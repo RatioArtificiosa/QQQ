@@ -13,7 +13,13 @@
   declare while the host binds what it models; the `Manifest`
   root denies unknown fields so `[limmits]` fails loudly.
   Red-first proofs for all four tests plus a 14th-namespace
-  probe (since removed).
+  probe (since removed). Review follow-up: `deny` and
+  `flatten` cancel out on one struct, so the denial lives on
+  the inner structs and the root while the validator checks
+  the catch-all — pinned both ways by new tests. Partner
+  review round: non-table values refused, `secret.use`
+  resolves through `crypto.secrets`, parsed stanzas must
+  grant, `FsWatch` contract pinned with CAP-024 as home.
 
 - **serve**: ping floods die on the idle bound (`F-16`
   parity): codec-level traffic never stamps activity, so a

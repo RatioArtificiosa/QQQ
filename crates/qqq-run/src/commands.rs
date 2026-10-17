@@ -191,6 +191,11 @@ pub fn fix_stanza_for(c: Capability) -> String {
         "clock" => "add to qqq.toml:\n\n    [capabilities.clock]\n    wall = true            # for clock.wall\n    monotonic = true       # for clock.monotonic".to_owned(),
         "env" => "add to qqq.toml:\n\n    [capabilities.env]\n    allow = [\"LOG_LEVEL\"]  # name each variable; wildcards are refused".to_owned(),
         "dns" => "add to qqq.toml:\n\n    [capabilities.dns]\n    resolve = [\"api.example.com\"]".to_owned(),
+        // `secret.use` is granted through the nested `crypto.secrets`
+        // spelling, not a `[capabilities.secret]` table — the wildcard
+        // below would name it unmodelled, which is false and would
+        // send the reader to a CAP item for a stanza that exists.
+        "secret" => "add to qqq.toml:\n\n    [capabilities.crypto]\n    secrets = [\"env:NAME\"]  # for secret.use".to_owned(),
         _ => format!(
             "no qqq.toml spelling grants `{}` yet — manifest modelling is tracked under CAP-017 through CAP-023",
             c.name()
@@ -1603,11 +1608,13 @@ mod tests {
         (!body.trim().is_empty()).then_some(body)
     }
 
-    /// For every namespace, the suggested stanza parses — or the
-    /// suggestion is an explicit, named refusal. A stanza the
-    /// parser rejects is a lie the tool tells the developer to
-    /// paste; this loop makes that shape fail the build for the
-    /// namespace that introduces it, including future ones.
+    /// For every namespace, the suggested stanza parses and grants
+    /// — or the suggestion is an explicit, named refusal. A stanza
+    /// the parser rejects is a lie the tool tells the developer to
+    /// paste, and a stanza that parses but grants nothing is the
+    /// same lie one step removed; this loop makes both shapes fail
+    /// the build for the namespace that introduces them, including
+    /// future ones.
     #[test]
     fn every_suggested_stanza_parses() {
         use qqq_cap::capability::Namespace;
@@ -1618,41 +1625,103 @@ mod tests {
                 .find(|c| c.namespace() == ns.as_str())
                 .expect("every namespace belongs to a capability");
             let fix = fix_stanza_for(*cap);
-            let parses = stanza_body(&fix).is_some_and(|body| {
-                Manifest::parse(&format!(
-                    "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
-                ))
-                .is_ok()
-            });
-            let refused = fix.contains("no qqq.toml spelling") && fix.contains("CAP-");
+            let Some(body) = stanza_body(&fix) else {
+                assert!(
+                    fix.contains("no qqq.toml spelling") && fix.contains("CAP-"),
+                    "{ns}: a refusal must name its state and tracking: {fix}"
+                );
+                continue;
+            };
+            let manifest = Manifest::parse(&format!(
+                "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
+            ))
+            .unwrap_or_else(|e| panic!("{ns}: the suggestion must parse: {e}"));
             assert!(
-                parses || refused,
-                "{ns}: the suggestion must parse or name its refusal: {fix}"
+                manifest.declared_capabilities().contains(cap),
+                "{ns}: the parsed stanza must grant {}: {fix}",
+                cap.name()
             );
         }
     }
 
     /// Namespaces the manifest cannot model must not emit stanzas.
-    /// `sql`, `kv`, `queue` and `ai` have no tables in
-    /// `Capabilities`, so any `[capabilities.<ns>]` text is a
-    /// stanza the parser rejects — the defect this pins.
+    /// Six namespaces (`sql`, `kv`, `queue`, `ai`, `log`, `trace`)
+    /// have no tables in `Capabilities`, so any
+    /// `[capabilities.<ns>]` text is a stanza the parser
+    /// rejects — the defect this pins. (`secret` is the seventh
+    /// unmodelled name but the exception: it resolves through the
+    /// nested `crypto.secrets` spelling, pinned below.)
     #[test]
     fn an_unmodelled_namespace_names_its_state_rather_than_guessing() {
-        for ns in ["sql", "kv", "queue", "ai"] {
+        for ns in ["sql", "kv", "queue", "ai", "log", "trace"] {
             let cap = Capability::all()
                 .iter()
                 .find(|c| c.namespace() == ns)
                 .expect("namespace exists");
             let fix = fix_stanza_for(*cap);
+            // A bare pointer at a tracking item would pass a
+            // contains check while naming nothing: the refusal must
+            // carry the namespace, the capability, and no stanza
+            // at all.
             assert!(
-                !fix.contains("[capabilities."),
-                "{ns}: must not emit a stanza the parser rejects: {fix}"
+                fix.contains(ns) && fix.contains(cap.name()),
+                "{ns}: the refusal must name what is unmodelled: {fix}"
+            );
+            assert!(
+                stanza_body(&fix).is_none(),
+                "{ns}: a refusal carries no stanza to parse: {fix}"
             );
             assert!(
                 fix.contains("CAP-"),
                 "{ns}: must name the modelling work: {fix}"
             );
         }
+    }
+
+    /// `secret.use` resolves through the nested `crypto.secrets`
+    /// spelling, not a `[capabilities.secret]` table — the one
+    /// unmodelled name with a true stanza. Pins the exception so a
+    /// future wildcard cannot swallow it back into the refusal.
+    #[test]
+    fn secret_use_resolves_through_crypto_secrets() {
+        use qqq_cap::manifest::Manifest;
+        let fix = fix_stanza_for(Capability::SecretUse);
+        let body = stanza_body(&fix).expect("secret.use has a stanza");
+        let manifest = Manifest::parse(&format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
+        ))
+        .expect("the crypto stanza must parse");
+        assert!(
+            manifest
+                .declared_capabilities()
+                .contains(&Capability::SecretUse),
+            "the stanza must grant secret.use"
+        );
+    }
+
+    /// The `fs` stanza grants `read` (and `write` by mode) but never
+    /// `watch`: `declared_capabilities` does not emit `FsWatch` for
+    /// any mode. Pinned as the exact current contract — a reader
+    /// pasting this stanza for a watch denial gains read access
+    /// without the watch grant. Deriving watch grants is CAP-024.
+    #[test]
+    fn fs_stanza_grants_read_not_watch_documenting_the_gap() {
+        use qqq_cap::manifest::Manifest;
+        let fix = fix_stanza_for(Capability::FsWatch);
+        let body = stanza_body(&fix).expect("fs.watch shares the fs stanza");
+        let manifest = Manifest::parse(&format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
+        ))
+        .expect("the fs stanza must parse");
+        let granted = manifest.declared_capabilities();
+        assert!(
+            granted.contains(&Capability::FsRead),
+            "the stanza grants read"
+        );
+        assert!(
+            !granted.contains(&Capability::FsWatch),
+            "watch is not derivable today (CAP-024); this pin fails if that changes"
+        );
     }
 
     // -- caps --------------------------------------------------------------

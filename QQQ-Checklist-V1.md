@@ -25,7 +25,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `POS` | Product positioning and messaging | 6 | Founder |
 | `ARCH` | Architecture decisions and crate topology | 16 | Systems lead |
 | `HOST` | `qqq-host` execution engine | 24 | Systems engineer |
-| `CAP` | Capability resolution pipeline | 23 | Security engineer |
+| `CAP` | Capability resolution pipeline | 24 | Security engineer |
 | `SEC` | Security engineering, audits, hardening | 30 | Security engineer |
 | `CON` | Contracts: WIT interfaces, manifest schema, versioning | 18 | Architect |
 | `ABI` | WIT package authoring and binding generation | 16 | Runtime engineer |
@@ -53,7 +53,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 614 items.**
+**Total: 615 items.**
 
 ### Status legend
 
@@ -2228,6 +2228,8 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §5.3 Manifest tables — ambient status must be decided, not defaulted into.
 - [ ] **CAP-023** Model `[capabilities.secret]` in the manifest alongside the nested `crypto.secrets` spelling: typed struct, validation, grant derivation for `secret.use`, and a generator stanza that parses.
   → §5.3 Manifest tables — two spellings for one capability must resolve to one grant set.
+- [ ] **CAP-024** Derive `FsWatch` grants from `[[capabilities.fs]]` entries: decide which modes imply watch, wire it into `declared_capabilities`, and pin the `fs` stanza to grant it. The stanza today grants read/write only, so a watch denial pasted from `qqqai why` changes authority without granting watch.
+  → §5.3 Manifest tables — found while pinning stanza truthfulness; the `fs` stanza over-promises for `fs.watch`.
 
 ### SEC — Security engineering
 
@@ -5785,7 +5787,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 |---|---|---|
 | P0 Foundation | M0 | 79 |
 | P1 Heartbeat | M1 | 58 |
-| P2 Capability engine | M2 | 53 |
+| P2 Capability engine | M2 | 54 |
 | P3 HTTP | M3 | 37 |
 | P4 DX v0 | M4 | 64 |
 | P5 Languages | M5, M8 | 40 |
@@ -5794,7 +5796,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 | P8 Perf/determinism/obs | continuous | 61 |
 | P9 V1 release | M10, M11 | 75 |
 | P10 Beyond V1 | post-1.0 | 54 |
-| **Total** | | **614** |
+| **Total** | | **615** |
 
 **Coverage rule:** every section of `QQQ-Proposal-V1.md` carrying implementation work has at least one item above. The only Proposal sections with no items are §0.1–§0.2, §1.3, §3.3, §13.1 and the appendices, which are narrative, justification or registers rather than buildable work.
 

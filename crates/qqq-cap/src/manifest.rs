@@ -312,12 +312,14 @@ impl Build {
 /// The capability declaration.
 ///
 /// Every field is optional and every absent field means **denied**.
-/// Unknown fields are denied at this level *and* at each
-/// per-capability struct below: the outer denial names the table,
-/// the inner one names the capability's own field, so both layers
+/// Unknown *tables* are collected by `other` and validated against
+/// the derived namespace set in [`Manifest::validate`] — `deny`
+/// cannot live on this struct because serde rejects before a
+/// `flatten` map collects, which would deaden the validator and
+/// the catch-all together. Unknown *fields* inside a typed table
+/// are still denied by that table's own struct, so both layers
 /// agree and neither relies on the other.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Capabilities {
     /// `[capabilities.http]` — server and/or client HTTP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -346,7 +348,9 @@ pub struct Capabilities {
     /// `[capabilities.htttp]` one. No `Eq` on this struct for the
     /// same reason the map exists: `toml::Value` is only
     /// `PartialEq`, and an `Eq` over floats would be the lie.
-    #[serde(flatten)]
+    /// `default` keeps the JSON schema from requiring the map:
+    /// an absent table and an empty one mean the same denied set.
+    #[serde(flatten, default)]
     pub other: BTreeMap<String, toml::Value>,
 }
 
@@ -1235,21 +1239,30 @@ impl Manifest {
             .iter()
             .map(ToString::to_string)
             .collect();
-        // `BTreeMap` iteration is sorted, so the first unknown key is
+        // `BTreeMap` iteration is sorted, so the first bad key is
         // deterministic — the error names the same table every run.
-        if let Some(unknown) = self
-            .capabilities
-            .other
-            .keys()
-            .find(|key| !known.iter().any(|ns| ns == *key))
-        {
-            return Err(ManifestError::InvalidField {
-                field: format!("capabilities.{unknown}"),
-                reason: format!(
-                    "unknown capability namespace; expected one of: {}",
-                    known.join(", ")
-                ),
-            });
+        // Values must be tables: `[capabilities] sql = "x"` is not a
+        // declaration but a scalar in the wrong place, and accepting
+        // it as "known" would be the silent misconfiguration this
+        // check exists to prevent.
+        for (key, value) in &self.capabilities.other {
+            if !known.iter().any(|ns| ns == key) {
+                return Err(ManifestError::InvalidField {
+                    field: format!("capabilities.{key}"),
+                    reason: format!(
+                        "unknown capability namespace; expected {}",
+                        quoted(&known.iter().map(String::as_str).collect::<Vec<_>>())
+                    ),
+                });
+            }
+            if !value.is_table() {
+                return Err(ManifestError::InvalidField {
+                    field: format!("capabilities.{key}"),
+                    reason: "must be a table, not a scalar — a capability declaration \
+                             names fields, it is not a value"
+                        .to_owned(),
+                });
+            }
         }
 
         Ok(())
@@ -2084,6 +2097,52 @@ allow_origins = ["https://app.example.com"]
         assert!(
             text.contains("unknown field") && text.contains("memroy"),
             "`memroy` must be refused as unknown, not ignored: {text}"
+        );
+    }
+
+    /// A declared-but-unmodelled namespace parses without granting:
+    /// the `flatten` catch-all collects the table and validation
+    /// accepts the known name. Without the catch-all this is an
+    /// unknown-field error; without validation it would be silent.
+    /// (Fails while `deny_unknown_fields` sits on `Capabilities`,
+    /// because serde rejects before the map collects — the
+    /// interaction this test exists to pin.)
+    #[test]
+    fn an_unmodelled_namespace_declaration_parses() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.sql]\nname = \"orders\"\n";
+        let m = Manifest::parse(src).expect("a known namespace must declare");
+        assert!(
+            m.capabilities.other.contains_key("sql"),
+            "the declaration must land in the catch-all"
+        );
+        // Key presence is not enough: the value must survive intact,
+        // or the catch-all is a second silent drop. Only the key set
+        // is validated — the shape belongs to the future typed struct.
+        assert_eq!(
+            m.capabilities.other["sql"]["name"].as_str(),
+            Some("orders"),
+            "the declared table body must round-trip through the catch-all"
+        );
+        assert!(
+            !m.declared_capabilities()
+                .iter()
+                .any(|c| c.namespace() == "sql"),
+            "declaring is not binding: the host grants nothing unmodelled"
+        );
+    }
+
+    /// A typo'd capability table fails naming the valid set — via
+    /// `validate`, not serde: with the catch-all collecting, serde
+    /// has nothing to reject, so the validator carries the message.
+    #[test]
+    fn a_misspelled_capability_table_names_the_valid_set() {
+        let src =
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.htttp]\nserver = true\n";
+        let err = Manifest::parse(src).expect_err("an unknown capability table must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.htttp") && text.contains("http"),
+            "`htttp` must fail naming the valid namespaces: {text}"
         );
     }
 

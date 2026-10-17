@@ -39706,4 +39706,60 @@ side dead — the failure message (`duplicate key`) names the
 survivor.
 → `crates/qqq-host/src/host_crypto.rs`.
 
+## §O-745 - `deny` and `flatten` cancel out: the review caught what green missed
+
+The namespace review confirmed everything except the core:
+`#[serde(deny_unknown_fields)]` on `Capabilities` rejects
+unknown tables *before* the `flatten` map collects them, so
+`other` was always empty, the validator dead, and the claims
+("13 namespaces parse", "typos name the valid set") false —
+on a green tree, with the new tests passing vacuously around
+the hole. The reviewer proved it with a throwaway probe, not
+a reading. Fix: `deny` leaves `Capabilities` (every inner
+struct keeps its own; the root keeps its own), the validator
+does the table check it was always documented to do, and two
+new tests pin the interaction both ways (`sql` parses into
+the catch-all granting nothing; `htttp` fails via the
+validator naming the set). Also fixed from the same review:
+`other` was schema-required (added `default`), and the pin
+test now covers all seven unmodelled namespaces. The
+generalisable rule, stated as a checkable property: when two
+mechanisms overlap (`deny` + `flatten`, or any pair), a test
+must exercise the seam — one case that only passes if *both*
+run — or the stronger one silently eats the weaker and the
+suite stays green over a dead branch.
+→ `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`, `schema/qqq-toml.schema.json`.
+
+## §O-746 - The partner review's twelve: validation gaps closed, two declined with reasons
+
+Copilot as fix partner returned twelve findings on the
+uncommitted namespace work; nine are fixed here, two
+declined with recorded reasons, one was already handled.
+Fixed: (1) validation checked keys only — `[capabilities]
+sql = "x"` passed as "known"; non-table values are now
+refused; (4) `secret.use` fell to the refusal although
+`crypto.secrets` grants it — explicit arm added, pinned by
+test; (6) the property test now asserts parsed stanzas
+*grant* the probed capability, not merely parse; (7) the
+validator message uses the module's `quoted()` shape, and
+the typo test asserts backticked names; (8) the catch-all
+test asserts value round-trip, not just key presence; (9)
+the pin test asserts namespace+capability names and no
+stanza body; (10) covered by the strengthened loop, which
+splits stanza/grants vs named refusal per namespace;
+(11) `other` is schema-optional via `default`; (3-part)
+`FsWatch` contract pinned (stanza grants read, never watch)
+with CAP-024 as its home. Declined: (2) warning in
+`caps`/`why` for unmodelled content — the denial path
+already surfaces state plus CAP range, and a warning
+surface is product work for the CAP items; (3/5-residual)
+`declared_capabilities` emitting watch — same CAP-024 home,
+deliberately not a grant change in a validation fix. The
+already-handled one: Eq-drop confirmed non-issue.
+Red proof: non-table validation fails pre-fix;
+`secret.use`-without-arm fails the new pin; grants
+assertion fails on the old parse-only loop. Measured: full
+gate verdict in this commit's log.
+→ `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`, `QQQ-Checklist-V1.md` (CAP-024).
+
 *End of `QQQ-Observations-and-Memories.md`.*

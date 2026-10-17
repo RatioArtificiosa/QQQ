@@ -385,11 +385,11 @@ def self_test() -> int:
     )
 
     # 1. A per-area count that disagrees with the items.
-    # Pinned row text like case 5 below: a count change (CAP-017..023
-    # moved CAP 16 -> 23) must update this string too, or the replace
+    # Pinned row text like case 5 below: a count change (CAP-024
+    # moved CAP 23 -> 24) must update this string too, or the replace
     # misses and the case goes DEAD instead of catching anything.
     broken = real.replace(
-        "| `CAP` | Capability resolution pipeline | 23 |",
+        "| `CAP` | Capability resolution pipeline | 24 |",
         "| `CAP` | Capability resolution pipeline | 99 |",
         1,
     )
@@ -408,10 +408,10 @@ def self_test() -> int:
     )
 
     # 3. A phase row that disagrees with its areas. Pinned text like
-    # cases 1 and 5: CAP-017..023 moved P2 46 -> 53, and the string
+    # cases 1 and 5: CAP-024 moved P2 53 -> 54, and the string
     # must track the table.
     broken = re.sub(
-        r"^\| P2 Capability engine \| M2 \| 53 \|$",
+        r"^\| P2 Capability engine \| M2 \| 54 \|$",
         "| P2 Capability engine | M2 | 7 |",
         real,
         count=1,

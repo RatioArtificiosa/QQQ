@@ -106,9 +106,6 @@
           "type": "object"
         }
       },
-      "required": [
-        "other"
-      ],
       "title": "qqq-toml#Capabilities",
       "type": "object"
     },

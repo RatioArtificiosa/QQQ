@@ -2547,6 +2547,47 @@ allow_origins = ["https://app.example.com"]
         );
     }
 
+    /// Either list alone grants: providers-only and models-only take
+    /// separate branches through the same `any()`, pinned here
+    /// individually so a future split of the branch fails loudly
+    /// instead of silently.
+    #[test]
+    fn ai_single_sided_lists_grant_infer() {
+        for (label, src) in [
+            (
+                "providers-only",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                [capabilities.ai]\nproviders = [\"local:ggml\"]\n",
+            ),
+            (
+                "models-only",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                [capabilities.ai]\nmodels = [\"*:<=4B\"]\n",
+            ),
+        ] {
+            let m = Manifest::parse(src).unwrap_or_else(|e| panic!("{label} must parse: {e}"));
+            assert!(
+                m.declared_capabilities()
+                    .contains(&crate::capability::Capability::AiInfer),
+                "{label} grants infer"
+            );
+        }
+    }
+
+    /// Whitespace-only ai entries refuse like empty ones: spaces
+    /// infer over nothing too, per the sql/kv precedent.
+    #[test]
+    fn ai_blank_entries_are_refused() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.ai]\nproviders = [\"   \"]\n";
+        let err = Manifest::parse(src).expect_err("a blank ai entry must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.ai"),
+            "refusal names the table: {text}"
+        );
+    }
+
     /// Whitespace-only store names refuse like empty ones, per the
     /// sql precedent: spaces grant a read of nothing too.
     #[test]

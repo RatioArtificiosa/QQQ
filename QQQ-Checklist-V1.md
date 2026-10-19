@@ -2226,7 +2226,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: `QueueCapability` (name + `QueueDirection` publish/subscribe enum, ordered for narrowing overlays like `FsMode`); direction selects the grant with no widening flag to forget; generator stanzas for both directions; refusal range narrowed to CAP-020..022.
   → Measured: `queue_table_parses_and_grants_by_direction`, `queue_subscribe_direction_grants_subscribe`, `queue_table_requires_name_and_direction`, `queue_subscribe_stanza_parses_and_grants_subscribe` — 1/1 each; `every_suggested_stanza_parses` covers both queue stanzas.
   → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.
-- [ ] **CAP-020** Model `[capabilities.ai]` in the manifest: typed struct, validation, grant derivation for `ai.infer`, and a generator stanza that parses.
+- [x] **CAP-020** Model `[capabilities.ai]` in the manifest: typed struct, validation, grant derivation for `ai.infer`, and a generator stanza that parses.
+  → Done: `AiCapability` (providers/models, either non-blank grants); empty table refused; generator stanza; refusal range narrowed to CAP-021..022; the `why` unmodelled pin repoints to `log.write` (ambient-but-denied-on-DENY_ALL — the denial path survives ai's graduation).
+  → Measured: `ai_table_parses_and_grants_infer`, `ai_table_requires_providers_or_models` — 1/1 each; `every_suggested_stanza_parses` covers the ai stanza.
   → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.
 - [ ] **CAP-021** Model `[capabilities.log]` in the manifest, preserving its ambient grant: typed struct, validation, and a generator stanza that parses.
   → §5.3 Manifest tables — ambient status must be decided, not defaulted into.

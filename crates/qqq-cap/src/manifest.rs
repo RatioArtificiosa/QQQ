@@ -345,6 +345,9 @@ pub struct Capabilities {
     /// `[[capabilities.queue]]` — one entry per queue.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queue: Vec<QueueCapability>,
+    /// `[capabilities.ai]` — model providers and bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiCapability>,
     /// `[capabilities.kv]` — named stores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv: Option<KvCapability>,
@@ -597,6 +600,21 @@ pub struct QueueCapability {
     pub name: String,
     /// Which direction this entry grants.
     pub direction: QueueDirection,
+}
+
+/// `[capabilities.ai]` — model providers and their size bounds.
+/// A non-empty providers-or-models list grants `ai.infer`; an
+/// entry naming neither grants inference over nothing, so the
+/// table with both lists empty is refused like an empty `kv`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiCapability {
+    /// Provider selectors, e.g. `local:ggml`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+    /// Model allowlist with size bounds, e.g. `*:<=4B`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
 }
 
 /// `[limits]` — enforceable resource bounds.
@@ -1316,6 +1334,7 @@ impl Manifest {
         Self::validate_sql(&self.capabilities.sql)?;
         Self::validate_kv(self.capabilities.kv.as_ref())?;
         Self::validate_queue(&self.capabilities.queue)?;
+        Self::validate_ai(self.capabilities.ai.as_ref())?;
 
         // -- unmodelled capability namespaces must still be known -------
         // The `flatten` map lets any `[capabilities.<ns>]` table parse;
@@ -1409,6 +1428,26 @@ impl Manifest {
         Ok(())
     }
 
+    /// A `[capabilities.ai]` table with neither providers nor models
+    /// is refused: an empty declaration would grant inference over
+    /// nothing. Blank entries refuse like empty ones, per the sql
+    /// precedent.
+    fn validate_ai(ai: Option<&AiCapability>) -> Result<(), ManifestError> {
+        if let Some(ai) = ai
+            && (ai
+                .providers
+                .iter()
+                .chain(&ai.models)
+                .all(|s| s.trim().is_empty()))
+        {
+            return Err(ManifestError::InvalidField {
+                field: "capabilities.ai".to_owned(),
+                reason: "providers or models must name at least one non-blank entry".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// The capabilities this manifest grants, as a concrete set.
     ///
     /// This is step 1's output and step 2's input. Note that it reflects only
@@ -1472,6 +1511,19 @@ impl Manifest {
             match q.direction {
                 QueueDirection::Publish => push(Capability::QueuePublish),
                 QueueDirection::Subscribe => push(Capability::QueueSubscribe),
+            }
+        }
+        if let Some(ai) = &self.capabilities.ai {
+            // Either list non-blank grants inference; validation
+            // refuses the both-empty shape, and direct construction
+            // with blanks grants nothing by the same gate.
+            if ai
+                .providers
+                .iter()
+                .chain(&ai.models)
+                .any(|s| !s.trim().is_empty())
+            {
+                push(Capability::AiInfer);
             }
         }
         if let Some(kv) = &self.capabilities.kv {
@@ -2274,29 +2326,29 @@ allow_origins = ["https://app.example.com"]
     /// (Fails while `deny_unknown_fields` sits on `Capabilities`,
     /// because serde rejects before the map collects — the
     /// interaction this test exists to pin.)
-    /// (`ai` stands in since `sql`/`kv`/`queue` graduated to typed
-    /// tables in CAP-017/018/019; the shape proved is the
+    /// (`log` stands in since `sql`/`kv`/`queue`/`ai` graduated to
+    /// typed tables in CAP-017/018/019/020; the shape proved is the
     /// catch-all's, not theirs.)
     #[test]
     fn an_unmodelled_namespace_declaration_parses() {
-        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.ai]\nproviders = [\"local:ggml\"]\n";
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.log]\npath = \"/var/log/app.log\"\n";
         let m = Manifest::parse(src).expect("a known namespace must declare");
         assert!(
-            m.capabilities.other.contains_key("ai"),
+            m.capabilities.other.contains_key("log"),
             "the declaration must land in the catch-all"
         );
         // Key presence is not enough: the value must survive intact,
         // or the catch-all is a second silent drop. Only the key set
         // is validated — the shape belongs to the future typed struct.
         assert_eq!(
-            m.capabilities.other["ai"]["providers"][0].as_str(),
-            Some("local:ggml"),
+            m.capabilities.other["log"]["path"].as_str(),
+            Some("/var/log/app.log"),
             "the declared table body must round-trip through the catch-all"
         );
         assert!(
             !m.declared_capabilities()
                 .iter()
-                .any(|c| c.namespace() == "ai"),
+                .any(|c| c.namespace() == "log"),
             "declaring is not binding: the host grants nothing unmodelled"
         );
     }
@@ -2319,13 +2371,12 @@ allow_origins = ["https://app.example.com"]
     /// A scalar under `[capabilities]` is not a declaration: the
     /// validator requires tables, so a misplaced value fails loudly
     /// instead of validating as a "known" key with no meaning.
-    /// (`ai` stands in: `sql`/`kv` are typed now and `queue`
-    /// followed in CAP-019 — all fail earlier at serde
+    /// (`log` stands in: `sql`/`kv`/`queue`/`ai` graduated in
+    /// CAP-017/018/019/020 — all fail earlier at serde
     /// type-checking, also loudly, also naming the table.)
     #[test]
     fn a_scalar_capability_value_is_refused_not_collected() {
-        let src =
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nai = \"models\"\n";
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nlog = \"app\"\n";
         let err = Manifest::parse(src).expect_err("a scalar capability value must be refused");
         let text = err.to_string();
         assert!(
@@ -2335,17 +2386,17 @@ allow_origins = ["https://app.example.com"]
     }
 
     /// An array-shaped unmodelled declaration parses into the
-    /// catch-all without granting: `[[capabilities.ai]]` is the
+    /// catch-all without granting: `[[capabilities.log]]` is the
     /// natural multi-entry shape, so refusing arrays while accepting
     /// tables would punish the shape users reach for first. Grants
     /// nothing, like all unmodelled content.
     #[test]
     fn unmodelled_array_shape_parses_without_granting() {
         let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
-            [[capabilities.ai]]\nproviders = [\"local:ggml\"]\n";
+            [[capabilities.log]]\npath = \"/var/log/app.log\"\n";
         let m = Manifest::parse(src).expect("array shape must declare");
         assert!(
-            m.capabilities.other.contains_key("ai"),
+            m.capabilities.other.contains_key("log"),
             "the array lands in the catch-all"
         );
         assert!(
@@ -2465,6 +2516,33 @@ allow_origins = ["https://app.example.com"]
         let text = err.to_string();
         assert!(
             text.contains("capabilities.kv"),
+            "refusal names the table: {text}"
+        );
+    }
+
+    /// A `ai` declaration grants infer: the providers and models
+    /// lists name what may run, and a table with neither is an
+    /// empty declaration granting inference over nothing.
+    #[test]
+    fn ai_table_parses_and_grants_infer() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.ai]\nproviders = [\"local:ggml\"]\nmodels = [\"*:<=4B\"]\n";
+        let m = Manifest::parse(src).expect("the ai table must parse");
+        assert!(
+            m.declared_capabilities()
+                .contains(&crate::capability::Capability::AiInfer),
+            "an ai entry grants infer"
+        );
+    }
+
+    /// An `ai` table with neither providers nor models is refused.
+    #[test]
+    fn ai_table_requires_providers_or_models() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.ai]\nproviders = []\nmodels = []\n";
+        let err = Manifest::parse(src).expect_err("an empty ai table must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.ai"),
             "refusal names the table: {text}"
         );
     }

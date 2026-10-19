@@ -4,6 +4,11 @@
 
 ### Security
 
+- **cap**: model `[capabilities.ai]` (CAP-020): either-list
+  grants, empty-table refusal, generator stanza, refusal
+  range narrowed to CAP-021..022, `why` pin repointed.
+  Red-first.
+
 - **cap**: model `[capabilities.queue]` (CAP-019): typed
   entries with a direction enum selecting the grant (no
   widening flag to forget), named validation, generator

@@ -39861,4 +39861,18 @@ three move in one edit. Measured: 4 new tests red-first
 green; 47/47 commands suite.
 → `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`.
 
+## §O-752 - CAP-020: either list grants, and ambient is not auto-grant
+
+Fourth table: `AiCapability` grants on either providers or
+models non-blank — symmetric to kv's either-list shape, no
+widening flag because there is only one grant. Two findings
+along the way: the `why` unmodelled pin had nowhere to go
+(`ai` was its stand-in), and probing showed ambient
+capabilities are denied on DENY_ALL — so the pin repoints
+through `log.write` as a denial, which also documents that
+ambient means "no declaration needed", not "always
+granted". Measured: 2 new tests red-first green; property
+loop covers the ai stanza.
+→ `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

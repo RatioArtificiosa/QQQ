@@ -181,9 +181,10 @@ pub fn why(loaded: &LoadedManifest, capability: &str) -> Result<WhyOutput> {
 /// the suggestion cannot drift from the parser's expectations — and for
 /// namespaces the manifest cannot model yet, generating the state instead of
 /// guessing a schema means the suggestion cannot be a stanza the parser
-/// rejects. The modelling work is tracked under CAP-020 through CAP-022
-/// (`sql`/`kv`/`queue` graduated in CAP-017/018/019; `secret` resolves
-/// through `crypto.secrets`, and CAP-023 tracks its dedicated table).
+/// rejects. The modelling work is tracked under CAP-021 through CAP-022
+/// (`sql`/`kv`/`queue`/`ai` graduated in CAP-017/018/019/020; `secret`
+/// resolves through `crypto.secrets`, and CAP-023 tracks its dedicated
+/// table).
 #[must_use]
 pub fn fix_stanza_for(c: Capability) -> String {
     // `sql.execute` needs the widening flag the query stanza leaves
@@ -206,6 +207,7 @@ pub fn fix_stanza_for(c: Capability) -> String {
         "env" => "add to qqq.toml:\n\n    [capabilities.env]\n    allow = [\"LOG_LEVEL\"]  # name each variable; wildcards are refused".to_owned(),
         "dns" => "add to qqq.toml:\n\n    [capabilities.dns]\n    resolve = [\"api.example.com\"]".to_owned(),
         "kv" => "add to qqq.toml:\n\n    [capabilities.kv]\n    stores = [\"sessions\"]\n    # write = true  # for kv.write; read-only without it".to_owned(),
+        "ai" => "add to qqq.toml:\n\n    [capabilities.ai]\n    providers = [\"local:ggml\"]\n    models = [\"*:<=4B\"]".to_owned(),
         "queue" => "add to qqq.toml:\n\n    [[capabilities.queue]]\n    name = \"orders.events\"\n    direction = \"publish\"  # or \"subscribe\"".to_owned(),
         "sql" => "add to qqq.toml:\n\n    [[capabilities.sql]]\n    name = \"orders\"\n    driver = \"postgres\"\n    host = \"db.internal:5432\"\n    # secret = \"env:ORDERS_DB_URL\"\n    # execute = true  # for sql.execute; query-only without it".to_owned(),
         // `secret.use` is granted through the nested `crypto.secrets`
@@ -214,7 +216,7 @@ pub fn fix_stanza_for(c: Capability) -> String {
         // send the reader to a CAP item for a stanza that exists.
         "secret" => "add to qqq.toml:\n\n    [capabilities.crypto]\n    secrets = [\"env:NAME\"]  # for secret.use".to_owned(),
         _ => format!(
-            "no qqq.toml spelling grants `{}` yet — manifest modelling is tracked under CAP-020 through CAP-022",
+            "no qqq.toml spelling grants `{}` yet — manifest modelling is tracked under CAP-021 through CAP-022",
             c.name()
         ),
     }
@@ -1408,17 +1410,19 @@ mod tests {
 
     #[test]
     fn why_reports_an_unmodelled_denial_with_its_state() {
-        // `ai.infer`: `queue` graduated to stanzas in CAP-019 (`kv`
-        // in CAP-018 and `sql` in CAP-017 before it), so the
-        // unmodelled-denial path is pinned through `ai` now.
+        // `log.write`: `ai` graduated to a stanza in CAP-020 (and
+        // `queue`/`kv`/`sql` before it), so the unmodelled-denial
+        // path is pinned through `log` now. Ambient or not, an
+        // unmentioned capability on DENY_ALL is denied — and the fix
+        // names the state instead of guessing a table.
         let l = loaded(DENY_ALL);
-        let out = why(&l, "ai.infer").expect("must explain");
+        let out = why(&l, "log.write").expect("must explain");
         assert!(!out.granted);
         assert!(out.steps.is_empty(), "nothing mentioned it");
         // Assert on the summary *before* moving `fix` out of `out`.
         assert!(out.summary().contains("DENIED"));
         let fix = out.fix.expect("a denial must suggest a fix");
-        // No stanza exists for `queue`: the fix names the state and
+        // No stanza exists for `log`: the fix names the state and
         // the modelling work, never a table the parser would reject.
         assert!(
             !fix.contains("[capabilities."),
@@ -1428,7 +1432,7 @@ mod tests {
             fix.contains("no qqq.toml spelling") && fix.contains("CAP-"),
             "must name the state and its tracking: {fix}"
         );
-        assert!(fix.contains("ai.infer"));
+        assert!(fix.contains("log.write"));
     }
 
     /// A typo is the most likely reason this command is run, so the error must
@@ -1665,16 +1669,16 @@ mod tests {
     }
 
     /// Namespaces the manifest cannot model must not emit stanzas.
-    /// Three namespaces (`ai`, `log`, `trace`) have no tables in
-    /// `Capabilities` (`sql`/`kv`/`queue` graduated in
-    /// CAP-017/018/019), so any `[capabilities.<ns>]` text is a
-    /// stanza the parser rejects — the defect this pins.
+    /// Two namespaces (`log`, `trace`) have no tables in
+    /// `Capabilities` (`sql`/`kv`/`queue`/`ai` graduated in
+    /// CAP-017/018/019/020), so any `[capabilities.<ns>]` text is
+    /// a stanza the parser rejects — the defect this pins.
     /// (`secret` is the seventh unmodelled name but the exception:
     /// it resolves through the nested `crypto.secrets` spelling,
     /// pinned below.)
     #[test]
     fn an_unmodelled_namespace_names_its_state_rather_than_guessing() {
-        for ns in ["ai", "log", "trace"] {
+        for ns in ["log", "trace"] {
             let cap = Capability::all()
                 .iter()
                 .find(|c| c.namespace() == ns)
@@ -1693,7 +1697,7 @@ mod tests {
                 "{ns}: a refusal carries no stanza to parse: {fix}"
             );
             assert!(
-                fix.contains("CAP-020"),
+                fix.contains("CAP-021"),
                 "{ns}: must name the modelling range start: {fix}"
             );
             assert!(

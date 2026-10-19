@@ -1,5 +1,28 @@
 {
   "$defs": {
+    "AiCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#AiCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `AiCapability` table.",
+      "properties": {
+        "models": {
+          "description": "Model allowlist with size bounds, e.g. `*:<=4B`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "providers": {
+          "description": "Provider selectors, e.g. `local:ggml`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "title": "qqq-toml#AiCapability",
+      "type": "object"
+    },
     "Build": {
       "$id": "https://qqq.codes/schema/qqq-toml#Build",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -38,6 +61,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "The `Capabilities` table.",
       "properties": {
+        "ai": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiCapability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[capabilities.ai]` — model providers and bounds."
+        },
         "clock": {
           "anyOf": [
             {

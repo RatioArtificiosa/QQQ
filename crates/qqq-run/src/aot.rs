@@ -188,6 +188,41 @@ fn failure(message: impl Into<String>) -> Error {
     )
 }
 
+#[cfg(unix)]
+fn verify_ownership(directory: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    // A file created by this process gives its effective owner without FFI.
+    let probe = directory.join(format!(
+        ".qqq-owner-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|e| failure(e.to_string()))?;
+    let metadata = file.metadata();
+    drop(file);
+    std::fs::remove_file(probe).map_err(|e| failure(e.to_string()))?;
+    let owner = metadata.map_err(|e| failure(e.to_string()))?.uid();
+    for (depth, ancestor) in directory.ancestors().enumerate() {
+        let metadata = std::fs::symlink_metadata(ancestor).map_err(|e| failure(e.to_string()))?;
+        if metadata.file_type().is_symlink()
+            || (metadata.uid() != owner && metadata.uid() != 0)
+            || (depth == 0 && metadata.uid() != owner)
+            || (metadata.mode() & 0o022 != 0 && (depth == 0 || metadata.mode() & 0o1000 == 0))
+        {
+            return Err(failure(
+                "AOT cache and its ancestors must be protected from other users",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,39 +348,4 @@ mod tests {
             .expect("no grants means no conflict");
         check_grants(None, &set).expect("no cache means no conflict");
     }
-}
-
-#[cfg(unix)]
-fn verify_ownership(directory: &Path) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    // A file created by this process gives its effective owner without FFI.
-    let probe = directory.join(format!(
-        ".qqq-owner-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-        .map_err(|e| failure(e.to_string()))?;
-    let metadata = file.metadata();
-    drop(file);
-    std::fs::remove_file(probe).map_err(|e| failure(e.to_string()))?;
-    let owner = metadata.map_err(|e| failure(e.to_string()))?.uid();
-    for (depth, ancestor) in directory.ancestors().enumerate() {
-        let metadata = std::fs::symlink_metadata(ancestor).map_err(|e| failure(e.to_string()))?;
-        if metadata.file_type().is_symlink()
-            || (metadata.uid() != owner && metadata.uid() != 0)
-            || (depth == 0 && metadata.uid() != owner)
-            || (metadata.mode() & 0o022 != 0 && (depth == 0 || metadata.mode() & 0o1000 == 0))
-        {
-            return Err(failure(
-                "AOT cache and its ancestors must be protected from other users",
-            ));
-        }
-    }
-    Ok(())
 }

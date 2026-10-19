@@ -40099,7 +40099,11 @@ Process lesson, paid twice this item: run workspace clippy LOCALLY
 before launching the 25-minute gate — the collapsible-if on the new
 pre-check (edition-2024 let-chains, the same lint class as the old
 qqq-sys case) would have been a 60-second catch. The gate is the
-verdict, never the linter.
+verdict, never the linter. And sharper: local Windows clippy CANNOT
+catch unix-gated lints — `items_after_test_module` fired only where
+`verify_ownership` compiles in, so the mid-file test module was green
+locally and red on ubuntu+macos. Convention now enforced by example:
+test modules go last in the file, unconditionally, on every OS.
 
 Review follow-up, all closed: the MED stood — the first version
 asserted only the `bound` record, which a per-engine linker cache

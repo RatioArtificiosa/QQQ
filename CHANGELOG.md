@@ -9,7 +9,8 @@
   clearer file-path message, per-instance authority on cache hits; the
   already-built parts verified (signatures + `qqqai verify` policy,
   content-addressed emission + provenance, reuse, miss-on-change).
-  Explicit `.cwasm` loading stays deferred (unsafe boundary).
+  Explicit `.cwasm` loading stays deferred (unsafe boundary). Follow-up:
+  test module moved last in `aot.rs` (unix-only lint invisible locally).
 
 - **cap**: derive `FsWatch` from `[[capabilities.fs]]` (CAP-024):
   watch follows readability — read-only/read-write imply watch via

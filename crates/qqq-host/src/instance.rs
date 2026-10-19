@@ -528,11 +528,14 @@ impl<'a> Instance<'a> {
     /// config.consume_fuel(true);
     /// let engine = wasmtime::Engine::new(&config).expect("engine must build");
     ///
-    /// // A component whose single import is `qqq:clock/monotonic`.
+    /// // A component whose single import is `qqq:clock/monotonic-clock`
+    /// // (exact versioned name and shape, per `wit/qqq-clock.wit` — an
+    /// // unversioned or mistyped import fails even when granted, which
+    /// // would prove nothing about authority).
     /// let wasm = r#"
     ///     (component
-    ///       (import "qqq:clock/monotonic" (instance $clock
-    ///         (export "now-nanos" (func (result u64)))))
+    ///       (import "qqq:clock/monotonic-clock@1.0.0" (instance $clock
+    ///         (export "now" (func (result u64)))))
     ///       (core module $m (func (export "f") (result i32) (i32.const 7)))
     ///       (core instance $i (instantiate $m))
     ///       (func (export "f") (result u32) (canon lift (core func $i "f")))

@@ -995,14 +995,14 @@ merging; this draft is not a release or a claim that persistent agents are compl
 
 | Scope | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| All checklist items | 285 | 3 | 326 | 4 | 0 | 0 | 618 | 46.1% |
+| All checklist items | 286 | 3 | 325 | 4 | 0 | 0 | 618 | 46.3% |
 
 ### By phase
 
 | Phase | Milestone(s) | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | P0 | M0 | 50 | 0 | 29 | 0 | 0 | 0 | 79 | 63.3% |
-| P1 | M1 | 52 | 0 | 6 | 0 | 0 | 0 | 58 | 89.7% |
+| P1 | M1 | 53 | 0 | 5 | 0 | 0 | 0 | 58 | 91.4% |
 | P2 | M2 | 52 | 0 | 0 | 2 | 0 | 0 | 54 | 96.3% |
 | P3 | M3 | 32 | 0 | 6 | 0 | 0 | 0 | 38 | 84.2% |
 | P4 | M4 | 32 | 0 | 32 | 0 | 0 | 0 | 64 | 50.0% |
@@ -1022,7 +1022,7 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P0 | GOV | 5 | 0 | 9 | 0 | 0 | 0 | 14 | 35.7% |
 | P0 | LIC | 7 | 0 | 5 | 0 | 0 | 0 | 12 | 58.3% |
 | P0 | PLAN | 7 | 0 | 13 | 0 | 0 | 0 | 20 | 35.0% |
-| P1 | ARCH | 11 | 0 | 5 | 0 | 0 | 0 | 16 | 68.8% |
+| P1 | ARCH | 12 | 0 | 4 | 0 | 0 | 0 | 16 | 75.0% |
 | P1 | CON | 18 | 0 | 0 | 0 | 0 | 0 | 18 | 100.0% |
 | P1 | HOST | 23 | 0 | 1 | 0 | 0 | 0 | 24 | 95.8% |
 | P2 | CAP | 24 | 0 | 0 | 0 | 0 | 0 | 24 | 100.0% |

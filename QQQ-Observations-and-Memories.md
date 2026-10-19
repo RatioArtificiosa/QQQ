@@ -40072,4 +40072,44 @@ in `FsGrant.quota_bytes` (stored-not-yet-enforced, verified by grep,
 not assumed). The `[FsRead,CryptoHash]→Contained` posture case stays
 reachable via overlays (deny-Watch narrows to it), so no test retired.
 
+## §O-760 - ARCH-015: the artifact model closes on evidence, with three principled deferrals
+
+Scoping found the item 80% built: components, Ed25519 artifact
+signatures + `qqqai verify` policy with negative CLI controls,
+content-addressed `.cwasm` emission + provenance, cross-process cache
+reuse, miss-on-change, and name-not-trusted all landed with tests. The
+open delivery-checklist boxes split into evidence gaps (closed now)
+and design deferrals (recorded, not pending). Closed with red/fault
+proofs: `atomic_write` failure cleanup + no-survivors pins (removal
+faulted red, restored byte-identical green), `configure` refusal pins
+— including one genuine red where a file path failed with a bare OS
+error instead of naming the rule, fixed by checking shape before
+creating — and per-instance authority on cache hits (same cached
+engine, double compile with hit counter, granted-vs-empty binding
+divergence; mutation to same-grants fails red). Deferred: explicit
+`.cwasm` loading (unsafe trust design unapproved; the forbid stands),
+crash-orphan stage sweep (blind sweeps race same-process emitters;
+partial temps are never consumed, so staleness is cosmetic), signed
+installation/distribution (DIST area, not this item). Measured: 5
+`aot::tests` + 1 linker test; fault logs with byte-identical restores;
+delivery-checklist A-boxes dispositioned one by one.
+`crates/qqq-run/src/aot.rs`, `crates/qqq-host/src/linker.rs`.
+
+Process lesson, paid twice this item: run workspace clippy LOCALLY
+before launching the 25-minute gate — the collapsible-if on the new
+pre-check (edition-2024 let-chains, the same lint class as the old
+qqq-sys case) would have been a 60-second catch. The gate is the
+verdict, never the linter.
+
+Review follow-up, all closed: the MED stood — the first version
+asserted only the `bound` record, which a per-engine linker cache
+with recomputed records would survive. Upgraded to behavior:
+granted-vs-denied `instantiate` on the warm engine, using the true
+versioned `qqq:clock/monotonic-clock@1.0.0` import (the first draft
+copied an unversioned shape from the `Instance::create` doctest that
+fails even when granted — that doctest only ever exercised denial,
+so its WAT is corrected to the true shape too; 172 doctests green).
+The LOWs were confirmed non-issues or already-covered (rename
+determinism, temp hygiene, shipped-behavior-only diff).
+
 *End of `QQQ-Observations-and-Memories.md`.*

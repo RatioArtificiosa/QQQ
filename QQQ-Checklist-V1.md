@@ -1171,10 +1171,10 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §4.7 Concurrency model for guests
 - [ ] **ARCH-014** Implement the manifest opt-in for shared memory, off by default.
   → §4.7 Concurrency model for guests
-- [ ] **ARCH-015** Implement the artifact model: component + signed manifest envelope + AOT cache keying.
-  → Progress: explicit Wasmtime managed-cache configuration and `build --aot` native emission
-    are covered by `docs/rfc/live-components-and-aot.md`. Signed installation and trusted
-    native-artifact distribution remain separate work; this item remains open.
+- [x] **ARCH-015** Implement the artifact model: component + signed manifest envelope + AOT cache keying.
+  → Done: evidence slices for the three open hygiene boxes — `atomic_write` failure cleanup + no-stage-survivors pins (fault-proven), `configure` refusal pins (relative/file paths; clearer file refusal message), per-instance authority on cache hits (`warm_cache_hit_still_derives_authority_per_instance`, mutation-proven). Verified already-done: component model, Ed25519 artifact signatures + `qqqai verify` policy with negative controls, content-addressed emission + provenance, cross-process reuse, miss-on-change, name-not-trusted.
+  → Measured: 5 `aot::tests` + 1 linker authority test red/fault-first green (each with red/green fault logs and byte-identical restores); full crates re-run green; delivery-checklist A-boxes dispositioned below.
+  → Deferred with reason (not pending): explicit `.cwasm` loading (needs an unsafe trust design; `forbid(unsafe_code)` stays), crash-orphan stage sweep (same-process concurrency makes blind sweeps unsafe; partial temps are never read), signed installation/distribution (DIST-area work, not this item).
   → §4.6 Where the artifacts live and how they move
 - [ ] **ARCH-016** Implement build-time component composition with load-time composition as fallback.
   → §4.6 Where the artifacts live and how they move

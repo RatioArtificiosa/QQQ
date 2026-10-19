@@ -29,8 +29,8 @@
     },
     "ARCH": {
       "blocked": 0,
-      "done": 11,
-      "open": 5,
+      "done": 12,
+      "open": 4,
       "partial": 0,
       "total": 16,
       "unknown": 0,
@@ -310,8 +310,8 @@
     },
     "P1": {
       "blocked": 0,
-      "done": 52,
-      "open": 6,
+      "done": 53,
+      "open": 5,
       "partial": 0,
       "total": 58,
       "unknown": 0,
@@ -429,8 +429,8 @@
     },
     "ARCH": {
       "blocked": 0,
-      "done": 11,
-      "open": 5,
+      "done": 12,
+      "open": 4,
       "partial": 0,
       "total": 16,
       "unknown": 0,
@@ -1674,7 +1674,7 @@
       "id": "ARCH-015",
       "line": 1174,
       "phase": "P1",
-      "status": "open",
+      "status": "done",
       "title": "Implement the artifact model: component + signed manifest envelope + AOT cache keying."
     },
     {

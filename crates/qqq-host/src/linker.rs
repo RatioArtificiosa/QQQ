@@ -1620,6 +1620,91 @@ mod tests {
         assert!(built.bound.unimplemented.is_empty());
     }
 
+    /// Authority is per instance, not per engine — even on a cache hit.
+    /// One cached engine serves two linkers built from different grants;
+    /// the bindings must differ AND the behavior must follow: the granted
+    /// linker instantiates a clock-importing component while the denied
+    /// one fails naming the import. Asserting only the `bound` record
+    /// would pass a per-engine linker cache that recomputes the record
+    /// per grants but shares registrations — instantiation is what the
+    /// guest actually meets. The double compile proves the hit is real
+    /// rather than assumed: the second identical compile must register
+    /// a hit.
+    #[test]
+    fn warm_cache_hit_still_derives_authority_per_instance() {
+        let root = std::env::temp_dir().join(format!("qqq-linkercache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cache_dir = root.join("cache");
+        let mut cache_config = wasmtime::CacheConfig::new();
+        cache_config.with_directory(&cache_dir);
+        let cache = wasmtime::Cache::new(cache_config).expect("cache must build");
+        let mut cfg = wasmtime::Config::new();
+        cfg.wasm_component_model(true);
+        cfg.cache(Some(cache.clone()));
+        let engine = wasmtime::Engine::new(&cfg).unwrap();
+        // A component whose single import is `qqq:clock/monotonic-clock`
+        // (exact versioned name and `now() -> u64` shape, per
+        // `wit/qqq-clock.wit` — an unversioned or mistyped import fails
+        // even when granted, which is a shape error, not an authority
+        // decision).
+        let wat = r#"
+            (component
+              (import "qqq:clock/monotonic-clock@1.0.0" (instance $clock
+                (export "now" (func (result u64)))))
+              (core module $m (func (export "f") (result i32) (i32.const 7)))
+              (core instance $i (instantiate $m))
+              (func (export "f") (result u32) (canon lift (core func $i "f")))
+            )
+        "#;
+        wasmtime::component::Component::new(&engine, wat).expect("first compile");
+        let hits_before = cache.cache_hits();
+        let component = wasmtime::component::Component::new(&engine, wat).expect("second compile");
+        assert!(
+            cache.cache_hits() > hits_before,
+            "the second identical compile must be a cache hit"
+        );
+        let granted = build_linker(
+            &engine,
+            &grants_from(
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[capabilities.clock]\nmonotonic = true\n",
+            ),
+        )
+        .expect("granted linker must build");
+        let denied = build_linker(&engine, &GrantSet::empty()).expect("empty linker must build");
+        assert!(
+            granted
+                .bound
+                .interfaces
+                .contains(&"qqq:clock@1.0.0".to_owned()),
+            "the grant must bind: {:?}",
+            granted.bound
+        );
+        assert!(
+            !denied
+                .bound
+                .interfaces
+                .contains(&"qqq:clock@1.0.0".to_owned()),
+            "the same cached engine must bind nothing ungranted: {:?}",
+            denied.bound
+        );
+        // Behavior, not just the record: instantiation enforces it.
+        let mut store = wasmtime::Store::new(&engine, StoreData::default());
+        granted
+            .linker
+            .instantiate(&mut store, &component)
+            .expect("the granted import must instantiate on the warm engine");
+        let mut store = wasmtime::Store::new(&engine, StoreData::default());
+        let err = denied
+            .linker
+            .instantiate(&mut store, &component)
+            .expect_err("the denied import must not instantiate on the warm engine");
+        assert!(
+            format!("{err:#}").contains("clock"),
+            "the error must name the missing import: {err:#}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     // -- HOST-011: every host function is panic-guarded ----------------------
 
     /// **`HOST-011`, enforced structurally.** Every `func_wrap` registration in

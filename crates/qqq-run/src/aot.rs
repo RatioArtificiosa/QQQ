@@ -42,6 +42,15 @@ pub fn configure(
             "AOT cache directory must be an absolute, host-owned path",
         ));
     }
+    // Name the requirement before the OS does: `create_dir_all` on an
+    // existing file fails with a bare OS error that says what happened
+    // but not what was required. A refusal that names the rule is
+    // actionable; an OS error sends the reader to the wrong manual.
+    if let Ok(present) = std::fs::symlink_metadata(directory)
+        && (!present.is_dir() || present.file_type().is_symlink())
+    {
+        return Err(failure("AOT cache must be a real directory, not a symlink"));
+    }
     std::fs::create_dir_all(directory).map_err(|e| failure(e.to_string()))?;
     let metadata = std::fs::symlink_metadata(directory).map_err(|e| failure(e.to_string()))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -177,6 +186,133 @@ fn failure(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::CompilationFailed, message).with_remediation(
         "inspect the artifact and host-owned AOT directory; portable WASM remains usable",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch directory owned by this test alone: pid-namespaced like the
+    /// staging files themselves, removed at the end with the same bounded
+    /// retry the live-components tests use for background cache flushes.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "qqq-aot-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock runs forward")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("scratch must exist");
+        root
+    }
+
+    fn stage_files(dir: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .expect("scratch must list")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(".qqq-stage-"))
+            })
+            .collect()
+    }
+
+    /// The happy path leaves exactly the destination: no stage file may
+    /// survive a successful write, or readers could mistake a temp name
+    /// for an artifact.
+    #[test]
+    fn atomic_write_leaves_no_stage_files_behind() {
+        let root = scratch("success");
+        let dest = root.join("artifact.cwasm");
+        atomic_write(&dest, b"native-bytes").expect("write must succeed");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"native-bytes");
+        assert!(
+            stage_files(&root).is_empty(),
+            "no stage files may survive success"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A failed publish exposes no partial artifact AND no stage file: the
+    /// destination pre-created as a directory makes the rename fail
+    /// deterministically on every OS, exercising the cleanup path that a
+    /// mere invalid-input test never reaches (those fail before any temp
+    /// file exists).
+    #[test]
+    fn atomic_write_cleans_up_after_a_failed_rename() {
+        let root = scratch("rename-fail");
+        let dest = root.join("artifact.cwasm");
+        std::fs::create_dir_all(&dest).expect("destination as directory");
+        let err = atomic_write(&dest, b"native-bytes").expect_err("rename must fail");
+        let _ = err;
+        assert!(
+            stage_files(&root).is_empty(),
+            "the stage file must be removed after failure"
+        );
+        assert!(dest.is_dir(), "the pre-existing destination is untouched");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A relative cache directory is refused: a relative native-code store
+    /// resolves against whatever the process happens to run in, which is
+    /// exactly the ambient-configuration hazard `configure` exists to end.
+    #[test]
+    fn configure_refuses_a_relative_cache_directory() {
+        let mut config = wasmtime::Config::new();
+        let err = configure(&mut config, Some(Path::new("relative/cache")))
+            .expect_err("relative cache dir must be refused");
+        assert!(
+            err.to_string().contains("absolute"),
+            "refusal names the requirement: {err}"
+        );
+    }
+
+    /// A cache path naming a file is refused: native-code storage must be
+    /// a real directory, and a file in that slot is either a typo or an
+    /// attack on the lookup.
+    #[test]
+    fn configure_refuses_a_cache_path_that_is_not_a_directory() {
+        let root = scratch("not-a-dir");
+        let file = root.join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        let mut config = wasmtime::Config::new();
+        let err = configure(&mut config, Some(&file)).expect_err("file must be refused");
+        assert!(
+            err.to_string().contains("directory") || err.to_string().contains("symlink"),
+            "refusal names the requirement: {err}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Caching with a filesystem-write grant stays refused until path-aware
+    /// exclusion exists: a guest that can write where native code lives can
+    /// replace it. Presence of the grant is what matters, not its scope.
+    #[test]
+    fn check_grants_refuses_cache_with_fs_write() {
+        use qqq_cap::manifest::Manifest;
+        use qqq_cap::resolve::GrantSet;
+        let writer = Manifest::parse(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.fs]]\npath = \"/tmp/x\"\nmode = \"read-write\"\n",
+        )
+        .expect("test manifest must parse");
+        let set = GrantSet::from_manifest(&writer);
+        assert!(set.grants(qqq_cap::Capability::FsWrite));
+        let err = check_grants(Some(Path::new("/tmp/qqq-cache")), &set)
+            .expect_err("fs.write plus cache must be refused");
+        assert!(
+            err.to_string().contains("fs.write"),
+            "refusal names the grant: {err}"
+        );
+        // Without the grant, or without a cache, there is nothing to refuse.
+        check_grants(Some(Path::new("/tmp/qqq-cache")), &GrantSet::empty())
+            .expect("no grants means no conflict");
+        check_grants(None, &set).expect("no cache means no conflict");
+    }
 }
 
 #[cfg(unix)]

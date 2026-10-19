@@ -4,6 +4,13 @@
 
 ### Security
 
+- **arch**: close ARCH-015 (artifact model) on evidence: `atomic_write`
+  failure cleanup + no-survivors pins, `configure` refusal pins with a
+  clearer file-path message, per-instance authority on cache hits; the
+  already-built parts verified (signatures + `qqqai verify` policy,
+  content-addressed emission + provenance, reuse, miss-on-change).
+  Explicit `.cwasm` loading stays deferred (unsafe boundary).
+
 - **cap**: derive `FsWatch` from `[[capabilities.fs]]` (CAP-024):
   watch follows readability — read-only/read-write imply watch via
   `FsMode::can_watch`, append-only does not (watching would leak

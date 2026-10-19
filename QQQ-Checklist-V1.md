@@ -4928,18 +4928,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
     rule" and "the rule is validated by measurement of its effect" are different claims,
     and `PERF-005`'s `docs/abi-cost-measured.md` is careful to state which it is.
 - [x] **PERF-007** Meet the AOT cache performance target.
-  → Done: `Budget::Perf007.method` now names the real harness (`crates/qqq-bench/tests/aot_cache.rs::aot_cache_roundtrip`, closing the `NOT_IMPLEMENTED`); new integration test measures cold miss + warm hit + hit→instantiate→callable on a 200-fn fixture with warmup + distributions and prints `AOTCACHE` evidence rows plus a computed (never asserted) verdict; the unsafe `deserialize` path is deliberately NOT used (forbidden) — the managed-cache hit is the safe equivalent production pays, stated in the docs.
-  → Measured: 3 release runs on Xeon E5-1650 v4/Win10/rustc 1.99.1/wasmtime 48.0.6 — to_callable p99 1068/1018/1149 µs vs ≤5000 µs budget = MET with ~4.4x headroom; warm_hit p99 ~1ms; cold median ~12ms (context); 1101/1101 hits every run; spread ±6%. Method: release profile, 100 warmup discarded, n=1001 (p99 honest), n=5 cold (median/min/max only), temp cache dir, sequential. Not measured: qqq-host configured engine, cross-process reuse (live_components), guest behavior (no-import fixture), other machines (single dev box, not a fleet baseline).
+  → Done: `Budget::Perf007.method` now names the real harness (`crates/qqq-run/src/aot.rs::measure_aot_roundtrip`, closing the `NOT_IMPLEMENTED`); the measurement lives in `qqq-run` (fixture + roundtrip + unit tests with `AOTCACHE` evidence lines) and rides every `qqqai bench` run unconditionally as an extension row, so the regression pipeline's measured==implemented contract holds; the unsafe `deserialize` path is deliberately NOT used (forbidden) — the managed-cache hit production pays is measured instead, stated in the docs.
+  → Measured: 3 release runs on Xeon E5-1650 v4/Win10/rustc 1.99.1/wasmtime 48.0.6 — to_callable p99 1638/1177/1021 µs vs ≤5000 µs budget = MET with ~4.2x headroom (median-of-p99s 1177); warm_hit p99 ~1.2-1.9ms; cold median ~13ms (context); 1101/1101 hits every run. Method: release profile, 100 warmup discarded, n=1001 (p99 honest), n=5 cold (median/min/max only), temp cache dir, sequential. Not measured: qqq-host configured engine, cross-process reuse (live_components), guest behavior (no-import fixture), other machines (single dev box, not a fleet baseline); no regression-vs-baseline comparison for the row (absolute verdict only — fleet baselines cannot be backfilled cross-runner).
   → §9.4 Specific optimizations planned
-  → §9.4 Specific optimizations planned
-  → **Measured and not met — no harness row and no verdict.** `Budget::ALL` cites
-    `bench/cold.rs::aot_cache_roundtrip`, which does not exist (`§O-249`); the
-    citation now reads `NOT_IMPLEMENTED::aot_cache_roundtrip`. No `qqqai bench`
-    workload measures an AOT round trip, and no published document states one.
-  → **What does exist is the deserialize path, measured**: `Component::deserialize`
-    on a precompiled 1.2 MB component is **304.8 µs**, against 6.8 ms for an
-    up-front `/d` build. That is the mechanism the AOT target depends on, recorded
-    here as context.
   → The item stays open because "the mechanism is measured" and "the target is met"
     are different claims, and this project's `§M-006` shape is exactly a control
     believed live that is not.

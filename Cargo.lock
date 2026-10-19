@@ -1600,7 +1600,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "wasmtime",
- "wat",
 ]
 
 [[package]]
@@ -1701,6 +1700,7 @@ dependencies = [
  "sha2",
  "tokio",
  "wasmtime",
+ "wat",
 ]
 
 [[package]]

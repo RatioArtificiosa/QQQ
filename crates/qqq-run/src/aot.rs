@@ -10,6 +10,7 @@
 //! assert!(cache.is_none());
 //! ```
 
+use qqq_bench::stats::Distribution;
 use qqq_core::{Error, ErrorCode, Result};
 use std::hash::{Hash as _, Hasher as _};
 use std::path::Path;
@@ -150,6 +151,202 @@ pub fn emit(bytes: &[u8], directory: &Path, cache: Option<&Path>) -> Result<std:
     Ok(destination)
 }
 
+/// How many code-bearing functions the round-trip fixture compiles.
+///
+/// Enough Cranelift work to be a real compile without making the
+/// measurement slow: cold compiles stay in the tens of milliseconds.
+pub const ROUNDTRIP_FUNCTIONS: usize = 200;
+
+/// Cold-miss samples. Fresh cache dir per sample; percentiles would be
+/// theater at this n, so only median/min/max are reported.
+pub const ROUNDTRIP_COLD_SAMPLES: usize = 5;
+
+/// Warm-path samples. n ≥ 1000, so p99 is a genuinely observed rank.
+pub const ROUNDTRIP_WARM_SAMPLES: usize = 1001;
+
+/// Warmup iterations discarded before each warm distribution.
+pub const ROUNDTRIP_WARMUP: usize = 100;
+
+/// The measured AOT round trip: cold miss, warm hit, hit-to-callable.
+///
+/// The distributions are data; judging them against `§9.2` is the
+/// caller's job (`bench.rs` verdicts, checklist records), because a
+/// threshold inside the measurement would turn every slow runner into a
+/// red build.
+pub struct AotRoundtrip {
+    /// Cold-miss compiles (fresh cache each sample).
+    pub cold: Distribution,
+    /// Warm recompiles (hits).
+    pub warm: Distribution,
+    /// Hit-compile → instantiate → callable handle.
+    pub to_callable: Distribution,
+    /// Cache hits registered across the warm samples.
+    pub cache_hits: usize,
+}
+
+/// A deterministic code-heavy component: `ROUNDTRIP_FUNCTIONS` arithmetic
+/// funcs, of which `f0` is lifted as the callable check.
+///
+/// # Why arithmetic on the input
+///
+/// A body that ignores its input is a `return` the optimiser collapses;
+/// `x + k` forces real instructions and makes the result depend on the
+/// input, so a future rewrite that dropped bodies would answer differently
+/// rather than faster.
+#[must_use]
+pub fn fixture_wat() -> String {
+    use std::fmt::Write as _;
+    let mut core = String::new();
+    for i in 0..ROUNDTRIP_FUNCTIONS {
+        let _ = writeln!(
+            core,
+            "(func (export \"f{i}\") (param i32) (result i32) \
+             (i32.add (local.get 0) (i32.const {})))",
+            7 + i
+        );
+    }
+    format!(
+        "(component\n  (core module $m\n{core}  )\n  \
+         (core instance $i (instantiate $m))\n  \
+         (func (export \"f0\") (param \"x\" u32) (result u32) \
+         (canon lift (core func $i \"f0\")))\n)"
+    )
+}
+
+/// What `f0(40)` must answer: input plus its constant.
+#[must_use]
+pub const fn f0_expected(x: u32) -> u32 {
+    x + 7
+}
+
+/// Measure the full round trip on a scratch cache under `dir`'s parent.
+///
+/// The fixture is parsed once, outside every sample: feeding text would
+/// conflate the WAT parser into compile/cache measurements and punish
+/// the cache for the harness's own work.
+///
+/// # Errors
+///
+/// Fixture, engine, cache, compile, instantiate, and answer failures —
+/// anything that means "the harness is broken", reported rather than
+/// panicked because this runs inside the `qqqai bench` command.
+pub fn measure_aot_roundtrip() -> Result<AotRoundtrip> {
+    use std::time::Instant;
+    let binary = wat::parse_str(fixture_wat()).map_err(|e| failure(e.to_string()))?;
+
+    // Cold: fresh cache dir per sample, so every compile is a miss.
+    let mut cold = Distribution::with_capacity(ROUNDTRIP_COLD_SAMPLES);
+    for n in 0..ROUNDTRIP_COLD_SAMPLES {
+        let root = scratch_dir("cold", n)?;
+        let (engine, _) = engine_with_cache(&root.join("cache"))?;
+        let start = Instant::now();
+        wasmtime::component::Component::new(&engine, &binary)
+            .map_err(|e| failure(e.to_string()))?;
+        cold.record(start.elapsed());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Warm: one engine, one dir. First compile warms, the rest must hit.
+    let root = scratch_dir("warm", 0)?;
+    let (engine, cache) = engine_with_cache(&root.join("cache"))?;
+    wasmtime::component::Component::new(&engine, &binary).map_err(|e| failure(e.to_string()))?;
+    let hits_before = cache.cache_hits();
+    let mut warm = Distribution::with_capacity(ROUNDTRIP_WARM_SAMPLES);
+    for _ in 0..ROUNDTRIP_WARMUP {
+        wasmtime::component::Component::new(&engine, &binary)
+            .map_err(|e| failure(e.to_string()))?;
+    }
+    for _ in 0..ROUNDTRIP_WARM_SAMPLES {
+        let start = Instant::now();
+        wasmtime::component::Component::new(&engine, &binary)
+            .map_err(|e| failure(e.to_string()))?;
+        warm.record(start.elapsed());
+    }
+    let hits = cache.cache_hits() - hits_before;
+
+    // Hit-compile to callable handle.
+    let linker = wasmtime::component::Linker::new(&engine);
+    let mut to_callable = Distribution::with_capacity(ROUNDTRIP_WARM_SAMPLES);
+    for _ in 0..ROUNDTRIP_WARMUP {
+        let component = wasmtime::component::Component::new(&engine, &binary)
+            .map_err(|e| failure(e.to_string()))?;
+        let mut store = wasmtime::Store::new(&engine, ());
+        linker
+            .instantiate(&mut store, &component)
+            .map_err(|e| failure(e.to_string()))?;
+    }
+    for _ in 0..ROUNDTRIP_WARM_SAMPLES {
+        let start = Instant::now();
+        let component = wasmtime::component::Component::new(&engine, &binary)
+            .map_err(|e| failure(e.to_string()))?;
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = linker
+            .instantiate(&mut store, &component)
+            .map_err(|e| failure(e.to_string()))?;
+        instance
+            .get_typed_func::<(u32,), (u32,)>(&mut store, "f0")
+            .map_err(|e| failure(e.to_string()))?;
+        to_callable.record(start.elapsed());
+    }
+
+    // Correctness, twice: the callable answers from its input at two
+    // points. One probe cannot tell execution from a constant body — a
+    // fixture returning `const 47` answers f0(40) correctly while
+    // computing nothing, so f0(0) must answer 7 too (review on PERF-007).
+    let component = wasmtime::component::Component::new(&engine, &binary)
+        .map_err(|e| failure(e.to_string()))?;
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = linker
+        .instantiate(&mut store, &component)
+        .map_err(|e| failure(e.to_string()))?;
+    let func = instance
+        .get_typed_func::<(u32,), (u32,)>(&mut store, "f0")
+        .map_err(|e| failure(e.to_string()))?;
+    for (input, expected) in [(40u32, f0_expected(40)), (0u32, f0_expected(0))] {
+        let (answer,) = func
+            .call(&mut store, (input,))
+            .map_err(|e| failure(e.to_string()))?;
+        if answer != expected {
+            return Err(failure("fixture answered without reading its input"));
+        }
+    }
+
+    let report = AotRoundtrip {
+        cold,
+        warm,
+        to_callable,
+        cache_hits: hits,
+    };
+    std::fs::remove_dir_all(&root).ok();
+    Ok(report)
+}
+
+/// A scratch cache dir owned by one measurement alone: pid-namespaced with
+/// a per-call index, removed by the caller when done.
+fn scratch_dir(name: &str, index: usize) -> Result<std::path::PathBuf> {
+    let root = std::env::temp_dir().join(format!(
+        "qqq-aotroundtrip-{name}-{}-{index}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&root).map_err(|e| failure(e.to_string()))?;
+    Ok(root)
+}
+
+/// An engine with its managed cache in `dir`, for one measurement.
+fn engine_with_cache(dir: &std::path::Path) -> Result<(wasmtime::Engine, wasmtime::Cache)> {
+    let mut cache_config = wasmtime::CacheConfig::new();
+    cache_config.with_directory(dir);
+    let cache = wasmtime::Cache::new(cache_config).map_err(|e| failure(e.to_string()))?;
+    let mut config = wasmtime::Config::new();
+    config.wasm_component_model(true);
+    config.cache(Some(cache.clone()));
+    let engine = wasmtime::Engine::new(&config).map_err(|e| failure(e.to_string()))?;
+    Ok((engine, cache))
+}
+
 /// Stage complete bytes, then rename in the same directory. Never expose a
 /// partially written component to a concurrent reader.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -224,6 +421,10 @@ fn verify_ownership(directory: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 mod tests {
     use super::*;
 
@@ -347,5 +548,67 @@ mod tests {
         check_grants(Some(Path::new("/tmp/qqq-cache")), &GrantSet::empty())
             .expect("no grants means no conflict");
         check_grants(None, &set).expect("no cache means no conflict");
+    }
+
+    /// The round trip reports a verdict shape the bench command can judge:
+    /// every distribution non-empty, every sample advanced the clock, every
+    /// warm recompile hit, and the fixture answers from its input. Timing
+    /// comparisons are deliberately absent — a verdict assert here would
+    /// turn every slow runner red (the `abi_cost` precedent); the item
+    /// verdict comes from recorded runs, not from this exit code.
+    #[test]
+    fn aot_roundtrip_reports_a_verdict_shape() {
+        let report = measure_aot_roundtrip().expect("measurement must run");
+        assert!(
+            report.cache_hits >= ROUNDTRIP_WARM_SAMPLES,
+            "every warm recompile must hit: {}",
+            report.cache_hits
+        );
+        assert!(
+            !report.cold.is_empty() && !report.warm.is_empty() && !report.to_callable.is_empty()
+        );
+        for d in [&report.cold, &report.warm, &report.to_callable] {
+            assert!(
+                d.samples().iter().all(|&ns| ns > 0),
+                "the clock must advance during every step"
+            );
+        }
+        // Evidence lines, captured quietly in CI and readable with
+        // `--nocapture` on a measurement run.
+        println!(
+            "AOTCACHE cold_median_only|{}|{}|{}|{}",
+            report.cold.len(),
+            report.cold.min().expect("non-empty"),
+            {
+                let mut v: Vec<u64> = report.cold.samples().to_vec();
+                v.sort_unstable();
+                v[v.len() / 2]
+            },
+            report.cold.max().expect("non-empty"),
+        );
+        for (label, d) in [
+            ("warm_hit", &report.warm),
+            ("to_callable", &report.to_callable),
+        ] {
+            println!(
+                "AOTCACHE {label}|{}|{}|{}|{}|{}|{}",
+                d.len(),
+                d.min().expect("non-empty"),
+                d.p50().expect("non-empty"),
+                d.p90().expect("non-empty"),
+                d.p99().expect("non-empty"),
+                d.max().expect("non-empty"),
+            );
+        }
+    }
+
+    /// The WAT fixture is deterministic: same functions, same answer, every
+    /// time. A fixture that drifted between runs would make medians
+    /// incomparable across the three repetitions the methodology requires.
+    #[test]
+    fn aot_fixture_is_deterministic() {
+        assert_eq!(fixture_wat(), fixture_wat());
+        assert_eq!(f0_expected(40), 47);
+        assert!(fixture_wat().contains("(export \"f199\")"));
     }
 }

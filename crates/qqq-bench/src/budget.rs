@@ -279,7 +279,7 @@ impl Budget {
             target: 5.0,
             direction: Direction::AtMost,
             unit: Unit::Millis,
-            method: "crates/qqq-bench/tests/aot_cache.rs::aot_cache_roundtrip",
+            method: "crates/qqq-run/src/aot.rs::measure_aot_roundtrip",
         },
         Self {
             item: Item::Perf008,

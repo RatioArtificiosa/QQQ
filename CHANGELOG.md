@@ -4,14 +4,15 @@
 
 ### Security
 
-- **perf**: meet PERF-007 (AOT cache ≤ 5 ms p99): new
-  `crates/qqq-bench/tests/aot_cache.rs` round-trip harness (cold miss,
-  warm hit, hit→instantiate→callable on a 200-fn fixture, warmup +
-  distributions, `AOTCACHE` evidence rows, loose structural asserts);
-  `Budget::Perf007` cites it instead of `NOT_IMPLEMENTED`. Measured
-  1068/1018/1149 µs p99 over 3 release runs (Xeon E5-1650 v4) = MET
-  with ~4.4x headroom. The unsafe `deserialize` path is deliberately
-  not used; the managed-cache hit is measured instead.
+- **perf**: meet PERF-007 (AOT cache ≤ 5 ms p99): the round trip
+  lives in `qqq-run/src/aot.rs` (`measure_aot_roundtrip`: cold miss,
+  warm hit, hit→instantiate→callable on a 200-fn fixture) and rides
+  every `qqqai bench` run as an extension row, satisfying the
+  regression pipeline's measured==implemented contract; `Budget::Perf007`
+  cites it. Measured 1638/1177/1021 µs p99 over 3 release runs
+  (Xeon E5-1650 v4) = MET with ~4.2x headroom. The unsafe `deserialize`
+  path is deliberately not used; verdict absolute-informational (no
+  fleet-baseline comparison).
 
 - **arch**: close ARCH-015 (artifact model) on evidence: `atomic_write`
   failure cleanup + no-survivors pins, `configure` refusal pins with a

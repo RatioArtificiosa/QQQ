@@ -95,7 +95,3 @@ tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-ut
 # different canonical ABIs -- the failure mode the workspace manifest records for
 # `wasmtime-wasi`.
 wasmtime = { workspace = true }
-# WAT fixtures are parsed once, outside every sample: feeding text would conflate
-# the parser into compile/cache measurements. Same pin as qqq-host (`wat = "1"`,
-# test-only like wasmtime above).
-wat = "1"

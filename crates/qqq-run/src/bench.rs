@@ -647,6 +647,16 @@ pub async fn run(opts: &BenchOptions, target: SocketAddr) -> Result<BenchOutput,
         methodology = Some(built);
     }
 
+    // The AOT row rides every successful run, full or `--only`-filtered:
+    // `Budget::ALL` marks PERF-007 implemented, and the regression
+    // pipeline requires every implemented row in the envelope. A local
+    // measurement, not socket traffic, so no target or workload
+    // selection applies; the few seconds it costs are noise beside the
+    // sustained workloads.
+    let aot = crate::aot::measure_aot_roundtrip()
+        .map_err(|e| usage(format!("could not measure the AOT round trip: {e}")))?;
+    results.push(aot_bench_result(&aot));
+
     // A run with no workloads still needs a document, and the environment is
     // readable without running anything -- so the empty case reports the machine
     // rather than an empty object. Total rather than expect: the table without
@@ -660,6 +670,51 @@ pub async fn run(opts: &BenchOptions, target: SocketAddr) -> Result<BenchOutput,
     };
 
     Ok(BenchOutput::new(&results, &methodology))
+}
+
+/// The AOT cache round trip as a bench row: `BenchmarkName::Other` is the
+/// extension slot by design, and a local measurement is exactly what it
+/// is for — the ten `§9.1` names stay closed while the envelope still
+/// carries the `§9.2` row the pipeline requires.
+///
+/// The verdict is computed here, not in the measurement: `aot.rs`
+/// measures, this module judges, the same split as every HTTP row
+/// (`loadgen` drives, `verdict_for` judges).
+#[must_use]
+pub fn aot_bench_result(report: &crate::aot::AotRoundtrip) -> BenchResult {
+    let p99 = report.to_callable.p99();
+    let verdict = match (Budget::for_item(Item::Perf007), p99) {
+        (Some(budget), Some(p99)) => budget.meets_nanos(p99).ok().map(|v| BudgetVerdict {
+            item: budget.item.id(),
+            metric: budget.item.metric(),
+            target: budget.target,
+            unit: budget.unit.symbol(),
+            direction: budget.direction.symbol(),
+            measured: v.measured,
+            met: v.met,
+        }),
+        _ => None,
+    };
+    let attempted = [
+        report.cold.len(),
+        report.warm.len(),
+        report.to_callable.len(),
+    ]
+    .into_iter()
+    .fold(0u64, |acc, n| {
+        acc.saturating_add(u64::try_from(n).unwrap_or(u64::MAX))
+    });
+    BenchResult {
+        name: BenchmarkName::Other("aot".to_owned()),
+        measures: "AOT cache roundtrip (hit to callable)".to_owned(),
+        expected: "≤ 5 ms p99".to_owned(),
+        attempted,
+        failed: 0,
+        p50_nanos: report.to_callable.p50(),
+        p99_nanos: p99,
+        rps: None,
+        verdict,
+    }
 }
 
 /// Build a load-generator plan for one workload.
@@ -1025,6 +1080,49 @@ mod tests {
     fn with_no_filter_all_ten_rows_run() {
         let opts = BenchOptions::default();
         assert_eq!(selected(&opts).len(), 10);
+    }
+
+    /// The AOT row joins the envelope as an extension, not a workload: the
+    /// ten `§9.1` rows stay closed (selection untouched) while the `§9.2`
+    /// row the pipeline requires is present. A synthetic report keeps this
+    /// free of timing — the verdict math is what is pinned, not a clock.
+    #[test]
+    fn the_aot_row_carries_a_perf007_verdict() {
+        use qqq_bench::stats::Distribution;
+        let mut to_callable = Distribution::new();
+        for ns in [900_000u64, 1_000_000, 1_100_000] {
+            to_callable.record_nanos(ns);
+        }
+        let mut cold = Distribution::new();
+        cold.record_nanos(10_000_000);
+        let report = crate::aot::AotRoundtrip {
+            cold,
+            warm: Distribution::new(),
+            to_callable,
+            cache_hits: 3,
+        };
+        let row = aot_bench_result(&report);
+        assert_eq!(row.name.as_str().into_owned(), "aot".to_owned());
+        assert_eq!(row.failed, 0);
+        assert!(row.attempted > 0);
+        let verdict = row.verdict.expect("the AOT row always judges");
+        assert_eq!(verdict.item, "PERF-007");
+        assert!(verdict.met, "1.1 ms meets a 5 ms ceiling");
+        let slow = {
+            let mut d = Distribution::new();
+            d.record_nanos(6_000_000);
+            crate::aot::AotRoundtrip {
+                cold: Distribution::new(),
+                warm: Distribution::new(),
+                to_callable: d,
+                cache_hits: 1,
+            }
+        };
+        let slow_row = aot_bench_result(&slow);
+        assert!(
+            !slow_row.verdict.expect("judged").met,
+            "6 ms must miss a 5 ms ceiling"
+        );
     }
 
     #[test]

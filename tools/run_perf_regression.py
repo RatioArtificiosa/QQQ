@@ -44,6 +44,12 @@ EXPECTED_WORKLOADS = {
     "multi",
     "tailp99",
     "cold",
+    # Not an HTTP workload: the AOT round trip is measured in-process by
+    # `qqqai bench` and rides the envelope as an extension row. It has no
+    # regression baseline (single absolute verdict, informational), so it
+    # joins EXPECTED_WORKLOADS but not LATENCY/THROUGHPUT_METRICS — adding
+    # it there would demand fleet baselines no runner can backfill.
+    "aot",
 }
 LATENCY_METRICS = {"hello": "p99_nanos", "tailp99": "p99_nanos"}
 THROUGHPUT_METRICS = {"json": "requests_per_second", "multi": "requests_per_second"}
@@ -592,6 +598,12 @@ def fixture_run(scale: float = 1.0) -> dict[str, Any]:
         elif name == "tailp99":
             result["budget"] = {"item": "PERF-011", "met": True}
             result["p99_nanos"] = 100.0 * scale
+        elif name == "aot":
+            result["budget"] = {"item": "PERF-007", "met": True}
+            result["p99_nanos"] = 100.0 * scale
+            # Production emits no rate for a local measurement; the fixture
+            # mirrors the envelope exactly rather than inventing one.
+            result["requests_per_second"] = None
         results.append(result)
     return {
         "ok": True,
@@ -626,7 +638,7 @@ def self_test() -> int:
 
     expect_error("a short Budget::ALL source", lambda: budget_source_items("Self {}"))
 
-    real_items = {"PERF-002", "PERF-010", "PERF-011"}
+    real_items = {"PERF-002", "PERF-007", "PERF-010", "PERF-011"}
     runs = [
         normalize_run(fixture_run(), "fixture", real_items),
         normalize_run(fixture_run(), "fixture", real_items),

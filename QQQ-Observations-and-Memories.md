@@ -40095,50 +40095,53 @@ installation/distribution (DIST area, not this item). Measured: 5
 delivery-checklist A-boxes dispositioned one by one.
 `crates/qqq-run/src/aot.rs`, `crates/qqq-host/src/linker.rs`.
 
-## §O-761 - PERF-007: the AOT target is met with 4.4x headroom, honestly measured
+## §O-761 - PERF-007: the AOT target is met, and the pipeline demanded a redesign
 
-The row (`≤ 5 ms p99`, deserialize-to-callable) cited a measurement
-that did not exist; now `Budget::Perf007.method` names
-`crates/qqq-bench/tests/aot_cache.rs::aot_cache_roundtrip` (red-proven:
-the contract test failed until the file landed). The harness is a new
-integration test beside PERF-005's `abi_cost.rs`, following its
-contract: WAT fixture (200 arithmetic funcs, answer depends on input),
-warmup + distributions, `AOTCACHE` evidence rows, assertions
-deliberately loose (shapes and counters, never timing). Two methodology
-corrections along the way, both with evidence: `Component::deserialize`
-is `unsafe` and forbidden, so the method measures the managed-cache hit
-path production actually pays and documents the substitution; feeding
-WAT text conflated ~1 ms/sample of parsing into every distribution, so
-the fixture is pre-parsed once (binary-fed runs measure ~40% lower).
-Verdict from 3 release runs on Xeon E5-1650 v4/Win10/rustc
-1.99.1/wasmtime 48.0.6: to_callable p99 1068/1018/1149 µs vs 5000 µs =
-MET, spread ±6%, 1101/1101 hits every run; cold median ~12 ms context.
-Raw rows in ns (warm/to_callable: `label|n|min|p50|p90|p99|max`;
-cold: `label|n|min|median|max`, no percentiles at n=5): run1
-`cold|5|10786300|11833700|20804700`, `warm|1001|1476100|1669200|2650100|3312700|8158600`,
-`to_callable|1001|1484700|1730800|2792500|3573200|5115900`; run2
-`cold|5|10888700|11575300|14450500`, `warm|1001|1497000|2091100|3172900|3917800|12550400`,
-`to_callable|1001|1475400|1620000|2284500|3252900|7425400`; run3
-`cold|5|12525900|13876500|15167400`, `warm|1001|1488600|1652500|2124900|3013400|6934400`,
-`to_callable|1001|1493400|1742400|2812000|3386400|10134400`.
+The row (`≤ 5 ms p99`) cited a measurement that did not exist; closing
+it took two designs, because the regression pipeline refused the
+first. The first put the harness in `qqq-bench/tests/` — but
+`run_perf_regression.py` requires every implemented row in the bench
+envelope (`measured==implemented`, no skip list by design, and the
+row set itself must equal `EXPECTED_WORKLOADS`), so the measurement
+moved to `qqq-run/src/aot.rs` (`measure_aot_roundtrip`, fixture +
+distributions + unit tests) and rides every `qqqai bench` run
+unconditionally as an extension row (`Other("aot")` — the ten `§9.1`
+names stay closed). No regression-vs-baseline comparison for the row:
+its verdict is absolute-informational, because backfilling fleet
+baselines cross-runner is impossible — stated at the decision point,
+not discovered later. Methodology corrections with evidence:
+`Component::deserialize` is `unsafe` and forbidden, so the
+managed-cache hit production pays is measured instead; feeding WAT
+text conflated ~1 ms/sample of parsing, so the fixture is pre-parsed
+once (binary-fed runs measure ~40% lower). Verdict from 3 release runs
+on Xeon E5-1650 v4/Win10/rustc 1.99.1/wasmtime 48.0.6: to_callable p99
+1638/1177/1021 µs vs 5000 µs = MET (~4.2x on median-of-p99s);
+1101/1101 hits every run. Raw rows in ns (warm/to_callable
+`label|n|min|p50|p90|p99|max`; cold median-only): run1
+`cold|5|12502700|13392600|14682700`,
+`warm|1001|535800|910900|1200500|1865500|3896400`,
+`to_callable|1001|531000|828600|1108900|1638500|11879100`; run2
+`cold|5|12362700|12535400|17148500`,
+`warm|1001|505600|790200|1019100|1313600|9623400`,
+`to_callable|1001|506500|766900|928500|1177300|1450400`; run3
+`cold|5|12285400|12998700|17467500`,
+`warm|1001|493500|753900|1085400|1243100|1892600`,
+`to_callable|1001|503600|643400|823500|1021000|10572600`.
 Stated non-measurements: host-configured engine, cross-process reuse,
-guest behavior, other machines (single dev box, not fleet). The test
-computes the verdict and prints it; asserting it in-test would make
-every slow runner red, per the abi_cost precedent. Mutation
-(wrong export) fails red, restored byte-identical green. Review
-follow-up: file-form budget methods now pin the symbol too (a typo'd
-symbol passed before), proven by typo-mutation red/green.
+guest behavior, other machines. The harness asserts shapes, never
+timing; the contract checker grew a repo-relative fallback (both
+checkers agree now) and file-form methods pin the symbol.
+`crates/qqq-run/src/aot.rs`, `crates/qqq-run/src/bench.rs`,
+`crates/qqq-bench/src/budget.rs`, `tools/run_perf_regression.py`,
+`tools/check_bench_contract.py`.
 
-Gate round, all real: the python contract checker resolves file-form
-methods under `src/` while the Rust test resolves repo-relative — the
-two disagreed on the only file-form row in existence, so the checker
-grew a repo-relative fallback (no current row affected) with self-test
-case 4d, and both agree now. Clippy demanded the test-setup idiom
-(`expect_used`/`indexing_slicing` file allow, mirroring `abi_cost`),
-`writeln!` over `write!`+newline, and `#[must_use]`; `audit_unsafe`
-re-recorded 199→200 files.
-`crates/qqq-bench/src/budget.rs`, `crates/qqq-bench/tests/aot_cache.rs`,
-`crates/qqq-bench/Cargo.toml` (`wat` dev-dep, mirroring qqq-host).
+Review follow-up, all closed: the answer check became two-point
+(f0(40)==47 && f0(0)==7 — a constant body passes the first, so the
+second is what proves execution; mutation with an 87-x body fails red
+at probe two, restored identical); the python contract checker now
+pins file-form symbols too (with self-test 4e); the fixture mirrors
+the envelope exactly (`requests_per_second: null`); the bench comment
+no longer overclaims partial-envelope behavior.
 
 Process lesson, paid twice this item: run workspace clippy LOCALLY
 before launching the 25-minute gate — the collapsible-if on the new

@@ -361,12 +361,12 @@ def self_test() -> int:
 
     # 4d. A repo-relative file method naming a file that does not exist.
     # The fallback admits `crates/...` addresses for measurements that
-    # cannot live under `src/` (integration tests); a dangling one must
-    # still fail. Anchored on PERF-007's real method so the injection
-    # cannot silently miss.
+    # cannot live under `src/` (the AOT round trip lives in `qqq-run`,
+    # not `qqq-bench/src`); a dangling one must still fail. Anchored on
+    # PERF-007's real method so the injection cannot silently miss.
     dangling_repo = real_budget.replace(
-        '"crates/qqq-bench/tests/aot_cache.rs::aot_cache_roundtrip"',
-        '"crates/qqq-bench/tests/nope.rs::nothing_here"',
+        '"crates/qqq-run/src/aot.rs::measure_aot_roundtrip"',
+        '"crates/qqq-run/src/nope.rs::nothing_here"',
         1,
     )
     if dangling_repo == real_budget:
@@ -376,6 +376,26 @@ def self_test() -> int:
         (
             "a repo-relative method naming a file that does not exist",
             dangling_repo,
+            proposal_text,
+            True,
+        )
+    )
+
+    # 4e. A file method naming a symbol the file does not contain. The path
+    # resolves, so existence alone passes — the symbol check is what catches
+    # the typo. Same anchor discipline as 4d.
+    dangling_symbol = real_budget.replace(
+        '"crates/qqq-run/src/aot.rs::measure_aot_roundtrip"',
+        '"crates/qqq-run/src/aot.rs::measure_aot_roundtripx"',
+        1,
+    )
+    if dangling_symbol == real_budget:
+        print("HARNESS FAIL: the dangling-symbol injection did not apply")
+        return 1
+    cases.append(
+        (
+            "a file method naming a symbol that is not there",
+            dangling_symbol,
             proposal_text,
             True,
         )
@@ -579,12 +599,7 @@ def analyse(budget_src: str, proposal_src: str, checklist_src: str) -> list[str]
                     f"{item_id} method '{method}' names `{symbol}`, which is not "
                     "declared anywhere in crates/qqq-bench/src"
                 )
-        elif (
-            not (
-                ROOT / "crates" / "qqq-bench" / "src" / method.split("::")[0]
-            ).is_file()
-            and not (ROOT / method.split("::")[0]).is_file()
-        ):
+        else:
             # A file path that must RESOLVE, not merely be shaped like one.
             #
             # This rule previously checked only the `bench/` prefix, and passed for as
@@ -598,16 +613,31 @@ def analyse(budget_src: str, proposal_src: str, checklist_src: str) -> list[str]
             # `§O-126` records for an invented checklist id, one level down.
             #
             # Two roots, in order: the historical `src/`-relative form, then the
-            # repo-relative form that names integration tests
-            # (`crates/qqq-bench/tests/...`), which cannot live under `src/`.
+            # repo-relative form that names measurements outside `src/`
+            # (`crates/qqq-run/src/...`), which cannot live under it.
             # No current row used the file form at all until PERF-007, so the
             # fallback changes no existing verdict — it only admits the honest
-            # address.
-            errors.append(
-                f"{item_id} method '{method}' names a file that does not exist: "
-                f"crates/qqq-bench/src/{method.split('::')[0]} "
-                f"nor {method.split('::')[0]}"
-            )
+            # address. The named symbol must appear in the resolved file,
+            # mirroring the `crate::` branch: a path that resolves to the
+            # wrong content is the same lie one level down.
+            first, _, symbol = method.partition("::")
+            candidates = [
+                ROOT / "crates" / "qqq-bench" / "src" / first,
+                ROOT / first,
+            ]
+            resolved = next((c for c in candidates if c.is_file()), None)
+            if resolved is None:
+                errors.append(
+                    f"{item_id} method '{method}' names a file that does not exist: "
+                    f"crates/qqq-bench/src/{first} nor {first}"
+                )
+            elif symbol and symbol.strip() not in resolved.read_text(
+                encoding="utf-8", errors="replace"
+            ):
+                errors.append(
+                    f"{item_id} method '{method}' names `{symbol.strip()}`, which "
+                    f"appears nowhere in {resolved.relative_to(ROOT)}"
+                )
 
     if not cited:
         errors.append("no checklist items extracted; the citation check is vacuous")

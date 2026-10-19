@@ -94,6 +94,10 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasmtime = { workspace = true }
+# WAT fixtures for the AOT round-trip measurement (`aot::fixture_wat`): parsed
+# once outside every sample so distributions never include parse cost. Same pin
+# as qqq-host/qqq-bench (`wat = "1"`); external crate, no topology edge.
+wat = "1"
 
 [dev-dependencies]
 serde_json = { workspace = true }

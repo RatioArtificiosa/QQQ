@@ -1411,11 +1411,11 @@ impl Manifest {
             }
         }
         if let Some(kv) = &self.capabilities.kv {
-            // Both grants live under the non-empty check: validation
-            // refuses empty stores at parse, and this keeps direct
+            // Both grants live under a non-blank store: validation
+            // refuses blank stores at parse, and this keeps direct
             // construction (which bypasses validation) honest too —
-            // a write flag with no stores grants nothing.
-            if !kv.stores.is_empty() {
+            // a blank name grants nothing, however it arrives.
+            if kv.stores.iter().any(|s| !s.trim().is_empty()) {
                 push(Capability::KvRead);
                 if kv.write {
                     push(Capability::KvWrite);
@@ -2451,6 +2451,32 @@ allow_origins = ["https://app.example.com"]
         assert!(
             manifest.declared_capabilities().is_empty(),
             "a storeless write flag grants nothing"
+        );
+        // Blank is storeless too: validation trims at parse, and the
+        // derivation trims here, so neither path grants on spaces.
+        let blank = Manifest {
+            package: Package {
+                name: "probe".to_owned(),
+                version: "0.1.0".to_owned(),
+                description: None,
+                license: None,
+            },
+            build: Build::default(),
+            capabilities: Capabilities {
+                kv: Some(KvCapability {
+                    stores: vec!["   ".to_owned()],
+                    write: true,
+                }),
+                ..Default::default()
+            },
+            limits: Limits::default(),
+            dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
+            server: Server::default(),
+        };
+        assert!(
+            blank.declared_capabilities().is_empty(),
+            "a blank write flag grants nothing"
         );
     }
 

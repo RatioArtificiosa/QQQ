@@ -445,6 +445,18 @@ impl FsMode {
         matches!(self, Self::AppendOnly | Self::ReadWrite)
     }
 
+    /// Whether this mode permits watching for changes.
+    ///
+    /// Observation follows readability: watching reports other writers'
+    /// changes, which an append-only holder cannot read directly — so a
+    /// write-only mode implying watch would smuggle read through
+    /// observation. The read-containing modes imply it (CAP-024); the
+    /// write-only mode does not.
+    #[must_use]
+    pub const fn can_watch(self) -> bool {
+        matches!(self, Self::ReadOnly | Self::ReadWrite)
+    }
+
     /// Whether a grant with **this** mode satisfies a request for `requested`.
     ///
     /// Compared on the underlying *rights* (read, write), not on the enum's
@@ -1507,6 +1519,35 @@ impl Manifest {
         Ok(())
     }
 
+    /// The `fs` grants from every preopened entry, factored out of
+    /// [`Manifest::declared_capabilities`] for the same
+    /// `too_many_lines` ratchet as [`Manifest::push_secret_grants`]:
+    /// split, not `allow`.
+    ///
+    /// A blank path grants nothing, however it arrives: validation refuses
+    /// blanks at parse, and direct construction bypasses validation — so
+    /// the derivation checks too, per the kv blank-store precedent. The
+    /// readable modes imply watch ([`FsMode::can_watch`]); append-only
+    /// must not observe what it cannot read.
+    fn push_fs_grants(&self, push: &mut impl FnMut(Capability)) {
+        for fs in &self.capabilities.fs {
+            if fs.path.trim().is_empty() {
+                continue;
+            }
+            match fs.mode {
+                FsMode::ReadOnly => push(Capability::FsRead),
+                FsMode::AppendOnly => push(Capability::FsWrite),
+                FsMode::ReadWrite => {
+                    push(Capability::FsRead);
+                    push(Capability::FsWrite);
+                }
+            }
+            if fs.mode.can_watch() {
+                push(Capability::FsWatch);
+            }
+        }
+    }
+
     /// The `secret.use` grant from either spelling, factored out of
     /// [`Manifest::declared_capabilities`]: that function grows one stanza
     /// per modelled table, and clippy's `too_many_lines` is the ratchet
@@ -1552,16 +1593,7 @@ impl Manifest {
                 push(Capability::HttpClient);
             }
         }
-        for fs in &self.capabilities.fs {
-            match fs.mode {
-                FsMode::ReadOnly => push(Capability::FsRead),
-                FsMode::AppendOnly => push(Capability::FsWrite),
-                FsMode::ReadWrite => {
-                    push(Capability::FsRead);
-                    push(Capability::FsWrite);
-                }
-            }
-        }
+        self.push_fs_grants(&mut push);
         if let Some(c) = &self.capabilities.crypto {
             if c.random {
                 push(Capability::CryptoRandom);
@@ -3484,6 +3516,124 @@ allow_origins = ["https://app.example.com"]
         );
     }
 
+    /// Watch follows readability (CAP-024): observation is a read-side
+    /// right, so the read-containing modes imply `FsWatch` and the
+    /// write-only mode does not — an append-only holder watching would
+    /// observe other writers' changes it cannot read directly, which is
+    /// read smuggled through observation.
+    #[test]
+    fn fs_mode_can_watch_follows_readability() {
+        assert!(FsMode::ReadOnly.can_watch());
+        assert!(!FsMode::AppendOnly.can_watch());
+        assert!(FsMode::ReadWrite.can_watch());
+    }
+
+    /// A read-only entry grants exactly read plus watch.
+    #[test]
+    fn read_only_fs_grants_read_and_watch() {
+        let src =
+            format!("{MINIMAL}\n[[capabilities.fs]]\npath = \"/tmp/x\"\nmode = \"read-only\"\n");
+        assert_eq!(
+            Manifest::parse(&src).unwrap().declared_capabilities(),
+            vec![Capability::FsRead, Capability::FsWatch],
+            "read-only implies watch, nothing else"
+        );
+    }
+
+    /// An append-only entry grants exactly write: no observation right,
+    /// or watching would leak reads the mode withholds.
+    #[test]
+    fn append_only_fs_grants_write_not_watch() {
+        let src =
+            format!("{MINIMAL}\n[[capabilities.fs]]\npath = \"/tmp/x\"\nmode = \"append-only\"\n");
+        assert_eq!(
+            Manifest::parse(&src).unwrap().declared_capabilities(),
+            vec![Capability::FsWrite],
+            "append-only must not imply watch"
+        );
+    }
+
+    /// A read-write entry grants read, write, and watch.
+    #[test]
+    fn read_write_fs_grants_read_write_and_watch() {
+        let src =
+            format!("{MINIMAL}\n[[capabilities.fs]]\npath = \"/tmp/x\"\nmode = \"read-write\"\n");
+        assert_eq!(
+            Manifest::parse(&src).unwrap().declared_capabilities(),
+            vec![Capability::FsRead, Capability::FsWrite, Capability::FsWatch],
+            "read-write implies watch"
+        );
+    }
+
+    /// Direct construction cannot smuggle grants past the path check: an
+    /// entry with a blank path grants nothing, however it arrives —
+    /// validation refuses blanks at parse, and the derivation nests under
+    /// the same gate (the kv blank-store precedent, review on CAP-024).
+    #[test]
+    fn fs_blank_path_direct_construction_grants_nothing() {
+        use crate::manifest::FsCapability;
+        let manifest = Manifest {
+            package: Package {
+                name: "probe".to_owned(),
+                version: "0.1.0".to_owned(),
+                description: None,
+                license: None,
+            },
+            build: Build::default(),
+            capabilities: Capabilities {
+                fs: vec![FsCapability {
+                    path: "   ".to_owned(),
+                    mode: FsMode::ReadOnly,
+                    quota: None,
+                }],
+                ..Default::default()
+            },
+            limits: Limits::default(),
+            dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
+            server: Server::default(),
+        };
+        assert!(
+            manifest.declared_capabilities().is_empty(),
+            "a blank-path construction grants nothing"
+        );
+        // A blank sibling must not poison a valid one: the guard skips
+        // the blank entry, not the whole manifest.
+        let mixed = Manifest {
+            package: Package {
+                name: "probe".to_owned(),
+                version: "0.1.0".to_owned(),
+                description: None,
+                license: None,
+            },
+            build: Build::default(),
+            capabilities: Capabilities {
+                fs: vec![
+                    FsCapability {
+                        path: "   ".to_owned(),
+                        mode: FsMode::ReadOnly,
+                        quota: None,
+                    },
+                    FsCapability {
+                        path: "/tmp/x".to_owned(),
+                        mode: FsMode::ReadOnly,
+                        quota: None,
+                    },
+                ],
+                ..Default::default()
+            },
+            limits: Limits::default(),
+            dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
+            server: Server::default(),
+        };
+        assert_eq!(
+            mixed.declared_capabilities(),
+            vec![Capability::FsRead, Capability::FsWatch],
+            "the valid sibling still grants fully"
+        );
+    }
+
     #[test]
     fn byte_size_parsing_is_correct_and_unambiguous() {
         assert_eq!(
@@ -3541,7 +3691,8 @@ allow_origins = ["https://app.example.com"]
         let g = group_by_namespace(&m.declared_capabilities());
         assert_eq!(g["crypto"].len(), 5); // random, hash, hmac, aead, sign
         assert_eq!(g["clock"].len(), 2);
-        assert_eq!(g["fs"].len(), 2);
+        // read, write, plus the implied watch (CAP-024).
+        assert_eq!(g["fs"].len(), 3);
     }
 
     /// Sorting the output makes `qqqai caps` deterministic, which matters

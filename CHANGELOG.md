@@ -4,6 +4,15 @@
 
 ### Security
 
+- **cap**: derive `FsWatch` from `[[capabilities.fs]]` (CAP-024):
+  watch follows readability — read-only/read-write imply watch via
+  `FsMode::can_watch`, append-only does not (watching would leak
+  reads the mode withholds); the `fs` stanza round-trips watch for
+  read modes. Visible consequence, pinned: a read-only preopen now
+  audits as `Exposed` via `fs.watch`. Red-first. Review follow-up:
+  blank-path derivation guard; watch/quota runtime backing recorded
+  as future-work for the `qqq:fs` host impl.
+
 - **cap**: model `[capabilities.secret]` (CAP-023): typed entries
   sharing the legacy `crypto.secrets` vocabulary; either spelling's
   non-blank entry grants the single `secret.use`, unioned and deduped

@@ -1106,19 +1106,24 @@ mod tests {
         }
     }
 
-    /// Read-only filesystem access is `Contained`, not `Exposed`.
+    /// Read-only filesystem access reports the exposed-posture finding
+    /// via the implied watch (CAP-024): a read-containing preopen derives
+    /// `FsWatch`, and watch is an exposing capability. This is the
+    /// deliberate, visible consequence of deriving watch by mode — a
+    /// read-only manifest used to audit clean here.
     #[test]
-    fn read_only_fs_access_is_not_an_exposed_posture() {
+    fn read_only_fs_access_is_an_exposed_posture_via_watch() {
         let src = "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\
                    [[capabilities.fs]]\npath = \".\"\nmode = \"read-only\"\n";
         let report = audit(&loaded(src), None);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.rule == "qqq/exposed-posture")
+            .expect("the implied watch must fire the posture rule");
         assert!(
-            !report
-                .findings
-                .iter()
-                .any(|f| f.rule == "qqq/exposed-posture"),
-            "read-only access must not be reported as exposed: {:?}",
-            report.findings
+            finding.message.contains("fs.watch"),
+            "the finding must name the watch grant: {finding:?}"
         );
     }
 

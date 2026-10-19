@@ -40031,4 +40031,45 @@ workspace clippy green.
 `crates/qqq-cap/src/normalize.rs`, `crates/qqq-cap/src/manifest.rs`,
 `crates/qqq-host/src/host_secrets.rs`.
 
+## §O-759 - CAP-024: watch follows readability, and read-only becomes Exposed
+
+Last table item: `FsMode::can_watch` is true for read-only/read-write
+and false for append-only — observation is a read-side right, and an
+append-only holder watching would observe other writers' changes it
+cannot read directly, which is read smuggled through observation. Wired
+into `declared_capabilities` beside the mode match; the documenting pin
+flipped to granted with an append-only counterpart and a posture
+assertion. The visible consequence is deliberate: a read-only preopen
+now audits as `Exposed` (watch was already an exposing capability), so
+the old `read_only_fs_access_is_not_an_exposed_posture` test inverted
+into a pin asserting the finding fires naming `fs.watch` — the posture
+shift is the point, not a surprise. Two collateral greens-turned-red
+along the way (the audit pin, the namespace-grouping count 2→3), both
+re-pointed with reasons, not adjusted blind. Wave 2 closes here: all
+eight tables model, parse, grant, and normalize; no known namespace is
+unmodelled; the wildcard, the catch-all validator, and the disposition
+patterns stand as safety nets for a future fourteenth. Measured: 4 new
++ 1 flipped + 2 re-pointed tests red-first green; full crates 309 +
+607 green. Gate clippy fired twice more on the new code
+(`too_many_lines` on the grown function → `push_fs_grants` split;
+`uninlined_format_args` in the new audit pin) — both fixed
+mechanically, workspace clippy green.
+`crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`,
+`crates/qqq-run/src/audit.rs`.
+
+Review follow-up, all closed: the `can_watch` decision held (watching
+only own appends is vacuous — you know what you wrote); one LOW fixed
+with a red proof — blank `fs.path` granted via direct construction
+(the parse validator never saw it), now nested under the derivation
+gate per the kv precedent; the posture inversion and grouping count
+confirmed positive pins; overlays/linker/ranking traced consistent
+(the derived watch changes no interface set, tie-breaks pinned).
+Recorded future-work, harmless today: watch has no runtime backing
+yet (`FsGrant` carries mode only, no `fs_allows(path, Watch)`), and
+must be closed when the `qqq:fs` host impl lands — same for quota,
+which the review suspected dead but is parsed, validated, and stored
+in `FsGrant.quota_bytes` (stored-not-yet-enforced, verified by grep,
+not assumed). The `[FsRead,CryptoHash]→Contained` posture case stays
+reachable via overlays (deny-Watch narrows to it), so no test retired.
+
 *End of `QQQ-Observations-and-Memories.md`.*

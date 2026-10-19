@@ -1844,13 +1844,15 @@ mod tests {
         );
     }
 
-    /// The `fs` stanza grants `read` (and `write` by mode) but never
-    /// `watch`: `declared_capabilities` does not emit `FsWatch` for
-    /// any mode. Pinned as the exact current contract — a reader
-    /// pasting this stanza for a watch denial gains read access
-    /// without the watch grant. Deriving watch grants is CAP-024.
+    /// The `fs` stanza grants `watch` for the readable modes (CAP-024):
+    /// read-only and read-write entries imply `FsWatch`; append-only does
+    /// not, or watching would leak reads the mode withholds. A pasted
+    /// stanza for a watch denial now grants exactly what was denied — and
+    /// the grant set is `Exposed` by posture, which the pin asserts so the
+    /// consequence stays visible (a read-only preopen used to be
+    /// `Contained`).
     #[test]
-    fn fs_stanza_grants_read_not_watch_documenting_the_gap() {
+    fn fs_stanza_grants_watch_for_read_modes() {
         use qqq_cap::manifest::Manifest;
         let fix = fix_stanza_for(Capability::FsWatch);
         let body = stanza_body(&fix).expect("fs.watch shares the fs stanza");
@@ -1859,13 +1861,27 @@ mod tests {
         ))
         .expect("the fs stanza must parse");
         let granted = manifest.declared_capabilities();
-        assert!(
-            granted.contains(&Capability::FsRead),
-            "the stanza grants read"
+        assert_eq!(
+            granted,
+            vec![Capability::FsRead, Capability::FsWatch],
+            "the read-only stanza grants exactly read plus watch"
         );
-        assert!(
-            !granted.contains(&Capability::FsWatch),
-            "watch is not derivable today (CAP-024); this pin fails if that changes"
+        assert_eq!(
+            classify_posture(&granted),
+            Posture::Exposed,
+            "watch is exposing: the posture shift is the point, not a surprise"
+        );
+        // Append-only shares the stanza shape with a different mode and
+        // must NOT gain watch.
+        let append = Manifest::parse(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+            [[capabilities.fs]]\npath = \"/var/lib/app\"\nmode = \"append-only\"\n",
+        )
+        .expect("the append-only stanza must parse");
+        assert_eq!(
+            append.declared_capabilities(),
+            vec![Capability::FsWrite],
+            "append-only grants exactly write"
         );
     }
 

@@ -4,6 +4,16 @@
 
 ### Security
 
+- **test**: repair TEST-019's h2spec job (follow-up): the serve step
+  aborted under `set -e` on any h2spec failure, so the strict run and
+  the verdict-disposition step never ran — the 3.5.2 disposition could
+  only confirm green logs, never forgive the race. Both suites now
+  always run under `set +e` and the disposition decides; its
+  summary-line requirement keeps a dead server loud. Exposed by three
+  consecutive RST-instead-of-FIN reds on the Ubuntu 26 migration day.
+  Proven by simulation against the real disposition script (accepts the
+  race, still rejects an empty log).
+
 - **cap**: model `[capabilities.log]`/`[capabilities.trace]`
   (CAP-021/022): ambient marker tables — presence grants
   `log.write`/`trace.write`, the struct deny is the validation

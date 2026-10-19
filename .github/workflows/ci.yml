@@ -1821,8 +1821,20 @@ jobs:
             exit 1
           fi
           export PATH="$PATH:$(go env GOPATH)/bin"
+          # No `set -e` abort around the suites: h2spec exits 1 on any
+          # failure, and the NEXT step dispositions the verdict (including
+          # the known 3.5.2 teardown race). Aborting here would skip the
+          # strict run AND the disposition, turning every dispositionable
+          # red into an unexplained one — which is exactly what happened
+          # three runs in a row once the Ubuntu 26 runners started
+          # resetting instead of closing (RST 3/3, FIN 0/3). Both suites
+          # always run; the disposition decides green. Anti-vacuity is
+          # unaffected: a dead server leaves no summary lines, and the
+          # disposition fails those loudly.
+          set +e
           h2spec -h 127.0.0.1 -p "$PORT" | tee "$RUNNER_TEMP/h2spec.log"
           h2spec -h 127.0.0.1 -p "$PORT" -S | tee -a "$RUNNER_TEMP/h2spec.log"
+          set -e
 
       # Verdict, not just counts: case 3.5.2 ("invalid preface must
       # close the connection") is a hyper-teardown race outside QQQ

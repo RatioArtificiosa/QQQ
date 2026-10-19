@@ -39951,4 +39951,32 @@ stanza-area.
 `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`,
 `tools/gen_schemas.py`, `tools/self_test_schemas.py`.
 
+## §O-756 - The h2spec disposition could never fire, and Ubuntu 26 proved it
+
+Three consecutive CI runs red on TEST-019's job with the identical
+signature (3.5.2 "Sends invalid connection preface", RST observed where
+FIN was expected, 144/145 — sampled exactly on two runs, same failed
+step on the third). Two findings, one environmental and one ours. Ours:
+the "Serve and run" step uses `set -euo pipefail` and the "Disposition
+the suite verdict" step only runs on success — so ANY h2spec failure
+aborts before the strict run and skips the disposition entirely. The
+verdict script was dead on arrival: it could only ever confirm a fully
+green log, never disposition the race it was written for. The fix is
+six lines (`set +e` around both suites, `set -e` restored): both suites
+always run, the disposition decides green, and its summary-line
+requirement keeps a dead server loud. Environmental: the annotation on
+all three runs says `ubuntu-latest` migrates to Ubuntu 26 on
+2026-10-19, and the RST rate went from once-ever to 3/3 on migration
+day — stated as correlation, not causation; no QQQ code runs before the
+preface parses, and RFC 7540 §3.5 requires termination, not FIN, so the
+disposition's reasoning stands unchanged. Proved locally, not by
+assertion: a stub-h2spec simulation of the repaired tail (both suites
+exit 1 with race logs) reaches the REAL disposition script extracted
+from ci.yml, which prints `verdict accepted` exit 0 — and an emptied
+log still fails `never ran` exit 1, so the vacuity guard survived the
+repair. Lesson: a fallback step guarded by the success of the step it
+forgives is not a fallback; review the `if:` conditions on verdict
+steps the way you review the verdict logic.
+`.github/workflows/ci.yml`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

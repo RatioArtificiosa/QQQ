@@ -37,7 +37,6 @@ import re
 import sys
 from pathlib import Path
 
-
 # This tool's own stdout must be able to encode what it prints. On a Windows console the stream
 # inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
 # raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
@@ -121,7 +120,7 @@ def proposal_rows(text: str) -> list[tuple[str, float, str]]:
     if start == -1:
         return []
     end = text.find("\n## ", start + 1)
-    section = text[start:end if end != -1 else len(text)]
+    section = text[start : end if end != -1 else len(text)]
 
     rows: list[tuple[str, float, str]] = []
     for line in section.splitlines():
@@ -181,7 +180,7 @@ def rust_rows(text: str) -> list[dict[str, str]]:
 
     rows: list[dict[str, str]] = []
     for entry in re.finditer(
-        r"Self\s*\{(?P<body>.*?)\}\s*,\s*(?=Self\s*\{|\Z)", block, re.S
+        r"Self\s*\{(?P<body>.*?)\}\s*,\s*(?=Self\s*\{|\Z)", block, re.DOTALL
     ):
         body = entry.group("body")
         row: dict[str, str] = {}
@@ -316,9 +315,7 @@ def self_test() -> int:
 
     # 3. A citation of an item that does not exist.
     invented = real_budget.replace("Item::Perf003", "Item::Perf999", 1)
-    cases.append(
-        ("an invented checklist citation", invented, proposal_text, True)
-    )
+    cases.append(("an invented checklist citation", invented, proposal_text, True))
 
     # 4. A method that names a file which does not exist. This is the rule that was
     #    MISSING until `§O-249`: the checker used to verify only that the string
@@ -330,7 +327,9 @@ def self_test() -> int:
     if bad_method == real_budget:
         print("HARNESS FAIL: the dangling-method injection did not apply")
         return 1
-    cases.append(("a method naming a file that does not exist", bad_method, proposal_text, True))
+    cases.append(
+        ("a method naming a file that does not exist", bad_method, proposal_text, True)
+    )
 
     # 4b. A `crate::` method naming a symbol the crate does not declare.
     bad_symbol = real_budget.replace(
@@ -339,7 +338,14 @@ def self_test() -> int:
     if bad_symbol == real_budget:
         print("HARNESS FAIL: the bad-symbol injection did not apply")
         return 1
-    cases.append(("a crate method naming a symbol that is not there", bad_symbol, proposal_text, True))
+    cases.append(
+        (
+            "a crate method naming a symbol that is not there",
+            bad_symbol,
+            proposal_text,
+            True,
+        )
+    )
 
     # 4c. A `NOT_IMPLEMENTED` marker with nothing after it. The marker is honest; a
     #     bare marker states nothing about what is missing, so it is refused.
@@ -349,7 +355,31 @@ def self_test() -> int:
     if bare_marker == real_budget:
         print("HARNESS FAIL: the bare-marker injection did not apply")
         return 1
-    cases.append(("a NOT_IMPLEMENTED marker naming nothing", bare_marker, proposal_text, True))
+    cases.append(
+        ("a NOT_IMPLEMENTED marker naming nothing", bare_marker, proposal_text, True)
+    )
+
+    # 4d. A repo-relative file method naming a file that does not exist.
+    # The fallback admits `crates/...` addresses for measurements that
+    # cannot live under `src/` (integration tests); a dangling one must
+    # still fail. Anchored on PERF-007's real method so the injection
+    # cannot silently miss.
+    dangling_repo = real_budget.replace(
+        '"crates/qqq-bench/tests/aot_cache.rs::aot_cache_roundtrip"',
+        '"crates/qqq-bench/tests/nope.rs::nothing_here"',
+        1,
+    )
+    if dangling_repo == real_budget:
+        print("HARNESS FAIL: the dangling repo-relative injection did not apply")
+        return 1
+    cases.append(
+        (
+            "a repo-relative method naming a file that does not exist",
+            dangling_repo,
+            proposal_text,
+            True,
+        )
+    )
 
     # 5. A §9.2 row the checker has not been taught. This rule used to live in
     #    `main` only, so the self-test could not see it. Injecting it here is what
@@ -363,7 +393,12 @@ def self_test() -> int:
         print("HARNESS FAIL: the proposal row injection did not apply")
         return 1
     cases.append(
-        ("a §9.2 row EXPECTED_ROWS has not been taught", real_budget, grown_proposal, True)
+        (
+            "a §9.2 row EXPECTED_ROWS has not been taught",
+            real_budget,
+            grown_proposal,
+            True,
+        )
     )
 
     # 6. `NOT_A_HARNESS_ROW` declaring a length its body does not match. The
@@ -376,7 +411,14 @@ def self_test() -> int:
     if short_declared == real_budget:
         print("HARNESS FAIL: the NOT_A_HARNESS_ROW length injection did not apply")
         return 1
-    cases.append(("a declared row count its body does not match", short_declared, proposal_text, True))
+    cases.append(
+        (
+            "a declared row count its body does not match",
+            short_declared,
+            proposal_text,
+            True,
+        )
+    )
 
     # --- The control ---------------------------------------------------------
     # The real source must PASS. Without this, a checker that failed on
@@ -390,8 +432,9 @@ def self_test() -> int:
         ok = did_fail == should_fail
         status = "OK  " if ok else "FAIL"
         expectation = "must FAIL" if should_fail else "must PASS"
-        print(f"  {status} {label}: {expectation}, got "
-              f"{'FAIL' if did_fail else 'PASS'}")
+        print(
+            f"  {status} {label}: {expectation}, got {'FAIL' if did_fail else 'PASS'}"
+        )
         if not ok:
             failures += 1
             for f in found[:3]:
@@ -404,9 +447,7 @@ def self_test() -> int:
     return 0
 
 
-def analyse(
-    budget_src: str, proposal_src: str, checklist_src: str
-) -> list[str]:
+def analyse(budget_src: str, proposal_src: str, checklist_src: str) -> list[str]:
     """The checker's decision procedure, as a pure function.
 
     Extracted so `self_test` can run it against a synthetic source without
@@ -430,7 +471,7 @@ def analyse(
     # `UnboundLocalError` in Python -- the first version of this edit had exactly
     # that, and the self-test caught it by crashing.
     metric_fn = re.search(
-        r"pub fn metric\(self\) -> &'static str \{(.*?)\n    \}", budget_src, re.S
+        r"pub fn metric\(self\) -> &'static str \{(.*?)\n    \}", budget_src, re.DOTALL
     )
     metric_names: dict[str, str] = {}
     if metric_fn:
@@ -447,7 +488,9 @@ def analyse(
         if abs(prop_target - target) > 0.001:
             errors.append(f"'{metric}': expected {target}, §9.2 states {prop_target}")
         if prop_direction != direction:
-            errors.append(f"'{metric}': expected {direction}, §9.2 states {prop_direction}")
+            errors.append(
+                f"'{metric}': expected {direction}, §9.2 states {prop_direction}"
+            )
 
     # The RUST table's targets must match the Proposal too.
     #
@@ -468,11 +511,7 @@ def analyse(
     }
     for metric, target, direction in EXPECTED_ROWS:
         # Find the Item whose metric name matches this §9.2 row.
-        owning = [
-            key
-            for key, name in metric_names.items()
-            if name == metric
-        ]
+        owning = [key for key, name in metric_names.items() if name == metric]
         if not owning:
             # Not every EXPECTED row is implemented -- some are excluded. The
             # exclusion path is checked by the accounting rule below.
@@ -540,7 +579,12 @@ def analyse(
                     f"{item_id} method '{method}' names `{symbol}`, which is not "
                     "declared anywhere in crates/qqq-bench/src"
                 )
-        elif not (ROOT / "crates" / "qqq-bench" / "src" / method.split("::")[0]).is_file():
+        elif (
+            not (
+                ROOT / "crates" / "qqq-bench" / "src" / method.split("::")[0]
+            ).is_file()
+            and not (ROOT / method.split("::")[0]).is_file()
+        ):
             # A file path that must RESOLVE, not merely be shaped like one.
             #
             # This rule previously checked only the `bench/` prefix, and passed for as
@@ -552,9 +596,17 @@ def analyse(
             #
             # `§O-249`. The shape of a citation is not the citation: the same defect
             # `§O-126` records for an invented checklist id, one level down.
+            #
+            # Two roots, in order: the historical `src/`-relative form, then the
+            # repo-relative form that names integration tests
+            # (`crates/qqq-bench/tests/...`), which cannot live under `src/`.
+            # No current row used the file form at all until PERF-007, so the
+            # fallback changes no existing verdict — it only admits the honest
+            # address.
             errors.append(
                 f"{item_id} method '{method}' names a file that does not exist: "
-                f"crates/qqq-bench/src/{method.split('::')[0]}"
+                f"crates/qqq-bench/src/{method.split('::')[0]} "
+                f"nor {method.split('::')[0]}"
             )
 
     if not cited:

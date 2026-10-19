@@ -4927,7 +4927,10 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Recorded as not met rather than ticked because "the numbers are consistent with the
     rule" and "the rule is validated by measurement of its effect" are different claims,
     and `PERF-005`'s `docs/abi-cost-measured.md` is careful to state which it is.
-- [ ] **PERF-007** Meet the AOT cache performance target.
+- [x] **PERF-007** Meet the AOT cache performance target.
+  → Done: `Budget::Perf007.method` now names the real harness (`crates/qqq-bench/tests/aot_cache.rs::aot_cache_roundtrip`, closing the `NOT_IMPLEMENTED`); new integration test measures cold miss + warm hit + hit→instantiate→callable on a 200-fn fixture with warmup + distributions and prints `AOTCACHE` evidence rows plus a computed (never asserted) verdict; the unsafe `deserialize` path is deliberately NOT used (forbidden) — the managed-cache hit is the safe equivalent production pays, stated in the docs.
+  → Measured: 3 release runs on Xeon E5-1650 v4/Win10/rustc 1.99.1/wasmtime 48.0.6 — to_callable p99 1068/1018/1149 µs vs ≤5000 µs budget = MET with ~4.4x headroom; warm_hit p99 ~1ms; cold median ~12ms (context); 1101/1101 hits every run; spread ±6%. Method: release profile, 100 warmup discarded, n=1001 (p99 honest), n=5 cold (median/min/max only), temp cache dir, sequential. Not measured: qqq-host configured engine, cross-process reuse (live_components), guest behavior (no-import fixture), other machines (single dev box, not a fleet baseline).
+  → §9.4 Specific optimizations planned
   → §9.4 Specific optimizations planned
   → **Measured and not met — no harness row and no verdict.** `Budget::ALL` cites
     `bench/cold.rs::aot_cache_roundtrip`, which does not exist (`§O-249`); the

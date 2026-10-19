@@ -279,7 +279,7 @@ impl Budget {
             target: 5.0,
             direction: Direction::AtMost,
             unit: Unit::Millis,
-            method: "NOT_IMPLEMENTED::aot_cache_roundtrip",
+            method: "crates/qqq-bench/tests/aot_cache.rs::aot_cache_roundtrip",
         },
         Self {
             item: Item::Perf008,
@@ -754,16 +754,28 @@ mod tests {
                 continue;
             }
 
-            // A repo-relative file path, which must exist.
+            // A repo-relative file path, which must exist — and must contain
+            // the named symbol. Checking the file alone lets a typo'd
+            // symbol pass while the method points at nothing (review on
+            // PERF-007: the `crate::` form gets this via
+            // `every_crate_method_names_a_symbol_this_crate_declares`, the
+            // file form had no equivalent).
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(std::path::Path::parent)
                 .expect("crates/<name>/ has two parents");
-            let place = method.split_once("::").expect("checked above").0;
+            let (place, symbol) = method.split_once("::").expect("checked above");
             let candidate = root.join(place);
             assert!(
                 candidate.is_file(),
                 "{} method `{method}` names a file that does not exist: {}",
+                budget.item.id(),
+                candidate.display()
+            );
+            let text = std::fs::read_to_string(&candidate).expect("file just proven to exist");
+            assert!(
+                text.contains(symbol),
+                "{} method `{method}` names `{symbol}`, which appears nowhere in {}",
                 budget.item.id(),
                 candidate.display()
             );

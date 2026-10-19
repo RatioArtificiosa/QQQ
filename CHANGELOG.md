@@ -4,6 +4,15 @@
 
 ### Security
 
+- **perf**: meet PERF-007 (AOT cache ≤ 5 ms p99): new
+  `crates/qqq-bench/tests/aot_cache.rs` round-trip harness (cold miss,
+  warm hit, hit→instantiate→callable on a 200-fn fixture, warmup +
+  distributions, `AOTCACHE` evidence rows, loose structural asserts);
+  `Budget::Perf007` cites it instead of `NOT_IMPLEMENTED`. Measured
+  1068/1018/1149 µs p99 over 3 release runs (Xeon E5-1650 v4) = MET
+  with ~4.4x headroom. The unsafe `deserialize` path is deliberately
+  not used; the managed-cache hit is measured instead.
+
 - **arch**: close ARCH-015 (artifact model) on evidence: `atomic_write`
   failure cleanup + no-survivors pins, `configure` refusal pins with a
   clearer file-path message, per-instance authority on cache hits; the

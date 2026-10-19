@@ -562,9 +562,12 @@ pub struct KvCapability {
     pub write: bool,
 }
 
-/// Queue direction. Ordered publish-before-subscribe so narrowing
-/// overlays compare them directly, like `FsMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// Queue direction: publish or subscribe, selected per entry.
+/// No ordering: nothing compares directions. The `as_str` spelling
+/// helper stays because `tools/gen_schemas.py` derives the JSON
+/// spellings from it — an enum without one is a schema-generation
+/// parse failure by that tool's documented rule, not a fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QueueDirection {
     /// May publish; may not subscribe.
@@ -2583,6 +2586,22 @@ allow_origins = ["https://app.example.com"]
         assert!(
             text.contains("capabilities.queue"),
             "refusal names the table: {text}"
+        );
+    }
+
+    /// A missing direction fails at serde before validation runs:
+    /// direction has no default to fall back to, so absence never
+    /// reaches the validator — both layers agree an undirected
+    /// entry never parses.
+    #[test]
+    fn queue_table_missing_direction_fails_at_parse() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.queue]]\nname = \"orders.events\"\n";
+        let err = Manifest::parse(src).expect_err("a directionless queue entry must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("missing field"),
+            "serde names the missing key: {text}"
         );
     }
 

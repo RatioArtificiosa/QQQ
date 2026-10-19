@@ -2202,6 +2202,7 @@ handler = "health"
             Capability::KvWrite,
             Capability::DnsResolve,
             Capability::QueuePublish,
+            Capability::QueueSubscribe,
         ] {
             assert_eq!(
                 classify_posture(&[c]),

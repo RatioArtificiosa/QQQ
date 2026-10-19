@@ -55,7 +55,6 @@ import re
 import sys
 from dataclasses import dataclass, field, replace
 
-
 # This tool's own stdout must be able to encode what it prints. On a Windows console the stream
 # inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
 # raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
@@ -151,6 +150,36 @@ FIELD = re.compile(
 )
 
 
+def code_portion(line: str) -> str:
+    """The line before any `//` comment, honouring string literals.
+
+    Brace counting must ignore braces in comments — a `///` doc line
+    like `opens { and closes` would otherwise swallow the next struct
+    (depth is counted before the DOC check) — but a naive split on
+    `//` breaks URLs in doc text, so the split honours double-quoted
+    strings. Only ever used for brace depth, never for parsing: docs
+    and attributes still read the whole line.
+    """
+    in_string = False
+    escaped = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
+            return line[:i]
+        i += 1
+    return line
+
+
 def read_structs(source: str) -> dict[str, Struct]:
     """Every `pub struct` with public fields, keyed by name.
 
@@ -172,13 +201,34 @@ def read_structs(source: str) -> dict[str, Struct]:
             i += 1
             continue
         name = m.group(1)
-        # Find the opening brace.
-        while i < len(lines) and "{" not in lines[i]:
+        # A unit struct (`pub struct H;`) declares a shape with no body:
+        # record it empty rather than scanning into the next struct for
+        # a brace that never comes.
+        if re.match(r"^pub struct \w+\s*;", lines[i]):
+            structs[name] = Struct(name=name)
             i += 1
+            continue
+        # Find the opening brace. A marker table (`pub struct Log {}`)
+        # opens AND closes on one line: count both directions on the way
+        # in, so the field loop below starts at depth 0 and the structs
+        # after the marker are read as structs, not as its fields.
+        # The old scan treated `{}` as an opening, swallowed every later
+        # struct into the marker, and generation died on the first field
+        # naming one of them (`limits: Limits`). Braces inside comments
+        # do not count — see `code_portion`.
+        while i < len(lines) and "{" not in code_portion(lines[i]):
+            i += 1
+        if i >= len(lines):
+            break
+        depth = code_portion(lines[i]).count("{") - code_portion(lines[i]).count("}")
         i += 1
         current = Struct(name=name)
-        pending: dict[str, object] = {"json": None, "default": False, "skip": False, "doc": ""}
-        depth = 1
+        pending: dict[str, object] = {
+            "json": None,
+            "default": False,
+            "skip": False,
+            "doc": "",
+        }
         # An attribute may be written across several lines:
         #
         #     #[serde(
@@ -199,7 +249,7 @@ def read_structs(source: str) -> dict[str, Struct]:
         # then the three patterns are searched against it once.
         while i < len(lines) and depth > 0:
             line = lines[i]
-            depth += line.count("{") - line.count("}")
+            depth += code_portion(line).count("{") - code_portion(line).count("}")
             if depth <= 0:
                 break
             doc = DOC_LINE.match(line)
@@ -287,14 +337,14 @@ def read_enums(source: str) -> dict[str, list[str]]:
             i += 1
             continue
         name = m.group(1)
-        while i < len(lines) and "{" not in lines[i]:
+        while i < len(lines) and "{" not in code_portion(lines[i]):
             i += 1
         i += 1
         variants: list[str] = []
         depth = 1
         while i < len(lines) and depth > 0:
             line = lines[i]
-            depth += line.count("{") - line.count("}")
+            depth += code_portion(line).count("{") - code_portion(line).count("}")
             if depth <= 0:
                 break
             v = VARIANT.match(line)
@@ -304,10 +354,14 @@ def read_enums(source: str) -> dict[str, list[str]]:
         # Find the matching `impl` and its `as_str` arms.
         spelling: dict[str, str] = {}
         j = i
-        while j < len(lines) and not re.match(rf"^(pub )?(struct|enum|fn|mod) ", lines[j]):
+        while j < len(lines) and not re.match(
+            r"^(pub )?(struct|enum|fn|mod) ", lines[j]
+        ):
             if f"impl {name}" in lines[j]:
                 k = j
-                while k < len(lines) and not re.match(r"^(pub )?(struct|enum|fn|mod) ", lines[k]):
+                while k < len(lines) and not re.match(
+                    r"^(pub )?(struct|enum|fn|mod) ", lines[k]
+                ):
                     arm = AS_STR_ARM.search(lines[k])
                     if arm:
                         spelling[arm.group(1)] = arm.group(2)
@@ -353,9 +407,15 @@ def doc_summary(doc: str, limit: int = 160) -> str:
     summary = " ".join(lines)
 
     # `[`Foo::bar`]` -> `` `bar` ``; `[`Foo`]` -> `` `Foo` ``.
-    summary = re.sub(r"\[`([A-Za-z0-9_:<>]+)`\]", lambda m: f"`{m.group(1).split('::')[-1]}`", summary)
+    summary = re.sub(
+        r"\[`([A-Za-z0-9_:<>]+)`\]",
+        lambda m: f"`{m.group(1).split('::')[-1]}`",
+        summary,
+    )
     # A bare `[Self::field]` with no code span.
-    summary = re.sub(r"\[([A-Za-z0-9_:]+)\]", lambda m: f"`{m.group(1).split('::')[-1]}`", summary)
+    summary = re.sub(
+        r"\[([A-Za-z0-9_:]+)\]", lambda m: f"`{m.group(1).split('::')[-1]}`", summary
+    )
 
     if len(summary) > limit:
         # Cut on a word boundary and mark it, rather than mid-word.
@@ -551,7 +611,11 @@ def manifest_schema() -> dict:
         if name == "Manifest":
             continue
         defs[name] = schema_for(
-            structs[name], f"qqq-toml#{name}", f"The `{name}` table.", known=names, enums=enums
+            structs[name],
+            f"qqq-toml#{name}",
+            f"The `{name}` table.",
+            known=names,
+            enums=enums,
         )
     if defs:
         schema["$defs"] = defs
@@ -578,7 +642,11 @@ def lockfile_schema() -> dict:
         if name == "Lockfile":
             continue
         defs[name] = schema_for(
-            structs[name], f"qqq-lock#{name}", f"The `{name}` record.", known=names, enums=enums
+            structs[name],
+            f"qqq-lock#{name}",
+            f"The `{name}` record.",
+            known=names,
+            enums=enums,
         )
     if defs:
         schema["$defs"] = defs
@@ -633,12 +701,7 @@ def cli_envelope_schema() -> dict:
     # the scalar table would also silently accept it in `Manifest` or `Lockfile`,
     # where an arbitrary value would be a defect.
     envelope.fields = [
-        (
-            replace(f, ty="AnyJson")
-            if f.name == "data"
-            else f
-        )
-        for f in envelope.fields
+        (replace(f, ty="AnyJson") if f.name == "data" else f) for f in envelope.fields
     ]
 
     names = set(structs)
@@ -677,8 +740,11 @@ def cli_envelope_schema() -> dict:
             for f in s.fields
         ]
         defs[name] = schema_for(
-            s, f"qqqai-cli-envelope#{name}", f"The `{name}` record.",
-            known=names, enums=enums,
+            s,
+            f"qqqai-cli-envelope#{name}",
+            f"The `{name}` record.",
+            known=names,
+            enums=enums,
         )
     if defs:
         schema["$defs"] = defs

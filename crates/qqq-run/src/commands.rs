@@ -181,10 +181,11 @@ pub fn why(loaded: &LoadedManifest, capability: &str) -> Result<WhyOutput> {
 /// the suggestion cannot drift from the parser's expectations — and for
 /// namespaces the manifest cannot model yet, generating the state instead of
 /// guessing a schema means the suggestion cannot be a stanza the parser
-/// rejects. The modelling work is tracked under CAP-021 through CAP-022
-/// (`sql`/`kv`/`queue`/`ai` graduated in CAP-017/018/019/020; `secret`
-/// resolves through `crypto.secrets`, and CAP-023 tracks its dedicated
-/// table).
+/// rejects. Every namespace is modelled now (`sql`/`kv`/`queue`/`ai` in
+/// CAP-017/018/019/020, `log`/`trace` in CAP-021/022; `secret` resolves
+/// through `crypto.secrets` with its dedicated table tracked as CAP-023,
+/// and `FsWatch` derivation as CAP-024) — the wildcard below stays as a
+/// safety net for a future fourteenth namespace, never for a known one.
 #[must_use]
 pub fn fix_stanza_for(c: Capability) -> String {
     // `sql.execute` needs the widening flag the query stanza leaves
@@ -210,13 +211,18 @@ pub fn fix_stanza_for(c: Capability) -> String {
         "ai" => "add to qqq.toml:\n\n    [capabilities.ai]\n    providers = [\"local:ggml\"]\n    models = [\"*:<=4B\"]".to_owned(),
         "queue" => "add to qqq.toml:\n\n    [[capabilities.queue]]\n    name = \"orders.events\"\n    direction = \"publish\"  # or \"subscribe\"".to_owned(),
         "sql" => "add to qqq.toml:\n\n    [[capabilities.sql]]\n    name = \"orders\"\n    driver = \"postgres\"\n    host = \"db.internal:5432\"\n    # secret = \"env:ORDERS_DB_URL\"\n    # execute = true  # for sql.execute; query-only without it".to_owned(),
+        // Markers: presence grants, so the header line is the whole
+        // stanza — the trailing comment says so at the paste site,
+        // where a `level = "debug"` typo would otherwise land.
+        "log" => "add to qqq.toml:\n\n    [capabilities.log]  # presence grants log.write; no fields".to_owned(),
+        "trace" => "add to qqq.toml:\n\n    [capabilities.trace]  # presence grants trace.write; no fields".to_owned(),
         // `secret.use` is granted through the nested `crypto.secrets`
         // spelling, not a `[capabilities.secret]` table — the wildcard
         // below would name it unmodelled, which is false and would
         // send the reader to a CAP item for a stanza that exists.
         "secret" => "add to qqq.toml:\n\n    [capabilities.crypto]\n    secrets = [\"env:NAME\"]  # for secret.use".to_owned(),
         _ => format!(
-            "no qqq.toml spelling grants `{}` yet — manifest modelling is tracked under CAP-021 through CAP-022",
+            "no qqq.toml spelling grants `{}` yet — this namespace has no modelled table; check the CAP range in QQQ-Checklist-V1.md for the modelling tracker",
             c.name()
         ),
     }
@@ -1409,12 +1415,14 @@ mod tests {
     }
 
     #[test]
-    fn why_reports_an_unmodelled_denial_with_its_state() {
-        // `log.write`: `ai` graduated to a stanza in CAP-020 (and
-        // `queue`/`kv`/`sql` before it), so the unmodelled-denial
-        // path is pinned through `log` now. Ambient or not, an
-        // unmentioned capability on DENY_ALL is denied — and the fix
-        // names the state instead of guessing a table.
+    fn why_denial_suggests_a_stanza_that_parses_and_grants() {
+        // `log.write` graduated to a stanza in CAP-021 (`trace` in
+        // CAP-022; `ai`/`queue`/`kv`/`sql` before them), so a denial
+        // now carries a real stanza instead of a named refusal — the
+        // inverse of the old unmodelled-denial pin. Ambient or not,
+        // an unmentioned capability on DENY_ALL is denied, and the
+        // fix is text the parser accepts that grants exactly it.
+        use qqq_cap::manifest::Manifest;
         let l = loaded(DENY_ALL);
         let out = why(&l, "log.write").expect("must explain");
         assert!(!out.granted);
@@ -1422,17 +1430,18 @@ mod tests {
         // Assert on the summary *before* moving `fix` out of `out`.
         assert!(out.summary().contains("DENIED"));
         let fix = out.fix.expect("a denial must suggest a fix");
-        // No stanza exists for `log`: the fix names the state and
-        // the modelling work, never a table the parser would reject.
-        assert!(
-            !fix.contains("[capabilities."),
-            "must not emit an unparseable stanza: {fix}"
+        let body = stanza_body(&fix).expect("a denial carries a stanza now: {fix}");
+        let manifest = Manifest::parse(&format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
+        ))
+        .expect("the suggested stanza must parse");
+        // Exact set: the marker selects one grant, so `contains`
+        // would let a smuggled second grant ride along silently.
+        assert_eq!(
+            manifest.declared_capabilities(),
+            vec![Capability::LogWrite],
+            "the suggested stanza must grant exactly log.write: {fix}"
         );
-        assert!(
-            fix.contains("no qqq.toml spelling") && fix.contains("CAP-"),
-            "must name the state and its tracking: {fix}"
-        );
-        assert!(fix.contains("log.write"));
     }
 
     /// A typo is the most likely reason this command is run, so the error must
@@ -1650,8 +1659,15 @@ mod tests {
                 .expect("every namespace belongs to a capability");
             let fix = fix_stanza_for(*cap);
             let Some(body) = stanza_body(&fix) else {
+                // No known namespace takes this branch anymore (pinned
+                // by `every_namespace_has_a_modelled_stanza`); it stays
+                // for a future fourteenth namespace, whose refusal must
+                // still name its state and tracking. "CAP" without a
+                // number on purpose: the wildcard names the CAP range,
+                // never a phantom `CAP-NNN` the citations checker would
+                // fail (procedure §6.5).
                 assert!(
-                    fix.contains("no qqq.toml spelling") && fix.contains("CAP-"),
+                    fix.contains("no qqq.toml spelling") && fix.contains("CAP"),
                     "{ns}: a refusal must name its state and tracking: {fix}"
                 );
                 continue;
@@ -1668,41 +1684,25 @@ mod tests {
         }
     }
 
-    /// Namespaces the manifest cannot model must not emit stanzas.
-    /// Two namespaces (`log`, `trace`) have no tables in
-    /// `Capabilities` (`sql`/`kv`/`queue`/`ai` graduated in
-    /// CAP-017/018/019/020), so any `[capabilities.<ns>]` text is
-    /// a stanza the parser rejects — the defect this pins.
-    /// (`secret` is the seventh unmodelled name but the exception:
-    /// it resolves through the nested `crypto.secrets` spelling,
-    /// pinned below.)
+    /// Every namespace has a modelled stanza: `log`/`trace` graduated
+    /// in CAP-021/022, leaving no known namespace on the refusal path.
+    /// This pin exists because the property loop above would *pass* a
+    /// regression that un-models a namespace — a refusal satisfies its
+    /// fallback branch — so the "no refusals remain" direction needs
+    /// its own assertion. The wildcard arm stays as a safety net for
+    /// a future fourteenth namespace only.
     #[test]
-    fn an_unmodelled_namespace_names_its_state_rather_than_guessing() {
-        for ns in ["log", "trace"] {
+    fn every_namespace_has_a_modelled_stanza() {
+        use qqq_cap::capability::Namespace;
+        for ns in Namespace::all() {
             let cap = Capability::all()
                 .iter()
-                .find(|c| c.namespace() == ns)
-                .expect("namespace exists");
+                .find(|c| c.namespace() == ns.as_str())
+                .expect("every namespace belongs to a capability");
             let fix = fix_stanza_for(*cap);
-            // A bare pointer at a tracking item would pass a
-            // contains check while naming nothing: the refusal must
-            // carry the namespace, the capability, and no stanza
-            // at all.
             assert!(
-                fix.contains(ns) && fix.contains(cap.name()),
-                "{ns}: the refusal must name what is unmodelled: {fix}"
-            );
-            assert!(
-                stanza_body(&fix).is_none(),
-                "{ns}: a refusal carries no stanza to parse: {fix}"
-            );
-            assert!(
-                fix.contains("CAP-021"),
-                "{ns}: must name the modelling range start: {fix}"
-            );
-            assert!(
-                !fix.contains("CAP-023"),
-                "{ns}: secret.use has its own stanza since the crypto arm; the refusal range ends at CAP-022: {fix}"
+                stanza_body(&fix).is_some(),
+                "{ns}: must carry a stanza, not a refusal: {fix}"
             );
         }
     }

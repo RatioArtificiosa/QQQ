@@ -39875,4 +39875,80 @@ granted". Measured: 2 new tests red-first green; property
 loop covers the ai stanza.
 → `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`.
 
+## §O-753 - CAP-021/022: ambient markers grant by presence, and the last refusal retires
+
+Fifth and sixth tables: `LogCapability`/`TraceCapability` are empty
+structs — ambient capabilities take no parameters, and one table
+selects exactly one grant, so presence is the whole declaration.
+Three decisions, each pinned: the struct's own `deny_unknown_fields`
+*is* the validation layer (no `validate_log` — an empty shape has
+nothing else to check; unknown-field refusal tests prove the seam
+both ways per §O-745); the kind stays `Ambient` (declaration makes
+the ambient explicit, never implicit); absence still grants nothing
+(`absent_log_and_trace_grant_nothing` — ambient is a classification,
+not an auto-grant, completing the §O-752 correction). With no known
+namespace left on the refusal path, the old unmodelled tests inverted:
+the `why` denial pin now asserts a parsing, granting stanza, and a new
+`every_namespace_has_a_modelled_stanza` pin guards the direction the
+property loop cannot see (a refusal satisfies its fallback branch, so
+an un-modelling regression would pass it). The wildcard arm stays as a
+future-14th-namespace safety net, reworded to the CAP range with no
+phantom IDs. The 14th-namespace proof ran as designed: a temporary
+`probefourteen` variant tripped the count test 14-vs-13 red with the
+sortedness test still green, then restored byte-identical green.
+Declined with reason: `addcap::stanza_for` still refuses `log`/`trace`
+— it covers only the original six tables by design, and CAP-017..020
+set a four-item precedent of not extending it (parameterized tables
+need a flags design first; extending only the trivial markers would be
+incoherent). Measured: 5 manifest tests + 2 reworked/1 new commands
+pins red-first green; 13/13 stanza-area commands tests.
+`crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`.
+
+## §O-754 - gen_schemas swallowed every struct after a one-line empty struct
+
+Found while regenerating schemas for CAP-021/022: `read_structs` in
+`tools/gen_schemas.py` scans for the opening brace and reads fields
+until the braces balance — but a marker table (`pub struct Log {}`)
+opens AND closes on one line, which the scan treated as an opening.
+Every struct after the marker was then read as its fields and dropped
+from the known types, so generation died with `UnknownType:
+unrecognised Rust type: 'Limits'` on a struct the edit never touched.
+(Stash-proved: the clean tree reports SCHEMAS OK; the failure arrives
+with the first `{}`.) The fix counts both brace directions on the way
+in, so the field loop starts at depth 0 for an empty struct. Pinned by
+self-test injection 8 (a `ProbeMarker {}` plus a field naming it must
+regenerate as DRIFT, not fail) — measured red 8/9, green 9/9 after the
+fix, with `LogCapability`/`TraceCapability` rendering as empty-object
+defs (+38 schema lines). Second instance of the tooling lesson from
+CAP-018's `as_str` revert: generators constrain implementation shapes,
+and the constraint belongs in the generator's self-test, not in tribal
+memory. `tools/gen_schemas.py`, `tools/self_test_schemas.py`,
+`schema/qqq-toml.schema.json`.
+
+## §O-755 - Review caught the three stand-ins my own edits orphaned
+
+Independent review (Copilot via the Meta BYOK proxy) of the CAP-021/022
+diff returned one HIGH: three catch-all tests still used `log` as their
+stand-in and went red under the graduation — reproduced 3/3 failing
+exactly as predicted (`unknown field`, serde type-check, `invalid
+length 1`), repointed to `secret` (the last table-less namespace), and
+tightened the new grant pins from `contains` to exact-set equality so a
+smuggled second grant cannot ride along. The same review probed the
+schema-reader fix and found its edges: braces in `///` comments counted
+toward depth, unit structs (`pub struct H;`) scanning into the next
+struct, nested `Option<Vec<..>>` silently dropped by the single-level
+FIELD regex. Fixed the first two (comment-aware `code_portion` in both
+readers, `;` arm) and pinned them by extending injection 8 — measured
+red 8/9, green 9/9. Declined with reason: `additionalProperties:false`
+(generator-wide convention, identical on every def) and nested generics
+(no live instance in either consumed source, and the FIELD comment
+documents why a deeper regex risks catastrophic backtracking). Lesson
+compounding §O-742: every table graduation must repoint the stand-ins
+in the same edit — the pin comments name their stand-in for exactly
+this, and this time I still missed three that review caught. Measured:
+`copilot-cap02122.log`; fixes green 8/8 manifest-area, 13/13
+stanza-area.
+`crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`,
+`tools/gen_schemas.py`, `tools/self_test_schemas.py`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

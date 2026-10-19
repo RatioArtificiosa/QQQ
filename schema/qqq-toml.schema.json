@@ -145,6 +145,17 @@
           ],
           "description": "`[capabilities.kv]` — named stores."
         },
+        "log": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LogCapability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[capabilities.log]` — marker granting `log.write`."
+        },
         "other": {
           "additionalProperties": true,
           "description": "Namespaces `Capability::all()` knows that have no typed struct yet. Kept so a declaration parses and can be *reported*; the host binds only what it models.…",
@@ -163,6 +174,17 @@
             "$ref": "#/$defs/SqlCapability"
           },
           "type": "array"
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TraceCapability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[capabilities.trace]` — marker granting `trace.write`."
         }
       },
       "title": "qqq-toml#Capabilities",
@@ -504,6 +526,14 @@
       "title": "qqq-toml#Limits",
       "type": "object"
     },
+    "LogCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#LogCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `LogCapability` table.",
+      "properties": {},
+      "title": "qqq-toml#LogCapability",
+      "type": "object"
+    },
     "Package": {
       "$id": "https://qqq.codes/schema/qqq-toml#Package",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -801,6 +831,14 @@
         }
       },
       "title": "qqq-toml#TenantLimit",
+      "type": "object"
+    },
+    "TraceCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#TraceCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `TraceCapability` table.",
+      "properties": {},
+      "title": "qqq-toml#TraceCapability",
       "type": "object"
     },
     "WebsocketPolicy": {

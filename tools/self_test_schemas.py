@@ -42,7 +42,6 @@ import subprocess
 import sys
 import tempfile
 
-
 # This tool's own stdout must be able to encode what it prints. On a Windows console the stream
 # inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
 # raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
@@ -74,7 +73,10 @@ def run_generator(tree: pathlib.Path, check: bool) -> tuple[int, str]:
         cwd=tree,
         capture_output=True,
         text=True,
-        check=False, encoding="utf-8", errors="replace")
+        check=False,
+        encoding="utf-8",
+        errors="replace",
+    )
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -164,7 +166,9 @@ def main() -> int:
             path = tree / "schema/qqq-lock.schema.json"
             doc = json.loads(path.read_text(encoding="utf-8"))
             doc["properties"]["hand_edited"] = {"type": "string"}
-            path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            path.write_text(
+                json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
             code, out = run_generator(tree, check=True)
             results.append(
                 expect(
@@ -259,7 +263,9 @@ def main() -> int:
                     "empty sources fail rather than emitting an empty schema",
                     code != 0
                     and not substantive
-                    and ("`Manifest` not found" in out or "`Lockfile` not found" in out),
+                    and (
+                        "`Manifest` not found" in out or "`Lockfile` not found" in out
+                    ),
                     f"exit {code}; produced {[p.name for p in substantive]} "
                     f"with properties; the failure must NAME the cause\n{out[:300]}",
                 )
@@ -310,7 +316,9 @@ def main() -> int:
             # and `--check` says DRIFT. This is the direction that cannot be
             # faked by an equivalent rewrite.
             replaced = text
-            start = text.index('    #[serde(\n        default,\n        rename = "dev-dependencies",')
+            start = text.index(
+                '    #[serde(\n        default,\n        rename = "dev-dependencies",'
+            )
             end = text.index("    )]\n", start) + len("    )]\n")
             replaced = text[:start] + text[end:]
             # The attribute must be gone and the field must remain, so the
@@ -332,6 +340,59 @@ def main() -> int:
                     f"exit {code}; if this passes, the reader is not applying the "
                     f"attribute and the published schema documents `dev_dependencies` "
                     f"as required\n{out[:400]}",
+                )
+            )
+        finally:
+            shutil.rmtree(tree, ignore_errors=True)
+
+    # ---- Injection 8: a one-line empty struct must not swallow its neighbours
+    #
+    # `read_structs` is line-oriented: on `pub struct X` it scans for the
+    # opening brace and reads fields until the braces balance. A marker table
+    # (`pub struct ProbeMarker {}`) opens AND closes on one line, which the
+    # old scan treated as an opening — so every struct after it was read as
+    # fields of the marker, dropped from the known types, and generation died
+    # on the first field naming a swallowed struct (`limits: Limits`). Fixed,
+    # the empty struct renders as an object with no properties and the schema
+    # drifts by exactly the new table, which `--check` reports as DRIFT.
+    #
+    # Two companion shapes ride along, both from independent review: a brace
+    # inside a `///` doc comment must not count toward depth (the scan used to
+    # count before checking for comments), and a unit struct (`pub struct
+    # ProbeUnit;`) has no brace at all and must record empty rather than
+    # scanning into the next struct.
+    print("\ninjection 8: a one-line empty struct must not swallow its neighbours")
+    with tempfile.TemporaryDirectory() as td:
+        tree = snapshot()
+        try:
+            path = tree / MANIFEST
+            text = path.read_text(encoding="utf-8")
+            marker = "pub kv: Option<KvCapability>,"
+            assert marker in text, "the injection's anchor moved; update the test"
+            replaced = text.replace(
+                marker,
+                marker
+                + "\n    pub probemarker: Option<ProbeMarker>,"
+                + "\n    pub probeunit: Option<ProbeUnit>,",
+                1,
+            )
+            anchor2 = "pub struct KvCapability {"
+            assert anchor2 in text, "the struct anchor moved; update the test"
+            replaced = replaced.replace(
+                anchor2,
+                "/// A marker opens { and closes on the same line.\n"
+                "pub struct ProbeMarker {}\n\n"
+                "pub struct ProbeUnit;\n\n" + anchor2,
+                1,
+            )
+            path.write_text(replaced, encoding="utf-8")
+            code, out = run_generator(tree, check=True)
+            results.append(
+                expect(
+                    "a one-line empty struct regenerates instead of failing",
+                    code == 1 and "DRIFT" in out,
+                    f"exit {code}; if this fails, read_structs swallowed the "
+                    f"structs after the empty one\n{out[:400]}",
                 )
             )
         finally:

@@ -4,6 +4,26 @@
 
 ### Security
 
+- **cap**: model `[capabilities.log]`/`[capabilities.trace]`
+  (CAP-021/022): ambient marker tables — presence grants
+  `log.write`/`trace.write`, the struct deny is the validation
+  layer, kind stays `Ambient`, absence still grants nothing;
+  every namespace now has a parsing, granting stanza and the
+  wildcard refusal retires to a future-14th-namespace safety
+  net. Red-first, with a temporary-14th-namespace proof
+  (trips 14-vs-13 red, restores green). Review follow-up:
+  catch-all stand-ins repointed `log`→`secret`, new grant pins
+  tightened to exact-set equality.
+
+- **tool**: fix `gen_schemas.py` swallowing every struct after
+  a one-line empty struct (`pub struct Log {}` opened-and-closed
+  on one line; the reader treated it as an opening and dropped
+  the later structs, dying on `limits: Limits`). The reader
+  counts both brace directions on entry; pinned by self-test
+  injection 8. Red-first (8/9 red, 9/9 green). Review follow-up:
+  comment-aware brace counting in both readers plus a unit-struct
+  (`;`) arm, pinned by extending injection 8 (red 8/9, green 9/9).
+
 - **cap**: model `[capabilities.ai]` (CAP-020): either-list
   grants, empty-table refusal, generator stanza, refusal
   range narrowed to CAP-021..022, `why` pin repointed.

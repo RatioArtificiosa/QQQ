@@ -351,6 +351,12 @@ pub struct Capabilities {
     /// `[capabilities.kv]` — named stores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv: Option<KvCapability>,
+    /// `[capabilities.log]` — marker granting `log.write`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<LogCapability>,
+    /// `[capabilities.trace]` — marker granting `trace.write`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<TraceCapability>,
     /// Namespaces `Capability::all()` knows that have no typed struct
     /// yet. Kept so a declaration parses and can be *reported*; the
     /// host binds only what it models. Every key is validated
@@ -616,6 +622,25 @@ pub struct AiCapability {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
 }
+
+/// `[capabilities.log]` — a marker: presence grants `log.write`.
+/// Ambient capabilities take no parameters, and `log` selects exactly
+/// one capability, so there are no fields to validate — the struct's
+/// own `deny_unknown_fields` *is* the validation layer, refusing any
+/// content as a typo for a setting that does not exist (hence no
+/// `validate_log`: an empty shape has nothing else to check). The
+/// kind stays `Ambient`: declaration makes the ambient explicit,
+/// never implicit, and absence still grants nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogCapability {}
+
+/// `[capabilities.trace]` — a marker: presence grants `trace.write`.
+/// Symmetric with [`LogCapability`]: no fields, no validator beyond
+/// the struct's own deny, kind stays `Ambient`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceCapability {}
 
 /// `[limits]` — enforceable resource bounds.
 ///
@@ -1538,6 +1563,17 @@ impl Manifest {
                 }
             }
         }
+        if self.capabilities.log.is_some() {
+            // Marker presence grants: ambient takes no parameters,
+            // and one table selects exactly one capability, so there
+            // is no flag to consult — and no direct-construction
+            // asymmetry either, since `Some` of an empty struct has
+            // no blank shape to smuggle.
+            push(Capability::LogWrite);
+        }
+        if self.capabilities.trace.is_some() {
+            push(Capability::TraceWrite);
+        }
         if let Some(c) = &self.capabilities.clock {
             if c.wall {
                 push(Capability::ClockWall);
@@ -2326,29 +2362,30 @@ allow_origins = ["https://app.example.com"]
     /// (Fails while `deny_unknown_fields` sits on `Capabilities`,
     /// because serde rejects before the map collects — the
     /// interaction this test exists to pin.)
-    /// (`log` stands in since `sql`/`kv`/`queue`/`ai` graduated to
-    /// typed tables in CAP-017/018/019/020; the shape proved is the
-    /// catch-all's, not theirs.)
+    /// (`secret` stands in since `sql`/`kv`/`queue`/`ai`/`log`/`trace`
+    /// graduated to typed tables in CAP-017..022 — the last namespace
+    /// with no table of its own; the shape proved is the catch-all's,
+    /// not theirs.)
     #[test]
     fn an_unmodelled_namespace_declaration_parses() {
-        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.log]\npath = \"/var/log/app.log\"\n";
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.secret]\nlabel = \"db\"\n";
         let m = Manifest::parse(src).expect("a known namespace must declare");
         assert!(
-            m.capabilities.other.contains_key("log"),
+            m.capabilities.other.contains_key("secret"),
             "the declaration must land in the catch-all"
         );
         // Key presence is not enough: the value must survive intact,
         // or the catch-all is a second silent drop. Only the key set
         // is validated — the shape belongs to the future typed struct.
         assert_eq!(
-            m.capabilities.other["log"]["path"].as_str(),
-            Some("/var/log/app.log"),
+            m.capabilities.other["secret"]["label"].as_str(),
+            Some("db"),
             "the declared table body must round-trip through the catch-all"
         );
         assert!(
             !m.declared_capabilities()
                 .iter()
-                .any(|c| c.namespace() == "log"),
+                .any(|c| c.namespace() == "secret"),
             "declaring is not binding: the host grants nothing unmodelled"
         );
     }
@@ -2371,12 +2408,13 @@ allow_origins = ["https://app.example.com"]
     /// A scalar under `[capabilities]` is not a declaration: the
     /// validator requires tables, so a misplaced value fails loudly
     /// instead of validating as a "known" key with no meaning.
-    /// (`log` stands in: `sql`/`kv`/`queue`/`ai` graduated in
-    /// CAP-017/018/019/020 — all fail earlier at serde
+    /// (`secret` stands in: `sql`/`kv`/`queue`/`ai`/`log`/`trace`
+    /// graduated in CAP-017..022 — all fail earlier at serde
     /// type-checking, also loudly, also naming the table.)
     #[test]
     fn a_scalar_capability_value_is_refused_not_collected() {
-        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nlog = \"app\"\n";
+        let src =
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nsecret = \"app\"\n";
         let err = Manifest::parse(src).expect_err("a scalar capability value must be refused");
         let text = err.to_string();
         assert!(
@@ -2386,17 +2424,17 @@ allow_origins = ["https://app.example.com"]
     }
 
     /// An array-shaped unmodelled declaration parses into the
-    /// catch-all without granting: `[[capabilities.log]]` is the
+    /// catch-all without granting: `[[capabilities.secret]]` is the
     /// natural multi-entry shape, so refusing arrays while accepting
     /// tables would punish the shape users reach for first. Grants
     /// nothing, like all unmodelled content.
     #[test]
     fn unmodelled_array_shape_parses_without_granting() {
         let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
-            [[capabilities.log]]\npath = \"/var/log/app.log\"\n";
+            [[capabilities.secret]]\nlabel = \"db\"\n";
         let m = Manifest::parse(src).expect("array shape must declare");
         assert!(
-            m.capabilities.other.contains_key("log"),
+            m.capabilities.other.contains_key("secret"),
             "the array lands in the catch-all"
         );
         assert!(
@@ -2585,6 +2623,86 @@ allow_origins = ["https://app.example.com"]
         assert!(
             text.contains("capabilities.ai"),
             "refusal names the table: {text}"
+        );
+    }
+
+    /// A `log` declaration grants `log.write`: the table is a marker —
+    /// ambient capabilities take no parameters, and `log` selects
+    /// exactly one capability, so presence is the whole declaration.
+    /// The struct's own deny *is* the validation layer here — there
+    /// is no `validate_log` because there is nothing to check beyond
+    /// the shape — and the kind stays `Ambient`: declaration is how
+    /// an ambient capability goes explicit, never implicit.
+    #[test]
+    fn log_table_parses_and_grants_write() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.log]\n";
+        let m = Manifest::parse(src).expect("the log table must parse");
+        // Exact set, not contains: the marker selects exactly one
+        // grant, so anything else in the set is a smuggle.
+        assert_eq!(
+            m.declared_capabilities(),
+            vec![crate::capability::Capability::LogWrite],
+            "a log entry grants exactly write"
+        );
+    }
+
+    /// The marker takes no fields: anything inside is a typo for a
+    /// setting that does not exist, refused at parse.
+    #[test]
+    fn log_table_refuses_unknown_fields() {
+        let src =
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.log]\nemit = true\n";
+        let e = Manifest::parse(src).expect_err("a log field must be refused");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("emit") || msg.contains("unknown field"),
+            "unknown fields must be rejected; got: {msg}"
+        );
+    }
+
+    /// A `trace` declaration grants `trace.write`, symmetric with
+    /// `log`: marker table, presence grants, kind stays `Ambient`.
+    #[test]
+    fn trace_table_parses_and_grants_write() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.trace]\n";
+        let m = Manifest::parse(src).expect("the trace table must parse");
+        assert_eq!(
+            m.declared_capabilities(),
+            vec![crate::capability::Capability::TraceWrite],
+            "a trace entry grants exactly write"
+        );
+    }
+
+    /// The trace marker takes no fields either.
+    #[test]
+    fn trace_table_refuses_unknown_fields() {
+        let src =
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.trace]\nemit = true\n";
+        let e = Manifest::parse(src).expect_err("a trace field must be refused");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("emit") || msg.contains("unknown field"),
+            "unknown fields must be rejected; got: {msg}"
+        );
+    }
+
+    /// Absence grants nothing: ambient is a classification, not an
+    /// auto-grant — unmentioned `log.write`/`trace.write` stay denied,
+    /// and declaring the table is what grants them. Pins the
+    /// no-auto-grant side of CAP-021/CAP-022 while the tests above
+    /// pin the declaration side.
+    #[test]
+    fn absent_log_and_trace_grant_nothing() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n";
+        let m = Manifest::parse(src).expect("minimal must parse");
+        let granted = m.declared_capabilities();
+        assert!(
+            !granted.contains(&crate::capability::Capability::LogWrite),
+            "absence must not smuggle log.write"
+        );
+        assert!(
+            !granted.contains(&crate::capability::Capability::TraceWrite),
+            "absence must not smuggle trace.write"
         );
     }
 

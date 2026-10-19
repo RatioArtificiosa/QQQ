@@ -2230,9 +2230,13 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: `AiCapability` (providers/models, either non-blank grants); empty table refused; generator stanza; refusal range narrowed to CAP-021..022; the `why` unmodelled pin repoints to `log.write` (ambient-but-denied-on-DENY_ALL — the denial path survives ai's graduation).
   → Measured: `ai_table_parses_and_grants_infer`, `ai_table_requires_providers_or_models` — 1/1 each; `every_suggested_stanza_parses` covers the ai stanza.
   → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.
-- [ ] **CAP-021** Model `[capabilities.log]` in the manifest, preserving its ambient grant: typed struct, validation, and a generator stanza that parses.
+- [x] **CAP-021** Model `[capabilities.log]` in the manifest, preserving its ambient grant: typed struct, validation, and a generator stanza that parses.
+  → Done: `LogCapability` marker (no fields; presence grants `log.write`); the struct's own `deny_unknown_fields` is the validation layer (no `validate_log` — an empty shape has nothing else to check); kind stays `Ambient`, absence still grants nothing; generator stanza is the header line with a no-fields comment; `why` denial pin now asserts a parsing, granting stanza.
+  → Measured: `log_table_parses_and_grants_write`, `log_table_refuses_unknown_fields`, `absent_log_and_trace_grant_nothing` — 1/1 each; `every_suggested_stanza_parses` and `every_namespace_has_a_modelled_stanza` cover the log stanza; 14th-namespace proof trips the count test 14-vs-13 red, restores green. Review follow-up (§O-755): 3 orphaned `log` stand-ins repointed to `secret`, grant pins tightened to exact-set.
   → §5.3 Manifest tables — ambient status must be decided, not defaulted into.
-- [ ] **CAP-022** Model `[capabilities.trace]` in the manifest, preserving its ambient grant: typed struct, validation, and a generator stanza that parses.
+- [x] **CAP-022** Model `[capabilities.trace]` in the manifest, preserving its ambient grant: typed struct, validation, and a generator stanza that parses.
+  → Done: `TraceCapability` marker symmetric with log; wildcard refusal arm kept as a future-14th-namespace safety net reworded to the CAP range (no phantom IDs); `gen_schemas.py` one-line-struct swallow fixed with injection-8 pin.
+  → Measured: `trace_table_parses_and_grants_write`, `trace_table_refuses_unknown_fields` — 1/1 each; `self_test_schemas.py` 9/9; `gen_schemas.py --check` green with `LogCapability`/`TraceCapability` empty-object defs. Review follow-up (§O-755): comment-aware brace counting in both readers plus a unit-struct arm, injection 8 extended (red 8/9, green 9/9).
   → §5.3 Manifest tables — ambient status must be decided, not defaulted into.
 - [ ] **CAP-023** Model `[capabilities.secret]` in the manifest alongside the nested `crypto.secrets` spelling: typed struct, validation, grant derivation for `secret.use`, and a generator stanza that parses.
   → §5.3 Manifest tables — two spellings for one capability must resolve to one grant set.

@@ -38,8 +38,8 @@
     },
     "CAP": {
       "blocked": 0,
-      "done": 18,
-      "open": 6,
+      "done": 19,
+      "open": 5,
       "partial": 0,
       "total": 24,
       "unknown": 0,
@@ -328,8 +328,8 @@
     },
     "P2": {
       "blocked": 2,
-      "done": 46,
-      "open": 6,
+      "done": 47,
+      "open": 5,
       "partial": 0,
       "total": 54,
       "unknown": 0,
@@ -438,8 +438,8 @@
     },
     "CAP": {
       "blocked": 0,
-      "done": 18,
-      "open": 6,
+      "done": 19,
+      "open": 5,
       "partial": 0,
       "total": 24,
       "unknown": 0,
@@ -2170,13 +2170,13 @@
       "id": "CAP-019",
       "line": 2225,
       "phase": "P2",
-      "status": "open",
+      "status": "done",
       "title": "Model `[capabilities.queue]` in the manifest: typed struct, validation, grant derivation for `queue.publish`/`queue.subscribe`, and a generator stanza that parses."
     },
     {
       "area": "CAP",
       "id": "CAP-020",
-      "line": 2227,
+      "line": 2229,
       "phase": "P2",
       "status": "open",
       "title": "Model `[capabilities.ai]` in the manifest: typed struct, validation, grant derivation for `ai.infer`, and a generator stanza that parses."
@@ -2184,7 +2184,7 @@
     {
       "area": "CAP",
       "id": "CAP-021",
-      "line": 2229,
+      "line": 2231,
       "phase": "P2",
       "status": "open",
       "title": "Model `[capabilities.log]` in the manifest, preserving its ambient grant: typed struct, validation, and a generator stanza that parses."
@@ -2192,7 +2192,7 @@
     {
       "area": "CAP",
       "id": "CAP-022",
-      "line": 2231,
+      "line": 2233,
       "phase": "P2",
       "status": "open",
       "title": "Model `[capabilities.trace]` in the manifest, preserving its ambient grant: typed struct, validation, and a generator stanza that parses."
@@ -2200,7 +2200,7 @@
     {
       "area": "CAP",
       "id": "CAP-023",
-      "line": 2233,
+      "line": 2235,
       "phase": "P2",
       "status": "open",
       "title": "Model `[capabilities.secret]` in the manifest alongside the nested `crypto.secrets` spelling: typed struct, validation, grant derivation for `secret.use`, and a generator stanza that parses."
@@ -2208,7 +2208,7 @@
     {
       "area": "CAP",
       "id": "CAP-024",
-      "line": 2235,
+      "line": 2237,
       "phase": "P2",
       "status": "open",
       "title": "Derive `FsWatch` grants from `[[capabilities.fs]]` entries: decide which modes imply watch, wire it into `declared_capabilities`, and pin the `fs` stanza to grant it. The stanza today grants read/write only, so a watch denial pasted from `qqqai why` changes authority without granting watch."
@@ -2216,7 +2216,7 @@
     {
       "area": "SEC",
       "id": "SEC-001",
-      "line": 2240,
+      "line": 2242,
       "phase": "P2",
       "status": "done",
       "title": "Write the threat model document covering §7.1 assets and §7.2 adversaries."
@@ -2224,7 +2224,7 @@
     {
       "area": "SEC",
       "id": "SEC-002",
-      "line": 2254,
+      "line": 2256,
       "phase": "P2",
       "status": "done",
       "title": "Implement the rule that an ungranted import is absent, not merely denied, and prove it by test."
@@ -2232,7 +2232,7 @@
     {
       "area": "SEC",
       "id": "SEC-003",
-      "line": 2280,
+      "line": 2282,
       "phase": "P2",
       "status": "done",
       "title": "Implement manifest capability validation with a deny-by-default posture throughout."
@@ -2240,7 +2240,7 @@
     {
       "area": "SEC",
       "id": "SEC-004",
-      "line": 2293,
+      "line": 2295,
       "phase": "P2",
       "status": "done",
       "title": "Build the hostile-guest test suite (≥200 cases) with a specified expected failure for each."
@@ -2248,7 +2248,7 @@
     {
       "area": "SEC",
       "id": "SEC-005",
-      "line": 2322,
+      "line": 2324,
       "phase": "P2",
       "status": "done",
       "title": "Implement memory-limit enforcement and prove the host survives a guest OOM."
@@ -2256,7 +2256,7 @@
     {
       "area": "SEC",
       "id": "SEC-006",
-      "line": 2353,
+      "line": 2355,
       "phase": "P2",
       "status": "done",
       "title": "Implement fuel-limit enforcement and prove the host survives fuel exhaustion."
@@ -2264,7 +2264,7 @@
     {
       "area": "SEC",
       "id": "SEC-007",
-      "line": 2364,
+      "line": 2366,
       "phase": "P2",
       "status": "done",
       "title": "Implement epoch-deadline enforcement and prove the host survives a non-terminating guest."
@@ -2272,7 +2272,7 @@
     {
       "area": "SEC",
       "id": "SEC-008",
-      "line": 2383,
+      "line": 2385,
       "phase": "P2",
       "status": "done",
       "title": "Implement handle-count limits and prove the host survives handle exhaustion attempts."
@@ -2280,7 +2280,7 @@
     {
       "area": "SEC",
       "id": "SEC-009",
-      "line": 2415,
+      "line": 2417,
       "phase": "P2",
       "status": "done",
       "title": "Implement subrequest limits to prevent guest-driven request amplification."
@@ -2288,7 +2288,7 @@
     {
       "area": "SEC",
       "id": "SEC-010",
-      "line": 2471,
+      "line": 2473,
       "phase": "P2",
       "status": "done",
       "title": "Implement path-traversal defences at the capability boundary, with a test corpus."
@@ -2296,7 +2296,7 @@
     {
       "area": "SEC",
       "id": "SEC-011",
-      "line": 2509,
+      "line": 2511,
       "phase": "P2",
       "status": "done",
       "title": "Implement input validation at every guest-to-host boundary crossing."
@@ -2304,7 +2304,7 @@
     {
       "area": "SEC",
       "id": "SEC-012",
-      "line": 2576,
+      "line": 2578,
       "phase": "P2",
       "status": "done",
       "title": "Establish the fuzzing programme covering the host interfaces, manifest parser and component loader."
@@ -2312,7 +2312,7 @@
     {
       "area": "SEC",
       "id": "SEC-013",
-      "line": 2626,
+      "line": 2628,
       "phase": "P2",
       "status": "done",
       "title": "Add `cargo-fuzz` targets to CI with a nightly fuzzing schedule."
@@ -2320,7 +2320,7 @@
     {
       "area": "SEC",
       "id": "SEC-014",
-      "line": 2663,
+      "line": 2665,
       "phase": "P2",
       "status": "done",
       "title": "Establish the Wasmtime advisory-tracking process with a 72-hour patch target (`R-04`)."
@@ -2328,7 +2328,7 @@
     {
       "area": "SEC",
       "id": "SEC-015",
-      "line": 2714,
+      "line": 2716,
       "phase": "P2",
       "status": "done",
       "title": "Implement the per-dependency capability diff display at install time."
@@ -2336,7 +2336,7 @@
     {
       "area": "SEC",
       "id": "SEC-016",
-      "line": 2776,
+      "line": 2778,
       "phase": "P2",
       "status": "done",
       "title": "Implement slow-loris, header-bomb and body-bomb mitigations with tests."
@@ -2344,7 +2344,7 @@
     {
       "area": "SEC",
       "id": "SEC-017",
-      "line": 2827,
+      "line": 2829,
       "phase": "P2",
       "status": "done",
       "title": "Implement the cryptographic-posture policy: named algorithms, no silent defaults, no agility without a version bump."
@@ -2352,7 +2352,7 @@
     {
       "area": "SEC",
       "id": "SEC-018",
-      "line": 2869,
+      "line": 2871,
       "phase": "P2",
       "status": "done",
       "title": "Implement the host CSPRNG with no guest-supplied seed outside deterministic test mode."
@@ -2360,7 +2360,7 @@
     {
       "area": "SEC",
       "id": "SEC-019",
-      "line": 2890,
+      "line": 2892,
       "phase": "P2",
       "status": "done",
       "title": "Implement Linux hardening: dropped privileges, `no_new_privs`, seccomp allowlist."
@@ -2368,7 +2368,7 @@
     {
       "area": "SEC",
       "id": "SEC-020",
-      "line": 2945,
+      "line": 2947,
       "phase": "P2",
       "status": "done",
       "title": "Audit every `unsafe` block in the three exception crates and record the findings."
@@ -2376,7 +2376,7 @@
     {
       "area": "SEC",
       "id": "SEC-021",
-      "line": 3008,
+      "line": 3010,
       "phase": "P2",
       "status": "done",
       "title": "Track post-quantum hybrid TLS (X25519+ML-KEM) as an opt-in, with a standards-watch task."
@@ -2384,7 +2384,7 @@
     {
       "area": "SEC",
       "id": "SEC-022",
-      "line": 3016,
+      "line": 3018,
       "phase": "P2",
       "status": "done",
       "title": "Implement the optional egress proxy with per-tenant policy."
@@ -2392,7 +2392,7 @@
     {
       "area": "SEC",
       "id": "SEC-023",
-      "line": 3028,
+      "line": 3030,
       "phase": "P2",
       "status": "done",
       "title": "Establish the responsible-disclosure process and a public security-advisory feed."
@@ -2400,7 +2400,7 @@
     {
       "area": "SEC",
       "id": "SEC-024",
-      "line": 3040,
+      "line": 3042,
       "phase": "P2",
       "status": "blocked",
       "title": "Commission external security audit #1 before the private alpha (M7)."
@@ -2408,7 +2408,7 @@
     {
       "area": "SEC",
       "id": "SEC-025",
-      "line": 3049,
+      "line": 3051,
       "phase": "P2",
       "status": "blocked",
       "title": "Commission external security audit #2 before the public beta (M10)."
@@ -2416,7 +2416,7 @@
     {
       "area": "SEC",
       "id": "SEC-026",
-      "line": 3053,
+      "line": 3055,
       "phase": "P2",
       "status": "done",
       "title": "Implement Landlock LSM integration as defence in depth on Linux ≥ 5.13."
@@ -2424,7 +2424,7 @@
     {
       "area": "SEC",
       "id": "SEC-027",
-      "line": 3066,
+      "line": 3068,
       "phase": "P2",
       "status": "done",
       "title": "Implement memory-protection-key support as an optional hardening feature."
@@ -2432,7 +2432,7 @@
     {
       "area": "SEC",
       "id": "SEC-028",
-      "line": 3078,
+      "line": 3080,
       "phase": "P2",
       "status": "done",
       "title": "Produce and publish the SBOM for every release."
@@ -2440,7 +2440,7 @@
     {
       "area": "SEC",
       "id": "SEC-029",
-      "line": 3095,
+      "line": 3097,
       "phase": "P2",
       "status": "done",
       "title": "Implement the distroless, read-only, non-root container image."
@@ -2448,7 +2448,7 @@
     {
       "area": "SEC",
       "id": "SEC-030",
-      "line": 3113,
+      "line": 3115,
       "phase": "P2",
       "status": "done",
       "title": "Publish the explicit out-of-scope section (host admin, side channels, physical, volumetric DoS)."
@@ -2456,7 +2456,7 @@
     {
       "area": "SRV",
       "id": "SRV-001",
-      "line": 3132,
+      "line": 3134,
       "phase": "P3",
       "status": "done",
       "title": "Implement HTTP/1.1 with keep-alive, timeouts and connection limits."
@@ -2464,7 +2464,7 @@
     {
       "area": "SRV",
       "id": "SRV-002",
-      "line": 3155,
+      "line": 3157,
       "phase": "P3",
       "status": "done",
       "title": "Implement HTTP/2 including multiplexing and flow control."
@@ -2472,7 +2472,7 @@
     {
       "area": "SRV",
       "id": "SRV-003",
-      "line": 3190,
+      "line": 3192,
       "phase": "P3",
       "status": "done",
       "title": "Implement the compile-time route table as a radix trie."
@@ -2480,7 +2480,7 @@
     {
       "area": "SRV",
       "id": "SRV-004",
-      "line": 3192,
+      "line": 3194,
       "phase": "P3",
       "status": "done",
       "title": "Implement streaming bodies end to end with backpressure propagation."
@@ -2488,7 +2488,7 @@
     {
       "area": "SRV",
       "id": "SRV-005",
-      "line": 3252,
+      "line": 3254,
       "phase": "P3",
       "status": "done",
       "title": "Implement `max_request_bytes` enforced during streaming, not after buffering."
@@ -2496,7 +2496,7 @@
     {
       "area": "SRV",
       "id": "SRV-006",
-      "line": 3269,
+      "line": 3271,
       "phase": "P3",
       "status": "done",
       "title": "Resolve open question `OQ-007`: decide whether `wasi:http` is the foundation or whether a custom interface is required."
@@ -2504,7 +2504,7 @@
     {
       "area": "SRV",
       "id": "SRV-007",
-      "line": 3272,
+      "line": 3274,
       "phase": "P3",
       "status": "done",
       "title": "Implement TLS with rustls and the documented cipher policy."
@@ -2512,7 +2512,7 @@
     {
       "area": "SRV",
       "id": "SRV-008",
-      "line": 3286,
+      "line": 3288,
       "phase": "P3",
       "status": "done",
       "title": "Implement mTLS as a supported `default_auth` mode."
@@ -2520,7 +2520,7 @@
     {
       "area": "SRV",
       "id": "SRV-009",
-      "line": 3304,
+      "line": 3306,
       "phase": "P3",
       "status": "done",
       "title": "Implement WebSockets over HTTP/1.1 and HTTP/2."
@@ -2528,7 +2528,7 @@
     {
       "area": "SRV",
       "id": "SRV-010",
-      "line": 3321,
+      "line": 3323,
       "phase": "P3",
       "status": "done",
       "title": "Implement Server-Sent Events."
@@ -2536,7 +2536,7 @@
     {
       "area": "SRV",
       "id": "SRV-011",
-      "line": 3329,
+      "line": 3331,
       "phase": "P3",
       "status": "done",
       "title": "Implement graceful shutdown with in-flight request draining."
@@ -2544,7 +2544,7 @@
     {
       "area": "SRV",
       "id": "SRV-012",
-      "line": 3332,
+      "line": 3334,
       "phase": "P3",
       "status": "done",
       "title": "Implement per-tenant connection limits and idle timeouts."
@@ -2552,7 +2552,7 @@
     {
       "area": "SRV",
       "id": "SRV-013",
-      "line": 3335,
+      "line": 3337,
       "phase": "P3",
       "status": "done",
       "title": "Implement structured access logging with tenant and trace correlation."
@@ -2560,7 +2560,7 @@
     {
       "area": "SRV",
       "id": "SRV-014",
-      "line": 3343,
+      "line": 3345,
       "phase": "P3",
       "status": "open",
       "title": "Implement HTTP/3 over QUIC behind a feature flag (beta)."
@@ -2568,7 +2568,7 @@
     {
       "area": "SRV",
       "id": "SRV-015",
-      "line": 3345,
+      "line": 3347,
       "phase": "P3",
       "status": "open",
       "title": "Implement gRPC over `wasi:http` plus `qqq:grpc` (beta)."
@@ -2576,7 +2576,7 @@
     {
       "area": "SRV",
       "id": "SRV-016",
-      "line": 3347,
+      "line": 3349,
       "phase": "P3",
       "status": "open",
       "title": "Implement ACME certificate provisioning as an opt-in."
@@ -2584,7 +2584,7 @@
     {
       "area": "SRV",
       "id": "SRV-017",
-      "line": 3349,
+      "line": 3351,
       "phase": "P3",
       "status": "done",
       "title": "Implement `qqqai openapi` emitting an OpenAPI description of a running app."
@@ -2592,7 +2592,7 @@
     {
       "area": "SRV",
       "id": "SRV-018",
-      "line": 3357,
+      "line": 3359,
       "phase": "P3",
       "status": "done",
       "title": "Implement the reference application used by all benchmarks (orders API)."
@@ -2600,7 +2600,7 @@
     {
       "area": "SRV",
       "id": "SRV-019",
-      "line": 3372,
+      "line": 3374,
       "phase": "P3",
       "status": "done",
       "title": "Implement CORS configuration with safe defaults."
@@ -2608,7 +2608,7 @@
     {
       "area": "SRV",
       "id": "SRV-020",
-      "line": 3385,
+      "line": 3387,
       "phase": "P3",
       "status": "done",
       "title": "Implement request-body size and count limits enforced per tenant, with metrics."
@@ -2616,7 +2616,7 @@
     {
       "area": "SRV",
       "id": "SRV-021",
-      "line": 3478,
+      "line": 3480,
       "phase": "P3",
       "status": "open",
       "title": "Model the `[server.tls]` manifest section and wire a TLS-terminating accept path into `qqqai serve`."
@@ -2624,7 +2624,7 @@
     {
       "area": "SRV",
       "id": "SRV-022",
-      "line": 3494,
+      "line": 3496,
       "phase": "P3",
       "status": "done",
       "title": "Decide the ALPN default policy now that the h2 loop exists: flip the default to advertise `h2` or keep http/1.1-only by least-surprise with `with_alpn` the explicit opt-in. A flip is a behavior change and needs red-first policy tests; a keep needs the recorded reason (the old rationale — no loop — is gone)."
@@ -2632,7 +2632,7 @@
     {
       "area": "ABI",
       "id": "ABI-001",
-      "line": 3498,
+      "line": 3500,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:http@1.0` with routing, streaming and client."
@@ -2640,7 +2640,7 @@
     {
       "area": "ABI",
       "id": "ABI-002",
-      "line": 3503,
+      "line": 3505,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:fs@1.0` with opened directories, handles, metadata and write modes."
@@ -2648,7 +2648,7 @@
     {
       "area": "ABI",
       "id": "ABI-003",
-      "line": 3508,
+      "line": 3510,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:sql@1.0` with pooled connections, prepared statements and transactions."
@@ -2656,7 +2656,7 @@
     {
       "area": "ABI",
       "id": "ABI-004",
-      "line": 3513,
+      "line": 3515,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:kv@1.0` with namespacing, TTL and scan."
@@ -2664,7 +2664,7 @@
     {
       "area": "ABI",
       "id": "ABI-005",
-      "line": 3518,
+      "line": 3520,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:queue@1.0` with publish, subscribe via `stream`, and acknowledgement."
@@ -2672,7 +2672,7 @@
     {
       "area": "ABI",
       "id": "ABI-006",
-      "line": 3523,
+      "line": 3525,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:crypto@1.0` with random, hash, hmac, aead and sign/verify."
@@ -2680,7 +2680,7 @@
     {
       "area": "ABI",
       "id": "ABI-007",
-      "line": 3528,
+      "line": 3530,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:clock@1.0` with wall, monotonic, timers and controllable time."
@@ -2688,7 +2688,7 @@
     {
       "area": "ABI",
       "id": "ABI-008",
-      "line": 3533,
+      "line": 3535,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:log@1.0` with structured, levelled logging with tenant attribution."
@@ -2696,7 +2696,7 @@
     {
       "area": "ABI",
       "id": "ABI-009",
-      "line": 3538,
+      "line": 3540,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:trace@1.0` with spans, events and W3C context propagation."
@@ -2704,7 +2704,7 @@
     {
       "area": "ABI",
       "id": "ABI-010",
-      "line": 3543,
+      "line": 3545,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:secrets@1.0` with use-without-disclosure."
@@ -2712,7 +2712,7 @@
     {
       "area": "ABI",
       "id": "ABI-011",
-      "line": 3548,
+      "line": 3550,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:test@1.0` with assertions and capability assertions."
@@ -2720,7 +2720,7 @@
     {
       "area": "ABI",
       "id": "ABI-012",
-      "line": 3554,
+      "line": 3556,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:agent@1.0` for self-description and structured progress."
@@ -2728,7 +2728,7 @@
     {
       "area": "ABI",
       "id": "ABI-013",
-      "line": 3566,
+      "line": 3568,
       "phase": "P3",
       "status": "done",
       "title": "Author `qqq:ai@1.0` with the inference interface (implementation deferred to `FUT-*`)."
@@ -2736,7 +2736,7 @@
     {
       "area": "ABI",
       "id": "ABI-014",
-      "line": 3571,
+      "line": 3573,
       "phase": "P3",
       "status": "open",
       "title": "Implement `qqqai bindings` generating every language's types from `wit/`."
@@ -2744,7 +2744,7 @@
     {
       "area": "ABI",
       "id": "ABI-015",
-      "line": 3573,
+      "line": 3575,
       "phase": "P3",
       "status": "done",
       "title": "Implement the CI drift check between `wit/` and all generated bindings."
@@ -2752,7 +2752,7 @@
     {
       "area": "ABI",
       "id": "ABI-016",
-      "line": 3589,
+      "line": 3591,
       "phase": "P3",
       "status": "open",
       "title": "Resolve open question `OQ-005`: ratify the shared-memory policy at the interface level."
@@ -2760,7 +2760,7 @@
     {
       "area": "DX",
       "id": "DX-001",
-      "line": 3598,
+      "line": 3600,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai new` scaffolding for all five languages and five templates."
@@ -2768,7 +2768,7 @@
     {
       "area": "DX",
       "id": "DX-002",
-      "line": 3600,
+      "line": 3602,
       "phase": "P4",
       "status": "done",
       "title": "Implement generated-manifest minimality: a new project grants nothing it does not need."
@@ -2776,7 +2776,7 @@
     {
       "area": "DX",
       "id": "DX-003",
-      "line": 3602,
+      "line": 3604,
       "phase": "P4",
       "status": "done",
       "title": "Implement the \"your app has 0 capabilities\" guidance shown at dev-server start."
@@ -2784,7 +2784,7 @@
     {
       "area": "DX",
       "id": "DX-004",
-      "line": 3604,
+      "line": 3606,
       "phase": "P4",
       "status": "done",
       "title": "Implement the error-message standard: what, code, why, fix, machine block."
@@ -2792,7 +2792,7 @@
     {
       "area": "DX",
       "id": "DX-005",
-      "line": 3635,
+      "line": 3637,
       "phase": "P4",
       "status": "done",
       "title": "Implement the `QQQ-XXXX` error-code registry with generated docs pages."
@@ -2800,7 +2800,7 @@
     {
       "area": "DX",
       "id": "DX-006",
-      "line": 3656,
+      "line": 3658,
       "phase": "P4",
       "status": "open",
       "title": "Implement the TIER-1 hot reload: component swap preserving the host process."
@@ -2808,7 +2808,7 @@
     {
       "area": "DX",
       "id": "DX-007",
-      "line": 3661,
+      "line": 3663,
       "phase": "P4",
       "status": "open",
       "title": "Implement TIER-2 state-preserving swap with declared guest state."
@@ -2816,7 +2816,7 @@
     {
       "area": "DX",
       "id": "DX-008",
-      "line": 3663,
+      "line": 3665,
       "phase": "P4",
       "status": "open",
       "title": "Implement TIER-3 full restart triggered only by manifest capability or limit changes."
@@ -2824,7 +2824,7 @@
     {
       "area": "DX",
       "id": "DX-009",
-      "line": 3665,
+      "line": 3667,
       "phase": "P4",
       "status": "done",
       "title": "Implement the file watcher with debounce and ignore rules."
@@ -2832,7 +2832,7 @@
     {
       "area": "DX",
       "id": "DX-010",
-      "line": 3667,
+      "line": 3669,
       "phase": "P4",
       "status": "open",
       "title": "Implement HTTPS in dev with locally-trusted certificates."
@@ -2840,7 +2840,7 @@
     {
       "area": "DX",
       "id": "DX-011",
-      "line": 3669,
+      "line": 3671,
       "phase": "P4",
       "status": "open",
       "title": "Implement the TTFA measurement job on a clean container for all three OSes."
@@ -2848,7 +2848,7 @@
     {
       "area": "DX",
       "id": "DX-012",
-      "line": 3671,
+      "line": 3673,
       "phase": "P4",
       "status": "open",
       "title": "Implement the scripted DX test suite: deliberate mistakes must produce the intended guidance within the target time."
@@ -2856,7 +2856,7 @@
     {
       "area": "DX",
       "id": "DX-013",
-      "line": 3673,
+      "line": 3675,
       "phase": "P4",
       "status": "done",
       "title": "Implement the `--help` brevity standard (≤40 lines, actionable) and a CI check."
@@ -2864,7 +2864,7 @@
     {
       "area": "DX",
       "id": "DX-014",
-      "line": 3727,
+      "line": 3729,
       "phase": "P4",
       "status": "done",
       "title": "Implement the CI check that every error code has a docs page."
@@ -2872,7 +2872,7 @@
     {
       "area": "DX",
       "id": "DX-015",
-      "line": 3744,
+      "line": 3746,
       "phase": "P4",
       "status": "open",
       "title": "Implement the CI check that every public API has a compiling example."
@@ -2880,7 +2880,7 @@
     {
       "area": "DX",
       "id": "DX-016",
-      "line": 3794,
+      "line": 3796,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai doctor` with environment diagnosis and remediation."
@@ -2888,7 +2888,7 @@
     {
       "area": "DX",
       "id": "DX-017",
-      "line": 3836,
+      "line": 3838,
       "phase": "P4",
       "status": "open",
       "title": "Implement the DevTools-protocol inspector adapter over DWARF source maps."
@@ -2896,7 +2896,7 @@
     {
       "area": "DX",
       "id": "DX-018",
-      "line": 3838,
+      "line": 3840,
       "phase": "P4",
       "status": "open",
       "title": "Implement the progressive-disclosure documentation tiers (Solo, Team, Fleet)."
@@ -2904,7 +2904,7 @@
     {
       "area": "DX",
       "id": "DX-019",
-      "line": 3840,
+      "line": 3842,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai add-cap` writing the correct manifest stanza."
@@ -2912,7 +2912,7 @@
     {
       "area": "DX",
       "id": "DX-020",
-      "line": 3856,
+      "line": 3858,
       "phase": "P4",
       "status": "open",
       "title": "Implement the ten-minute script as an automated, CI-run acceptance test."
@@ -2920,7 +2920,7 @@
     {
       "area": "CLI",
       "id": "CLI-001",
-      "line": 3861,
+      "line": 3863,
       "phase": "P4",
       "status": "done",
       "title": "Implement the shared output layer with `--json` supported by every command."
@@ -2928,7 +2928,7 @@
     {
       "area": "CLI",
       "id": "CLI-002",
-      "line": 3864,
+      "line": 3866,
       "phase": "P4",
       "status": "done",
       "title": "Implement compile-time exhaustiveness so a new command cannot ship without a JSON shape."
@@ -2936,7 +2936,7 @@
     {
       "area": "CLI",
       "id": "CLI-003",
-      "line": 3867,
+      "line": 3869,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai new`."
@@ -2944,7 +2944,7 @@
     {
       "area": "CLI",
       "id": "CLI-004",
-      "line": 3869,
+      "line": 3871,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai init`."
@@ -2952,7 +2952,7 @@
     {
       "area": "CLI",
       "id": "CLI-005",
-      "line": 3871,
+      "line": 3873,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai add` and `qqqai remove`."
@@ -2960,7 +2960,7 @@
     {
       "area": "CLI",
       "id": "CLI-006",
-      "line": 3876,
+      "line": 3878,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai install` with `--locked`, `--frozen`, `--offline`."
@@ -2968,7 +2968,7 @@
     {
       "area": "CLI",
       "id": "CLI-007",
-      "line": 3881,
+      "line": 3883,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai update` with `--latest` and `--dry-run`."
@@ -2976,7 +2976,7 @@
     {
       "area": "CLI",
       "id": "CLI-008",
-      "line": 3885,
+      "line": 3887,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai build` with `--release`, `--target`, `--aot`, `--reproducible`."
@@ -2984,7 +2984,7 @@
     {
       "area": "CLI",
       "id": "CLI-009",
-      "line": 3887,
+      "line": 3889,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai run` with explicit capability and limit flags."
@@ -2992,7 +2992,7 @@
     {
       "area": "CLI",
       "id": "CLI-010",
-      "line": 3889,
+      "line": 3891,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai dev`."
@@ -3000,7 +3000,7 @@
     {
       "area": "CLI",
       "id": "CLI-011",
-      "line": 3891,
+      "line": 3893,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai serve` with `--workers`, `--tls`, `--config`."
@@ -3008,7 +3008,7 @@
     {
       "area": "CLI",
       "id": "CLI-012",
-      "line": 3938,
+      "line": 3940,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai test`."
@@ -3016,7 +3016,7 @@
     {
       "area": "CLI",
       "id": "CLI-013",
-      "line": 3942,
+      "line": 3944,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai bench`."
@@ -3024,7 +3024,7 @@
     {
       "area": "CLI",
       "id": "CLI-014",
-      "line": 3960,
+      "line": 3962,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai fmt` and `qqqai lint` with a unified interface over language toolchains."
@@ -3032,7 +3032,7 @@
     {
       "area": "CLI",
       "id": "CLI-015",
-      "line": 3988,
+      "line": 3990,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai inspect` with static capability reporting and `--diff`."
@@ -3040,7 +3040,7 @@
     {
       "area": "CLI",
       "id": "CLI-016",
-      "line": 4002,
+      "line": 4004,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai audit` with SARIF output and `--fail-on`."
@@ -3048,7 +3048,7 @@
     {
       "area": "CLI",
       "id": "CLI-017",
-      "line": 4018,
+      "line": 4020,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai verify` for signature and attestation checking."
@@ -3056,7 +3056,7 @@
     {
       "area": "CLI",
       "id": "CLI-018",
-      "line": 4039,
+      "line": 4041,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai caps` with `--explain`."
@@ -3064,7 +3064,7 @@
     {
       "area": "CLI",
       "id": "CLI-019",
-      "line": 4088,
+      "line": 4090,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai why`."
@@ -3072,7 +3072,7 @@
     {
       "area": "CLI",
       "id": "CLI-020",
-      "line": 4102,
+      "line": 4104,
       "phase": "P4",
       "status": "open",
       "title": "Implement `qqqai trace`."
@@ -3080,7 +3080,7 @@
     {
       "area": "CLI",
       "id": "CLI-021",
-      "line": 4104,
+      "line": 4106,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai doctor`."
@@ -3088,7 +3088,7 @@
     {
       "area": "CLI",
       "id": "CLI-022",
-      "line": 4112,
+      "line": 4114,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai mcp`."
@@ -3096,7 +3096,7 @@
     {
       "area": "CLI",
       "id": "CLI-023",
-      "line": 4115,
+      "line": 4117,
       "phase": "P4",
       "status": "done",
       "title": "Implement `qqqai schema --all` and the per-command schema output."
@@ -3104,7 +3104,7 @@
     {
       "area": "CLI",
       "id": "CLI-024",
-      "line": 4164,
+      "line": 4166,
       "phase": "P4",
       "status": "open",
       "title": "Implement `qqqai migrate`."
@@ -3112,7 +3112,7 @@
     {
       "area": "DIST",
       "id": "DIST-001",
-      "line": 4169,
+      "line": 4171,
       "phase": "P4",
       "status": "open",
       "title": "Implement the POSIX `install.sh` installer with checksum and signature verification."
@@ -3120,7 +3120,7 @@
     {
       "area": "DIST",
       "id": "DIST-002",
-      "line": 4171,
+      "line": 4173,
       "phase": "P4",
       "status": "open",
       "title": "Implement the Windows `install.ps1` installer with the same verification."
@@ -3128,7 +3128,7 @@
     {
       "area": "DIST",
       "id": "DIST-003",
-      "line": 4173,
+      "line": 4175,
       "phase": "P4",
       "status": "open",
       "title": "Publish GitHub Releases with binaries, checksums and Ed25519 signatures for all five targets."
@@ -3136,7 +3136,7 @@
     {
       "area": "DIST",
       "id": "DIST-004",
-      "line": 4175,
+      "line": 4177,
       "phase": "P4",
       "status": "open",
       "title": "Publish the `qqqai` crate to crates.io and verify `cargo install qqqai` on all targets."
@@ -3144,7 +3144,7 @@
     {
       "area": "DIST",
       "id": "DIST-005",
-      "line": 4177,
+      "line": 4179,
       "phase": "P4",
       "status": "open",
       "title": "Publish the `qqqai` npm wrapper package and verify `npm install -g qqqai`."
@@ -3152,7 +3152,7 @@
     {
       "area": "DIST",
       "id": "DIST-006",
-      "line": 4179,
+      "line": 4181,
       "phase": "P4",
       "status": "open",
       "title": "Submit the Homebrew formula."
@@ -3160,7 +3160,7 @@
     {
       "area": "DIST",
       "id": "DIST-007",
-      "line": 4181,
+      "line": 4183,
       "phase": "P4",
       "status": "open",
       "title": "Submit Scoop and winget manifests."
@@ -3168,7 +3168,7 @@
     {
       "area": "DIST",
       "id": "DIST-008",
-      "line": 4183,
+      "line": 4185,
       "phase": "P4",
       "status": "open",
       "title": "Publish the OCI image to `ghcr.io/qqqai/qqqai`."
@@ -3176,7 +3176,7 @@
     {
       "area": "DIST",
       "id": "DIST-009",
-      "line": 4185,
+      "line": 4187,
       "phase": "P4",
       "status": "open",
       "title": "Implement `qqqai doctor`'s self-verification of its own binary."
@@ -3184,7 +3184,7 @@
     {
       "area": "DIST",
       "id": "DIST-010",
-      "line": 4187,
+      "line": 4189,
       "phase": "P4",
       "status": "open",
       "title": "Meet the download-size SLO (≤25 MB compressed)."
@@ -3192,7 +3192,7 @@
     {
       "area": "DIST",
       "id": "DIST-011",
-      "line": 4189,
+      "line": 4191,
       "phase": "P4",
       "status": "open",
       "title": "Meet the `--version` startup SLO (≤15 ms)."
@@ -3200,7 +3200,7 @@
     {
       "area": "DIST",
       "id": "DIST-012",
-      "line": 4191,
+      "line": 4193,
       "phase": "P4",
       "status": "open",
       "title": "Meet the cold-start SLO (≤40 ms cached)."
@@ -3208,7 +3208,7 @@
     {
       "area": "DIST",
       "id": "DIST-013",
-      "line": 4193,
+      "line": 4195,
       "phase": "P4",
       "status": "open",
       "title": "Publish apt/dnf/apk repositories once the release cadence is stable."
@@ -3216,7 +3216,7 @@
     {
       "area": "DIST",
       "id": "DIST-014",
-      "line": 4195,
+      "line": 4197,
       "phase": "P4",
       "status": "open",
       "title": "Publish AUR, Nix, asdf and mise specifications."
@@ -3224,7 +3224,7 @@
     {
       "area": "DIST",
       "id": "DIST-015",
-      "line": 4197,
+      "line": 4199,
       "phase": "P4",
       "status": "open",
       "title": "Implement binary reproducibility verification across independent build hosts."
@@ -3232,7 +3232,7 @@
     {
       "area": "DIST",
       "id": "DIST-016",
-      "line": 4199,
+      "line": 4201,
       "phase": "P4",
       "status": "open",
       "title": "Implement macOS notarization and Windows code signing."
@@ -3240,7 +3240,7 @@
     {
       "area": "DIST",
       "id": "DIST-017",
-      "line": 4201,
+      "line": 4203,
       "phase": "P4",
       "status": "open",
       "title": "Implement offline installation from a local bundle."
@@ -3248,7 +3248,7 @@
     {
       "area": "DIST",
       "id": "DIST-018",
-      "line": 4203,
+      "line": 4205,
       "phase": "P4",
       "status": "open",
       "title": "Publish the install-verification instructions users can follow without trusting us."
@@ -3256,7 +3256,7 @@
     {
       "area": "DIST",
       "id": "DIST-019",
-      "line": 4205,
+      "line": 4207,
       "phase": "P4",
       "status": "open",
       "title": "Implement version-manager support (asdf/mise plugins) with tests."
@@ -3264,7 +3264,7 @@
     {
       "area": "DIST",
       "id": "DIST-020",
-      "line": 4207,
+      "line": 4209,
       "phase": "P4",
       "status": "open",
       "title": "Resolve open question `OQ-004`: Windows first-class or best-effort, and reflect this in the CI budget."
@@ -3272,7 +3272,7 @@
     {
       "area": "LANG",
       "id": "LANG-001",
-      "line": 4220,
+      "line": 4222,
       "phase": "P5",
       "status": "done",
       "title": "Rust toolchain integration: `wasm32-wasip2` build path, verified end to end."
@@ -3280,7 +3280,7 @@
     {
       "area": "LANG",
       "id": "LANG-002",
-      "line": 4223,
+      "line": 4225,
       "phase": "P5",
       "status": "done",
       "title": "Rust bindings generated from `wit/` via `wit-bindgen`."
@@ -3288,7 +3288,7 @@
     {
       "area": "LANG",
       "id": "LANG-003",
-      "line": 4226,
+      "line": 4228,
       "phase": "P5",
       "status": "done",
       "title": "Rust project template with tests and CI."
@@ -3296,7 +3296,7 @@
     {
       "area": "LANG",
       "id": "LANG-004",
-      "line": 4229,
+      "line": 4231,
       "phase": "P5",
       "status": "done",
       "title": "Rust conformance-suite pass."
@@ -3304,7 +3304,7 @@
     {
       "area": "LANG",
       "id": "LANG-005",
-      "line": 4232,
+      "line": 4234,
       "phase": "P5",
       "status": "done",
       "title": "Rust reference application implementation."
@@ -3312,7 +3312,7 @@
     {
       "area": "LANG",
       "id": "LANG-006",
-      "line": 4235,
+      "line": 4237,
       "phase": "P5",
       "status": "done",
       "title": "Rust documentation, recipes and examples."
@@ -3320,7 +3320,7 @@
     {
       "area": "LANG",
       "id": "LANG-007",
-      "line": 4238,
+      "line": 4240,
       "phase": "P5",
       "status": "open",
       "title": "Rust build-time and binary-size budget met."
@@ -3328,7 +3328,7 @@
     {
       "area": "LANG",
       "id": "LANG-008",
-      "line": 4242,
+      "line": 4244,
       "phase": "P5",
       "status": "done",
       "title": "Rust language-guide page published with honest limitations (there are few)."
@@ -3336,7 +3336,7 @@
     {
       "area": "LANG",
       "id": "LANG-009",
-      "line": 4248,
+      "line": 4250,
       "phase": "P5",
       "status": "open",
       "title": "AssemblyScript toolchain integration and build path."
@@ -3344,7 +3344,7 @@
     {
       "area": "LANG",
       "id": "LANG-010",
-      "line": 4250,
+      "line": 4252,
       "phase": "P5",
       "status": "open",
       "title": "AssemblyScript bindings generated from `wit/`."
@@ -3352,7 +3352,7 @@
     {
       "area": "LANG",
       "id": "LANG-011",
-      "line": 4252,
+      "line": 4254,
       "phase": "P5",
       "status": "open",
       "title": "TypeScript-shaped project template using AssemblyScript."
@@ -3360,7 +3360,7 @@
     {
       "area": "LANG",
       "id": "LANG-012",
-      "line": 4254,
+      "line": 4256,
       "phase": "P5",
       "status": "open",
       "title": "AssemblyScript conformance-suite pass."
@@ -3368,7 +3368,7 @@
     {
       "area": "LANG",
       "id": "LANG-013",
-      "line": 4256,
+      "line": 4258,
       "phase": "P5",
       "status": "open",
       "title": "AssemblyScript reference application implementation."
@@ -3376,7 +3376,7 @@
     {
       "area": "LANG",
       "id": "LANG-014",
-      "line": 4258,
+      "line": 4260,
       "phase": "P5",
       "status": "done",
       "title": "Documentation that states clearly what AssemblyScript is not (full TypeScript)."
@@ -3384,7 +3384,7 @@
     {
       "area": "LANG",
       "id": "LANG-015",
-      "line": 4261,
+      "line": 4263,
       "phase": "P5",
       "status": "done",
       "title": "Evaluate and document the full-TypeScript-via-engine-in-Wasm path, with measurements."
@@ -3392,7 +3392,7 @@
     {
       "area": "LANG",
       "id": "LANG-016",
-      "line": 4264,
+      "line": 4266,
       "phase": "P5",
       "status": "done",
       "title": "Resolve open question `OQ-002`: how we name and market this path."
@@ -3400,7 +3400,7 @@
     {
       "area": "LANG",
       "id": "LANG-017",
-      "line": 4270,
+      "line": 4272,
       "phase": "P5",
       "status": "open",
       "title": "TinyGo toolchain integration and build path."
@@ -3408,7 +3408,7 @@
     {
       "area": "LANG",
       "id": "LANG-018",
-      "line": 4272,
+      "line": 4274,
       "phase": "P5",
       "status": "open",
       "title": "Go bindings generated from `wit/`."
@@ -3416,7 +3416,7 @@
     {
       "area": "LANG",
       "id": "LANG-019",
-      "line": 4274,
+      "line": 4276,
       "phase": "P5",
       "status": "open",
       "title": "Go project template."
@@ -3424,7 +3424,7 @@
     {
       "area": "LANG",
       "id": "LANG-020",
-      "line": 4276,
+      "line": 4278,
       "phase": "P5",
       "status": "open",
       "title": "Go conformance-suite pass."
@@ -3432,7 +3432,7 @@
     {
       "area": "LANG",
       "id": "LANG-021",
-      "line": 4278,
+      "line": 4280,
       "phase": "P5",
       "status": "open",
       "title": "Go reference application implementation."
@@ -3440,7 +3440,7 @@
     {
       "area": "LANG",
       "id": "LANG-022",
-      "line": 4280,
+      "line": 4282,
       "phase": "P5",
       "status": "done",
       "title": "Document TinyGo's runtime differences, reduced stdlib, and in-guest GC."
@@ -3448,7 +3448,7 @@
     {
       "area": "LANG",
       "id": "LANG-023",
-      "line": 4283,
+      "line": 4285,
       "phase": "P5",
       "status": "blocked",
       "title": "Contribute upstream fixes to TinyGo where the component path is weak."
@@ -3456,7 +3456,7 @@
     {
       "area": "LANG",
       "id": "LANG-024",
-      "line": 4286,
+      "line": 4288,
       "phase": "P5",
       "status": "blocked",
       "title": "Track standard-Go component support and re-evaluate quarterly."
@@ -3464,7 +3464,7 @@
     {
       "area": "LANG",
       "id": "LANG-025",
-      "line": 4292,
+      "line": 4294,
       "phase": "P5",
       "status": "done",
       "title": "Spike: CPython compiled to WASI, measured for size, cold start and correctness."
@@ -3472,7 +3472,7 @@
     {
       "area": "LANG",
       "id": "LANG-026",
-      "line": 4295,
+      "line": 4297,
       "phase": "P5",
       "status": "open",
       "title": "Python bindings generated from `wit/` via `componentize-py` or equivalent."
@@ -3480,7 +3480,7 @@
     {
       "area": "LANG",
       "id": "LANG-027",
-      "line": 4297,
+      "line": 4299,
       "phase": "P5",
       "status": "open",
       "title": "Python project template."
@@ -3488,7 +3488,7 @@
     {
       "area": "LANG",
       "id": "LANG-028",
-      "line": 4299,
+      "line": 4301,
       "phase": "P5",
       "status": "open",
       "title": "Python conformance-suite pass."
@@ -3496,7 +3496,7 @@
     {
       "area": "LANG",
       "id": "LANG-029",
-      "line": 4301,
+      "line": 4303,
       "phase": "P5",
       "status": "open",
       "title": "Python reference application implementation."
@@ -3504,7 +3504,7 @@
     {
       "area": "LANG",
       "id": "LANG-030",
-      "line": 4303,
+      "line": 4305,
       "phase": "P5",
       "status": "open",
       "title": "Implement precompiled-`.pyc` bundling and interpreter-instance pooling to cut startup cost."
@@ -3512,7 +3512,7 @@
     {
       "area": "LANG",
       "id": "LANG-031",
-      "line": 4305,
+      "line": 4307,
       "phase": "P5",
       "status": "done",
       "title": "Resolve open question `OQ-003`: first-class or experimental, based on the M5 measurement."
@@ -3520,7 +3520,7 @@
     {
       "area": "LANG",
       "id": "LANG-032",
-      "line": 4308,
+      "line": 4310,
       "phase": "P5",
       "status": "done",
       "title": "Document Python's honest limits (component size, startup, stdlib coverage)."
@@ -3528,7 +3528,7 @@
     {
       "area": "LANG",
       "id": "LANG-033",
-      "line": 4314,
+      "line": 4316,
       "phase": "P5",
       "status": "open",
       "title": "Clang `--target=wasm32-wasip2` integration and build path."
@@ -3536,7 +3536,7 @@
     {
       "area": "LANG",
       "id": "LANG-034",
-      "line": 4316,
+      "line": 4318,
       "phase": "P5",
       "status": "open",
       "title": "C and C++ bindings generated from `wit/`."
@@ -3544,7 +3544,7 @@
     {
       "area": "LANG",
       "id": "LANG-035",
-      "line": 4318,
+      "line": 4320,
       "phase": "P5",
       "status": "open",
       "title": "C and C++ project templates."
@@ -3552,7 +3552,7 @@
     {
       "area": "LANG",
       "id": "LANG-036",
-      "line": 4320,
+      "line": 4322,
       "phase": "P5",
       "status": "open",
       "title": "C and C++ conformance-suite pass."
@@ -3560,7 +3560,7 @@
     {
       "area": "LANG",
       "id": "LANG-037",
-      "line": 4322,
+      "line": 4324,
       "phase": "P5",
       "status": "open",
       "title": "C and C++ reference application implementation."
@@ -3568,7 +3568,7 @@
     {
       "area": "LANG",
       "id": "LANG-038",
-      "line": 4324,
+      "line": 4326,
       "phase": "P5",
       "status": "done",
       "title": "Document the C/C++ path and the `wasm-ld`/`wit-bindgen` toolchain requirements."
@@ -3576,7 +3576,7 @@
     {
       "area": "LANG",
       "id": "LANG-039",
-      "line": 4327,
+      "line": 4329,
       "phase": "P5",
       "status": "open",
       "title": "Publish the language parity matrix, generated from CI, with every gap owned and dated."
@@ -3584,7 +3584,7 @@
     {
       "area": "LANG",
       "id": "LANG-040",
-      "line": 4335,
+      "line": 4337,
       "phase": "P5",
       "status": "open",
       "title": "Implement the CI job that fails when the parity matrix gains an unexplained gap."
@@ -3592,7 +3592,7 @@
     {
       "area": "PKG",
       "id": "PKG-001",
-      "line": 4349,
+      "line": 4351,
       "phase": "P6",
       "status": "open",
       "title": "Implement the content-addressed global store with hard-link/reflink materialization."
@@ -3600,7 +3600,7 @@
     {
       "area": "PKG",
       "id": "PKG-002",
-      "line": 4352,
+      "line": 4354,
       "phase": "P6",
       "status": "open",
       "title": "Implement parallel, resumable fetching with HTTP/3 where available."
@@ -3608,7 +3608,7 @@
     {
       "area": "PKG",
       "id": "PKG-003",
-      "line": 4354,
+      "line": 4356,
       "phase": "P6",
       "status": "open",
       "title": "Implement the version solver with lockfile-first resolution."
@@ -3616,7 +3616,7 @@
     {
       "area": "PKG",
       "id": "PKG-004",
-      "line": 4356,
+      "line": 4358,
       "phase": "P6",
       "status": "done",
       "title": "Implement lockfile read/write with `caps` per package and a covering hash."
@@ -3624,7 +3624,7 @@
     {
       "area": "PKG",
       "id": "PKG-005",
-      "line": 4359,
+      "line": 4361,
       "phase": "P6",
       "status": "open",
       "title": "Resolve open question `OQ-006`: build the registry from day one, or bootstrap on OCI and migrate."
@@ -3632,7 +3632,7 @@
     {
       "area": "PKG",
       "id": "PKG-006",
-      "line": 4361,
+      "line": 4363,
       "phase": "P6",
       "status": "open",
       "title": "Implement `registry.qqq.codes` as a QQQ application (dogfooding)."
@@ -3640,7 +3640,7 @@
     {
       "area": "PKG",
       "id": "PKG-007",
-      "line": 4363,
+      "line": 4365,
       "phase": "P6",
       "status": "open",
       "title": "Implement immutable versions with yank support."
@@ -3648,7 +3648,7 @@
     {
       "area": "PKG",
       "id": "PKG-008",
-      "line": 4365,
+      "line": 4367,
       "phase": "P6",
       "status": "open",
       "title": "Implement provenance attestation (SLSA-style) for every published artifact."
@@ -3656,7 +3656,7 @@
     {
       "area": "PKG",
       "id": "PKG-009",
-      "line": 4367,
+      "line": 4369,
       "phase": "P6",
       "status": "open",
       "title": "Implement capability metadata on package pages and in the registry API."
@@ -3664,7 +3664,7 @@
     {
       "area": "PKG",
       "id": "PKG-010",
-      "line": 4369,
+      "line": 4371,
       "phase": "P6",
       "status": "open",
       "title": "Implement capability-aware search (\"find a JSON parser needing no capabilities\")."
@@ -3672,7 +3672,7 @@
     {
       "area": "PKG",
       "id": "PKG-011",
-      "line": 4371,
+      "line": 4373,
       "phase": "P6",
       "status": "open",
       "title": "Implement the registry API with a published schema and fair rate limits."
@@ -3680,7 +3680,7 @@
     {
       "area": "PKG",
       "id": "PKG-012",
-      "line": 4373,
+      "line": 4375,
       "phase": "P6",
       "status": "open",
       "title": "Implement self-hostable registry mirrors; Fabric adds air-gapped mode."
@@ -3688,7 +3688,7 @@
     {
       "area": "PKG",
       "id": "PKG-013",
-      "line": 4375,
+      "line": 4377,
       "phase": "P6",
       "status": "open",
       "title": "Implement the scoped-namespace and ownership-verification system."
@@ -3696,7 +3696,7 @@
     {
       "area": "PKG",
       "id": "PKG-014",
-      "line": 4377,
+      "line": 4379,
       "phase": "P6",
       "status": "open",
       "title": "Implement `--offline` fully from the local store."
@@ -3704,7 +3704,7 @@
     {
       "area": "PKG",
       "id": "PKG-015",
-      "line": 4379,
+      "line": 4381,
       "phase": "P6",
       "status": "open",
       "title": "Implement the trust policy for signature verification, configurable per project and per org."
@@ -3712,7 +3712,7 @@
     {
       "area": "PKG",
       "id": "PKG-016",
-      "line": 4381,
+      "line": 4383,
       "phase": "P6",
       "status": "open",
       "title": "Ship the 30 essential first-party packages (JSON, HTTP client, validation, logging, testing, crypto, date/time, collections)."
@@ -3720,7 +3720,7 @@
     {
       "area": "PKG",
       "id": "PKG-017",
-      "line": 4383,
+      "line": 4385,
       "phase": "P6",
       "status": "open",
       "title": "Port the curated top-200 high-value libraries with correct attribution and licence checks."
@@ -3728,7 +3728,7 @@
     {
       "area": "PKG",
       "id": "PKG-018",
-      "line": 4385,
+      "line": 4387,
       "phase": "P6",
       "status": "open",
       "title": "Publish the \"port a library in an afternoon\" guide."
@@ -3736,7 +3736,7 @@
     {
       "area": "PKG",
       "id": "PKG-019",
-      "line": 4387,
+      "line": 4389,
       "phase": "P6",
       "status": "open",
       "title": "Launch the public porting bounty programme."
@@ -3744,7 +3744,7 @@
     {
       "area": "PKG",
       "id": "PKG-020",
-      "line": 4389,
+      "line": 4391,
       "phase": "P6",
       "status": "open",
       "title": "Implement dependency-confusion and typosquatting defences."
@@ -3752,7 +3752,7 @@
     {
       "area": "PKG",
       "id": "PKG-021",
-      "line": 4391,
+      "line": 4393,
       "phase": "P6",
       "status": "open",
       "title": "Implement `qqqai audit` for a project's full dependency tree with SARIF output."
@@ -3760,7 +3760,7 @@
     {
       "area": "PKG",
       "id": "PKG-022",
-      "line": 4393,
+      "line": 4395,
       "phase": "P6",
       "status": "open",
       "title": "Implement the registry's abuse-reporting and takedown process."
@@ -3768,7 +3768,7 @@
     {
       "area": "PKG",
       "id": "PKG-023",
-      "line": 4395,
+      "line": 4397,
       "phase": "P6",
       "status": "open",
       "title": "Implement registry analytics that respect privacy (aggregate only, no per-user tracking)."
@@ -3776,7 +3776,7 @@
     {
       "area": "PKG",
       "id": "PKG-024",
-      "line": 4397,
+      "line": 4399,
       "phase": "P6",
       "status": "open",
       "title": "Implement the registry's own SLA monitoring and status page."
@@ -3784,7 +3784,7 @@
     {
       "area": "SUP",
       "id": "SUP-001",
-      "line": 4402,
+      "line": 4404,
       "phase": "P6",
       "status": "open",
       "title": "Implement artifact signing with Ed25519 at publish time."
@@ -3792,7 +3792,7 @@
     {
       "area": "SUP",
       "id": "SUP-002",
-      "line": 4404,
+      "line": 4406,
       "phase": "P6",
       "status": "open",
       "title": "Implement signature verification at install time with a configurable trust policy."
@@ -3800,7 +3800,7 @@
     {
       "area": "SUP",
       "id": "SUP-003",
-      "line": 4406,
+      "line": 4408,
       "phase": "P6",
       "status": "open",
       "title": "Implement the SBOM generator per artifact."
@@ -3808,7 +3808,7 @@
     {
       "area": "SUP",
       "id": "SUP-004",
-      "line": 4408,
+      "line": 4410,
       "phase": "P6",
       "status": "open",
       "title": "Implement provenance attestation capture in the build pipeline."
@@ -3816,7 +3816,7 @@
     {
       "area": "SUP",
       "id": "SUP-005",
-      "line": 4410,
+      "line": 4412,
       "phase": "P6",
       "status": "open",
       "title": "Implement hash pinning in the lockfile with verification on every install."
@@ -3824,7 +3824,7 @@
     {
       "area": "SUP",
       "id": "SUP-006",
-      "line": 4412,
+      "line": 4414,
       "phase": "P6",
       "status": "open",
       "title": "Implement the air-gapped mirror workflow for Fabric."
@@ -3832,7 +3832,7 @@
     {
       "area": "SUP",
       "id": "SUP-007",
-      "line": 4414,
+      "line": 4416,
       "phase": "P6",
       "status": "open",
       "title": "Implement the dependency-vulnerability feed and `qqqai audit` integration."
@@ -3840,7 +3840,7 @@
     {
       "area": "SUP",
       "id": "SUP-008",
-      "line": 4416,
+      "line": 4418,
       "phase": "P6",
       "status": "open",
       "title": "Establish the incident process for a compromised first-party package."
@@ -3848,7 +3848,7 @@
     {
       "area": "SUP",
       "id": "SUP-009",
-      "line": 4418,
+      "line": 4420,
       "phase": "P6",
       "status": "open",
       "title": "Implement build-environment attestation (what ran the build)."
@@ -3856,7 +3856,7 @@
     {
       "area": "SUP",
       "id": "SUP-010",
-      "line": 4420,
+      "line": 4422,
       "phase": "P6",
       "status": "open",
       "title": "Implement the reproducible-build check across independent build hosts."
@@ -3864,7 +3864,7 @@
     {
       "area": "SUP",
       "id": "SUP-011",
-      "line": 4422,
+      "line": 4424,
       "phase": "P6",
       "status": "open",
       "title": "Publish the trust-chain document explaining every verification a user can perform."
@@ -3872,7 +3872,7 @@
     {
       "area": "SUP",
       "id": "SUP-012",
-      "line": 4424,
+      "line": 4426,
       "phase": "P6",
       "status": "open",
       "title": "Implement key-rotation and revocation for the project's signing keys."
@@ -3880,7 +3880,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-025",
-      "line": 4433,
+      "line": 4435,
       "phase": "P7",
       "status": "open",
       "title": "Prove all four agent relationships (author, operator, host, adversary) are genuinely served: run a structured exercise for each and publish the findings, including any relationship that turns out to be unserved."
@@ -3888,7 +3888,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-001",
-      "line": 4435,
+      "line": 4437,
       "phase": "P7",
       "status": "open",
       "title": "Implement `qqqai schema --all` producing the complete machine contract document."
@@ -3896,7 +3896,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-002",
-      "line": 4437,
+      "line": 4439,
       "phase": "P7",
       "status": "open",
       "title": "Implement the versioning policy for the schema document."
@@ -3904,7 +3904,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-003",
-      "line": 4439,
+      "line": 4441,
       "phase": "P7",
       "status": "open",
       "title": "Implement the CI drift check that fails when schema output diverges from the implementation."
@@ -3912,7 +3912,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-004",
-      "line": 4441,
+      "line": 4443,
       "phase": "P7",
       "status": "done",
       "title": "Implement `qqqai mcp` as a stdio MCP server."
@@ -3920,7 +3920,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-005",
-      "line": 4447,
+      "line": 4449,
       "phase": "P7",
       "status": "done",
       "title": "Implement `qqqai mcp` as an HTTP MCP server."
@@ -3928,7 +3928,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-006",
-      "line": 4453,
+      "line": 4455,
       "phase": "P7",
       "status": "open",
       "title": "Implement `qqq_new` tool with dry-run."
@@ -3936,7 +3936,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-007",
-      "line": 4457,
+      "line": 4459,
       "phase": "P7",
       "status": "done",
       "title": "Implement `qqq_build` tool returning structured diagnostics."
@@ -3944,7 +3944,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-008",
-      "line": 4462,
+      "line": 4464,
       "phase": "P7",
       "status": "partial",
       "title": "Implement `qqq_run` tool with explicit capabilities."
@@ -3952,7 +3952,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-009",
-      "line": 4469,
+      "line": 4471,
       "phase": "P7",
       "status": "done",
       "title": "Implement `qqq_test` tool returning structured results."
@@ -3960,7 +3960,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-010",
-      "line": 4473,
+      "line": 4475,
       "phase": "P7",
       "status": "done",
       "title": "Implement `qqq_inspect` tool returning a static capability report."
@@ -3968,7 +3968,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-011",
-      "line": 4477,
+      "line": 4479,
       "phase": "P7",
       "status": "done",
       "title": "Implement `qqq_audit` tool returning SARIF."
@@ -3976,7 +3976,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-012",
-      "line": 4483,
+      "line": 4485,
       "phase": "P7",
       "status": "done",
       "title": "Implement `qqq_caps_explain` tool."
@@ -3984,7 +3984,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-013",
-      "line": 4487,
+      "line": 4489,
       "phase": "P7",
       "status": "open",
       "title": "Implement `qqq_dev_status` tool."
@@ -3992,7 +3992,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-014",
-      "line": 4490,
+      "line": 4492,
       "phase": "P7",
       "status": "done",
       "title": "Implement `qqq_schema` tool."
@@ -4000,7 +4000,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-015",
-      "line": 4495,
+      "line": 4497,
       "phase": "P7",
       "status": "open",
       "title": "Implement `qqq_logs`, `qqq_metrics` and `qqq_trace` tools."
@@ -4008,7 +4008,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-016",
-      "line": 4498,
+      "line": 4500,
       "phase": "P7",
       "status": "open",
       "title": "Implement `qqq_doctor` tool."
@@ -4016,7 +4016,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-017",
-      "line": 4501,
+      "line": 4503,
       "phase": "P7",
       "status": "open",
       "title": "Implement `qqq_migrate_plan` tool (read-only analysis)."
@@ -4024,7 +4024,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-018",
-      "line": 4505,
+      "line": 4507,
       "phase": "P7",
       "status": "open",
       "title": "Write MCP tool descriptions for models, then review them with a human."
@@ -4032,7 +4032,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-019",
-      "line": 4510,
+      "line": 4512,
       "phase": "P7",
       "status": "done",
       "title": "Ensure every tool returns structured content, never prose-only."
@@ -4040,7 +4040,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-020",
-      "line": 4517,
+      "line": 4519,
       "phase": "P7",
       "status": "done",
       "title": "Ensure every mutating tool supports `dry_run` and says so in its description."
@@ -4048,7 +4048,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-021",
-      "line": 4523,
+      "line": 4525,
       "phase": "P7",
       "status": "done",
       "title": "Implement the error-code class table and publish it."
@@ -4056,7 +4056,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-022",
-      "line": 4529,
+      "line": 4531,
       "phase": "P7",
       "status": "done",
       "title": "Implement the docs URL pattern for every error code."
@@ -4064,7 +4064,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-023",
-      "line": 4534,
+      "line": 4536,
       "phase": "P7",
       "status": "done",
       "title": "Build the agent benchmark suite and track success rate."
@@ -4072,7 +4072,7 @@
     {
       "area": "AGENT",
       "id": "AGENT-024",
-      "line": 4537,
+      "line": 4539,
       "phase": "P7",
       "status": "done",
       "title": "Publish the agent cookbook: a minimal reproducer for every error code."
@@ -4080,7 +4080,7 @@
     {
       "area": "TEST",
       "id": "TEST-001",
-      "line": 4543,
+      "line": 4545,
       "phase": "P7",
       "status": "open",
       "title": "Implement test discovery for all five languages."
@@ -4088,7 +4088,7 @@
     {
       "area": "TEST",
       "id": "TEST-002",
-      "line": 4545,
+      "line": 4547,
       "phase": "P7",
       "status": "open",
       "title": "Implement filtering, parallel execution and watch mode."
@@ -4096,7 +4096,7 @@
     {
       "area": "TEST",
       "id": "TEST-003",
-      "line": 4547,
+      "line": 4549,
       "phase": "P7",
       "status": "done",
       "title": "Implement JUnit, TAP and JSON output."
@@ -4104,7 +4104,7 @@
     {
       "area": "TEST",
       "id": "TEST-004",
-      "line": 4550,
+      "line": 4552,
       "phase": "P7",
       "status": "open",
       "title": "Implement coverage via Wasm instrumentation plus DWARF source mapping."
@@ -4112,7 +4112,7 @@
     {
       "area": "TEST",
       "id": "TEST-005",
-      "line": 4552,
+      "line": 4554,
       "phase": "P7",
       "status": "done",
       "title": "Implement `--trials N` determinism checking."
@@ -4120,7 +4120,7 @@
     {
       "area": "TEST",
       "id": "TEST-006",
-      "line": 4566,
+      "line": 4568,
       "phase": "P7",
       "status": "done",
       "title": "Implement deterministic replay logs and `--replay`."
@@ -4128,7 +4128,7 @@
     {
       "area": "TEST",
       "id": "TEST-007",
-      "line": 4582,
+      "line": 4584,
       "phase": "P7",
       "status": "done",
       "title": "Implement capability assertions (`assert_caps!`)."
@@ -4136,7 +4136,7 @@
     {
       "area": "TEST",
       "id": "TEST-008",
-      "line": 4620,
+      "line": 4622,
       "phase": "P7",
       "status": "done",
       "title": "Implement fuel assertions (`assert_fuel_below!`)."
@@ -4144,7 +4144,7 @@
     {
       "area": "TEST",
       "id": "TEST-009",
-      "line": 4641,
+      "line": 4643,
       "phase": "P7",
       "status": "open",
       "title": "Implement property tests with shrinking and replayable failures."
@@ -4152,7 +4152,7 @@
     {
       "area": "TEST",
       "id": "TEST-010",
-      "line": 4643,
+      "line": 4645,
       "phase": "P7",
       "status": "partial",
       "title": "Implement the cross-language conformance suite and wire it into CI."
@@ -4160,7 +4160,7 @@
     {
       "area": "TEST",
       "id": "TEST-011",
-      "line": 4665,
+      "line": 4667,
       "phase": "P7",
       "status": "open",
       "title": "Implement snapshot testing with a reviewable diff format."
@@ -4168,7 +4168,7 @@
     {
       "area": "TEST",
       "id": "TEST-012",
-      "line": 4667,
+      "line": 4669,
       "phase": "P7",
       "status": "done",
       "title": "Implement test isolation guarantees: no test can observe another test's state."
@@ -4176,7 +4176,7 @@
     {
       "area": "TEST",
       "id": "TEST-013",
-      "line": 4702,
+      "line": 4704,
       "phase": "P7",
       "status": "done",
       "title": "Implement benchmark-as-test: fail a build when a performance budget regresses."
@@ -4184,7 +4184,7 @@
     {
       "area": "TEST",
       "id": "TEST-014",
-      "line": 4715,
+      "line": 4717,
       "phase": "P7",
       "status": "done",
       "title": "Implement the flaky-test detector."
@@ -4192,7 +4192,7 @@
     {
       "area": "TEST",
       "id": "TEST-015",
-      "line": 4741,
+      "line": 4743,
       "phase": "P7",
       "status": "done",
       "title": "Implement the dead-code and unused-capability detector (\"this app declares a capability it never uses\")."
@@ -4200,7 +4200,7 @@
     {
       "area": "TEST",
       "id": "TEST-016",
-      "line": 4744,
+      "line": 4746,
       "phase": "P7",
       "status": "done",
       "title": "Implement the conformance-suite runner as an independently usable tool."
@@ -4208,7 +4208,7 @@
     {
       "area": "TEST",
       "id": "TEST-017",
-      "line": 4747,
+      "line": 4749,
       "phase": "P7",
       "status": "open",
       "title": "Publish the test-runner documentation with per-language examples."
@@ -4216,7 +4216,7 @@
     {
       "area": "TEST",
       "id": "TEST-018",
-      "line": 4749,
+      "line": 4751,
       "phase": "P7",
       "status": "open",
       "title": "Implement CI integration examples for GitHub Actions, GitLab CI and others."
@@ -4224,7 +4224,7 @@
     {
       "area": "TEST",
       "id": "TEST-019",
-      "line": 4751,
+      "line": 4753,
       "phase": "P7",
       "status": "open",
       "title": "Wire h2spec into CI against the hyper h2 driver: download the binary, boot the driver, run the full suite plus strict, gate on pass. Local evidence (145/145 + 146/146 strict) exists but no job enforces it, so framing can regress silently."
@@ -4232,7 +4232,7 @@
     {
       "area": "MIG",
       "id": "MIG-001",
-      "line": 4756,
+      "line": 4758,
       "phase": "P7",
       "status": "open",
       "title": "Implement Node/Express route-table extraction."
@@ -4240,7 +4240,7 @@
     {
       "area": "MIG",
       "id": "MIG-002",
-      "line": 4758,
+      "line": 4760,
       "phase": "P7",
       "status": "open",
       "title": "Implement middleware-ordering analysis."
@@ -4248,7 +4248,7 @@
     {
       "area": "MIG",
       "id": "MIG-003",
-      "line": 4760,
+      "line": 4762,
       "phase": "P7",
       "status": "open",
       "title": "Implement env-var access inventory."
@@ -4256,7 +4256,7 @@
     {
       "area": "MIG",
       "id": "MIG-004",
-      "line": 4762,
+      "line": 4764,
       "phase": "P7",
       "status": "open",
       "title": "Implement package inventory with alternative suggestions."
@@ -4264,7 +4264,7 @@
     {
       "area": "MIG",
       "id": "MIG-005",
-      "line": 4764,
+      "line": 4766,
       "phase": "P7",
       "status": "open",
       "title": "Implement capability inference from source analysis."
@@ -4272,7 +4272,7 @@
     {
       "area": "MIG",
       "id": "MIG-006",
-      "line": 4766,
+      "line": 4768,
       "phase": "P7",
       "status": "open",
       "title": "Implement the Bun-specific API flagging."
@@ -4280,7 +4280,7 @@
     {
       "area": "MIG",
       "id": "MIG-007",
-      "line": 4768,
+      "line": 4770,
       "phase": "P7",
       "status": "open",
       "title": "Implement the Deno permission-to-capability mapping."
@@ -4288,7 +4288,7 @@
     {
       "area": "MIG",
       "id": "MIG-008",
-      "line": 4770,
+      "line": 4772,
       "phase": "P7",
       "status": "open",
       "title": "Implement core-Wasm-to-component wrapping with a generated manifest."
@@ -4296,7 +4296,7 @@
     {
       "area": "MIG",
       "id": "MIG-009",
-      "line": 4772,
+      "line": 4774,
       "phase": "P7",
       "status": "open",
       "title": "Implement `migration-report.md` generation."
@@ -4304,7 +4304,7 @@
     {
       "area": "MIG",
       "id": "MIG-010",
-      "line": 4774,
+      "line": 4776,
       "phase": "P7",
       "status": "open",
       "title": "Implement `migration-report.json` with per-file confidence scores."
@@ -4312,7 +4312,7 @@
     {
       "area": "MIG",
       "id": "MIG-011",
-      "line": 4776,
+      "line": 4778,
       "phase": "P7",
       "status": "open",
       "title": "Ensure the report is consumable by an agent so it can finish the migration autonomously."
@@ -4320,7 +4320,7 @@
     {
       "area": "MIG",
       "id": "MIG-012",
-      "line": 4778,
+      "line": 4780,
       "phase": "P7",
       "status": "open",
       "title": "Publish worked migration case studies from real projects."
@@ -4328,7 +4328,7 @@
     {
       "area": "MIG",
       "id": "MIG-013",
-      "line": 4780,
+      "line": 4782,
       "phase": "P7",
       "status": "open",
       "title": "Implement `qqq_migrate_plan` MCP tool (shared with `AGENT-017`)."
@@ -4336,7 +4336,7 @@
     {
       "area": "MIG",
       "id": "MIG-014",
-      "line": 4782,
+      "line": 4784,
       "phase": "P7",
       "status": "open",
       "title": "Publish the migration guide with honest \"this cannot be migrated\" sections."
@@ -4344,7 +4344,7 @@
     {
       "area": "PERF",
       "id": "PERF-027",
-      "line": 4791,
+      "line": 4793,
       "phase": "P8",
       "status": "open",
       "title": "Establish and enforce the tail-latency and cold-start budgets as *contractual* objectives: publish them, alert on regression, and treat a breach as a release blocker rather than a metric."
@@ -4352,7 +4352,7 @@
     {
       "area": "PERF",
       "id": "PERF-028",
-      "line": 4809,
+      "line": 4811,
       "phase": "P8",
       "status": "open",
       "title": "Own runner-identity rotation for the PERF baseline: when the fleet identity changes, bootstrap a candidate via the tool's designed path, compare vectors and within-run spread per §O-543, and commit the reviewed entry. PERF-020 failed once on identity mismatch with no benchmark running; the retry went green, but no item tracks the next rotation."
@@ -4360,7 +4360,7 @@
     {
       "area": "PERF",
       "id": "PERF-001",
-      "line": 4811,
+      "line": 4813,
       "phase": "P8",
       "status": "done",
       "title": "Build the benchmark harness with the full published methodology."
@@ -4368,7 +4368,7 @@
     {
       "area": "PERF",
       "id": "PERF-002",
-      "line": 4827,
+      "line": 4829,
       "phase": "P8",
       "status": "done",
       "title": "Implement the ten benchmarks listed in §9.1."
@@ -4376,7 +4376,7 @@
     {
       "area": "PERF",
       "id": "PERF-003",
-      "line": 4851,
+      "line": 4853,
       "phase": "P8",
       "status": "open",
       "title": "Meet the warm-instance-acquire budget (≤100 µs p99)."
@@ -4384,7 +4384,7 @@
     {
       "area": "PERF",
       "id": "PERF-004",
-      "line": 4874,
+      "line": 4876,
       "phase": "P8",
       "status": "open",
       "title": "Meet the cold-instantiate budgets (≤5 ms cached, ≤150 ms from `.wasm`)."
@@ -4392,7 +4392,7 @@
     {
       "area": "PERF",
       "id": "PERF-005",
-      "line": 4889,
+      "line": 4891,
       "phase": "P8",
       "status": "done",
       "title": "Measure and publish the real ABI-crossing costs, replacing the estimates in §9.3."
@@ -4400,7 +4400,7 @@
     {
       "area": "PERF",
       "id": "PERF-006",
-      "line": 4903,
+      "line": 4905,
       "phase": "P8",
       "status": "open",
       "title": "Validate the batch-first design rule with measurements showing its effect."
@@ -4408,7 +4408,7 @@
     {
       "area": "PERF",
       "id": "PERF-007",
-      "line": 4918,
+      "line": 4920,
       "phase": "P8",
       "status": "open",
       "title": "Meet the AOT cache performance target."
@@ -4416,7 +4416,7 @@
     {
       "area": "PERF",
       "id": "PERF-008",
-      "line": 4931,
+      "line": 4933,
       "phase": "P8",
       "status": "open",
       "title": "Meet the idle RSS budget (≤25 MB)."
@@ -4424,7 +4424,7 @@
     {
       "area": "PERF",
       "id": "PERF-009",
-      "line": 4950,
+      "line": 4952,
       "phase": "P8",
       "status": "open",
       "title": "Meet the 1000-idle-instance RSS budget (≤350 MB)."
@@ -4432,7 +4432,7 @@
     {
       "area": "PERF",
       "id": "PERF-010",
-      "line": 4961,
+      "line": 4963,
       "phase": "P8",
       "status": "open",
       "title": "Meet the throughput budget (≥60k RPS)."
@@ -4440,7 +4440,7 @@
     {
       "area": "PERF",
       "id": "PERF-011",
-      "line": 4979,
+      "line": 4981,
       "phase": "P8",
       "status": "open",
       "title": "Meet the p99 latency budget (≤2 ms at 10k RPS)."
@@ -4448,7 +4448,7 @@
     {
       "area": "PERF",
       "id": "PERF-012",
-      "line": 4995,
+      "line": 4997,
       "phase": "P8",
       "status": "open",
       "title": "Meet the per-instance memory budget (≤256 KB)."
@@ -4456,7 +4456,7 @@
     {
       "area": "PERF",
       "id": "PERF-013",
-      "line": 5009,
+      "line": 5011,
       "phase": "P8",
       "status": "open",
       "title": "Meet the build-time budget (≤20 s for 10k LOC)."
@@ -4464,7 +4464,7 @@
     {
       "area": "PERF",
       "id": "PERF-014",
-      "line": 5028,
+      "line": 5030,
       "phase": "P8",
       "status": "open",
       "title": "Evaluate the io_uring backend and publish whether it earns its complexity."
@@ -4472,7 +4472,7 @@
     {
       "area": "PERF",
       "id": "PERF-015",
-      "line": 5030,
+      "line": 5032,
       "phase": "P8",
       "status": "open",
       "title": "Validate the async-single-threaded guest default against a shared-memory alternative."
@@ -4480,7 +4480,7 @@
     {
       "area": "PERF",
       "id": "PERF-016",
-      "line": 5032,
+      "line": 5034,
       "phase": "P8",
       "status": "open",
       "title": "Implement and measure the listener-per-shard optimization."
@@ -4488,7 +4488,7 @@
     {
       "area": "PERF",
       "id": "PERF-017",
-      "line": 5039,
+      "line": 5041,
       "phase": "P8",
       "status": "open",
       "title": "Implement and measure the zero-copy streaming response path."
@@ -4496,7 +4496,7 @@
     {
       "area": "PERF",
       "id": "PERF-018",
-      "line": 5041,
+      "line": 5043,
       "phase": "P8",
       "status": "open",
       "title": "Implement and measure SIMD acceleration in `qqqai/json`."
@@ -4504,7 +4504,7 @@
     {
       "area": "PERF",
       "id": "PERF-019",
-      "line": 5043,
+      "line": 5045,
       "phase": "P8",
       "status": "open",
       "title": "Implement and measure huge-page allocation for guest memory."
@@ -4512,7 +4512,7 @@
     {
       "area": "PERF",
       "id": "PERF-020",
-      "line": 5045,
+      "line": 5047,
       "phase": "P8",
       "status": "done",
       "title": "Implement continuous performance regression detection in CI."
@@ -4520,7 +4520,7 @@
     {
       "area": "PERF",
       "id": "PERF-021",
-      "line": 5059,
+      "line": 5061,
       "phase": "P8",
       "status": "open",
       "title": "Publish the benchmarks dashboard with hardware disclosure."
@@ -4528,7 +4528,7 @@
     {
       "area": "PERF",
       "id": "PERF-022",
-      "line": 5074,
+      "line": 5076,
       "phase": "P8",
       "status": "done",
       "title": "Publish the \"what this does not measure\" section for every benchmark."
@@ -4536,7 +4536,7 @@
     {
       "area": "PERF",
       "id": "PERF-023",
-      "line": 5096,
+      "line": 5098,
       "phase": "P8",
       "status": "open",
       "title": "Implement a tail-latency soak test (30+ minutes at sustained load)."
@@ -4544,7 +4544,7 @@
     {
       "area": "PERF",
       "id": "PERF-024",
-      "line": 5113,
+      "line": 5115,
       "phase": "P8",
       "status": "open",
       "title": "Establish the profiling workflow (perf, samply, VTune) and document it."
@@ -4552,7 +4552,7 @@
     {
       "area": "PERF",
       "id": "PERF-025",
-      "line": 5137,
+      "line": 5139,
       "phase": "P8",
       "status": "open",
       "title": "Implement the CPU-cost-per-request metric derived from fuel."
@@ -4560,7 +4560,7 @@
     {
       "area": "PERF",
       "id": "PERF-026",
-      "line": 5153,
+      "line": 5155,
       "phase": "P8",
       "status": "done",
       "title": "Re-examine every performance claim at each milestone and correct it publicly when wrong."
@@ -4568,7 +4568,7 @@
     {
       "area": "DET",
       "id": "DET-001",
-      "line": 5175,
+      "line": 5177,
       "phase": "P8",
       "status": "open",
       "title": "Implement deterministic mode as an engine configuration profile."
@@ -4576,7 +4576,7 @@
     {
       "area": "DET",
       "id": "DET-002",
-      "line": 5177,
+      "line": 5179,
       "phase": "P8",
       "status": "open",
       "title": "Implement virtualized wall and monotonic clocks."
@@ -4584,7 +4584,7 @@
     {
       "area": "DET",
       "id": "DET-003",
-      "line": 5179,
+      "line": 5181,
       "phase": "P8",
       "status": "open",
       "title": "Implement the seeded CSPRNG for deterministic randomness."
@@ -4592,7 +4592,7 @@
     {
       "area": "DET",
       "id": "DET-004",
-      "line": 5181,
+      "line": 5183,
       "phase": "P8",
       "status": "open",
       "title": "Implement the deterministic single-threaded scheduler for deterministic mode."
@@ -4600,7 +4600,7 @@
     {
       "area": "DET",
       "id": "DET-005",
-      "line": 5183,
+      "line": 5185,
       "phase": "P8",
       "status": "open",
       "title": "Enable NaN canonicalization and disable float fusion in deterministic mode."
@@ -4608,7 +4608,7 @@
     {
       "area": "DET",
       "id": "DET-006",
-      "line": 5185,
+      "line": 5187,
       "phase": "P8",
       "status": "open",
       "title": "Enforce ordered maps in all guest-visible interfaces."
@@ -4616,7 +4616,7 @@
     {
       "area": "DET",
       "id": "DET-007",
-      "line": 5187,
+      "line": 5189,
       "phase": "P8",
       "status": "open",
       "title": "Implement the replay log format."
@@ -4624,7 +4624,7 @@
     {
       "area": "DET",
       "id": "DET-008",
-      "line": 5189,
+      "line": 5191,
       "phase": "P8",
       "status": "open",
       "title": "Implement `--replay` reproducing a recorded execution exactly."
@@ -4632,7 +4632,7 @@
     {
       "area": "DET",
       "id": "DET-009",
-      "line": 5191,
+      "line": 5193,
       "phase": "P8",
       "status": "done",
       "title": "Implement the 10,000-trial bit-identical verification required by the Definition of Done."
@@ -4640,7 +4640,7 @@
     {
       "area": "DET",
       "id": "DET-010",
-      "line": 5204,
+      "line": 5206,
       "phase": "P8",
       "status": "open",
       "title": "Document determinism's honest limits (engine version, target triple, external I/O)."
@@ -4648,7 +4648,7 @@
     {
       "area": "DET",
       "id": "DET-011",
-      "line": 5206,
+      "line": 5208,
       "phase": "P8",
       "status": "open",
       "title": "Implement network-timing recording for replay."
@@ -4656,7 +4656,7 @@
     {
       "area": "DET",
       "id": "DET-012",
-      "line": 5208,
+      "line": 5210,
       "phase": "P8",
       "status": "done",
       "title": "Implement deterministic-mode rejection of shared memory."
@@ -4664,7 +4664,7 @@
     {
       "area": "DET",
       "id": "DET-013",
-      "line": 5220,
+      "line": 5222,
       "phase": "P8",
       "status": "open",
       "title": "Implement deterministic compilation pinning by artifact digest and compiler version."
@@ -4672,7 +4672,7 @@
     {
       "area": "DET",
       "id": "DET-014",
-      "line": 5222,
+      "line": 5224,
       "phase": "P8",
       "status": "open",
       "title": "Publish the determinism documentation with use cases and non-use-cases."
@@ -4680,7 +4680,7 @@
     {
       "area": "DET",
       "id": "DET-015",
-      "line": 5224,
+      "line": 5226,
       "phase": "P8",
       "status": "open",
       "title": "Implement deterministic replay for the agent-sandbox reference architecture."
@@ -4688,7 +4688,7 @@
     {
       "area": "DET",
       "id": "DET-016",
-      "line": 5226,
+      "line": 5228,
       "phase": "P8",
       "status": "open",
       "title": "Implement the deterministic-mode performance-cost report so users know what they pay."
@@ -4696,7 +4696,7 @@
     {
       "area": "OBS",
       "id": "OBS-001",
-      "line": 5231,
+      "line": 5233,
       "phase": "P8",
       "status": "done",
       "title": "Implement the capability-audit stream: granted, denied and attempted."
@@ -4704,7 +4704,7 @@
     {
       "area": "OBS",
       "id": "OBS-002",
-      "line": 5253,
+      "line": 5255,
       "phase": "P8",
       "status": "done",
       "title": "Implement the append-only, hash-chained audit record."
@@ -4712,7 +4712,7 @@
     {
       "area": "OBS",
       "id": "OBS-003",
-      "line": 5267,
+      "line": 5269,
       "phase": "P8",
       "status": "done",
       "title": "Implement SARIF export of the audit record."
@@ -4720,7 +4720,7 @@
     {
       "area": "OBS",
       "id": "OBS-004",
-      "line": 5280,
+      "line": 5282,
       "phase": "P8",
       "status": "done",
       "title": "Implement the compliance-report export."
@@ -4728,7 +4728,7 @@
     {
       "area": "OBS",
       "id": "OBS-005",
-      "line": 5291,
+      "line": 5293,
       "phase": "P8",
       "status": "open",
       "title": "Implement the default metric set."
@@ -4736,7 +4736,7 @@
     {
       "area": "OBS",
       "id": "OBS-006",
-      "line": 5299,
+      "line": 5301,
       "phase": "P8",
       "status": "done",
       "title": "Implement the cardinality lint on metric definitions."
@@ -4744,7 +4744,7 @@
     {
       "area": "OBS",
       "id": "OBS-007",
-      "line": 5326,
+      "line": 5328,
       "phase": "P8",
       "status": "done",
       "title": "Implement structured JSON logging with trace and tenant correlation."
@@ -4752,7 +4752,7 @@
     {
       "area": "OBS",
       "id": "OBS-008",
-      "line": 5346,
+      "line": 5348,
       "phase": "P8",
       "status": "done",
       "title": "Implement host-side redaction using manifest-declared secret names."
@@ -4760,7 +4760,7 @@
     {
       "area": "OBS",
       "id": "OBS-009",
-      "line": 5374,
+      "line": 5376,
       "phase": "P8",
       "status": "open",
       "title": "Implement automatic spans for the fifteen lifecycle steps."
@@ -4768,7 +4768,7 @@
     {
       "area": "OBS",
       "id": "OBS-010",
-      "line": 5390,
+      "line": 5392,
       "phase": "P8",
       "status": "open",
       "title": "Implement W3C Trace Context propagation through `wasi:http`."
@@ -4776,7 +4776,7 @@
     {
       "area": "OBS",
       "id": "OBS-011",
-      "line": 5392,
+      "line": 5394,
       "phase": "P8",
       "status": "done",
       "title": "Implement host-controlled sampling with a tail-sampling option."
@@ -4784,7 +4784,7 @@
     {
       "area": "OBS",
       "id": "OBS-012",
-      "line": 5409,
+      "line": 5411,
       "phase": "P8",
       "status": "open",
       "title": "Implement the OTLP exporter for traces, metrics and logs."
@@ -4792,7 +4792,7 @@
     {
       "area": "OBS",
       "id": "OBS-013",
-      "line": 5411,
+      "line": 5413,
       "phase": "P8",
       "status": "done",
       "title": "Implement the Prometheus scrape endpoint."
@@ -4800,7 +4800,7 @@
     {
       "area": "OBS",
       "id": "OBS-014",
-      "line": 5450,
+      "line": 5452,
       "phase": "P8",
       "status": "done",
       "title": "Prove that a guest cannot influence sampling decisions."
@@ -4808,7 +4808,7 @@
     {
       "area": "OBS",
       "id": "OBS-015",
-      "line": 5478,
+      "line": 5480,
       "phase": "P8",
       "status": "open",
       "title": "Implement per-tenant audit isolation and retention controls."
@@ -4816,7 +4816,7 @@
     {
       "area": "OBS",
       "id": "OBS-016",
-      "line": 5480,
+      "line": 5482,
       "phase": "P8",
       "status": "done",
       "title": "Implement the \"prove what this code did\" report generator."
@@ -4824,7 +4824,7 @@
     {
       "area": "OBS",
       "id": "OBS-017",
-      "line": 5491,
+      "line": 5493,
       "phase": "P8",
       "status": "open",
       "title": "Decide whether to contribute capability-audit semantic conventions to OpenTelemetry (open question `OQ-010`)."
@@ -4832,7 +4832,7 @@
     {
       "area": "OBS",
       "id": "OBS-018",
-      "line": 5493,
+      "line": 5495,
       "phase": "P8",
       "status": "open",
       "title": "Implement the local development observability experience (readable traces in the terminal)."
@@ -4840,7 +4840,7 @@
     {
       "area": "DOD",
       "id": "DOD-001",
-      "line": 5502,
+      "line": 5504,
       "phase": "P9",
       "status": "open",
       "title": "Verify all five languages pass the identical conformance suite, or document gaps with owners and dates."
@@ -4848,7 +4848,7 @@
     {
       "area": "DOD",
       "id": "DOD-002",
-      "line": 5504,
+      "line": 5506,
       "phase": "P9",
       "status": "open",
       "title": "Run the reference application under sustained load for 72 hours with zero crashes."
@@ -4856,7 +4856,7 @@
     {
       "area": "DOD",
       "id": "DOD-003",
-      "line": 5506,
+      "line": 5508,
       "phase": "P9",
       "status": "partial",
       "title": "Verify bit-identical results across 10,000 deterministic trials."
@@ -4864,7 +4864,7 @@
     {
       "area": "DOD",
       "id": "DOD-004",
-      "line": 5516,
+      "line": 5518,
       "phase": "P9",
       "status": "open",
       "title": "Confirm both external audits are complete and all critical and high findings are fixed."
@@ -4872,7 +4872,7 @@
     {
       "area": "DOD",
       "id": "DOD-005",
-      "line": 5518,
+      "line": 5520,
       "phase": "P9",
       "status": "open",
       "title": "Confirm the ≥200-case hostile-guest suite passes with zero host memory-safety incidents."
@@ -4880,7 +4880,7 @@
     {
       "area": "DOD",
       "id": "DOD-006",
-      "line": 5520,
+      "line": 5522,
       "phase": "P9",
       "status": "open",
       "title": "Confirm `qqqai audit --fail-on warning` is clean on all first-party packages."
@@ -4888,7 +4888,7 @@
     {
       "area": "DOD",
       "id": "DOD-007",
-      "line": 5531,
+      "line": 5533,
       "phase": "P9",
       "status": "open",
       "title": "Publish the threat model including explicit non-goals."
@@ -4896,7 +4896,7 @@
     {
       "area": "DOD",
       "id": "DOD-008",
-      "line": 5533,
+      "line": 5535,
       "phase": "P9",
       "status": "open",
       "title": "Verify every numeric target in the performance budget on reference hardware."
@@ -4904,7 +4904,7 @@
     {
       "area": "DOD",
       "id": "DOD-009",
-      "line": 5535,
+      "line": 5537,
       "phase": "P9",
       "status": "open",
       "title": "Publish the benchmark suite with methodology and honest losses."
@@ -4912,7 +4912,7 @@
     {
       "area": "DOD",
       "id": "DOD-010",
-      "line": 5537,
+      "line": 5539,
       "phase": "P9",
       "status": "open",
       "title": "Verify TTFA ≤3 minutes on a clean machine across all three OSes."
@@ -4920,7 +4920,7 @@
     {
       "area": "DOD",
       "id": "DOD-011",
-      "line": 5539,
+      "line": 5541,
       "phase": "P9",
       "status": "open",
       "title": "Verify 100% of error codes are documented with remediation."
@@ -4928,7 +4928,7 @@
     {
       "area": "DOD",
       "id": "DOD-012",
-      "line": 5541,
+      "line": 5543,
       "phase": "P9",
       "status": "open",
       "title": "Verify 100% of public APIs have a compiling example."
@@ -4936,7 +4936,7 @@
     {
       "area": "DOD",
       "id": "DOD-013",
-      "line": 5543,
+      "line": 5545,
       "phase": "P9",
       "status": "open",
       "title": "Verify `qqqai schema --all` is complete and drift-checked in CI."
@@ -4944,7 +4944,7 @@
     {
       "area": "DOD",
       "id": "DOD-014",
-      "line": 5545,
+      "line": 5547,
       "phase": "P9",
       "status": "open",
       "title": "Verify the MCP server exposes all V1 tools with structured output."
@@ -4952,7 +4952,7 @@
     {
       "area": "DOD",
       "id": "DOD-015",
-      "line": 5547,
+      "line": 5549,
       "phase": "P9",
       "status": "open",
       "title": "Verify the agent benchmark meets its success target."
@@ -4960,7 +4960,7 @@
     {
       "area": "DOD",
       "id": "DOD-016",
-      "line": 5549,
+      "line": 5551,
       "phase": "P9",
       "status": "open",
       "title": "Publish licence, governance, contribution guide and code of conduct."
@@ -4968,7 +4968,7 @@
     {
       "area": "DOD",
       "id": "DOD-017",
-      "line": 5551,
+      "line": 5553,
       "phase": "P9",
       "status": "open",
       "title": "Verify the deprecation policy is written and in force."
@@ -4976,7 +4976,7 @@
     {
       "area": "DOD",
       "id": "DOD-018",
-      "line": 5553,
+      "line": 5555,
       "phase": "P9",
       "status": "open",
       "title": "Verify at least two maintainers have commit rights and a succession plan exists."
@@ -4984,7 +4984,7 @@
     {
       "area": "DOD",
       "id": "DOD-019",
-      "line": 5555,
+      "line": 5557,
       "phase": "P9",
       "status": "open",
       "title": "Publish the support and security-response policies."
@@ -4992,7 +4992,7 @@
     {
       "area": "DOD",
       "id": "DOD-020",
-      "line": 5557,
+      "line": 5559,
       "phase": "P9",
       "status": "open",
       "title": "Run the independent third-party acceptance test: an external team builds and ships a real app from the docs alone."
@@ -5000,7 +5000,7 @@
     {
       "area": "DOD",
       "id": "DOD-021",
-      "line": 5559,
+      "line": 5561,
       "phase": "P9",
       "status": "open",
       "title": "Verify the install path on a genuinely clean machine for each supported OS and each install channel."
@@ -5008,7 +5008,7 @@
     {
       "area": "DOD",
       "id": "DOD-022",
-      "line": 5561,
+      "line": 5563,
       "phase": "P9",
       "status": "open",
       "title": "Verify the migration tool on at least three real Node projects with published results."
@@ -5016,7 +5016,7 @@
     {
       "area": "DOD",
       "id": "DOD-023",
-      "line": 5563,
+      "line": 5565,
       "phase": "P9",
       "status": "open",
       "title": "Verify the registry has enough packages for the reference application to be built without vendoring."
@@ -5024,7 +5024,7 @@
     {
       "area": "DOD",
       "id": "DOD-024",
-      "line": 5565,
+      "line": 5567,
       "phase": "P9",
       "status": "open",
       "title": "Hold the go/no-go review with the cut-order list on the table."
@@ -5032,7 +5032,7 @@
     {
       "area": "GTM",
       "id": "GTM-001",
-      "line": 5570,
+      "line": 5572,
       "phase": "P9",
       "status": "open",
       "title": "Build the qqq.codes website as a QQQ application (dogfooding)."
@@ -5040,7 +5040,7 @@
     {
       "area": "GTM",
       "id": "GTM-002",
-      "line": 5572,
+      "line": 5574,
       "phase": "P9",
       "status": "open",
       "title": "Publish the competitive-comparison page with cited evidence and no disparagement."
@@ -5048,7 +5048,7 @@
     {
       "area": "GTM",
       "id": "GTM-003",
-      "line": 5574,
+      "line": 5576,
       "phase": "P9",
       "status": "open",
       "title": "Launch the migration-programme landing page and the agent-assisted migration offer."
@@ -5056,7 +5056,7 @@
     {
       "area": "GTM",
       "id": "GTM-004",
-      "line": 5576,
+      "line": 5578,
       "phase": "P9",
       "status": "open",
       "title": "Execute Phase 0 (credibility): publish benchmarks and the security model; seek public criticism."
@@ -5064,7 +5064,7 @@
     {
       "area": "GTM",
       "id": "GTM-005",
-      "line": 5578,
+      "line": 5580,
       "phase": "P9",
       "status": "open",
       "title": "Execute Phase 1 (agents): MCP integration, agent-sandbox reference architecture, framework partnerships."
@@ -5072,7 +5072,7 @@
     {
       "area": "GTM",
       "id": "GTM-006",
-      "line": 5580,
+      "line": 5582,
       "phase": "P9",
       "status": "open",
       "title": "Execute Phase 2 (edge/serverless): publish density and cold-start case studies with real numbers."
@@ -5080,7 +5080,7 @@
     {
       "area": "GTM",
       "id": "GTM-007",
-      "line": 5582,
+      "line": 5584,
       "phase": "P9",
       "status": "open",
       "title": "Execute Phase 3 (polyglot teams): migration tooling, parity, ported registry."
@@ -5088,7 +5088,7 @@
     {
       "area": "GTM",
       "id": "GTM-008",
-      "line": 5584,
+      "line": 5586,
       "phase": "P9",
       "status": "open",
       "title": "Execute Phase 4 (enterprise): Fabric, compliance evidence, support."
@@ -5096,7 +5096,7 @@
     {
       "area": "GTM",
       "id": "GTM-009",
-      "line": 5586,
+      "line": 5588,
       "phase": "P9",
       "status": "open",
       "title": "Secure the first three design partners before M3."
@@ -5104,7 +5104,7 @@
     {
       "area": "GTM",
       "id": "GTM-010",
-      "line": 5588,
+      "line": 5590,
       "phase": "P9",
       "status": "open",
       "title": "Publish the agent-sandbox reference implementation as open source."
@@ -5112,7 +5112,7 @@
     {
       "area": "GTM",
       "id": "GTM-011",
-      "line": 5590,
+      "line": 5592,
       "phase": "P9",
       "status": "open",
       "title": "Build the pricing page and the licence FAQ together, so they never contradict each other."
@@ -5120,7 +5120,7 @@
     {
       "area": "GTM",
       "id": "GTM-012",
-      "line": 5592,
+      "line": 5594,
       "phase": "P9",
       "status": "open",
       "title": "Establish the enterprise-sales motion: what we sell, to whom, and what we refuse to sell."
@@ -5128,7 +5128,7 @@
     {
       "area": "GTM",
       "id": "GTM-013",
-      "line": 5594,
+      "line": 5596,
       "phase": "P9",
       "status": "open",
       "title": "Publish the OEM/platform-embedding programme."
@@ -5136,7 +5136,7 @@
     {
       "area": "GTM",
       "id": "GTM-014",
-      "line": 5596,
+      "line": 5598,
       "phase": "P9",
       "status": "open",
       "title": "Establish the developer-relations content programme (talks, essays, live coding)."
@@ -5144,7 +5144,7 @@
     {
       "area": "RISK",
       "id": "RISK-001",
-      "line": 5601,
+      "line": 5603,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-01` ecosystem emptiness; alert below 50 useful packages at M6."
@@ -5152,7 +5152,7 @@
     {
       "area": "RISK",
       "id": "RISK-002",
-      "line": 5603,
+      "line": 5605,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-02` language toolchain immaturity; run spikes from M1 and drop a language after two failures."
@@ -5160,7 +5160,7 @@
     {
       "area": "RISK",
       "id": "RISK-003",
-      "line": 5605,
+      "line": 5607,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-03` Wasmtime API instability; quarterly upgrade sprint."
@@ -5168,7 +5168,7 @@
     {
       "area": "RISK",
       "id": "RISK-004",
-      "line": 5607,
+      "line": 5609,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-04` sandbox escape; 72-hour patch target and public advisories."
@@ -5176,7 +5176,7 @@
     {
       "area": "RISK",
       "id": "RISK-005",
-      "line": 5609,
+      "line": 5611,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-05` competitive performance; measure at M3 and pivot messaging if missed by >2×."
@@ -5184,7 +5184,7 @@
     {
       "area": "RISK",
       "id": "RISK-006",
-      "line": 5611,
+      "line": 5613,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-06` competitor capability copying."
@@ -5192,7 +5192,7 @@
     {
       "area": "RISK",
       "id": "RISK-007",
-      "line": 5613,
+      "line": 5615,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-07` licence-driven enterprise friction."
@@ -5200,7 +5200,7 @@
     {
       "area": "RISK",
       "id": "RISK-008",
-      "line": 5615,
+      "line": 5617,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-08` late structural audit findings; audit at M7."
@@ -5208,7 +5208,7 @@
     {
       "area": "RISK",
       "id": "RISK-009",
-      "line": 5617,
+      "line": 5619,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-09` runway exhaustion; alert at six months before M7."
@@ -5216,7 +5216,7 @@
     {
       "area": "RISK",
       "id": "RISK-010",
-      "line": 5619,
+      "line": 5621,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-10` positioning confusion; verify with user research at 3 months."
@@ -5224,7 +5224,7 @@
     {
       "area": "RISK",
       "id": "RISK-011",
-      "line": 5621,
+      "line": 5623,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-11` CPython-to-Wasm viability; measure at M5."
@@ -5232,7 +5232,7 @@
     {
       "area": "RISK",
       "id": "RISK-012",
-      "line": 5623,
+      "line": 5625,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-12` trademark friction; legal review before launch."
@@ -5240,7 +5240,7 @@
     {
       "area": "RISK",
       "id": "RISK-013",
-      "line": 5625,
+      "line": 5627,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-13` documentation and agent-contract drift."
@@ -5248,7 +5248,7 @@
     {
       "area": "RISK",
       "id": "RISK-014",
-      "line": 5627,
+      "line": 5629,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-14` standards churn in Wasm/WASI."
@@ -5256,7 +5256,7 @@
     {
       "area": "RISK",
       "id": "RISK-015",
-      "line": 5629,
+      "line": 5631,
       "phase": "P9",
       "status": "open",
       "title": "Track `R-15` maintainer concentration; require a second maintainer by M5."
@@ -5264,7 +5264,7 @@
     {
       "area": "FUT",
       "id": "FUT-001",
-      "line": 5638,
+      "line": 5640,
       "phase": "P10",
       "status": "open",
       "title": "QQQ Fabric GA: multi-host control plane, fleet policy, attestation."
@@ -5272,7 +5272,7 @@
     {
       "area": "FUT",
       "id": "FUT-002",
-      "line": 5640,
+      "line": 5642,
       "phase": "P10",
       "status": "open",
       "title": "Browser target: the QQQ host compiled to Wasm, running components in-browser."
@@ -5280,7 +5280,7 @@
     {
       "area": "FUT",
       "id": "FUT-003",
-      "line": 5642,
+      "line": 5644,
       "phase": "P10",
       "status": "open",
       "title": "Native codegen escape hatch with MPK-based isolation replacing the Wasm sandbox."
@@ -5288,7 +5288,7 @@
     {
       "area": "FUT",
       "id": "FUT-004",
-      "line": 5644,
+      "line": 5646,
       "phase": "P10",
       "status": "open",
       "title": "Component Model cooperative-threads support, contingent on Wasmtime's stack-switching."
@@ -5296,7 +5296,7 @@
     {
       "area": "FUT",
       "id": "FUT-005",
-      "line": 5646,
+      "line": 5648,
       "phase": "P10",
       "status": "open",
       "title": "Distributed composition: components calling components over the network transparently."
@@ -5304,7 +5304,7 @@
     {
       "area": "FUT",
       "id": "FUT-006",
-      "line": 5648,
+      "line": 5650,
       "phase": "P10",
       "status": "open",
       "title": "Formal verification of the capability engine."
@@ -5312,7 +5312,7 @@
     {
       "area": "FUT",
       "id": "FUT-007",
-      "line": 5650,
+      "line": 5652,
       "phase": "P10",
       "status": "open",
       "title": "Implement `qqq:ai` local inference as a metered capability (interface already authored in `ABI-013`)."
@@ -5320,7 +5320,7 @@
     {
       "area": "FUT",
       "id": "FUT-008",
-      "line": 5652,
+      "line": 5654,
       "phase": "P10",
       "status": "open",
       "title": "GPU capability with metered access."
@@ -5328,7 +5328,7 @@
     {
       "area": "FUT",
       "id": "FUT-009",
-      "line": 5654,
+      "line": 5656,
       "phase": "P10",
       "status": "open",
       "title": "Time-travel debugging with reverse stepping, built on determinism."
@@ -5336,7 +5336,7 @@
     {
       "area": "FUT",
       "id": "FUT-010",
-      "line": 5656,
+      "line": 5658,
       "phase": "P10",
       "status": "open",
       "title": "QQQ Cloud hosted platform."
@@ -5344,7 +5344,7 @@
     {
       "area": "FUT",
       "id": "FUT-011",
-      "line": 5658,
+      "line": 5660,
       "phase": "P10",
       "status": "open",
       "title": "Hardware-backed attestation (TPM / Secure Enclave)."
@@ -5352,7 +5352,7 @@
     {
       "area": "FUT",
       "id": "FUT-012",
-      "line": 5660,
+      "line": 5662,
       "phase": "P10",
       "status": "open",
       "title": "Registry federation for private registries that mirror and extend the public one."
@@ -5360,7 +5360,7 @@
     {
       "area": "OQ",
       "id": "OQ-001",
-      "line": 5665,
+      "line": 5667,
       "phase": "P10",
       "status": "open",
       "title": "Define and close the free-tier eligibility boundary and revenue-attestation mechanism."
@@ -5368,7 +5368,7 @@
     {
       "area": "OQ",
       "id": "OQ-002",
-      "line": 5667,
+      "line": 5669,
       "phase": "P10",
       "status": "done",
       "title": "Decide how the AssemblyScript path is named and marketed."
@@ -5376,7 +5376,7 @@
     {
       "area": "OQ",
       "id": "OQ-003",
-      "line": 5670,
+      "line": 5672,
       "phase": "P10",
       "status": "done",
       "title": "Decide whether Python is first-class or experimental, based on the M5 spike."
@@ -5384,7 +5384,7 @@
     {
       "area": "OQ",
       "id": "OQ-004",
-      "line": 5673,
+      "line": 5675,
       "phase": "P10",
       "status": "open",
       "title": "Decide whether Windows is first-class or best-effort."
@@ -5392,7 +5392,7 @@
     {
       "area": "OQ",
       "id": "OQ-005",
-      "line": 5675,
+      "line": 5677,
       "phase": "P10",
       "status": "done",
       "title": "Ratify the Wasm shared-memory and threads policy."
@@ -5400,7 +5400,7 @@
     {
       "area": "OQ",
       "id": "OQ-006",
-      "line": 5698,
+      "line": 5700,
       "phase": "P10",
       "status": "open",
       "title": "Decide whether to build the registry now or bootstrap on OCI."
@@ -5408,7 +5408,7 @@
     {
       "area": "OQ",
       "id": "OQ-007",
-      "line": 5700,
+      "line": 5702,
       "phase": "P10",
       "status": "done",
       "title": "Decide whether `wasi:http` is sufficient or a custom HTTP interface is required."
@@ -5416,7 +5416,7 @@
     {
       "area": "OQ",
       "id": "OQ-008",
-      "line": 5705,
+      "line": 5707,
       "phase": "P10",
       "status": "open",
       "title": "Choose the exact Fabric licence."
@@ -5424,7 +5424,7 @@
     {
       "area": "OQ",
       "id": "OQ-009",
-      "line": 5707,
+      "line": 5709,
       "phase": "P10",
       "status": "open",
       "title": "Decide on Bytecode Alliance engagement."
@@ -5432,7 +5432,7 @@
     {
       "area": "OQ",
       "id": "OQ-010",
-      "line": 5709,
+      "line": 5711,
       "phase": "P10",
       "status": "open",
       "title": "Decide on contributing capability-audit semantic conventions to OpenTelemetry."
@@ -5440,7 +5440,7 @@
     {
       "area": "OQ",
       "id": "OQ-011",
-      "line": 5711,
+      "line": 5713,
       "phase": "P10",
       "status": "open",
       "title": "Decide whether `qqq:ai` ships inside the V1 line or moves to V2."
@@ -5448,7 +5448,7 @@
     {
       "area": "OQ",
       "id": "OQ-012",
-      "line": 5713,
+      "line": 5715,
       "phase": "P10",
       "status": "done",
       "title": "Decide the deprecation window: two minor versions, or a fixed time period."
@@ -5456,7 +5456,7 @@
     {
       "area": "AI",
       "id": "AI-001",
-      "line": 5726,
+      "line": 5728,
       "phase": "P10",
       "status": "open",
       "title": "Ratify the `qqq:ai@1.0` interface (authored in `ABI-013`, implementation deferred)."
@@ -5464,7 +5464,7 @@
     {
       "area": "AI",
       "id": "AI-002",
-      "line": 5728,
+      "line": 5730,
       "phase": "P10",
       "status": "open",
       "title": "Implement host-owned model loading and memory management."
@@ -5472,7 +5472,7 @@
     {
       "area": "AI",
       "id": "AI-003",
-      "line": 5730,
+      "line": 5732,
       "phase": "P10",
       "status": "open",
       "title": "Implement token metering as a first-class resource, like fuel."
@@ -5480,7 +5480,7 @@
     {
       "area": "AI",
       "id": "AI-004",
-      "line": 5732,
+      "line": 5734,
       "phase": "P10",
       "status": "open",
       "title": "Implement `max_tokens_per_request` enforcement by the host."
@@ -5488,7 +5488,7 @@
     {
       "area": "AI",
       "id": "AI-005",
-      "line": 5734,
+      "line": 5736,
       "phase": "P10",
       "status": "open",
       "title": "Implement the local GGML-family provider as the default."
@@ -5496,7 +5496,7 @@
     {
       "area": "AI",
       "id": "AI-006",
-      "line": 5736,
+      "line": 5738,
       "phase": "P10",
       "status": "open",
       "title": "Implement cloud providers as a separately granted capability with named endpoints."
@@ -5504,7 +5504,7 @@
     {
       "area": "AI",
       "id": "AI-007",
-      "line": 5738,
+      "line": 5740,
       "phase": "P10",
       "status": "open",
       "title": "Implement the size-constrained model allowlist (`*:<=4B`)."
@@ -5512,7 +5512,7 @@
     {
       "area": "AI",
       "id": "AI-008",
-      "line": 5740,
+      "line": 5742,
       "phase": "P10",
       "status": "open",
       "title": "Ensure the interface is async-only and documented as never being on the request hot path."
@@ -5520,7 +5520,7 @@
     {
       "area": "AI",
       "id": "AI-009",
-      "line": 5742,
+      "line": 5744,
       "phase": "P10",
       "status": "open",
       "title": "Implement per-tenant model isolation and accounting."
@@ -5528,7 +5528,7 @@
     {
       "area": "AI",
       "id": "AI-010",
-      "line": 5744,
+      "line": 5746,
       "phase": "P10",
       "status": "open",
       "title": "Publish the `qqq:ai` documentation with honest latency expectations."
@@ -5536,7 +5536,7 @@
     {
       "area": "REG",
       "id": "REG-001",
-      "line": 5753,
+      "line": 5755,
       "phase": "P10",
       "status": "open",
       "title": "Add the eighteen Q-Block rows to Proposal §0.6 and regenerate `docs/glossary.md`."
@@ -5544,7 +5544,7 @@
     {
       "area": "REG",
       "id": "REG-002",
-      "line": 5755,
+      "line": 5757,
       "phase": "P10",
       "status": "open",
       "title": "Write Proposal §4.8 with its subsections and their citations."
@@ -5552,7 +5552,7 @@
     {
       "area": "REG",
       "id": "REG-003",
-      "line": 5757,
+      "line": 5759,
       "phase": "P10",
       "status": "open",
       "title": "Record `§D-011` and `§O-740` in the Observations register."
@@ -5560,7 +5560,7 @@
     {
       "area": "REG",
       "id": "REG-004",
-      "line": 5759,
+      "line": 5761,
       "phase": "P10",
       "status": "open",
       "title": "Add `crates/qqq-core/tests/qblock.rs` with five tests, including the control."
@@ -5568,7 +5568,7 @@
     {
       "area": "REG",
       "id": "REG-005",
-      "line": 5761,
+      "line": 5763,
       "phase": "P10",
       "status": "open",
       "title": "Add `tools/fault_inject_qblock.py` with four injections and prove each is DETECTED."
@@ -5576,7 +5576,7 @@
     {
       "area": "REG",
       "id": "REG-006",
-      "line": 5763,
+      "line": 5765,
       "phase": "P10",
       "status": "open",
       "title": "Add the `qblock-declared-namespaces` resolver to `check_doc_claims.py` and use it in §4.8.5."
@@ -5584,7 +5584,7 @@
     {
       "area": "REG",
       "id": "REG-007",
-      "line": 5765,
+      "line": 5767,
       "phase": "P10",
       "status": "open",
       "title": "Add the `qblock-bindable-namespaces` resolver and use it in §4.8.5."
@@ -5592,7 +5592,7 @@
     {
       "area": "REG",
       "id": "REG-008",
-      "line": 5767,
+      "line": 5769,
       "phase": "P10",
       "status": "open",
       "title": "Add the `qblock-bound-capabilities` resolver and use it in §4.8.5."
@@ -5600,7 +5600,7 @@
     {
       "area": "REG",
       "id": "REG-009",
-      "line": 5769,
+      "line": 5771,
       "phase": "P10",
       "status": "done",
       "title": "Repair `fix_stanza_for` so it emits a stanza only for a bindable namespace, and otherwise names the state."
@@ -5608,7 +5608,7 @@
     {
       "area": "REG",
       "id": "REG-010",
-      "line": 5773,
+      "line": 5775,
       "phase": "P10",
       "status": "done",
       "title": "Add `deny_unknown_fields` to `Manifest`, with a test and a positive control."
@@ -5616,7 +5616,7 @@
     {
       "area": "REG",
       "id": "REG-011",
-      "line": 5777,
+      "line": 5779,
       "phase": "P10",
       "status": "open",
       "title": "State the lockfile's real forward-compatibility rule: a new *field* is minor, a new *structure* is a version bump."
@@ -5624,7 +5624,7 @@
     {
       "area": "REG",
       "id": "REG-012",
-      "line": 5779,
+      "line": 5781,
       "phase": "P10",
       "status": "open",
       "title": "Reconcile the three host-module counts to one owner, named for its level."
@@ -5632,7 +5632,7 @@
     {
       "area": "REG",
       "id": "REG-013",
-      "line": 5781,
+      "line": 5783,
       "phase": "P10",
       "status": "open",
       "title": "Add `tools/gen_capability_catalogue.py` with its `--check` half, and commit its generated output."
@@ -5640,7 +5640,7 @@
     {
       "area": "REG",
       "id": "REG-014",
-      "line": 5783,
+      "line": 5785,
       "phase": "P10",
       "status": "open",
       "title": "Provide the `qqqai source` verb and publish a source bundle at `caps = [\"none\"]`, never resolvable."
@@ -5648,7 +5648,7 @@
     {
       "area": "REG",
       "id": "REG-015",
-      "line": 5785,
+      "line": 5787,
       "phase": "P10",
       "status": "open",
       "title": "Assert in a workspace test that no install path spawns a subprocess or compiles anything — no `postinstall`, no `build.rs`, no install-time toolchain."
@@ -5656,7 +5656,7 @@
     {
       "area": "REG",
       "id": "REG-016",
-      "line": 5787,
+      "line": 5789,
       "phase": "P10",
       "status": "open",
       "title": "Keep package, version, artifact digest and capability set as four separate fields in the lockfile and in `qqqai info`."
@@ -5664,7 +5664,7 @@
     {
       "area": "REG",
       "id": "REG-017",
-      "line": 5789,
+      "line": 5791,
       "phase": "P10",
       "status": "open",
       "title": "Assert that only the four verbs reach the registry, and that `install` performs no execution."
@@ -5672,7 +5672,7 @@
     {
       "area": "REG",
       "id": "REG-018",
-      "line": 5791,
+      "line": 5793,
       "phase": "P10",
       "status": "open",
       "title": "Require an ADR that re-derives the narrowing argument before a fourth capability kind lands, and assert `GrantSet` stays a set."
@@ -5680,7 +5680,7 @@
     {
       "area": "REG",
       "id": "REG-019",
-      "line": 5793,
+      "line": 5795,
       "phase": "P10",
       "status": "open",
       "title": "Refuse a publish whose artifact is not a component or whose manifest is absent, naming all four negatives."
@@ -5688,7 +5688,7 @@
     {
       "area": "REG",
       "id": "REG-020",
-      "line": 5795,
+      "line": 5797,
       "phase": "P10",
       "status": "open",
       "title": "Resolve the three open questions at the milestones named, recording each as a `§Q-` entry."

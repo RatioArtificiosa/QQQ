@@ -4,6 +4,12 @@
 
 ### Security
 
+- **cap**: model `[capabilities.queue]` (CAP-019): typed
+  entries with a direction enum selecting the grant (no
+  widening flag to forget), named validation, generator
+  stanzas for both directions, refusal range narrowed to
+  CAP-020..022. Red-first.
+
 - **cap**: model `[capabilities.kv]` (CAP-018): typed stores
   with read-by-default and explicit `write = true` widening,
   blank-store validation, generator stanzas for both grants,

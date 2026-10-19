@@ -116,6 +116,13 @@
           "description": "Namespaces `Capability::all()` knows that have no typed struct yet. Kept so a declaration parses and can be *reported*; the host binds only what it models.…",
           "type": "object"
         },
+        "queue": {
+          "description": "`[[capabilities.queue]]` — one entry per queue.",
+          "items": {
+            "$ref": "#/$defs/QueueCapability"
+          },
+          "type": "array"
+        },
         "sql": {
           "description": "`[[capabilities.sql]]` — one entry per database.",
           "items": {
@@ -504,6 +511,31 @@
         "version"
       ],
       "title": "qqq-toml#Package",
+      "type": "object"
+    },
+    "QueueCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#QueueCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `QueueCapability` table.",
+      "properties": {
+        "direction": {
+          "description": "Which direction this entry grants.",
+          "enum": [
+            "publish",
+            "subscribe"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "description": "Logical name, used in diagnostics and audit rows.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "direction",
+        "name"
+      ],
+      "title": "qqq-toml#QueueCapability",
       "type": "object"
     },
     "RequestLimits": {

@@ -342,6 +342,9 @@ pub struct Capabilities {
     /// `[[capabilities.sql]]` — one entry per database.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sql: Vec<SqlCapability>,
+    /// `[[capabilities.queue]]` — one entry per queue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queue: Vec<QueueCapability>,
     /// `[capabilities.kv]` — named stores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv: Option<KvCapability>,
@@ -557,6 +560,40 @@ pub struct KvCapability {
     /// Widen from read-only to `kv.write`. Default denies.
     #[serde(default)]
     pub write: bool,
+}
+
+/// Queue direction. Ordered publish-before-subscribe so narrowing
+/// overlays compare them directly, like `FsMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QueueDirection {
+    /// May publish; may not subscribe.
+    Publish,
+    /// May subscribe; may not publish.
+    Subscribe,
+}
+
+impl QueueDirection {
+    /// The manifest spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Publish => "publish",
+            Self::Subscribe => "subscribe",
+        }
+    }
+}
+
+/// One `[[capabilities.queue]]` entry: a named queue in one
+/// direction. Direction selects the grant — publish never smuggles
+/// subscribe — so there is no widening flag to forget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueCapability {
+    /// Logical name, used in diagnostics and audit rows.
+    pub name: String,
+    /// Which direction this entry grants.
+    pub direction: QueueDirection,
 }
 
 /// `[limits]` — enforceable resource bounds.
@@ -1275,6 +1312,7 @@ impl Manifest {
         // unknown fields (the struct's own deny already covers those).
         Self::validate_sql(&self.capabilities.sql)?;
         Self::validate_kv(self.capabilities.kv.as_ref())?;
+        Self::validate_queue(&self.capabilities.queue)?;
 
         // -- unmodelled capability namespaces must still be known -------
         // The `flatten` map lets any `[capabilities.<ns>]` table parse;
@@ -1353,6 +1391,21 @@ impl Manifest {
         Ok(())
     }
 
+    /// Every `[[capabilities.queue]]` entry names a real pipe in a
+    /// real direction: an undressed declaration would grant a pipe
+    /// to nowhere.
+    fn validate_queue(entries: &[QueueCapability]) -> Result<(), ManifestError> {
+        for (i, q) in entries.iter().enumerate() {
+            if q.name.trim().is_empty() {
+                return Err(ManifestError::InvalidField {
+                    field: format!("capabilities.queue[{i}]"),
+                    reason: "name is required".to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// The capabilities this manifest grants, as a concrete set.
     ///
     /// This is step 1's output and step 2's input. Note that it reflects only
@@ -1408,6 +1461,14 @@ impl Manifest {
             push(Capability::SqlQuery);
             if db.execute {
                 push(Capability::SqlExecute);
+            }
+        }
+        for q in &self.capabilities.queue {
+            // Direction selects the grant: no widening flag exists to
+            // forget, so publish can never smuggle subscribe.
+            match q.direction {
+                QueueDirection::Publish => push(Capability::QueuePublish),
+                QueueDirection::Subscribe => push(Capability::QueueSubscribe),
             }
         }
         if let Some(kv) = &self.capabilities.kv {
@@ -2210,29 +2271,29 @@ allow_origins = ["https://app.example.com"]
     /// (Fails while `deny_unknown_fields` sits on `Capabilities`,
     /// because serde rejects before the map collects — the
     /// interaction this test exists to pin.)
-    /// (`queue` stands in since `sql` graduated to a typed table in
-    /// CAP-017 and `kv` in CAP-018; the shape proved is the
+    /// (`ai` stands in since `sql`/`kv`/`queue` graduated to typed
+    /// tables in CAP-017/018/019; the shape proved is the
     /// catch-all's, not theirs.)
     #[test]
     fn an_unmodelled_namespace_declaration_parses() {
-        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.queue]\nname = \"orders.events\"\n";
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.ai]\nproviders = [\"local:ggml\"]\n";
         let m = Manifest::parse(src).expect("a known namespace must declare");
         assert!(
-            m.capabilities.other.contains_key("queue"),
+            m.capabilities.other.contains_key("ai"),
             "the declaration must land in the catch-all"
         );
         // Key presence is not enough: the value must survive intact,
         // or the catch-all is a second silent drop. Only the key set
         // is validated — the shape belongs to the future typed struct.
         assert_eq!(
-            m.capabilities.other["queue"]["name"].as_str(),
-            Some("orders.events"),
+            m.capabilities.other["ai"]["providers"][0].as_str(),
+            Some("local:ggml"),
             "the declared table body must round-trip through the catch-all"
         );
         assert!(
             !m.declared_capabilities()
                 .iter()
-                .any(|c| c.namespace() == "queue"),
+                .any(|c| c.namespace() == "ai"),
             "declaring is not binding: the host grants nothing unmodelled"
         );
     }
@@ -2255,13 +2316,13 @@ allow_origins = ["https://app.example.com"]
     /// A scalar under `[capabilities]` is not a declaration: the
     /// validator requires tables, so a misplaced value fails loudly
     /// instead of validating as a "known" key with no meaning.
-    /// (`queue` stands in: `sql` is typed now and `kv` followed in
-    /// CAP-018 — both fail earlier at serde type-checking, also
-    /// loudly, also naming the table.)
+    /// (`ai` stands in: `sql`/`kv` are typed now and `queue`
+    /// followed in CAP-019 — all fail earlier at serde
+    /// type-checking, also loudly, also naming the table.)
     #[test]
     fn a_scalar_capability_value_is_refused_not_collected() {
         let src =
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nqueue = \"events\"\n";
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nai = \"models\"\n";
         let err = Manifest::parse(src).expect_err("a scalar capability value must be refused");
         let text = err.to_string();
         assert!(
@@ -2271,18 +2332,17 @@ allow_origins = ["https://app.example.com"]
     }
 
     /// An array-shaped unmodelled declaration parses into the
-    /// catch-all without granting: `[[capabilities.queue]]` is the
-    /// natural multi-entry shape (the old generator emitted it), so
-    /// refusing arrays while accepting tables would punish the
-    /// shape users reach for first. Grants nothing, like all
-    /// unmodelled content.
+    /// catch-all without granting: `[[capabilities.ai]]` is the
+    /// natural multi-entry shape, so refusing arrays while accepting
+    /// tables would punish the shape users reach for first. Grants
+    /// nothing, like all unmodelled content.
     #[test]
     fn unmodelled_array_shape_parses_without_granting() {
         let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
-            [[capabilities.queue]]\nname = \"orders.events\"\n";
+            [[capabilities.ai]]\nproviders = [\"local:ggml\"]\n";
         let m = Manifest::parse(src).expect("array shape must declare");
         assert!(
-            m.capabilities.other.contains_key("queue"),
+            m.capabilities.other.contains_key("ai"),
             "the array lands in the catch-all"
         );
         assert!(
@@ -2477,6 +2537,52 @@ allow_origins = ["https://app.example.com"]
         assert!(
             blank.declared_capabilities().is_empty(),
             "a blank write flag grants nothing"
+        );
+    }
+
+    /// A `queue` declaration grants by direction: `publish` grants
+    /// `queue.publish`, `subscribe` grants `queue.subscribe`, and
+    /// one direction never smuggles the other.
+    #[test]
+    fn queue_table_parses_and_grants_by_direction() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.queue]]\nname = \"orders.events\"\ndirection = \"publish\"\n";
+        let m = Manifest::parse(src).expect("the queue table must parse");
+        let granted = m.declared_capabilities();
+        assert!(
+            granted.contains(&crate::capability::Capability::QueuePublish),
+            "publish direction grants publish"
+        );
+        assert!(
+            !granted.contains(&crate::capability::Capability::QueueSubscribe),
+            "publish must not smuggle subscribe"
+        );
+    }
+
+    /// The subscribe direction grants subscribe, symmetrically.
+    #[test]
+    fn queue_subscribe_direction_grants_subscribe() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.queue]]\nname = \"orders.events\"\ndirection = \"subscribe\"\n";
+        let m = Manifest::parse(src).expect("the queue table must parse");
+        assert!(
+            m.declared_capabilities()
+                .contains(&crate::capability::Capability::QueueSubscribe),
+            "subscribe direction grants subscribe"
+        );
+    }
+
+    /// A `queue` entry without a name or direction is refused: an
+    /// undressed declaration would grant a pipe to nowhere.
+    #[test]
+    fn queue_table_requires_name_and_direction() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.queue]]\nname = \"\"\ndirection = \"publish\"\n";
+        let err = Manifest::parse(src).expect_err("a nameless queue entry must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.queue"),
+            "refusal names the table: {text}"
         );
     }
 

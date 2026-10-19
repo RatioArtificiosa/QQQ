@@ -2222,7 +2222,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: `KvCapability` (stores + `write` flag); empty/blank stores refused; read by default, `write = true` widens; generator stanzas for both grants; refusal range narrowed to CAP-019..022.
   → Measured: `kv_table_parses_and_grants_read_not_write`, `kv_write_flag_grants_write`, `kv_table_requires_nonempty_stores`, `kv_write_stanza_parses_and_grants_write` — 1/1 each; `every_suggested_stanza_parses` covers both kv stanzas.
   → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.
-- [ ] **CAP-019** Model `[capabilities.queue]` in the manifest: typed struct, validation, grant derivation for `queue.publish`/`queue.subscribe`, and a generator stanza that parses.
+- [x] **CAP-019** Model `[capabilities.queue]` in the manifest: typed struct, validation, grant derivation for `queue.publish`/`queue.subscribe`, and a generator stanza that parses.
+  → Done: `QueueCapability` (name + `QueueDirection` publish/subscribe enum, ordered for narrowing overlays like `FsMode`); direction selects the grant with no widening flag to forget; generator stanzas for both directions; refusal range narrowed to CAP-020..022.
+  → Measured: `queue_table_parses_and_grants_by_direction`, `queue_subscribe_direction_grants_subscribe`, `queue_table_requires_name_and_direction`, `queue_subscribe_stanza_parses_and_grants_subscribe` — 1/1 each; `every_suggested_stanza_parses` covers both queue stanzas.
   → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.
 - [ ] **CAP-020** Model `[capabilities.ai]` in the manifest: typed struct, validation, grant derivation for `ai.infer`, and a generator stanza that parses.
   → §5.3 Manifest tables — `fix_stanza_for` currently names this state instead of guessing a schema.

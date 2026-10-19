@@ -39845,4 +39845,20 @@ and a nonexistent `queue.read` in the repoint (the enum has
 Measured: 3 new tests red-first green; 46/46 commands suite.
 → `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`.
 
+## §O-751 - CAP-019: direction selects the grant, so no flag exists to forget
+
+Third table: `QueueCapability` carries a `direction` enum
+instead of a widening flag — publish grants publish,
+subscribe grants subscribe, and there is no boolean whose
+default decides authority. The enum orders publish-before-
+subscribe like `FsMode` so narrowing overlays compare
+directly. The generator still needed per-capability arms
+(one namespace, two grants — the property loop picks
+`QueuePublish` first alphabetically). The refusal range
+narrowed to CAP-020..022 in message, doc, and pin together;
+the pin caught my own lag once already, which is why all
+three move in one edit. Measured: 4 new tests red-first
+green; 47/47 commands suite.
+→ `crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

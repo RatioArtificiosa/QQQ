@@ -1411,11 +1411,15 @@ impl Manifest {
             }
         }
         if let Some(kv) = &self.capabilities.kv {
+            // Both grants live under the non-empty check: validation
+            // refuses empty stores at parse, and this keeps direct
+            // construction (which bypasses validation) honest too —
+            // a write flag with no stores grants nothing.
             if !kv.stores.is_empty() {
                 push(Capability::KvRead);
-            }
-            if kv.write {
-                push(Capability::KvWrite);
+                if kv.write {
+                    push(Capability::KvWrite);
+                }
             }
         }
         if let Some(c) = &self.capabilities.clock {
@@ -2399,6 +2403,54 @@ allow_origins = ["https://app.example.com"]
         assert!(
             text.contains("capabilities.kv"),
             "refusal names the table: {text}"
+        );
+    }
+
+    /// Whitespace-only store names refuse like empty ones, per the
+    /// sql precedent: spaces grant a read of nothing too.
+    #[test]
+    fn kv_blank_store_names_are_refused() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.kv]\nstores = [\"   \"]\n";
+        let err = Manifest::parse(src).expect_err("a blank kv entry must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.kv"),
+            "refusal names the table: {text}"
+        );
+    }
+
+    /// The write flag without stores grants nothing, even constructed
+    /// directly: `declared_capabilities` nests both grants under the
+    /// non-empty check, so bypassing `validate` still cannot smuggle
+    /// a write to no store.
+    #[test]
+    fn kv_write_without_stores_grants_nothing() {
+        use crate::manifest::KvCapability;
+        let capabilities = Capabilities {
+            kv: Some(KvCapability {
+                stores: Vec::new(),
+                write: true,
+            }),
+            ..Default::default()
+        };
+        let manifest = Manifest {
+            package: Package {
+                name: "probe".to_owned(),
+                version: "0.1.0".to_owned(),
+                description: None,
+                license: None,
+            },
+            build: Build::default(),
+            capabilities,
+            limits: Limits::default(),
+            dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
+            server: Server::default(),
+        };
+        assert!(
+            manifest.declared_capabilities().is_empty(),
+            "a storeless write flag grants nothing"
         );
     }
 

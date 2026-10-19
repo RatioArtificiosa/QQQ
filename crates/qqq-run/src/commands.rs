@@ -181,9 +181,9 @@ pub fn why(loaded: &LoadedManifest, capability: &str) -> Result<WhyOutput> {
 /// the suggestion cannot drift from the parser's expectations — and for
 /// namespaces the manifest cannot model yet, generating the state instead of
 /// guessing a schema means the suggestion cannot be a stanza the parser
-/// rejects. The modelling work is tracked under CAP-018 through CAP-022
-/// (`secret` resolves through `crypto.secrets`, and CAP-023 tracks its
-/// dedicated table).
+/// rejects. The modelling work is tracked under CAP-019 through CAP-022
+/// (`sql`/`kv` graduated in CAP-017/018; `secret` resolves through
+/// `crypto.secrets`, and CAP-023 tracks its dedicated table).
 #[must_use]
 pub fn fix_stanza_for(c: Capability) -> String {
     // `sql.execute` needs the widening flag the query stanza leaves
@@ -210,7 +210,7 @@ pub fn fix_stanza_for(c: Capability) -> String {
         // send the reader to a CAP item for a stanza that exists.
         "secret" => "add to qqq.toml:\n\n    [capabilities.crypto]\n    secrets = [\"env:NAME\"]  # for secret.use".to_owned(),
         _ => format!(
-            "no qqq.toml spelling grants `{}` yet — manifest modelling is tracked under CAP-018 through CAP-022",
+            "no qqq.toml spelling grants `{}` yet — manifest modelling is tracked under CAP-019 through CAP-022",
             c.name()
         ),
     }
@@ -1688,7 +1688,7 @@ mod tests {
                 "{ns}: a refusal carries no stanza to parse: {fix}"
             );
             assert!(
-                fix.contains("CAP-018"),
+                fix.contains("CAP-019"),
                 "{ns}: must name the modelling range start: {fix}"
             );
             assert!(

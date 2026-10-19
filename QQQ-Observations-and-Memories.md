@@ -39979,4 +39979,56 @@ forgives is not a fallback; review the `if:` conditions on verdict
 steps the way you review the verdict logic.
 `.github/workflows/ci.yml`.
 
+## §O-757 - CAP-023: the last namespace graduates, and the stand-ins invert
+
+Seventh table: `SecretCapability` (`secrets` list — the key vocabulary
+matches the legacy nested `crypto.secrets` spelling on purpose, so the
+two read as one grant set with two addresses). Either spelling's
+non-blank entry grants the single `secret.use`; `push` dedups, so both
+together grant exactly once (proven, not asserted). Two hardenings with
+red proofs: blank legacy `crypto.secrets` entries granted until now —
+they grant nothing after (the spellings share one semantics, so a blank
+the new table refuses must not grant through the old one) — and the
+three catch-all stand-in tests inverted with the graduation: scalar and
+array impostor shapes now refuse instead of collecting, and the
+declaration test retired (no known namespace is unmodelled anymore; the
+catch-all stays for a future fourteenth). Deserializer quirk found by
+probing: toml 0.9 reports an array-into-struct mismatch through a
+flatten struct as `invalid type: map, expected a sequence` — expected
+and actual inverted — so the impostor test pins the failure KIND, not
+the exact text, and says why in the comment. The generator suggests the
+dedicated table; legacy keeps granting, pinned. Measured: 7 new +
+1 reworked manifest tests red-first green; 2 commands pins; full crates
+299 + 607 green.
+`crates/qqq-cap/src/manifest.rs`, `crates/qqq-run/src/commands.rs`,
+`schema/qqq-toml.schema.json`.
+
+## §O-758 - Review found the layer CAP-023 forgot: normalize never saw the new table
+
+Independent review (Copilot BYOK) of the CAP-023 diff returned one HIGH:
+`normalize_secrets` resolved only `crypto.secrets`, so a
+`[capabilities.secret]` entry granted `secret.use` yet landed nowhere in
+`NormalizedManifest.secrets` — runtime `secret_source()` None, typos
+deploying silently instead of failing closed. Reproduced 3/3 red, fixed
+by chaining both spellings through one resolve-validate-existence path,
+green. Two LOWs closed as guard pins: direct-construction blank gate
+(behavior already correct — no failing reproduction possible, pinned)
+and field-level impostors (scalar/non-string/bare). One INFO confirmed:
+retired validator branches are truly dead, removal correct. Adjacent
+pre-existing bug fixed on sight: `host_secrets` remediation pointed at
+`[capabilities.secrets]` (plural) — a table under neither spelling —
+now `[capabilities.secret]`. Lesson compounding §O-755: a capability
+table has THREE layers (parse, grant, normalize), and the review prompt
+now names all three explicitly — the grant layer passing made the
+missing layer invisible to every test I wrote. Measured:
+`copilot-cap023.log`; fixes green 6/6 targeted, full crates re-run green.
+Post-review append: the relaunched gate failed clippy on the new code
+(`too_many_lines` 105/100 on `declared_capabilities`,
+`map_unwrap_or` x2 in `normalize_secrets`) — fixed by extracting
+`push_secret_grants` (the ratchet working as designed: split, not
+`allow`) and `map_or`, confirmed behavior-identical by re-review,
+workspace clippy green.
+`crates/qqq-cap/src/normalize.rs`, `crates/qqq-cap/src/manifest.rs`,
+`crates/qqq-host/src/host_secrets.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -168,6 +168,17 @@
           },
           "type": "array"
         },
+        "secret": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecretCapability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[capabilities.secret]` — named secret uses."
+        },
         "sql": {
           "description": "`[[capabilities.sql]]` — one entry per database.",
           "items": {
@@ -673,6 +684,22 @@
         "path"
       ],
       "title": "qqq-toml#Route",
+      "type": "object"
+    },
+    "SecretCapability": {
+      "$id": "https://qqq.codes/schema/qqq-toml#SecretCapability",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `SecretCapability` table.",
+      "properties": {
+        "secrets": {
+          "description": "Secret references the guest may use, e.g. `env:DB_URL`. Never a blanket inherit; blank entries refuse like empty ones.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "title": "qqq-toml#SecretCapability",
       "type": "object"
     },
     "Server": {

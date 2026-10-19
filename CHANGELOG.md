@@ -4,6 +4,17 @@
 
 ### Security
 
+- **cap**: model `[capabilities.secret]` (CAP-023): typed entries
+  sharing the legacy `crypto.secrets` vocabulary; either spelling's
+  non-blank entry grants the single `secret.use`, unioned and deduped
+  (proven by a both-spellings test); blank legacy entries hardened to
+  grant nothing; generator stanza is the dedicated table with the
+  legacy spelling pinned granting; the last catch-all stand-ins
+  inverted (scalar/array impostor shapes refuse). Red-first. Review
+  follow-up: the new table now resolves through normalize like the
+  legacy spelling (missing/malformed refs fail closed); adjacent fix
+  for a remediation naming the nonexistent `[capabilities.secrets]`.
+
 - **test**: repair TEST-019's h2spec job (follow-up): the serve step
   aborted under `set -e` on any h2spec failure, so the strict run and
   the verdict-disposition step never ran — the 3.5.2 disposition could

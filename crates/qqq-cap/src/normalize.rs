@@ -921,11 +921,23 @@ fn normalize_secrets(
     manifest: &Manifest,
     env: &impl HostEnv,
 ) -> Result<Vec<SecretRef>, NormalizeError> {
-    let Some(crypto) = &manifest.capabilities.crypto else {
-        return Ok(Vec::new());
-    };
-    let mut secrets = Vec::with_capacity(crypto.secrets.len());
-    for s in &crypto.secrets {
+    // Both spellings, one resolution: the dedicated `[capabilities.secret]`
+    // table (CAP-023) and the legacy nested `crypto.secrets` list name the
+    // same grant set, so both must resolve, validate, and existence-check
+    // identically — otherwise a typo in the new spelling deploys silently
+    // while the same typo in the old one fails closed (review F1).
+    let dedicated: &[String] = manifest
+        .capabilities
+        .secret
+        .as_ref()
+        .map_or(&[], |s| s.secrets.as_slice());
+    let legacy: &[String] = manifest
+        .capabilities
+        .crypto
+        .as_ref()
+        .map_or(&[], |c| c.secrets.as_slice());
+    let mut secrets = Vec::with_capacity(dedicated.len() + legacy.len());
+    for s in dedicated.iter().chain(legacy) {
         let r = SecretRef::parse(s).map_err(|reason| NormalizeError::InvalidHostPattern {
             pattern: s.clone(),
             reason,
@@ -1748,6 +1760,47 @@ mod tests {
         assert_eq!(n.secrets.len(), 1);
         assert_eq!(n.secret_source("JWT_KEY"), Some("JWT_KEY"));
         assert_eq!(n.secret_source("nope"), None);
+    }
+
+    /// The dedicated `[capabilities.secret]` table normalizes exactly like
+    /// the legacy nested spelling: existence-checked, `SecretRef`-validated,
+    /// and recorded — otherwise a granted secret lands nowhere at runtime
+    /// and typos deploy silently (review F1 on CAP-023).
+    #[test]
+    fn normalization_resolves_the_dedicated_secret_table() {
+        let m = manifest_with("[capabilities.secret]\nsecrets = [\"env:DB\"]\n");
+        // Absent -> SecretMissing, never silent.
+        let e = Normalized::from_manifest(&m, &FakeEnv::default()).unwrap_err();
+        assert!(matches!(e, NormalizeError::SecretMissing { .. }));
+        assert!(e.to_string().contains("DB"));
+        // Present -> recorded.
+        let env = FakeEnv::default().with_var("DB");
+        let n = Normalized::from_manifest(&m, &env).unwrap();
+        assert_eq!(n.secret_source("DB"), Some("DB"));
+    }
+
+    /// Malformed refs in the dedicated table fail closed at NORMALIZE,
+    /// exactly like the legacy spelling.
+    #[test]
+    fn normalization_rejects_malformed_dedicated_secret_refs() {
+        let m = manifest_with("[capabilities.secret]\nsecrets = [\"vault:x\"]\n");
+        let e = Normalized::from_manifest(&m, &FakeEnv::default()).unwrap_err();
+        assert!(matches!(e, NormalizeError::InvalidHostPattern { .. }));
+    }
+
+    /// Both spellings union in normalization too: one entry from each
+    /// spelling resolves into two records (and a shared entry dedups).
+    #[test]
+    fn normalization_unions_both_secret_spellings() {
+        let m = manifest_with(
+            "[capabilities.secret]\nsecrets = [\"env:A\"]\n\
+             [capabilities.crypto]\nsecrets = [\"env:B\"]\n",
+        );
+        let env = FakeEnv::default().with_var("A").with_var("B");
+        let n = Normalized::from_manifest(&m, &env).unwrap();
+        assert_eq!(n.secrets.len(), 2);
+        assert_eq!(n.secret_source("A"), Some("A"));
+        assert_eq!(n.secret_source("B"), Some("B"));
     }
 
     #[test]

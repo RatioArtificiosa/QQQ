@@ -182,10 +182,10 @@ pub fn why(loaded: &LoadedManifest, capability: &str) -> Result<WhyOutput> {
 /// namespaces the manifest cannot model yet, generating the state instead of
 /// guessing a schema means the suggestion cannot be a stanza the parser
 /// rejects. Every namespace is modelled now (`sql`/`kv`/`queue`/`ai` in
-/// CAP-017/018/019/020, `log`/`trace` in CAP-021/022; `secret` resolves
-/// through `crypto.secrets` with its dedicated table tracked as CAP-023,
-/// and `FsWatch` derivation as CAP-024) — the wildcard below stays as a
-/// safety net for a future fourteenth namespace, never for a known one.
+/// CAP-017/018/019/020, `log`/`trace` in CAP-021/022, `secret` in CAP-023
+/// with the legacy `crypto.secrets` spelling still granting;
+/// `FsWatch` derivation is tracked as CAP-024) — the wildcard below stays
+/// as a safety net for a future fourteenth namespace, never for a known one.
 #[must_use]
 pub fn fix_stanza_for(c: Capability) -> String {
     // `sql.execute` needs the widening flag the query stanza leaves
@@ -216,11 +216,10 @@ pub fn fix_stanza_for(c: Capability) -> String {
         // where a `level = "debug"` typo would otherwise land.
         "log" => "add to qqq.toml:\n\n    [capabilities.log]  # presence grants log.write; no fields".to_owned(),
         "trace" => "add to qqq.toml:\n\n    [capabilities.trace]  # presence grants trace.write; no fields".to_owned(),
-        // `secret.use` is granted through the nested `crypto.secrets`
-        // spelling, not a `[capabilities.secret]` table — the wildcard
-        // below would name it unmodelled, which is false and would
-        // send the reader to a CAP item for a stanza that exists.
-        "secret" => "add to qqq.toml:\n\n    [capabilities.crypto]\n    secrets = [\"env:NAME\"]  # for secret.use".to_owned(),
+        // `secret.use` is granted through the dedicated
+        // `[capabilities.secret]` table (CAP-023); the legacy nested
+        // `crypto.secrets` spelling still grants, pinned below.
+        "secret" => "add to qqq.toml:\n\n    [capabilities.secret]\n    secrets = [\"env:NAME\"]  # for secret.use".to_owned(),
         _ => format!(
             "no qqq.toml spelling grants `{}` yet — this namespace has no modelled table; check the CAP range in QQQ-Checklist-V1.md for the modelling tracker",
             c.name()
@@ -1777,15 +1776,19 @@ mod tests {
         );
     }
 
-    /// `secret.use` resolves through the nested `crypto.secrets`
-    /// spelling, not a `[capabilities.secret]` table — the one
-    /// unmodelled name with a true stanza. Pins the exception so a
-    /// future wildcard cannot swallow it back into the refusal.
+    /// The dedicated `[capabilities.secret]` table (CAP-023) is the
+    /// stanza `qqqai why` suggests; the legacy nested `crypto.secrets`
+    /// spelling still grants, pinned here so backwards compatibility
+    /// cannot silently lapse.
     #[test]
-    fn secret_use_resolves_through_crypto_secrets() {
+    fn secret_stanza_parses_and_grants_use() {
         use qqq_cap::manifest::Manifest;
         let fix = fix_stanza_for(Capability::SecretUse);
         let body = stanza_body(&fix).expect("secret.use has a stanza");
+        assert!(
+            body.contains("[capabilities.secret]"),
+            "the stanza is the dedicated table: {fix}"
+        );
         let manifest = Manifest::parse(&format!(
             "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
         ))
@@ -1794,6 +1797,24 @@ mod tests {
             manifest.declared_capabilities(),
             vec![Capability::SecretUse],
             "exactly one grant, no smuggling"
+        );
+    }
+
+    /// The legacy spelling keeps granting: manifests written before
+    /// CAP-023 used `[capabilities.crypto]` `secrets`, and graduation
+    /// must not strand them.
+    #[test]
+    fn secret_legacy_crypto_spelling_still_grants() {
+        use qqq_cap::manifest::Manifest;
+        let manifest = Manifest::parse(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+            [capabilities.crypto]\nsecrets = [\"env:NAME\"]\n",
+        )
+        .expect("the legacy spelling must parse");
+        assert_eq!(
+            manifest.declared_capabilities(),
+            vec![Capability::SecretUse],
+            "legacy grants exactly use"
         );
     }
 

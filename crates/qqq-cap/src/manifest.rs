@@ -357,6 +357,9 @@ pub struct Capabilities {
     /// `[capabilities.trace]` — marker granting `trace.write`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<TraceCapability>,
+    /// `[capabilities.secret]` — named secret uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<SecretCapability>,
     /// Namespaces `Capability::all()` knows that have no typed struct
     /// yet. Kept so a declaration parses and can be *reported*; the
     /// host binds only what it models. Every key is validated
@@ -641,6 +644,21 @@ pub struct LogCapability {}
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TraceCapability {}
+
+/// `[capabilities.secret]` — named secrets the guest may **use**
+/// without reading, graduating the namespace out of the catch-all.
+/// The key vocabulary (`secrets`) is deliberately identical to the
+/// legacy nested `[capabilities.crypto]` spelling, so the two read as
+/// one grant set with two addresses — which is what they are: either
+/// non-blank entry grants the single `secret.use` capability.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretCapability {
+    /// Secret references the guest may use, e.g. `env:DB_URL`.
+    /// Never a blanket inherit; blank entries refuse like empty ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
+}
 
 /// `[limits]` — enforceable resource bounds.
 ///
@@ -1360,6 +1378,7 @@ impl Manifest {
         Self::validate_kv(self.capabilities.kv.as_ref())?;
         Self::validate_queue(&self.capabilities.queue)?;
         Self::validate_ai(self.capabilities.ai.as_ref())?;
+        Self::validate_secret(self.capabilities.secret.as_ref())?;
 
         // -- unmodelled capability namespaces must still be known -------
         // The `flatten` map lets any `[capabilities.<ns>]` table parse;
@@ -1473,6 +1492,45 @@ impl Manifest {
         Ok(())
     }
 
+    /// A `[capabilities.secret]` table with no usable entries is refused:
+    /// an empty declaration would grant the use of nothing, per the
+    /// kv/ai precedent. Whitespace-only names refuse like empty ones.
+    fn validate_secret(secret: Option<&SecretCapability>) -> Result<(), ManifestError> {
+        if let Some(secret) = secret
+            && (secret.secrets.is_empty() || secret.secrets.iter().any(|s| s.trim().is_empty()))
+        {
+            return Err(ManifestError::InvalidField {
+                field: "capabilities.secret".to_owned(),
+                reason: "secrets must name at least one non-blank secret".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The `secret.use` grant from either spelling, factored out of
+    /// [`Manifest::declared_capabilities`]: that function grows one stanza
+    /// per modelled table, and clippy's `too_many_lines` is the ratchet
+    /// that forces the split rather than an `allow`.
+    ///
+    /// Two spellings, one grant set: the legacy nested `crypto.secrets`
+    /// and the dedicated `[capabilities.secret]` table union into a single
+    /// `secret.use`. Both live under a non-blank gate — validation refuses
+    /// blanks at parse, and this keeps direct construction (which bypasses
+    /// validation) honest too, per the kv precedent. The shared `push`
+    /// dedups, so declaring both spellings grants exactly once.
+    fn push_secret_grants(&self, push: &mut impl FnMut(Capability)) {
+        if let Some(c) = &self.capabilities.crypto
+            && c.secrets.iter().any(|s| !s.trim().is_empty())
+        {
+            push(Capability::SecretUse);
+        }
+        if let Some(s) = &self.capabilities.secret
+            && s.secrets.iter().any(|s| !s.trim().is_empty())
+        {
+            push(Capability::SecretUse);
+        }
+    }
+
     /// The capabilities this manifest grants, as a concrete set.
     ///
     /// This is step 1's output and step 2's input. Note that it reflects only
@@ -1520,10 +1578,8 @@ impl Manifest {
             if !c.sign.is_empty() {
                 push(Capability::CryptoSign);
             }
-            if !c.secrets.is_empty() {
-                push(Capability::SecretUse);
-            }
         }
+        self.push_secret_grants(&mut push);
         for db in &self.capabilities.sql {
             push(Capability::SqlQuery);
             if db.execute {
@@ -2362,31 +2418,39 @@ allow_origins = ["https://app.example.com"]
     /// (Fails while `deny_unknown_fields` sits on `Capabilities`,
     /// because serde rejects before the map collects — the
     /// interaction this test exists to pin.)
-    /// (`secret` stands in since `sql`/`kv`/`queue`/`ai`/`log`/`trace`
-    /// graduated to typed tables in CAP-017..022 — the last namespace
-    /// with no table of its own; the shape proved is the catch-all's,
-    /// not theirs.)
+    /// RETIRED by CAP-023: `secret` was the last table-less namespace,
+    /// so no known namespace is unmodelled anymore and the test has no
+    /// subject. The catch-all stays for a future fourteenth namespace
+    /// (proven by temporary-add/remove, §O-753); its graduation inverse
+    /// is pinned below — every impostor shape of the new typed table
+    /// now refuses instead of collecting.
     #[test]
-    fn an_unmodelled_namespace_declaration_parses() {
-        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.secret]\nlabel = \"db\"\n";
-        let m = Manifest::parse(src).expect("a known namespace must declare");
+    fn secret_impostor_shapes_are_refused_not_collected() {
+        // Scalar: a bare value is not a declaration. Serde names the
+        // expected struct (`SecretCapability`), not the field path —
+        // assert on that stable contract, case aside.
+        let scalar =
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nsecret = \"app\"\n";
+        let err = Manifest::parse(scalar).expect_err("a scalar secret must be refused");
+        let text = err.to_string();
         assert!(
-            m.capabilities.other.contains_key("secret"),
-            "the declaration must land in the catch-all"
+            text.contains("SecretCapability") || text.contains("secret"),
+            "refusal names the table: {text}"
         );
-        // Key presence is not enough: the value must survive intact,
-        // or the catch-all is a second silent drop. Only the key set
-        // is validated — the shape belongs to the future typed struct.
-        assert_eq!(
-            m.capabilities.other["secret"]["label"].as_str(),
-            Some("db"),
-            "the declared table body must round-trip through the catch-all"
-        );
+        // Array: the table is singular, not a multi-entry list. The refusal
+        // is a serde type error, but its wording is NOT pinned beyond the
+        // kind: toml 0.9's flatten handling reports an array-into-struct
+        // mismatch as `invalid type: map, expected a sequence` — expected
+        // and actual inverted — so exact text would couple the test to a
+        // deserializer quirk rather than to our contract. What is ours:
+        // the shape refuses, loudly, as a type mismatch.
+        let array = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [[capabilities.secret]]\nsecrets = [\"env:DB\"]\n";
+        let err = Manifest::parse(array).expect_err("an array secret must be refused");
+        let text = err.to_string();
         assert!(
-            !m.declared_capabilities()
-                .iter()
-                .any(|c| c.namespace() == "secret"),
-            "declaring is not binding: the host grants nothing unmodelled"
+            text.contains("invalid type"),
+            "refusal is a loud type mismatch: {text}"
         );
     }
 
@@ -2402,44 +2466,6 @@ allow_origins = ["https://app.example.com"]
         assert!(
             text.contains("capabilities.htttp") && text.contains("`http`"),
             "`htttp` must fail naming the valid namespaces in one shape: {text}"
-        );
-    }
-
-    /// A scalar under `[capabilities]` is not a declaration: the
-    /// validator requires tables, so a misplaced value fails loudly
-    /// instead of validating as a "known" key with no meaning.
-    /// (`secret` stands in: `sql`/`kv`/`queue`/`ai`/`log`/`trace`
-    /// graduated in CAP-017..022 — all fail earlier at serde
-    /// type-checking, also loudly, also naming the table.)
-    #[test]
-    fn a_scalar_capability_value_is_refused_not_collected() {
-        let src =
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities]\nsecret = \"app\"\n";
-        let err = Manifest::parse(src).expect_err("a scalar capability value must be refused");
-        let text = err.to_string();
-        assert!(
-            text.contains("must be a table"),
-            "the scalar branch must fire: {text}"
-        );
-    }
-
-    /// An array-shaped unmodelled declaration parses into the
-    /// catch-all without granting: `[[capabilities.secret]]` is the
-    /// natural multi-entry shape, so refusing arrays while accepting
-    /// tables would punish the shape users reach for first. Grants
-    /// nothing, like all unmodelled content.
-    #[test]
-    fn unmodelled_array_shape_parses_without_granting() {
-        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
-            [[capabilities.secret]]\nlabel = \"db\"\n";
-        let m = Manifest::parse(src).expect("array shape must declare");
-        assert!(
-            m.capabilities.other.contains_key("secret"),
-            "the array lands in the catch-all"
-        );
-        assert!(
-            m.declared_capabilities().is_empty(),
-            "declaring is not binding"
         );
     }
 
@@ -2704,6 +2730,201 @@ allow_origins = ["https://app.example.com"]
             !granted.contains(&crate::capability::Capability::TraceWrite),
             "absence must not smuggle trace.write"
         );
+    }
+
+    /// A `secret` declaration grants exactly `secret.use`: the dedicated
+    /// table graduates the namespace out of the catch-all, so presence
+    /// with a non-blank entry is the whole grant — no second capability
+    /// exists to smuggle.
+    #[test]
+    fn secret_table_parses_and_grants_use() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.secret]\nsecrets = [\"env:DB\"]\n";
+        let m = Manifest::parse(src).expect("the secret table must parse");
+        assert_eq!(
+            m.declared_capabilities(),
+            vec![crate::capability::Capability::SecretUse],
+            "a secret entry grants exactly use"
+        );
+        assert!(
+            !m.capabilities.other.contains_key("secret"),
+            "the graduated table must not land in the catch-all"
+        );
+    }
+
+    /// A `secret` table with no entries is refused: an empty declaration
+    /// would grant the use of nothing, per the kv/ai precedent.
+    #[test]
+    fn secret_table_requires_nonempty_secrets() {
+        let src =
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.secret]\nsecrets = []\n";
+        let err = Manifest::parse(src).expect_err("an empty secret table must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.secret"),
+            "refusal names the table: {text}"
+        );
+    }
+
+    /// Whitespace-only secret names refuse like empty ones: spaces use
+    /// no secret, per the sql/kv/ai precedent.
+    #[test]
+    fn secret_blank_entries_are_refused() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.secret]\nsecrets = [\"   \"]\n";
+        let err = Manifest::parse(src).expect_err("a blank secret entry must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.secret"),
+            "refusal names the table: {text}"
+        );
+    }
+
+    /// The marker takes no fields: anything besides the entry list is a
+    /// typo for a setting that does not exist, refused at parse.
+    #[test]
+    fn secret_table_refuses_unknown_fields() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.secret]\nsecrets = [\"env:DB\"]\nlevel = \"debug\"\n";
+        let e = Manifest::parse(src).expect_err("a secret field must be refused");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("level") || msg.contains("unknown field"),
+            "unknown fields must be rejected; got: {msg}"
+        );
+    }
+
+    /// Both spellings resolve to one grant set: the dedicated table and
+    /// the legacy nested `crypto.secrets` spelling union into exactly one
+    /// `secret.use` — declaring both must not double-grant, widen, or
+    /// smuggle anything else. Each spelling alone grants it too.
+    #[test]
+    fn both_secret_spellings_resolve_to_one_grant_set() {
+        use crate::capability::Capability;
+        let both = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.secret]\nsecrets = [\"env:DB\"]\n\
+            [capabilities.crypto]\nsecrets = [\"env:OTHER\"]\n";
+        let m = Manifest::parse(both).expect("both spellings must parse together");
+        assert_eq!(
+            m.declared_capabilities(),
+            vec![Capability::SecretUse],
+            "both spellings union into exactly one grant"
+        );
+        let legacy = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.crypto]\nsecrets = [\"env:DB\"]\n";
+        let m = Manifest::parse(legacy).expect("the legacy spelling must parse");
+        assert_eq!(
+            m.declared_capabilities(),
+            vec![Capability::SecretUse],
+            "the legacy spelling alone grants exactly use"
+        );
+    }
+
+    /// Blank names in the legacy `crypto.secrets` spelling grant nothing:
+    /// the two spellings share one semantics, so a blank that the dedicated
+    /// table refuses must not grant through the nested one either. (Hardening
+    /// shipped with CAP-023: blanks previously granted.)
+    #[test]
+    fn crypto_blank_secrets_grant_nothing() {
+        let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.crypto]\nsecrets = [\"   \"]\n";
+        let m = Manifest::parse(src).expect("the shape still parses");
+        assert!(
+            !m.declared_capabilities()
+                .contains(&crate::capability::Capability::SecretUse),
+            "a blank legacy entry must grant nothing"
+        );
+    }
+
+    /// Direct construction cannot smuggle a blank secret grant past the
+    /// derivation gate: both branches nest under a non-blank check, so
+    /// bypassing `validate_secret` still grants nothing (the kv
+    /// `write_without_stores` precedent, review F2 on CAP-023). A mixed
+    /// valid-plus-blank construction still grants exactly once — the gate
+    /// is existential, not poisoning.
+    #[test]
+    fn secret_blank_direct_construction_grants_nothing() {
+        use crate::manifest::SecretCapability;
+        let blank_only = Manifest {
+            package: Package {
+                name: "probe".to_owned(),
+                version: "0.1.0".to_owned(),
+                description: None,
+                license: None,
+            },
+            build: Build::default(),
+            capabilities: Capabilities {
+                secret: Some(SecretCapability {
+                    secrets: vec!["   ".to_owned()],
+                }),
+                ..Default::default()
+            },
+            limits: Limits::default(),
+            dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
+            server: Server::default(),
+        };
+        assert!(
+            blank_only.declared_capabilities().is_empty(),
+            "a blank-only construction grants nothing"
+        );
+        let mixed = Manifest {
+            package: Package {
+                name: "probe".to_owned(),
+                version: "0.1.0".to_owned(),
+                description: None,
+                license: None,
+            },
+            build: Build::default(),
+            capabilities: Capabilities {
+                secret: Some(SecretCapability {
+                    secrets: vec!["env:DB".to_owned(), "  ".to_owned()],
+                }),
+                ..Default::default()
+            },
+            limits: Limits::default(),
+            dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
+            server: Server::default(),
+        };
+        assert_eq!(
+            mixed.declared_capabilities(),
+            vec![crate::capability::Capability::SecretUse],
+            "mixed construction grants exactly once"
+        );
+    }
+
+    /// Field-level impostors refuse: a scalar `secrets` list, a non-string
+    /// entry, and a bare table (which defaults to `[]` and meets the
+    /// validator). Table-level shapes are pinned above; these pin the
+    /// fields inside (review F3 on CAP-023).
+    #[test]
+    fn secret_field_impostors_are_refused() {
+        for (label, src, needle) in [
+            (
+                "scalar list",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                [capabilities.secret]\nsecrets = \"env:DB\"\n",
+                "invalid type",
+            ),
+            (
+                "non-string entry",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                [capabilities.secret]\nsecrets = [123]\n",
+                "invalid type",
+            ),
+            (
+                "bare table",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.secret]\n",
+                "capabilities.secret",
+            ),
+        ] {
+            let err = Manifest::parse(src).expect_err(&format!("{label} must be refused"));
+            assert!(
+                err.to_string().contains(needle),
+                "{label} must name `{needle}`: {err}"
+            );
+        }
     }
 
     /// Whitespace-only store names refuse like empty ones, per the

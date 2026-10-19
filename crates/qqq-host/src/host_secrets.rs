@@ -512,7 +512,7 @@ impl SecretStore {
         .with_context("variant", variant.to_owned())
         .with_remediation(match variant {
             "not-granted" => {
-                "add the secret to `[capabilities.secrets]` in `qqq.toml`; the \
+                "add the secret to `[capabilities.secret]` in `qqq.toml`; the \
                  manifest's allowlist is the only way a guest reaches a secret"
             }
             "unavailable" => {

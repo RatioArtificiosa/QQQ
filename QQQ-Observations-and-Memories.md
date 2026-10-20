@@ -40312,4 +40312,23 @@ the upgrade signature is compile-checked).
 `crates/qqq-serve/src/conn_stream.rs`, `crates/qqq-serve/src/server.rs`,
 `crates/qqq-run/src/serve.rs`, `crates/qqq-cap/src/manifest.rs`.
 
+## §O-767 - TEST-010 verified: the suite runs in CI end to end, and stays open honestly
+
+Every testable claim in the `[~]` row was re-derived live.
+`check_conformance.py --matrix` prints rust-yes with the other four
+owned and dated (M5/M8); `--self-test` detects 11/11 injected faults
+(ownerless gap, toolchain disagreement, phantom checker, one-gate-only,
+missing failure mode, unknown capability, both vacuity shapes,
+runner-less execution, checker-plus-runner, missing language); the drift
+guard passes; the ignored execution test passes against the built Rust
+guest (0.92 s); CI's rust jobs run `cargo xtask ci` literally, whose
+`IGNORED_TESTS` list runs `conformance_exec --ignored` on all three
+platforms. Nothing was broken, so nothing was fixed — the breadth gap
+is owned by `LANG-009`…`LANG-040`, and marking `[x]` would claim a
+cross-language result from one language's pass, exactly as the row
+warns. The value of the unit is the proof, captured in scratch logs:
+fixture check, matrix, self-test, drift guard, and execution, each with
+its measured output. `tools/check_conformance.py`,
+`crates/qqq-run/tests/conformance_exec.rs`, `crates/xtask/src/main.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

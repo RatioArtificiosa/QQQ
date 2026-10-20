@@ -4661,7 +4661,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
     (`--matrix`), **fails on a gap with no owner or date** (Proposal §6.10), derives each language's
     status from `build::toolchain_for`'s own guard so the fixture cannot drift from the code, and
     requires every obligation's checker to be invoked in **both** gates. Wired into `ci.yml` and
-    `docker/entrypoint.sh`, with **9 fault injections**, every one detected.
+    `docker/entrypoint.sh`, with **11 fault injections**, every one detected.
     **The execution half now EXISTS for Rust and still does not for the other four.** `TEST-016`
     landed as `crates/qqq-run/tests/conformance_exec.rs`: the fixture gained a `kind`
     (`definition`|`execution`), two execution cases (`component-layer`, `qqq-imports-all-mapped`)

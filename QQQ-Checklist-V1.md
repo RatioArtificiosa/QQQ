@@ -4760,7 +4760,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §11.3 Documentation as a product surface
 - [ ] **TEST-018** Implement CI integration examples for GitHub Actions, GitLab CI and others.
   → §11.3 Documentation as a product surface
-- [ ] **TEST-019** Wire h2spec into CI against the hyper h2 driver: download the binary, boot the driver, run the full suite plus strict, gate on pass. Local evidence (145/145 + 146/146 strict) exists but no job enforces it, so framing can regress silently.
+- [x] **TEST-019** Wire h2spec into CI against the hyper h2 driver: download the binary, boot the driver, run the full suite plus strict, gate on pass. Local evidence (145/145 + 146/146 strict) exists but no job enforces it, so framing can regress silently.
+  → Done: the `h2spec` job in `.github/workflows/ci.yml` enforces it — pinned h2spec v2.2.1, the `h2spec_serve` example as driver, full suite plus strict with a verdict gate, ubuntu-only by recorded reason (framing is OS-independent), including the serve-step repair that lets both suites reach the verdict step.
+  → Measured: HTTP/2 conformance green on six consecutive main runs (job durations) — 39287458939 (1m38s), 39316557447 (3m35s), 39333972512 (5m28s), 39350898727 (5m16s), 39369173115 (1m12s), 39379499462 (1m25s).
   → §6.4 `qqq-serve` — the HTTP and application server
 
 ### MIG — Migration

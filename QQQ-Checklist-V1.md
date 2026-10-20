@@ -5190,7 +5190,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.5 Determinism — the feature nobody else has
 - [ ] **DET-006** Enforce ordered maps in all guest-visible interfaces.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-007** Implement the replay log format.
+- [x] **DET-007** Implement the replay log format.
+  → Done: the format (magic, version, header, hash-chained length-prefixed records, counters) landed with its parse/render round trips before this item; what remained was load hardening for attacker-supplied files — `from_text` refuses past `REPLAY_FILE_MAX_BYTES` (4 MiB, ~25k records max by construction) with `TooLarge`, and the `--replay` read path takes one byte past the limit via a named `read_replay_file` helper instead of an unbounded `read_to_string` (no check-then-read race). One bound, two enforcement points; a record-count cap would be dead under the byte cap and was declined with that reason.
+  → Measured: `an_oversized_file_is_refused_before_parsing` (bulk→TooLarge, edge→Malformed), `an_oversized_replay_file_is_refused_without_loading` (bulk→exceeds, absent→readability) — red/fault-first green (gate neutered→red, restored byte-identical green); full replay suites green.
   → §10.5 Determinism — the feature nobody else has
 - [ ] **DET-008** Implement `--replay` reproducing a recorded execution exactly.
   → §10.5 Determinism — the feature nobody else has

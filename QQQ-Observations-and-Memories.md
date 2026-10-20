@@ -40095,6 +40095,34 @@ installation/distribution (DIST area, not this item). Measured: 5
 delivery-checklist A-boxes dispositioned one by one.
 `crates/qqq-run/src/aot.rs`, `crates/qqq-host/src/linker.rs`.
 
+## §O-762 - DET-007: the format was built, the hardening was missing
+
+Scoping found the replay format substantially landed (magic, version,
+header, hash-chained records, counters, round trips, tamper/foreign/
+truncation refusals, 10k-trial verification via DET-009) — what no one
+had closed was load behavior on attacker-supplied files: `from_text`
+collected every line unbounded and `run.rs` read the file unbounded.
+Closed with one bound in two places: `REPLAY_FILE_MAX_BYTES` (4 MiB)
+refused as `TooLarge` before parsing, and a named `read_replay_file`
+that takes one byte past the limit (no check-then-read race). A
+record-count cap was designed, then deleted before shipping: every
+record line carries two 64-hex digests, so no file reaches it under
+the byte cap — dead checks rot, and the test comment says so.
+Measured: 2 new tests red/fault-first green (gate neutered→red,
+restored byte-identical green); full replay suites green. Process
+note: one edit in this round deleted a line it meant to keep (restored
+by re-reading before re-editing — the discipline held).
+
+Review round two, all closed: fail-fast first-line check kills the
+newline-file transient (same Malformed errors, no behavior change);
+bytes-then-decode fixes the mid-char misreport plus a distinct
+not-UTF-8 refusal, both pinned; comment figures corrected (~27.7k);
+`from_text` docs list all five errors. Rebutted with evidence, no
+code: the header hole — header fields are component digest (fixed
+shape), two consts, and a bool, so no attacker string reaches `new()`;
+files go through the capped parse. The record-count cap stays dropped.
+`crates/qqq-host/src/replay.rs`, `crates/qqq-run/src/run.rs`.
+
 ## §O-761 - PERF-007: the AOT target is met, and the pipeline demanded a redesign
 
 The row (`≤ 5 ms p99`) cited a measurement that did not exist; closing

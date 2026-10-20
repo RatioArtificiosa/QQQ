@@ -4,6 +4,13 @@
 
 ### Security
 
+- **det**: harden DET-007's replay log format for attacker-supplied
+  files: `from_text` refuses past 4 MiB with `TooLarge` before parsing,
+  and the `--replay` read path takes one byte past the limit via a
+  named helper instead of an unbounded read (no check-then-read race).
+  A record-count cap was designed and deleted — unreachable under the
+  byte cap. Red/fault-first.
+
 - **perf**: meet PERF-007 (AOT cache ≤ 5 ms p99): the round trip
   lives in `qqq-run/src/aot.rs` (`measure_aot_roundtrip`: cold miss,
   warm hit, hit→instantiate→callable on a 200-fn fixture) and rides

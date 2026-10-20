@@ -34,12 +34,12 @@
 //! with the exact `qqq.toml` stanza that resolves it — rather than letting
 //! Wasmtime report a link error and leaving the user to translate it.
 
-use std::path::{Path, PathBuf};
-use std::time::Instant;
-
 use qqq_cap::resolve::{GrantSet, Resolution};
 use qqq_core::{Error, ErrorCode, Result};
 use qqq_host::{EngineConfig, Instance, LimitSet, PreparedComponent};
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::build::component_path;
 use crate::manifest_loader::LoadedManifest;
@@ -787,6 +787,63 @@ fn replay_header(digest: &str, deterministic: bool) -> qqq_host::replay::ReplayH
 /// # Errors
 ///
 /// `QQQ-1002` when the replay file cannot be read or does not verify.
+/// Read a replay file with the format's own byte limit enforced.
+///
+/// The file is attacker-supplied by construction, so `read_to_string`
+/// on it is an unbounded allocation. Taking one byte past
+/// [`qqq_host::replay::REPLAY_FILE_MAX_BYTES`] and refusing past it is
+/// deterministic: no check-then-read race, no partial content accepted.
+///
+/// # Errors
+///
+/// `QQQ-1002` when the file cannot be opened or read, or exceeds the limit.
+fn read_replay_file(path: &Path) -> Result<String> {
+    let open_err = |e: std::io::Error| {
+        Error::new(
+            ErrorCode::InvalidComponentArtifact,
+            format!(
+                "the replay file `{}` could not be read: {e}",
+                path.display()
+            ),
+        )
+        .with_remediation(
+            "`--replay` takes the path `--replay-log` wrote; check it exists and is readable",
+        )
+    };
+    let file = std::fs::File::open(path).map_err(open_err)?;
+    // Bytes first, text second: a file past the limit that ends mid-char
+    // must report "exceeds", not "could not be read" — the truncation is
+    // ours (we stopped at limit+1), not corruption in the file.
+    let mut bytes = Vec::new();
+    file.take(qqq_host::replay::REPLAY_FILE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(open_err)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > qqq_host::replay::REPLAY_FILE_MAX_BYTES {
+        return Err(Error::new(
+            ErrorCode::InvalidComponentArtifact,
+            format!(
+                "the replay file `{}` exceeds the {}-byte limit",
+                path.display(),
+                qqq_host::replay::REPLAY_FILE_MAX_BYTES
+            ),
+        )
+        .with_remediation(
+            "re-record it with `--replay-log`; this build never writes larger files",
+        ));
+    }
+    let text = String::from_utf8(bytes).map_err(|e| {
+        Error::new(
+            ErrorCode::InvalidComponentArtifact,
+            format!(
+                "the replay file `{}` is not valid UTF-8: {e}",
+                path.display()
+            ),
+        )
+        .with_remediation("re-record it with `--replay-log`")
+    })?;
+    Ok(text)
+}
+
 fn replay_endpoints(
     opts: &RunOptions,
     digest: &str,
@@ -809,15 +866,7 @@ fn replay_endpoints(
     let replay_source = match &opts.replay {
         None => None,
         Some(path) => {
-            let text = std::fs::read_to_string(path).map_err(|e| {
-                qqq_core::Error::new(
-                    qqq_core::ErrorCode::InvalidComponentArtifact,
-                    format!("the replay file `{}` could not be read: {e}", path.display()),
-                )
-                .with_remediation(
-                    "`--replay` takes the path `--replay-log` wrote; check it exists and is readable",
-                )
-            })?;
+            let text = read_replay_file(path)?;
             // **A file that does not verify is refused rather than partly used.** The chain is
             // re-derived on load, so an edit, a deletion or a rewritten link is a failure here and
             // not a run that silently reproduces something else.
@@ -1562,6 +1611,50 @@ mod tests {
         assert!(
             rendered.contains("chain") || rendered.contains("edited"),
             "the refusal must name the edit, got: {rendered}"
+        );
+    }
+
+    /// **An oversized replay file is refused without loading it.** The read
+    /// takes one byte past the format limit and refuses past it, so a bulk
+    /// file costs one bounded read, never an allocation it sized.
+    #[test]
+    fn an_oversized_replay_file_is_refused_without_loading() {
+        let dir = temp_dir("replay-oversized");
+        let path = dir.join("big.replay");
+        let bulk =
+            vec![b'x'; usize::try_from(qqq_host::replay::REPLAY_FILE_MAX_BYTES).expect("fits") + 1];
+        std::fs::write(&path, bulk).expect("write");
+        let err = read_replay_file(&path).expect_err("bulk must be refused");
+        assert!(
+            err.to_string().contains("exceeds"),
+            "the refusal must name the limit: {err}"
+        );
+        // A missing file still reports readability, not the limit.
+        let missing = dir.join("absent.replay");
+        let err = read_replay_file(&missing).expect_err("absent must be refused");
+        assert!(
+            err.to_string().contains("could not be read"),
+            "absent reports readability: {err}"
+        );
+        // A file past the limit that ends mid-char reports the limit, not
+        // a decode failure — the truncation is the reader's own doing.
+        let split = dir.join("split.replay");
+        let mut bulk =
+            vec![b'x'; usize::try_from(qqq_host::replay::REPLAY_FILE_MAX_BYTES).expect("fits")];
+        bulk.push(0xC3);
+        std::fs::write(&split, bulk).expect("write");
+        let err = read_replay_file(&split).expect_err("over-limit must be refused");
+        assert!(
+            err.to_string().contains("exceeds"),
+            "over-limit reports the limit even mid-char: {err}"
+        );
+        // A small file with bad encoding reports text, not readability.
+        let bad = dir.join("bad.replay");
+        std::fs::write(&bad, [0xFF]).expect("write");
+        let err = read_replay_file(&bad).expect_err("bad encoding must be refused");
+        assert!(
+            err.to_string().contains("UTF-8"),
+            "bad encoding names itself: {err}"
         );
     }
 

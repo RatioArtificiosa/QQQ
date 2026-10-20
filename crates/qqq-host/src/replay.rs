@@ -541,6 +541,17 @@ pub enum ReplayError {
         /// The 1-based line number of the record whose link is broken.
         line: usize,
     },
+    /// A replay file bigger than [`REPLAY_FILE_MAX_BYTES`].
+    /// ```
+    /// use qqq_host::replay::ReplayError;
+    ///
+    /// let e = ReplayError::TooLarge { limit_bytes: 1 };
+    /// assert!(e.to_string().contains("too large"));
+    /// ```
+    TooLarge {
+        /// The byte limit the file exceeded.
+        limit_bytes: u64,
+    },
 }
 
 impl std::fmt::Display for ReplayError {
@@ -568,6 +579,10 @@ impl std::fmt::Display for ReplayError {
                 f,
                 "replay file line {line}: the record's `previous` does not point at the record \
                  before it"
+            ),
+            Self::TooLarge { limit_bytes } => write!(
+                f,
+                "the replay file is too large to parse (limit {limit_bytes} bytes)"
             ),
         }
     }
@@ -599,6 +614,15 @@ pub const REPLAY_FILE_MAGIC: &str = "qqq-replay";
 /// assert_eq!(REPLAY_FILE_VERSION, 1);
 /// ```
 pub const REPLAY_FILE_VERSION: u32 = 1;
+
+/// The largest replay file `from_text` parses, in bytes.
+///
+/// A replay file is attacker-supplied by construction, so an unbounded
+/// read is an allocation the file's author controls. 4 MiB holds ~25k
+/// records — six times what the largest writer in-tree produces (4096)
+/// — with headroom for hand-grown logs, while bounding the text, the
+/// record `Vec`, and the per-line chain work behind one number.
+pub const REPLAY_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// The functions a replay file may name.
 ///
@@ -789,6 +813,11 @@ pub struct ReplayLog {
     records: Vec<ReplayRecord>,
     capacity: usize,
     counters: AppendCounters,
+    /// Rendered bytes so far (header plus record lines, as `to_text`
+    /// writes them). The writer refuses past [`REPLAY_FILE_MAX_BYTES`] so
+    /// it never produces a file its own reader refuses — the writer/reader
+    /// coherence the format exists to guarantee.
+    bytes: u64,
     /// How far a *reader* has consumed the log — `DET-008`.
     ///
     /// # Why the cursor lives here rather than in the caller
@@ -801,6 +830,62 @@ pub struct ReplayLog {
     /// It is distinct from `records.len()`: a log may be written and then read, and the writer's
     /// count is not a read position.
     cursor: usize,
+}
+
+/// The header as `to_text` writes it: magic, version, four keys, and the
+/// refused count. Shared by `to_text` and the writer's byte gate so the
+/// two cannot disagree about the header's size.
+fn render_header(header: &ReplayHeader, refused: u64) -> String {
+    let mut out = String::with_capacity(128);
+    out.push_str(REPLAY_FILE_MAGIC);
+    out.push(' ');
+    out.push_str(&REPLAY_FILE_VERSION.to_string());
+    out.push('\n');
+    for (key, value) in [
+        ("artifact_digest", header.artifact_digest.as_str()),
+        ("engine_version", header.engine_version.as_str()),
+        ("target_triple", header.target_triple.as_str()),
+    ] {
+        out.push_str(key);
+        out.push(' ');
+        out.push_str(value);
+        out.push('\n');
+    }
+    out.push_str("deterministic ");
+    out.push_str(if header.deterministic {
+        "true"
+    } else {
+        "false"
+    });
+    out.push('\n');
+    out.push_str("refused ");
+    out.push_str(&refused.to_string());
+    out.push('\n');
+    out
+}
+
+/// One record as `to_text` writes it: six space-separated fields.
+///
+/// Shared by `to_text` and the writer's byte gate for the same reason as
+/// [`render_header`]: the gate must measure exactly what the file will
+/// contain, or the writer accepts what the reader refuses (or the reverse,
+/// stranding a legitimate log).
+fn render_record(record: &ReplayRecord) -> String {
+    let f = record.fields();
+    let mut out = String::with_capacity(96);
+    out.push_str(&f.sequence.to_string());
+    out.push(' ');
+    out.push_str(f.function);
+    out.push(' ');
+    out.push_str(f.kind);
+    out.push(' ');
+    out.push_str(&f.canonical);
+    out.push(' ');
+    out.push_str(&record.previous);
+    out.push(' ');
+    out.push_str(&record.chain);
+    out.push('\n');
+    out
 }
 
 impl ReplayLog {
@@ -825,11 +910,13 @@ impl ReplayLog {
     /// ```
     #[must_use]
     pub fn new(header: ReplayHeader, capacity: usize) -> Self {
+        let bytes = u64::try_from(render_header(&header, 0).len()).unwrap_or(u64::MAX);
         Self {
             header,
             records: Vec::new(),
             capacity,
             counters: AppendCounters::default(),
+            bytes,
             cursor: 0,
         }
     }
@@ -1052,6 +1139,18 @@ impl ReplayLog {
             chain: String::new(),
         };
         record.chain = ReplayRecord::compute_chain(&record.fields());
+        // Writer/reader coherence: the rendered line plus slack for the
+        // `refused` counter's own growth must fit, or this write would
+        // produce a file `from_text` refuses. The slack (64 bytes) covers
+        // any digit growth in the refused count with orders of margin;
+        // the alternative — exact accounting through the counter — would
+        // couple every refusal to a recomputation for one byte.
+        let line_len = u64::try_from(render_record(&record).len()).unwrap_or(u64::MAX);
+        if self.bytes + line_len + 64 > REPLAY_FILE_MAX_BYTES {
+            self.counters.refused += 1;
+            return Err(ReplayError::Full);
+        }
+        self.bytes += line_len;
         self.records.push(record);
         self.counters.recorded += 1;
         Ok(())
@@ -1155,45 +1254,9 @@ impl ReplayLog {
     /// ```
     #[must_use]
     pub fn to_text(&self) -> String {
-        let mut out = String::with_capacity(128 + self.records.len() * 96);
-        out.push_str(REPLAY_FILE_MAGIC);
-        out.push(' ');
-        out.push_str(&REPLAY_FILE_VERSION.to_string());
-        out.push('\n');
-        for (key, value) in [
-            ("artifact_digest", self.header.artifact_digest.as_str()),
-            ("engine_version", self.header.engine_version.as_str()),
-            ("target_triple", self.header.target_triple.as_str()),
-        ] {
-            out.push_str(key);
-            out.push(' ');
-            out.push_str(value);
-            out.push('\n');
-        }
-        out.push_str("deterministic ");
-        out.push_str(if self.header.deterministic {
-            "true"
-        } else {
-            "false"
-        });
-        out.push('\n');
-        out.push_str("refused ");
-        out.push_str(&self.counters.refused.to_string());
-        out.push('\n');
+        let mut out = render_header(&self.header, self.counters.refused);
         for r in &self.records {
-            let f = r.fields();
-            out.push_str(&f.sequence.to_string());
-            out.push(' ');
-            out.push_str(f.function);
-            out.push(' ');
-            out.push_str(f.kind);
-            out.push(' ');
-            out.push_str(&f.canonical);
-            out.push(' ');
-            out.push_str(&r.previous);
-            out.push(' ');
-            out.push_str(&r.chain);
-            out.push('\n');
+            out.push_str(&render_record(r));
         }
         out
     }
@@ -1203,8 +1266,10 @@ impl ReplayLog {
     /// # Errors
     ///
     /// [`ReplayError::Malformed`] for a line that cannot be parsed, [`ReplayError::Tampered`] for a record
-    /// whose stored chain does not match a re-derived one, and [`ReplayError::Discontinuous`] for a
-    /// `previous` that does not point at the record before it.
+    /// whose stored chain does not match a re-derived one, [`ReplayError::Discontinuous`] for a
+    /// `previous` that does not point at the record before it, [`ReplayError::OutOfOrder`] for a
+    /// sequence that does not follow, and [`ReplayError::TooLarge`] past the byte limit — checked
+    /// before anything is allocated.
     ///
     /// # Why the three are separate
     ///
@@ -1241,17 +1306,34 @@ impl ReplayLog {
     /// assert_eq!(back.header().engine_version, "48.0.5");
     /// ```
     pub fn from_text(text: &str) -> Result<Self, ReplayError> {
+        // Bulk first: parsing bulk is where the allocation happens, and a
+        // refusal after allocating is not a refusal.
+        if u64::try_from(text.len()).unwrap_or(u64::MAX) > REPLAY_FILE_MAX_BYTES {
+            return Err(ReplayError::TooLarge {
+                limit_bytes: REPLAY_FILE_MAX_BYTES,
+            });
+        }
+        // Magic first: a file that is not a replay log should not cost a
+        // full split — a 4 MiB newline file would otherwise build a ~4M-entry
+        // line `Vec` before the first line refuses it. Empty text falls
+        // through to `parse_magic`, which owns the "file is empty" refusal.
+        if !text.is_empty() && !text.starts_with(REPLAY_FILE_MAGIC) {
+            return Err(malformed(1, "not a replay file"));
+        }
         let all: Vec<&str> = text.lines().collect();
         parse_magic(&all)?;
         let (header, refused, body_start) = parse_header(&all)?;
         let records = parse_records(&all, body_start)?;
-        let recorded = records.len() as u64;
+        let recorded = u64::try_from(records.len()).unwrap_or(u64::MAX);
         let capacity = records.len();
         Ok(Self {
             header,
             records,
             capacity,
             counters: AppendCounters { recorded, refused },
+            // The text is the rendered form, so its length is the exact
+            // byte count a re-save would write.
+            bytes: u64::try_from(text.len()).unwrap_or(u64::MAX),
             cursor: 0,
         })
     }
@@ -1616,6 +1698,70 @@ mod tests {
             target_triple: "x86_64-pc-windows-msvc".to_owned(),
             deterministic: true,
         }
+    }
+
+    /// **An oversized file is refused before parsing.** A replay file is
+    /// attacker-supplied by construction, so an unbounded read is an
+    /// allocation the file's author controls. Past the byte limit the
+    /// only answer is refusal, whatever the content — even a magic line.
+    /// One bound is enough: every record line carries two 64-hex digests,
+    /// so the byte cap also bounds the record `Vec` (~27.7k records max)
+    /// and the per-line chain work. A second record-count cap would be
+    /// dead — no file can reach it under the byte cap — and dead checks
+    /// rot.
+    #[test]
+    fn an_oversized_file_is_refused_before_parsing() {
+        let big = "x".repeat(usize::try_from(REPLAY_FILE_MAX_BYTES).expect("the limit fits") + 1);
+        assert!(
+            matches!(
+                ReplayLog::from_text(&big),
+                Err(ReplayError::TooLarge { .. })
+            ),
+            "bulk must refuse before content is considered"
+        );
+        // At exactly the limit the size gate passes and the content
+        // decides — here, a missing magic.
+        let edge = "x".repeat(usize::try_from(REPLAY_FILE_MAX_BYTES).expect("the limit fits"));
+        assert!(
+            matches!(
+                ReplayLog::from_text(&edge),
+                Err(ReplayError::Malformed { .. })
+            ),
+            "the limit itself is not the refusal"
+        );
+    }
+
+    /// **A writer never produces what the reader refuses.** Two megabyte
+    /// random reads fit one line each past the midpoint but not both: the
+    /// first records, the second is refused as full, the file still parses,
+    /// and replay fails loudly at the gap (`Exhausted`) — never silently,
+    /// never partially.
+    #[test]
+    fn writer_and_reader_agree_on_bulk() {
+        let mut log = log(8);
+        log.record("crypto.random", ReplayValue::Random(vec![0x5a; 1 << 20]))
+            .expect("the first megabyte fits");
+        let err = log
+            .record("crypto.random", ReplayValue::Random(vec![0x5b; 1 << 20]))
+            .expect_err("the second megabyte must not fit");
+        assert!(
+            matches!(err, ReplayError::Full),
+            "bulk refusal is Full, like capacity: {err:?}"
+        );
+        assert!(log.counters().has_gaps(), "the gap must be visible");
+        let text = log.to_text();
+        let mut back = ReplayLog::from_text(&text).expect("a log this crate wrote parses");
+        assert_eq!(
+            back.next_record("crypto.random").expect("first"),
+            ReplayValue::Random(vec![0x5a; 1 << 20])
+        );
+        assert!(
+            matches!(
+                back.next_record("crypto.random"),
+                Err(ReplayError::Exhausted)
+            ),
+            "replay ends loudly at the refused record"
+        );
     }
 
     fn log(capacity: usize) -> ReplayLog {

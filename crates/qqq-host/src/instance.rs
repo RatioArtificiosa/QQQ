@@ -2843,6 +2843,199 @@ mod tests {
             .expect("deterministic sync execution must keep working");
     }
 
+    // -- DET-008: a recorded execution replays exactly -----------------------
+    //
+    // A component whose only nondeterminism is two clock reads — wall and
+    // monotonic — through two exports. One `run` call reads both (the call
+    // consumes the instance), so each test makes one instance per
+    // direction. The imports are the true versioned shapes
+    // (`wit/qqq-clock.wit`). Two different functions with different live
+    // values is what makes order and consumption provable: identical
+    // values would let a swap or a live read pass.
+    const REPLAY_WAT: &str = r#"
+        (component
+          (import "qqq:clock/wall-clock@1.0.0" (instance $wclock
+            (export "now" (func (result u64)))))
+          (import "qqq:clock/monotonic-clock@1.0.0" (instance $mclock
+            (export "now" (func (result u64)))))
+          (core module $m
+            (import "w" "now" (func $wnow (result i64)))
+            (import "m" "now" (func $mnow (result i64)))
+            (func (export "getw") (result i64) (call $wnow))
+            (func (export "getm") (result i64) (call $mnow)))
+          (core func $wlower (canon lower (func $wclock "now")))
+          (core func $mlower (canon lower (func $mclock "now")))
+          (core instance $hostw (export "now" (func $wlower)))
+          (core instance $hostm (export "now" (func $mlower)))
+          (core instance $i
+            (instantiate $m (with "w" (instance $hostw)) (with "m" (instance $hostm))))
+          (func (export "read-wall") (result u64) (canon lift (core func $i "getw")))
+          (func (export "read-mono") (result u64) (canon lift (core func $i "getm")))
+        )
+    "#;
+
+    fn clock_grants() -> GrantSet {
+        grants(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [capabilities.clock]\nwall = true\nmonotonic = true\n",
+        )
+    }
+
+    fn replay_header_for_test() -> crate::replay::ReplayHeader {
+        crate::replay::ReplayHeader {
+            artifact_digest: "sha256:test".to_owned(),
+            engine_version: "test".to_owned(),
+            target_triple: "test".to_owned(),
+            deterministic: true,
+        }
+    }
+
+    /// Both clock reads in one run call, since the call consumes the
+    /// instance. Wall first, monotonic second: the order is part of the
+    /// contract the tests below pin.
+    fn read_twice(instance: Instance<'_>) -> (u64, u64) {
+        instance
+            .run(|store, wasm| {
+                let w = wasm
+                    .get_typed_func::<(), (u64,)>(&mut *store, "read-wall")
+                    .expect("export");
+                let m = wasm
+                    .get_typed_func::<(), (u64,)>(&mut *store, "read-mono")
+                    .expect("export");
+                let (wall,) = w.call(&mut *store, ()).expect("read");
+                let (mono,) = m.call(&mut *store, ()).expect("read");
+                Ok((wall, mono))
+            })
+            .expect("reads must succeed")
+    }
+
+    /// Recording captures what the guest observed, in order and by
+    /// function. Without the sink wired through, the log stays empty and
+    /// this fails — the test proves capture, not just that reads work.
+    /// Distinct functions pin the order: swapped records would fail the
+    /// function-name assertions, not just the values.
+    #[test]
+    fn recording_captures_what_the_guest_observed_in_order() {
+        let e = engine();
+        let p = PreparedComponent::compile(&e, REPLAY_WAT.as_bytes()).expect("compiles");
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(crate::replay::ReplayLog::new(
+            replay_header_for_test(),
+            8,
+        )));
+        let opts = InstanceOptions {
+            deterministic: true,
+            replay_sink: Some(std::sync::Arc::clone(&sink)),
+            ..InstanceOptions::default()
+        };
+        let instance =
+            Instance::create_with(&e, &p, &clock_grants(), limits(), &opts).expect("instance");
+        let (wall, mono) = read_twice(instance);
+        let log = sink.lock().expect("log");
+        assert_ne!(
+            wall, mono,
+            "the two clocks must differ, or order is unprovable"
+        );
+        let records = log.records();
+        let [first_record, second_record] = records else {
+            panic!("the sink must hold both reads, got {}", records.len());
+        };
+        assert_eq!(first_record.function, "clock.wall");
+        assert_eq!(second_record.function, "clock.monotonic");
+        assert_eq!(
+            (first_record.value.clone(), second_record.value.clone()),
+            (
+                crate::replay::ReplayValue::Clock(wall),
+                crate::replay::ReplayValue::Clock(mono)
+            ),
+            "the sink must hold exactly what the guest observed, in order"
+        );
+    }
+
+    /// Replaying feeds the log's values, not live ones. The source holds
+    /// instants no virtual clock reports, so a guest computing its own
+    /// values returns something else and the assertion catches it — the
+    /// inverse of a test that replays what live time would give anyway.
+    #[test]
+    fn replaying_feeds_the_logs_values_not_live_ones() {
+        use crate::replay::{ReplayLog, ReplayValue};
+        let e = engine();
+        let p = PreparedComponent::compile(&e, REPLAY_WAT.as_bytes()).expect("compiles");
+        let mut written = ReplayLog::new(replay_header_for_test(), 8);
+        written
+            .record("clock.wall", ReplayValue::Clock(42))
+            .expect("room");
+        written
+            .record("clock.monotonic", ReplayValue::Clock(1_000_007))
+            .expect("room");
+        let source = std::sync::Arc::new(std::sync::Mutex::new(written));
+        let opts = InstanceOptions {
+            deterministic: true,
+            replay_source: Some(std::sync::Arc::clone(&source)),
+            ..InstanceOptions::default()
+        };
+        let instance =
+            Instance::create_with(&e, &p, &clock_grants(), limits(), &opts).expect("instance");
+        assert_eq!(read_twice(instance), (42, 1_000_007));
+        assert_eq!(
+            source.lock().expect("log").cursor(),
+            2,
+            "both records must have been consumed from the source"
+        );
+    }
+
+    /// The file boundary, end to end: record, serialize, parse, replay —
+    /// and the replayed outputs equal the recorded ones. This is DET-008's
+    /// item text with a real guest, through the DET-007 format. The cursor
+    /// assertion is what makes it non-vacuous: without the source
+    /// attached, the outputs could coincide with live virtual time and the
+    /// test would still pass — an unconsumed source cannot.
+    #[test]
+    fn recorded_execution_replays_exactly_through_the_file() {
+        use crate::replay::ReplayLog;
+        let e = engine();
+        let p = PreparedComponent::compile(&e, REPLAY_WAT.as_bytes()).expect("compiles");
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(ReplayLog::new(
+            replay_header_for_test(),
+            8,
+        )));
+        let record_opts = InstanceOptions {
+            deterministic: true,
+            replay_sink: Some(std::sync::Arc::clone(&sink)),
+            ..InstanceOptions::default()
+        };
+        let recorded = Instance::create_with(&e, &p, &clock_grants(), limits(), &record_opts)
+            .expect("record instance");
+        let (wall, mono) = read_twice(recorded);
+        let text = sink.lock().expect("log").to_text();
+        let parsed = ReplayLog::from_text(&text).expect("a log this run wrote parses");
+        assert_eq!(
+            parsed
+                .records()
+                .iter()
+                .map(|r| r.value.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                crate::replay::ReplayValue::Clock(wall),
+                crate::replay::ReplayValue::Clock(mono)
+            ],
+            "the file must carry the observed values as values, not substrings"
+        );
+        let source = std::sync::Arc::new(std::sync::Mutex::new(parsed));
+        let replay_opts = InstanceOptions {
+            deterministic: true,
+            replay_source: Some(std::sync::Arc::clone(&source)),
+            ..InstanceOptions::default()
+        };
+        let replayed = Instance::create_with(&e, &p, &clock_grants(), limits(), &replay_opts)
+            .expect("replay instance");
+        assert_eq!(read_twice(replayed), (wall, mono));
+        assert_eq!(
+            source.lock().expect("log").cursor(),
+            2,
+            "the replay must have consumed the file, not recomputed it"
+        );
+    }
+
     /// The async path runs a real guest to completion and returns its value.
     ///
     /// This is the positive control for everything below: if `run_async` could

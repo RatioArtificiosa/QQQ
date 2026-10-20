@@ -4,6 +4,12 @@
 
 ### Security
 
+- **det**: prove DET-008 end to end with a real guest: record captures
+  exactly what the guest observed, replay feeds the log's values (never
+  live ones — distinctive instants), and record→text→parse→replay
+  reproduces exactly through the file. Each direction fault-proven red.
+  Red-first.
+
 - **det**: harden DET-007's replay log format for attacker-supplied
   files: `from_text` refuses past 4 MiB with `TooLarge` before parsing,
   and the `--replay` read path takes one byte past the limit via a

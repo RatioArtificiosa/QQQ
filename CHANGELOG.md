@@ -4,6 +4,16 @@
 
 ### Security
 
+- **perf**: close PERF-028 (runner-identity rotation) on the first
+  real rotation: `ubuntu-latest` moved to Ubuntu 26 (kernel
+  7.0.0-1017-azure) and PERF-020 refused by design with zero
+  comparison run. Reviewed entry 12 (EPYC 7763, qqqai 0.1.1, measured
+  at 001406b, from run 39369173115's artifact) committed after a
+  §O-543 vector review (worst delta +13.5% throughput-up, spreads
+  2–10%, aot/PERF-007 MET at 0.371 ms vs 5 ms). Red-first: the shipped
+  selector refuses the candidate before, selects and compares clean
+  after.
+
 - **det**: prove DET-008 end to end with a real guest: record captures
   exactly what the guest observed, replay feeds the log's values (never
   live ones — distinctive instants), and record→text→parse→replay

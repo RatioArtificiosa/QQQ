@@ -40214,4 +40214,31 @@ shape), two consts, and a bool, so no attacker string reaches `new()`;
 files go through the capped parse. The record-count cap stays dropped.
 `crates/qqq-host/src/replay.rs`, `crates/qqq-run/src/run.rs`.
 
+## §O-764 - PERF-028: the fleet rotated to Ubuntu 26, and the rotation procedure worked as designed
+
+`ubuntu-latest` migrated to Ubuntu 26 on 2026-10-19 (announced in the
+run annotations), and the first push after the migration — DET-008's
+`001406b`, run `39369173115` — failed PERF-020 with the designed
+identity refusal: kernel `7.0.0-1017-azure` against eleven reviewed
+entries all on `6.17.0-1022-azure`. No benchmark comparison ran, so
+there was nothing to rerun twice per §O-543 — the refusal is a
+deterministic string mismatch (kernel, plus 6 MiB memory drift against
+a 1 MiB tolerance, plus `qqqai` 0.0.0→0.1.1, which is part of the
+signature, so version bumps rotate identity too), not variance. A
+same-SHA retry would burn CI for an identical verdict, and the
+cancel-in-progress group would collide with the fix push anyway.
+Review per §O-543 against the nearest same-CPU/same-toolchain entries
+(EPYC 7763 + `qqqai` 0.1.1): hello −5.2%, json +13.5%, multi −3.3%,
+tailp99 +2.0% — all inside gate tolerance with margin and no
+regression signature; within-run spreads 2–10%, none of the 35%
+pathology; the new `aot` row carries PERF-007 MET (0.371 ms vs 5 ms).
+The reviewed entry is byte-identical to the tool's canonical
+serialization, spliced in binary mode (the file is LF with zero-indent
+entries — a text-mode write would CRLF it per the workspace memory
+note). RED proven with the shipped selector on 11 entries, GREEN
+after: selects `001406b`, compare zero failures. The candidate came
+from the fleet itself via the run's `performance-regression` artifact
+— the designed bootstrap path, no local fabrication.
+`.github/perf/baseline.json`, `tools/run_perf_regression.py`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

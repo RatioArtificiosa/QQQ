@@ -4818,7 +4818,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
     today would block every release for a reason that is environmental, which is how
     a gate gets disabled and stays disabled. The prerequisite is the reference
     profile, then the contract.
-- [ ] **PERF-028** Own runner-identity rotation for the PERF baseline: when the fleet identity changes, bootstrap a candidate via the tool's designed path, compare vectors and within-run spread per §O-543, and commit the reviewed entry. PERF-020 failed once on identity mismatch with no benchmark running; the retry went green, but no item tracks the next rotation.
+- [x] **PERF-028** Own runner-identity rotation for the PERF baseline: when the fleet identity changes, bootstrap a candidate via the tool's designed path, compare vectors and within-run spread per §O-543, and commit the reviewed entry. PERF-020 failed once on identity mismatch with no benchmark running; the retry went green, but no item tracks the next rotation.
+  → Done: reviewed entry 12 (kernel 7.0.0-1017-azure, EPYC 7763, qqqai 0.1.1, measured at 001406b) appended to `.github/perf/baseline.json` from CI run 39369173115's `performance-regression` artifact — the first Ubuntu-26-fleet entry, byte-identical to the tool's canonical serialization.
+  → Measured: RED proven (the shipped selector refuses the candidate on 11 entries), GREEN after (selects 001406b, compare zero failures); vectors vs nearest same-CPU entries: hello −5.2%, json +13.5%, multi −3.3%, tailp99 +2.0%, all inside gate tolerance; within-run spreads 2–10%; aot/PERF-007 MET (0.371 ms vs 5 ms).
   → §2.3 NN-3 — Performance and Predictability Over Micro-Benchmarks
 - [x] **PERF-001** Build the benchmark harness with the full published methodology.
   → §9.1 The honest benchmark position

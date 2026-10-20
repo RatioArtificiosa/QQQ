@@ -40359,4 +40359,24 @@ with the flag passed, the pure rule carries its own fabricated-input
 cases, and both comments name the live sites. `tools/check_api_examples.py`,
 `crates/xtask/src/main.rs`, `crates/qqq-cap/src/manifest.rs`.
 
+## §O-769 - PERF-028 second rotation: 8573C joins the Ubuntu-26 fleet
+
+Two days of fleet churn in one observation. First, the TEST-010 commit
+(a records-only change) failed PERF-020 on variance — tailp99 +29.8%,
+multi −24.6% against the old 9V74 entry on an old-fleet runner — with
+zero hot-path overlap, and the same-SHA rerun went green: the §O-543
+disposition (no mechanism, green retry), now the fleet's normal
+background noise during the 24-to-26 migration. Then the DX-015 commit
+failed differently: a hard identity refusal, and the candidate named a
+second new-fleet identity — Intel 8573C on kernel 7.0.0-1017-azure.
+Reviewed per §O-543 against the nearest same-CPU entry (8573C + `qqqai`
+0.1.1): hello +1.9%, json +2.0%, multi +2.3%, tailp99 +0.4% — noise, no
+regression; within-run spreads match the old entry's shapes (json's 21%
+range on one high sample is absorbed by the n=3 median, as before). Committed
+as reviewed entry 13, byte-identical to the tool's canonical
+serialization like entry 12, with the same RED/GREEN selector proof.
+The migration lesson sharpens: old-fleet runners still match old
+entries (variance fails there are flakes), new-fleet classes each need
+their entry (refusals there are procedure). `.github/perf/baseline.json`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -15,8 +15,8 @@ achievable by assertion:
 
 | Measurement | Value |
 |---|---|
-| public declarations across the 11 crates | **1,937** |
-| doctests `cargo test --doc --workspace` runs | **3** |
+| public declarations across the 11 crates | **2,318** |
+| doctests `cargo test --doc --workspace` runs | **385** |
 
 So the honest state is that the standard is **not met**, and a check that claimed otherwise would
 be the "a diagnostic that cannot fail is not a diagnostic" defect in its most visible form. What
@@ -25,14 +25,14 @@ this check does instead is:
 1. **Fail** when an item that *had* an example loses one - a regression is the thing CI can
    meaningfully block.
 2. **Report** the outstanding count, so progress is visible and the number cannot silently drift.
-3. **Allow a floor** via `--allow N`, which is set in `ci.yml` to the current count and lowered as
-   examples are added. A ratchet rather than a cliff.
+3. **Allow a floor** via `--allow N`, which is set in the `xtask` gate to the current count and
+   lowered as examples are added. A ratchet rather than a cliff.
 
 # Why a ratchet and not a hard 100%
 
-Because a check that demands 1,934 new examples turns red and stays red, and a permanently red gate
+Because a check that demands 1,933 new examples turns red and stays red, and a permanently red gate
 is one people learn to ignore - the failure `check_batch_first.py` names as *"paperwork"*. A ratchet
-encodes the same standard while being satisfiable at every commit, and the number in `ci.yml` is
+encodes the same standard while being satisfiable at every commit, and the number in the gate is
 the visible distance to the target.
 
 # What counts as an example
@@ -73,7 +73,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 # This tool's own stdout must be able to encode what it prints. On a Windows console the stream
 # inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
 # raises `UnicodeEncodeError` inside `print` and the tool dies while reporting its result. `§O-291`.
@@ -112,7 +111,9 @@ PUB_DECL = re.compile(
 # are scanned: `qqq-core/src/lib.rs` opens with a `//!` example that **does** compile, and the
 # first version of this pattern matched only `///`, so it reported zero compiling fences for a
 # crate that has one. Measured: `cargo test --doc` runs 3 doctests while this counted 0.
-COMPILING_FENCE = re.compile(r"^\s*//[/!]\s*```(?:rust|no_run|should_panic|compile_fail)?\s*$")
+COMPILING_FENCE = re.compile(
+    r"^\s*//[/!]\s*```(?:rust|no_run|should_panic|compile_fail)?\s*$"
+)
 
 # A compiling fence that rustdoc will *build and not run*. Counted, and reported apart from the
 # rest, because it documents an API without proving its behaviour (`§O-236`).
@@ -266,8 +267,7 @@ def items_in(text: str) -> list[tuple[str, str]]:
             depth_in_test += line.count("{") - line.count("}")
             # Clamp at zero: an unbalanced `}` in a string would otherwise carry the exclusion
             # past the module's real end and hide real API.
-            if depth_in_test < 0:
-                depth_in_test = 0
+            depth_in_test = max(depth_in_test, 0)
             i += 1
             continue
 
@@ -368,7 +368,10 @@ def doctests_run() -> int:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=1800, encoding="utf-8", errors="replace")
+        timeout=1800,
+        encoding="utf-8",
+        errors="replace",
+    )
     total = 0
     for line in (p.stdout + p.stderr).split("\n"):
         m = re.match(r"running (\d+) tests?", line.strip())
@@ -377,21 +380,85 @@ def doctests_run() -> int:
     return total
 
 
-# The allowance, read from `ci.yml` so the number lives in one place and a reviewer sees it.
+# The allowance, read from the gate so the number lives in one place and a
+# reviewer sees it. Two files are read because history put the invocation in
+# two places: `crates/xtask/src/main.rs` holds the live one, `.github/workflows/ci.yml`
+# the documented one. When both name a number they must agree — two numbers is
+# not a ratchet, it is a disagreement about what the gate enforces.
+#
+# Two patterns because the two files spell an invocation differently: a `run:`
+# shell line in YAML versus adjacent Rust string literals in `xtask`. A test
+# that only fed the YAML shape passed while the live Rust line resolved to
+# nothing — the matcher must read the shape that actually ships.
 ALLOW_RE = re.compile(r"check_api_examples\.py\s+--allow\s+(\d+)")
+ALLOW_XTASK_RE = re.compile(r'check_api_examples\.py",\s*"--allow",\s*"(\d+)"')
 
 
-def allowance_from_ci() -> int | None:
-    ci = ROOT / ".github/workflows/ci.yml"
-    if not ci.is_file():
-        return None
-    m = ALLOW_RE.search(ci.read_text(encoding="utf-8"))
-    return int(m.group(1)) if m else None
+def allowance_in_text(text: str) -> int | None:
+    """The allowance an invocation text names, or nothing when it names none."""
+    for pattern in (ALLOW_RE, ALLOW_XTASK_RE):
+        m = pattern.search(text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def allowances_in(xtask_text: str, ci_text: str) -> dict[str, int]:
+    """The allowance each gate file names, keyed by file. Missing files name nothing."""
+    found: dict[str, int] = {}
+    for name, text in (("xtask", xtask_text), ("ci.yml", ci_text)):
+        value = allowance_in_text(text)
+        if value is not None:
+            found[name] = value
+    return found
+
+
+def allowance_from_gate() -> tuple[int | None, str | None]:
+    """Resolve the live allowance and any disagreement between its sources.
+
+    Returns the allowance (explicit `--allow` still wins at the call site) and,
+    when both gate files name different numbers, the conflict to refuse on.
+    """
+    texts: dict[str, str] = {}
+    for name, path in (
+        ("xtask", ROOT / "crates/xtask/src/main.rs"),
+        ("ci.yml", ROOT / ".github/workflows/ci.yml"),
+    ):
+        if path.is_file():
+            texts[name] = path.read_text(encoding="utf-8")
+        else:
+            texts[name] = ""
+    return resolve_gate_allowance(texts["xtask"], texts["ci.yml"])
+
+
+def resolve_gate_allowance(
+    xtask_text: str, ci_text: str
+) -> tuple[int | None, str | None]:
+    """The pure rule both the checker and its self-test call.
+
+    Split out so the self-test exercises the decision on fabricated texts
+    rather than re-implementing it: a test that recomputes the answer beside
+    the code passes when both are wrong in the same way.
+    """
+    found = allowances_in(xtask_text, ci_text)
+    if len(set(found.values())) > 1:
+        detail = ", ".join(
+            f"{name} says {value}" for name, value in sorted(found.items())
+        )
+        return None, (
+            f"the gate names two allowances ({detail}): agree on one number, "
+            "because two numbers is not a ratchet"
+        )
+    if found:
+        return next(iter(found.values())), None
+    return None, None
 
 
 def run_check(args) -> int:
     if not crates():
-        print(f"FAIL -- no crates found under {CRATES}; a scan of nothing certifies nothing")
+        print(
+            f"FAIL -- no crates found under {CRATES}; a scan of nothing certifies nothing"
+        )
         return 1
 
     per = measure()
@@ -399,10 +466,14 @@ def run_check(args) -> int:
     total_comp = sum(v["compiling"] for v in per.values())
     total_no_run = sum(v["no_run"] for v in per.values())
 
-    print(f"{'crate':14} {'files':>6} {'public items':>13} {'compiling fences':>17} {'no_run':>7} {'other':>6}")
+    print(
+        f"{'crate':14} {'files':>6} {'public items':>13} {'compiling fences':>17} {'no_run':>7} {'other':>6}"
+    )
     print("-" * 70)
     for name, v in per.items():
-        print(f"{name:14} {v['files']:6} {v['items']:13} {v['compiling']:17} {v['no_run']:7} {v['other']:6}")
+        print(
+            f"{name:14} {v['files']:6} {v['items']:13} {v['compiling']:17} {v['no_run']:7} {v['other']:6}"
+        )
     print("-" * 70)
     print(
         f"{'TOTAL':14} {sum(v['files'] for v in per.values()):6} {total_items:13} "
@@ -437,11 +508,26 @@ def run_check(args) -> int:
             "(§O-236)."
         )
 
-    allowance = args.allow if args.allow is not None else allowance_from_ci()
+    allowance = args.allow if args.allow is not None else None
+    # Consulted unconditionally: an explicit `--allow` excuses nothing when
+    # the gate files disagree with each other — the xtask CI path passes its
+    # number explicitly, so a conflict check behind the explicit branch would
+    # never fire where it matters.
+    _, conflict = allowance_from_gate()
+    if conflict is not None:
+        print()
+        print(f"FAIL -- {conflict}.")
+        return 1
+    if allowance is None:
+        allowance, _ = allowance_from_gate()
     if allowance is None:
         print()
-        print("NOTE: no `--allow` in ci.yml and none passed, so this run only reports.")
-        print("      Add `check_api_examples.py --allow N` to ci.yml to make it a gate.")
+        print(
+            "NOTE: no `--allow` in the gate and none passed, so this run only reports."
+        )
+        print(
+            "      Add `check_api_examples.py --allow N` to the gate to make it enforce."
+        )
         return 0
 
     print(f"allowance:           {allowance}")
@@ -460,12 +546,18 @@ def run_check(args) -> int:
 
     print()
     if outstanding > allowance:
-        print(f"API EXAMPLES OVER ALLOWANCE -- {outstanding} outstanding, allowance {allowance}")
-        print("Every public API needs a compiling example (Proposal §12.3, 100% target).")
-        print("Add examples, then lower the `--allow` number in ci.yml to match.")
+        print(
+            f"API EXAMPLES OVER ALLOWANCE -- {outstanding} outstanding, allowance {allowance}"
+        )
+        print(
+            "Every public API needs a compiling example (Proposal §12.3, 100% target)."
+        )
+        print("Add examples, then lower the gate's `--allow` number to match.")
         return 1
 
-    print(f"API EXAMPLES OK -- {outstanding} outstanding, at or under the allowance of {allowance}")
+    print(
+        f"API EXAMPLES OK -- {outstanding} outstanding, at or under the allowance of {allowance}"
+    )
     if outstanding:
         print("The target is 0. The allowance is a ratchet: lower it as examples land.")
     return 0
@@ -520,7 +612,9 @@ pub type E = u32;
     expect("0 doctests and no items is not", measured_nothing(0, 0), False)
     expect("doctests ran is not vacuous", measured_nothing(2139, 17), False)
     expect("pub(crate) excluded", any(n == "hidden" for _, n in items_in(src)), False)
-    expect("pub(super) excluded", any(n == "also_hidden" for _, n in items_in(src)), False)
+    expect(
+        "pub(super) excluded", any(n == "also_hidden" for _, n in items_in(src)), False
+    )
 
     # A test module's `pub fn` is not API.
     with_tests = """
@@ -542,7 +636,7 @@ mod tests {
     # The fixture is the shape that was measured, not a shape invented for the test: `new.rs`
     # carries twelve `pub` items inside the scaffold templates, and `qqq-host/src/arch012.rs` has a
     # doc comment that *quotes* `pub const NAME: &str`.
-    with_strings = '''
+    with_strings = """
 pub fn real_one() {}
 
 const TEMPLATE: &str = r#"pub struct Fake {
@@ -560,9 +654,11 @@ pub const REAL: u32 = 1;
 fn not_public() {
     let _s = "pub fn inside_a_plain_string() {}";
 }
-'''
+"""
     names = [n for _, n in items_in(with_strings)]
-    expect("the real items are kept", names.count("real_one") + names.count("real_two"), 2)
+    expect(
+        "the real items are kept", names.count("real_one") + names.count("real_two"), 2
+    )
     expect("a real const is kept", "REAL" in names, True)
     expect("a template's struct is excluded", "Fake" in names, False)
     expect("a template's fn is excluded", "also_fake" in names, False)
@@ -641,6 +737,50 @@ pub fn after_the_lifetime() {}
     expect("over allowance fails", over, True)
     expect("at allowance passes", at, True)
 
+    # The allowance source (`DX-015`): the number lived in `ci.yml` per every
+    # doc comment while the live invocation sat in `crates/xtask/src/main.rs`
+    # — nothing watched the watcher, so the gate's slack went unnoticed.
+    # The resolver reads both gate files; a test that only re-implements the
+    # comparison cannot see the number move, so these run the real functions
+    # on fabricated texts.
+    gate_text = "run: python tools/check_api_examples.py --allow 1933\n"
+    expect("an invocation resolves", allowance_in_text(gate_text), 1933)
+    expect(
+        "no invocation resolves to nothing",
+        allowance_in_text("run: python tools/other.py\n"),
+        None,
+    )
+    both_same = allowances_in(gate_text, gate_text)
+    expect("agreeing sources resolve singly", sorted(set(both_same.values())), [1933])
+    differed = allowances_in(gate_text, gate_text.replace("1933", "2115"))
+    expect(
+        "differing sources are detected", sorted(set(differed.values())), [1933, 2115]
+    )
+    # The live `xtask` shape — adjacent Rust literals, not a shell line. A
+    # first version of this test fed only the shell shape and passed while
+    # the real file resolved to nothing (`§O-280`: the injection had not
+    # injected what it claimed).
+    xtask_line = '        &["tools/check_api_examples.py", "--allow", "1933"],\n'
+    expect("the xtask invocation shape resolves", allowance_in_text(xtask_line), 1933)
+    # The live tree resolves without conflict. Pinned to shape, not to the
+    # number: a legitimate retightening must update the gate, not this test.
+    live_value, live_conflict = allowance_from_gate()
+    expect("the live gate resolves", live_value is not None, True)
+    expect("the live gate agrees", live_conflict, None)
+    # The pure rule, decided on fabricated texts — including the refusal an
+    # explicit `--allow` does not excuse.
+    resolved, refused = resolve_gate_allowance(gate_text, "")
+    expect("one source resolves", (resolved, refused), (1933, None))
+    resolved, refused = resolve_gate_allowance(
+        gate_text, gate_text.replace("1933", "2115")
+    )
+    expect("two numbers resolve nothing", resolved, None)
+    expect(
+        "two numbers refuse",
+        refused is not None and "2115" in refused and "1933" in refused,
+        True,
+    )
+
     # The corpus must be non-empty.
     expect("crates found", len(crates()) > 0, True)
 
@@ -654,9 +794,15 @@ pub fn after_the_lifetime() {}
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--self-test", action="store_true", help="prove the counters and gate")
-    ap.add_argument("--list", action="store_true", help="name files with items and no example")
-    ap.add_argument("--allow", type=int, help="pass at this many outstanding items or fewer")
+    ap.add_argument(
+        "--self-test", action="store_true", help="prove the counters and gate"
+    )
+    ap.add_argument(
+        "--list", action="store_true", help="name files with items and no example"
+    )
+    ap.add_argument(
+        "--allow", type=int, help="pass at this many outstanding items or fewer"
+    )
     args = ap.parse_args()
     return self_test(args) if args.self_test else run_check(args)
 

@@ -35,7 +35,7 @@ produces its number, or the next reader cannot tell a stale line from a current 
 | always | why |
 |---|---|
 | **`cargo fmt --all`** | it moves comments, so a coordinate measured before it is stale after it |
-| **the four gate commands** | `fmt`, `clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`, `check_api_examples --allow 2105` |
+| **the four gate commands** | `fmt`, `clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`, `check_api_examples --allow 1933` |
 | **both gates stay in parity** | `check_gate_parity.py`; a checker in one gate and not the other is the divergence it exists to find |
 
 ## 3. Why "code, tests, docs, xref, observations" is not checkable as written

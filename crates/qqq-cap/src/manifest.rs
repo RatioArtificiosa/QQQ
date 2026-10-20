@@ -2111,10 +2111,21 @@ pub struct Cors {
 ///
 /// Only file paths are modelled, matching the one `CertificateSource`
 /// variant an operator can write down (`Files`): ACME issuance is refused
-/// a platform key the manifest cannot see cannot be named in it. ALPN is
-/// deliberately not modelled: the in-house accept loop is HTTP/1.1-only
-/// (`SRV-022`), so an `alpn` knob could advertise a loop that does not
-/// exist on this path.
+/// elsewhere by name (`SRV-013`), and a platform key the manifest cannot
+/// see cannot be named in it. ALPN is deliberately not modelled: the
+/// in-house accept loop is HTTP/1.1-only (`SRV-022`), so an `alpn` knob
+/// could advertise a loop that does not exist on this path.
+///
+/// ```
+/// use qqq_cap::manifest::ServerTls;
+///
+/// let tls = ServerTls {
+///     cert_file: "certs/server.pem".to_owned(),
+///     key_file: "certs/server.key".to_owned(),
+/// };
+/// assert_eq!(tls.cert_file, "certs/server.pem");
+/// assert_eq!(tls.key_file, "certs/server.key");
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerTls {

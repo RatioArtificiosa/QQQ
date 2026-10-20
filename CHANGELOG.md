@@ -684,6 +684,16 @@
   and refuses anything else rather than misreading it. New rows are
   always v2. (`F-09`)
 
+### Changed
+
+- **dx**: make the api-examples ratchet exact (DX-015): the gate allowed
+  2115 against a live 1934, so 181 net-new undocumented APIs would pass
+  (red-proven with a temporary item). Allowance is now the live 1933
+  including one new `ServerTls` example, the resolver reads the real
+  `xtask` invocation shape (the YAML-only matcher resolved nothing live),
+  and disagreeing gate sources refuse. Doc drift fixed (the number never
+  lived in `ci.yml`; measurement table updated to 2,318/385).
+
 ## v0.1.1 - 2026-10-05
 
 ### Security

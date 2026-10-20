@@ -575,7 +575,7 @@ const PY_STEPS: &[Step] = &[
     Step::py(
         Lane::Seq,
         "check_api_examples",
-        &["tools/check_api_examples.py", "--allow", "2115"],
+        &["tools/check_api_examples.py", "--allow", "1933"],
     ),
     Step::py(
         Lane::Seq,

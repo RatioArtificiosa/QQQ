@@ -40331,4 +40331,32 @@ fixture check, matrix, self-test, drift guard, and execution, each with
 its measured output. `tools/check_conformance.py`,
 `crates/qqq-run/tests/conformance_exec.rs`, `crates/xtask/src/main.rs`.
 
+## §O-768 - DX-015: the ratchet bit nothing, and the watcher was unwatched
+
+The gate allowed 2115 against a live count of 1934 — 181 undocumented
+APIs of slack. Red proof first: a temporary undocumented `pub fn`
+passed the gate (1935 ≤ 2115, logged), so the check certified exactly
+what it could not see. The fix tightens `xtask` to the live count and
+lands one example (`ServerTls`, pure struct doctest: 1934 → 1933), but
+the instructive find came next: the new self-test cases passed while
+the live file resolved to nothing. The matcher only read the YAML
+`run:` shape; the live invocation is adjacent Rust literals in
+`main.rs`. `§O-280`'s rule verbatim — the injection had not injected
+what it claimed — so the matcher reads both shapes and the self-test
+feeds the real `xtask` line plus a live-tree assertion (resolves,
+agrees; pinned to shape, never to the number). Two more drifts fixed
+in passing: every doc comment said the number lives in `ci.yml`, where
+no invocation exists (the resolver now reads both files and refuses on
+disagreement, proven end to end by a temporary conflicting entry), and
+the header's measurement table still read 1,937/3 against live
+2,318/385. The gate now fails on any net-new undocumented API and on
+any two-number disagreement. Review returned 1 MEDIUM (the conflict
+refusal untested on fabricated input and bypassed by explicit `--allow`
+— the xtask path never consulted the files) plus 2 LOWs (stale
+allowance-site comments in `check_public_reachability` and the
+definition-of-done doc): the refusal is now unconditional and proven
+with the flag passed, the pure rule carries its own fabricated-input
+cases, and both comments name the live sites. `tools/check_api_examples.py`,
+`crates/xtask/src/main.rs`, `crates/qqq-cap/src/manifest.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

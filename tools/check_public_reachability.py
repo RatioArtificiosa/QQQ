@@ -33,8 +33,8 @@ outside this repository, and only a human can say which. So:
      `dead_code` for no reason. There are no false positives; this is the one case the tool refuses.
   2. **Rule B is a ratchet**: the count of unreferenced `pub` items must not **grow** past the
      recorded allowance. A new module with no caller raises it immediately; the existing 22 are a
-     known, reviewable baseline. The allowance lives in `ci.yml`, like `check_api_examples`'s, so a
-     reviewer sees the number in one place.
+     known, reviewable baseline. The allowance lives in `tools/public-reachability-allow.txt`,
+     next to the checker, so a reviewer sees the number beside the rule that enforces it.
 
 # Why the baseline is honest rather than convenient
 
@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from collections import Counter
 from pathlib import Path
 
@@ -64,11 +63,11 @@ ROOT = Path(__file__).resolve().parent.parent
 # narrower thing, which is what this tool wants a caller-less item to become.
 DECL = re.compile(
     r"^\s*pub (?:const |async |unsafe )?(fn|struct|enum|trait|type|const|static)\s+([A-Za-z_]\w*)",
-    re.M,
+    re.MULTILINE,
 )
 
 # A module declaration, to find items whose `pub` cannot be reached.
-MODULE = re.compile(r"^\s*(pub(?:\([^)]*\))? )?mod (\w+)", re.M)
+MODULE = re.compile(r"^\s*(pub(?:\([^)]*\))? )?mod (\w+)", re.MULTILINE)
 
 # Where a reference can legitimately appear.
 CORPUS_GLOBS = (
@@ -259,7 +258,9 @@ def validate(listing: bool, override: int | None) -> int:
     print(f"public declarations        : {total}")
     print(f"referenced nowhere         : {len(unref)}")
     print(f"`pub` in a non-`pub` module: {len(lies)}")
-    print(f"declared, with a reason    : {len(declared_map)} ({unreviewed} still `unreviewed`)")
+    print(
+        f"declared, with a reason    : {len(declared_map)} ({unreviewed} still `unreviewed`)"
+    )
     if listing:
         for path, kind, name in unref:
             key = (str(path.relative_to(ROOT)).replace("\\", "/"), name)
@@ -269,9 +270,11 @@ def validate(listing: bool, override: int | None) -> int:
             print(f"  VISIBILITY   {path.relative_to(ROOT)}  {what}")
 
     problems = check_declaration(unref, declared_map)
-    problems += check(len(unref), len(lies), override if override is not None else len(unref))
+    problems += check(
+        len(unref), len(lies), override if override is not None else len(unref)
+    )
 
-    print("")
+    print()
     if problems:
         print(f"PUBLIC REACHABILITY FAILED -- {len(problems)} problem(s):")
         for p_ in problems:
@@ -310,9 +313,17 @@ def self_test() -> int:
     bad = "pub(crate) mod m {\n    pub fn lied() {}\n}\n"
     case("a `pub mod` is not a lie", len(_lies_in(good, {"fine"})), 0)
     # `lied` is unreferenced AND in a `pub(crate)` module: the intersection, and the defect.
-    case("an unreferenced `pub` in a `pub(crate) mod` is a lie", len(_lies_in(bad, {"lied"})), 1)
+    case(
+        "an unreferenced `pub` in a `pub(crate) mod` is a lie",
+        len(_lies_in(bad, {"lied"})),
+        1,
+    )
     # The same module, but the item IS referenced: merely redundant, not a defect.
-    case("a referenced `pub` in a `pub(crate) mod` is not a lie", len(_lies_in(bad, {"other"})), 0)
+    case(
+        "a referenced `pub` in a `pub(crate) mod` is not a lie",
+        len(_lies_in(bad, {"other"})),
+        0,
+    )
 
     # The real workspace must currently pass.
     real = unreferenced()
@@ -330,12 +341,20 @@ def self_test() -> int:
 
     # Staleness, both directions, on synthetic input.
     live = [(ROOT / "crates" / "a" / "src" / "x.rs", "fn", "live_one")]
-    case("a declared and live item is fine", check_declaration(live, {("crates/a/src/x.rs", "live_one"): "published-api"}), [])
-    case("a declared item that is now referenced is STALE", len(check_declaration([], {("crates/a/src/x.rs", "gone"): "published-api"})), 1)
+    case(
+        "a declared and live item is fine",
+        check_declaration(live, {("crates/a/src/x.rs", "live_one"): "published-api"}),
+        [],
+    )
+    case(
+        "a declared item that is now referenced is STALE",
+        len(check_declaration([], {("crates/a/src/x.rs", "gone"): "published-api"})),
+        1,
+    )
     case("an undeclared unreferenced item fails", len(check_declaration(live, {})), 1)
 
     total = 11
-    print("")
+    print()
     if failures:
         print(f"SELF-TEST FAILED -- {failures}/{total} case(s) behaved wrongly")
         return 1
@@ -371,8 +390,12 @@ def _lies_in(text: str, names: set[str]) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--self-test", action="store_true", help="prove both rules are live")
-    ap.add_argument("--list", action="store_true", help="print every unreferenced declaration")
+    ap.add_argument(
+        "--self-test", action="store_true", help="prove both rules are live"
+    )
+    ap.add_argument(
+        "--list", action="store_true", help="print every unreferenced declaration"
+    )
     ap.add_argument("--allow", type=int, default=None, help="the recorded baseline")
     args = ap.parse_args()
     if args.self_test:

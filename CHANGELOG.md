@@ -4,6 +4,13 @@
 
 ### Security
 
+- **sec**: upgrade wasmtime 48.0.6 → 48.0.7 for RUSTSEC-2026-0378/0379
+  (SEC-014/R-04, issue #7): the 0379 aarch64 `br_table` miscompile is
+  CVSS 9.9 CRITICAL against untrusted guests, the 0378 component-stream
+  panic is 5.7 MEDIUM with no QQQ-side trigger found. `ENGINE_VERSION`
+  moved with the lock (anti-drift test red-then-green); detected by the
+  local gate within the hour, inside the +4h triage window.
+
 - **perf**: close PERF-028 (runner-identity rotation) on the first
   real rotation: `ubuntu-latest` moved to Ubuntu 26 (kernel
   7.0.0-1017-azure) and PERF-020 refused by design with zero

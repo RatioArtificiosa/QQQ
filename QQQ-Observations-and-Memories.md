@@ -40241,4 +40241,35 @@ from the fleet itself via the run's `performance-regression` artifact
 — the designed bootstrap path, no local fabrication.
 `.github/perf/baseline.json`, `tools/run_perf_regression.py`.
 
+## §O-765 - The advisory tripwire fired for real: RUSTSEC-2026-0378/0379 stop the wave
+
+`cargo deny` turned red mid-gate on two Wasmtime advisories issued
+today, both affecting the pinned 48.0.6 — the exact tripwire
+`docs/wasmtime-advisory-process.md` and the goal's 24h rule describe.
+0379 is CVSS 9.9 CRITICAL (aarch64 `br_table` miscompile — a wrong jump
+target under untrusted guests, the R-04 scenario, and QQQ executes
+guests on aarch64); 0378 is 5.7 MEDIUM (host-created component-stream
+panic, whose trigger a tree scan shows QQQ does not hold). Detection
+channel: the local gate, within the hour — the daily scheduled job had
+not fired yet, which answers the process's review question 1 honestly
+(automation caught it, just the faster of the two automated channels).
+Response per the process: triage issue #7 (affected range stated),
+`cargo update -p wasmtime --precise 48.0.7`, and the anti-drift test did
+its designed job — red naming the lockfile/constant pair, green after
+`ENGINE_VERSION` moved with it. Review caught the lockstep miss the
+bump left behind: `wasmtime-wasi`/`wasi-io` sat at 48.0.6 beside engine
+48.0.7, against the workspace's own lockstep rule — fixed by
+`cargo update -p wasmtime-wasi --precise 48.0.7`, with compatibility
+6/6, hostile guests 6/6, and the separate fuzz workspace 15/15 on the
+new engine before the gate. The SRV-021 unit was complete and
+green-gated at that point; it was stashed (`srv021-tls-termination-uncommitted`,
+with untracked files) rather than mixed into the security bump, because
+a mixed commit would pin the advisory's provenance to an unrelated
+feature. Lesson with teeth: the process doc's "current pin" (§160)
+still said 48.0.5 two bumps later — descriptive pin statements rot, and
+the bump now updates it as part of the unit rather than leaving it for
+a review that never comes. NOTE (merge record): the stashed SRV-021
+branch also numbers its observation §O-765; on unstash it renumbers to
+§O-766, and this entry stays.
+
 *End of `QQQ-Observations-and-Memories.md`.*

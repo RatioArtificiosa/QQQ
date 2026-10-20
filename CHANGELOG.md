@@ -4,6 +4,12 @@
 
 ### Security
 
+- **sec**: upgrade rustls-webpki 0.103.15 → 0.103.16 for
+  RUSTSEC-2026-0382 (issue #9): affected versions accept certificate
+  paths with distrusted emSign intermediates (CVE-2026-111943,
+  crypto-failure). Narrow QQQ-side exposure in the TLS stack, so patch
+  rather than argue; no API change.
+
 - **tls**: honor SRV-021 (`--tls` terminates in `qqqai serve`): `[server.tls]`
   (`cert_file`, `key_file`) modelled with shape-only validation, and the
   in-house accept loop decrypts through the same handlers via a

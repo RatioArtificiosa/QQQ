@@ -40379,4 +40379,45 @@ The migration lesson sharpens: old-fleet runners still match old
 entries (variance fails there are flakes), new-fleet classes each need
 their entry (refusals there are procedure). `.github/perf/baseline.json`.
 
+## §O-770 - Bridge20: the final tree is green on Linux, inside limits, with one slow step understood
+
+`tools/qqqdev.ps1 test` on `143df71` (tree verified clean pre-launch,
+stash noted but superseded): exit 0, "All Linux gates passed", 87
+suites green / 0 bad — then `checks` (GATE GREEN all 146 steps, exit 0)
+and `test-linux` (exit True, 88 green / 0 bad) for the full family.
+Zero failures anywhere, nothing silently absent: every step and suite
+present in the logs and ok. One slow step, understood not feared:
+`self_test_xrefs` took 61 min in-container against ~100 s on the host
+— the xrefs self-test does thousands of file ops over the bind mount,
+and CPU accrued throughout (2.5 → 4 min across polls), so this is
+virtiofs I/O pain, not a hang; the `check_coderabbit_config` self-test
+showed the same shape (30 min in-container, 14 s on host, 13/13 both).
+Resources (132 continuous one-minute samples, fresh per-run log):
+CPU mean 80.2% (diluted by inter-phase idle — reported plainly),
+max 817.6%; MEM max 3.28 GiB = 41.0% of the 8 GiB compose limit. Max
+CPU matches bridge19's 805.0% (same cargo build-burst signature);
+memory sits between bridge18 (2.26 GiB) and bridge19 (3.70 GiB) —
+priors per the goal brief's comparison set, as prior bridge logs live
+outside the repo. Suite counts differ by phase scope, not by loss: 87
+`test result: ok` in `test` (crate suites) versus 88 in `test-linux`
+(Linux-only targets). Consumer identified: `cargo`/test binaries in
+the two run containers, timestamps correlated. Judgement NORMAL:
+inside limits throughout, understood causes, all outcomes green, no
+correlation to chase.
+`bridge20/` logs (test, checks, test-linux, per-run docker-stats with
+1-minute timestamps) under the goal scratch.
+
+## §O-771 - Second tripwire the same day: RUSTSEC-2026-0382 (rustls-webpki)
+
+`cargo deny` turned red again in the bridge-record gate — a rustls-webpki
+advisory issued today: affected versions accept certificate paths with
+distrusted emSign intermediates when trust anchors allow such paths
+(CVE-2026-111943, crypto-failure). QQQ-side exposure is narrow but sits
+in the TLS stack this goal just shipped (client path verification and
+server-side mTLS trust roots from operator CA files), so patch, don't
+argue: `cargo update -p rustls-webpki --precise 0.103.16`, no API
+change, lock-only plus records. Triage issue #9. Two tripwires in one
+day is the process working as designed, not a bad day: both were caught
+by automation within the hour, both ship ahead of any clock.
+
 *End of `QQQ-Observations-and-Memories.md`.*

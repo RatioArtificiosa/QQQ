@@ -39,6 +39,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use qqq_serve::conn_stream::ConnStream;
 use qqq_serve::sse::{self, Event};
 use qqq_serve::stream::{StreamOutcome, StreamWriter};
 use qqq_serve::{Response, Version};
@@ -131,7 +132,8 @@ async fn a_streaming_writer_produces_a_valid_chunked_response() {
     let listener = TcpListener::bind(addr).await.expect("bind");
 
     let server = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.expect("accept");
+        let (sock, _) = listener.accept().await.expect("accept");
+        let mut sock = ConnStream::Plain(sock);
         let mut buf = [0u8; 1024];
         let _ = sock.read(&mut buf).await;
 
@@ -192,7 +194,8 @@ async fn the_head_reaches_the_client_before_any_body() {
     let listener = TcpListener::bind(addr).await.expect("bind");
 
     let server = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.expect("accept");
+        let (sock, _) = listener.accept().await.expect("accept");
+        let mut sock = ConnStream::Plain(sock);
         let mut buf = [0u8; 1024];
         let _ = sock.read(&mut buf).await;
         // Scoped so the borrow of `sock` ends here. No `drop(writer)`: the type has no
@@ -234,7 +237,8 @@ async fn an_empty_write_does_not_end_the_body() {
     let listener = TcpListener::bind(addr).await.expect("bind");
 
     let server = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.expect("accept");
+        let (sock, _) = listener.accept().await.expect("accept");
+        let mut sock = ConnStream::Plain(sock);
         let mut buf = [0u8; 1024];
         let _ = sock.read(&mut buf).await;
 
@@ -275,7 +279,8 @@ async fn an_http10_stream_writes_no_chunk_terminator() {
     let listener = TcpListener::bind(addr).await.expect("bind");
 
     let server = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.expect("accept");
+        let (sock, _) = listener.accept().await.expect("accept");
+        let mut sock = ConnStream::Plain(sock);
         let mut buf = [0u8; 1024];
         let _ = sock.read(&mut buf).await;
 
@@ -320,7 +325,8 @@ async fn a_client_disconnect_is_an_error_the_handler_can_see() {
     let listener = TcpListener::bind(addr).await.expect("bind");
 
     let server = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.expect("accept");
+        let (sock, _) = listener.accept().await.expect("accept");
+        let mut sock = ConnStream::Plain(sock);
         let mut buf = [0u8; 1024];
         let _ = sock.read(&mut buf).await;
 
@@ -368,7 +374,8 @@ async fn finish_is_idempotent() {
     let listener = TcpListener::bind(addr).await.expect("bind");
 
     let server = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.expect("accept");
+        let (sock, _) = listener.accept().await.expect("accept");
+        let mut sock = ConnStream::Plain(sock);
         let mut buf = [0u8; 1024];
         let _ = sock.read(&mut buf).await;
 

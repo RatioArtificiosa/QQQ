@@ -4,6 +4,15 @@
 
 ### Security
 
+- **tls**: honor SRV-021 (`--tls` terminates in `qqqai serve`): `[server.tls]`
+  (`cert_file`, `key_file`) modelled with shape-only validation, and the
+  in-house accept loop decrypts through the same handlers via a
+  `ConnStream` enum (TLS state boxed). Fail closed both directions at
+  startup; handshake failure records a protocol error, never cleartext
+  fallback; ALPN stays http/1.1-only (no h2 loop in-house). 21 tests
+  across manifest, accept loop, wiring, and the real binary — including a
+  TLS/cleartext byte-parity proof — each seam fault-proven red.
+
 - **sec**: upgrade wasmtime 48.0.6 → 48.0.7 for RUSTSEC-2026-0378/0379
   (SEC-014/R-04, issue #7): the 0379 aarch64 `br_table` miscompile is
   CVSS 9.9 CRITICAL against untrusted guests, the 0378 component-stream

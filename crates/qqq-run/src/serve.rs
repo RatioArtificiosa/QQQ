@@ -49,16 +49,20 @@
 //! **requests** hold a guest at once, across the process. Both are real and neither
 //! substitutes for the other.
 //!
-//! # Why `--tls` is refused
+//! # How `--tls` is honored
 //!
-//! `--tls` used to parse, set `ServeOutput::tls`, print `TLS: on` and serve cleartext: the
-//! manifest has no `[server.tls]` section and there is no TLS-terminating accept path, so
+//! `--tls` once parsed, set `ServeOutput::tls`, printed `TLS: on` and served cleartext: the
+//! manifest had no `[server.tls]` section and there was no TLS-terminating accept path, so
 //! the flag had nothing to turn on. A command that reports an active security feature it
 //! does not provide is worse than one that has no such flag, because the operator's belief
 //! is the thing being relied on.
 //!
-//! It is refused at parse time, naming what is missing and what to do instead, so the
-//! failure lands while the user is looking at the command they typed.
+//! `SRV-021` closed both halves: the manifest models `[server.tls]` (`cert_file`,
+//! `key_file`), and the in-house accept loop terminates what `build_tls` builds from
+//! it. The flag and the section must agree — `--tls` without a section has nothing to
+//! terminate with, and a section without `--tls` would leave a configured identity
+//! unapplied — so `prepare` refuses both mismatches at startup, naming the true cause.
+//! Failure lands while the user is looking at the command they typed.
 //!
 //! # Why `--config` names a manifest and is not an overlay format
 //!
@@ -113,7 +117,9 @@ pub struct ServeOptions {
     pub listen: String,
     /// `--workers <n>`. Only `1` is accepted; see the module documentation.
     pub workers: u32,
-    /// `--tls`. Refused while no TLS configuration or accept path exists; see the module
+    /// `--tls`. Honored when the manifest declares `[server.tls]`, refused
+    /// otherwise — and a declared section without the flag is refused too,
+    /// so a configured identity is never silently unapplied. See the module
     /// documentation.
     pub tls: bool,
     /// `--config <path>` — an alternate manifest to serve.
@@ -530,29 +536,16 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
 
     // --- The one flag that would otherwise report something untrue -----------
     //
-    // A *refusal at parse time* rather than a warning at startup, because the alternative
-    // is a server that prints a security claim it cannot honour: `--tls` printed
+    // A *refusal at prepare time* rather than a warning at startup, because the alternative
+    // is a server that prints a security claim it cannot honour: `--tls` once printed
     // `TLS: on` while serving cleartext, so an operator reading the command's own output
     // would conclude the listener was encrypted.
     //
-    // Refusing is a smaller change than it looks, and a reversible one: when `[server.tls]`
-    // is modelled and a TLS-terminating accept path exists, this check is deleted and
-    // nothing else moves.
-    if opts.tls {
-        return Err(usage(
-            "`--tls` is not implemented: the manifest has no `[server.tls]` section and \
-             there is no TLS-terminating accept path, so this server would serve cleartext \
-             while reporting TLS",
-        )
-        .with_remediation(
-            "terminate TLS in front of `qqqai serve` (a reverse proxy or a service mesh). \
-             `SRV-007` is **done** — it implemented `qqq-serve::tls`: rustls 0.23, the explicit \
-             cipher policy, ALPN, and 21 end-to-end handshake tests. What has not landed is the \
-             **manifest `[server.tls]` section** and the **accept path in this command that \
-             would read it**, and no checklist item owns either. That is why this remediation \
-             names the two missing pieces instead of a row to wait for",
-        ));
-    }
+    // Parse time cannot refuse: `options` never sees the manifest, so it cannot know
+    // whether `[server.tls]` exists. The check lives in `prepare`, next to the
+    // configuration it guards — and `SRV-021` deleted the only arm that said "not
+    // implemented", leaving two mismatch arms that each name the true cause.
+    //
     // `--workers > 1` was refused here until the instance pool landed, and the refusal
     // said as much: *"A refusal is the honest shape while the flag has nothing to size;
     // when a pool lands, the check is deleted and the number acquires its meaning."*
@@ -761,6 +754,12 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // policy, not an absence.
     config.ws = build_ws(server)?;
 
+    // The TLS identity, or `None` for cleartext (`SRV-021`).
+    //
+    // Extracted from `prepare` rather than inlined, because `prepare` is at
+    // its line budget without it — the same reason `build_ws` lives outside.
+    attach_tls(opts, server, &mut config)?;
+
     // Metrics, always on for the production command.
     //
     // No manifest switch exists for this, and inventing one would be a configuration
@@ -935,6 +934,70 @@ fn build_ws(server: &qqq_cap::manifest::Server) -> Result<qqq_serve::ws::WsConfi
             .unwrap_or_default(),
         limits,
     })
+}
+
+/// Attach the TLS identity the flag and the section agree on (`SRV-021`).
+///
+/// The flag and the section must agree, and each mismatch names its own
+/// cause: `--tls` without a section has no certificate to present, and a
+/// section without `--tls` would serve cleartext with an identity on file
+/// — the configured-but-unapplied shape this command refuses everywhere.
+/// Building happens only when both are present, so a broken certificate
+/// is reported as a broken certificate rather than as a mismatch.
+///
+/// # Errors
+///
+/// `QQQ-7001` usage error on either mismatch, naming the true cause.
+fn attach_tls(
+    opts: &ServeOptions,
+    server: &qqq_cap::manifest::Server,
+    config: &mut qqq_serve::server::ServerConfig,
+) -> Result<()> {
+    match (opts.tls, server.tls.is_some()) {
+        (true, true) => {
+            config.tls = build_tls(server)?;
+            Ok(())
+        }
+        (true, false) => Err(usage(
+            "`--tls` needs a `[server.tls]` section: the flag has no certificate \
+             to present, so this server would serve cleartext while reporting TLS",
+        )
+        .with_remediation(
+            "add `[server.tls]` with `cert_file` and `key_file` to the manifest, \
+             or drop `--tls` to serve cleartext honestly",
+        )),
+        (false, true) => Err(usage(
+            "the manifest declares `[server.tls]` but `--tls` was not passed: serving \
+             cleartext with a TLS identity on file",
+        )
+        .with_remediation(
+            "pass `--tls` to terminate what the section declares, or remove \
+             `[server.tls]` to serve cleartext honestly",
+        )),
+        (false, false) => Ok(()),
+    }
+}
+
+/// Build the rustls configuration from the manifest's `[server.tls]` (`SRV-021`).
+///
+/// `None` when the section is absent — the manifest saying "cleartext", which
+/// is different from the server forgetting to install TLS. The file reads
+/// happen here, at startup, not at parse time: `qqqai check` accepts paths
+/// that only exist where the server runs, and the errors below name the file
+/// that failed rather than the field that named it.
+///
+/// # Errors
+///
+/// `QQQ-2002` when a file cannot be read, holds no certificate or key, or the
+/// pair does not match — each naming the specific file, via
+/// `CertificateSource::resolve` and `TlsConfig::build`.
+fn build_tls(server: &qqq_cap::manifest::Server) -> Result<Option<Arc<rustls::ServerConfig>>> {
+    let Some(tls) = server.tls.as_ref() else {
+        return Ok(None);
+    };
+    let source = qqq_serve::tls::CertificateSource::files(&tls.cert_file, &tls.key_file);
+    let config = qqq_serve::tls::TlsConfig::new(source).build()?;
+    Ok(Some(config))
 }
 
 /// A server that is ready to bind.
@@ -1245,6 +1308,10 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
         eprintln!("{}", deterministic_mode_warning(public));
     }
 
+    // The report states what the server holds (see the `tls` field docs):
+    // captured before `config` moves into the accept loop below.
+    let tls = prepared.config.tls.is_some();
+
     qqq_serve::serve(
         prepared.config,
         prepared.table,
@@ -1267,7 +1334,12 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
             .pool_capacity
             .and_then(|c| u32::try_from(c).ok())
             .unwrap_or(opts.workers),
-        tls: opts.tls,
+        // The configuration the server holds, not the flag parsed: a report
+        // echoing the flag could not notice an attach that never happened —
+        // the same rule `deterministic` follows two fields down. Equivalent
+        // today because the mismatches refuse, and true by construction
+        // rather than by checking.
+        tls,
         guest_loaded,
         metrics_path: opts.metrics_path.clone(),
         deterministic: prepared.deterministic,
@@ -1422,6 +1494,56 @@ mod tests {
         m.server
     }
 
+    /// A whole manifest the way `prepare` receives it: parsed text plus the
+    /// path it was read from.
+    fn loaded_manifest(toml: &str) -> LoadedManifest {
+        let text = format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\n[server]\n\
+             routes = [{{ path = \"/\", methods = [\"GET\"], handler = \"root\" }}]\n{toml}\n"
+        );
+        let manifest = qqq_cap::manifest::Manifest::parse(&text).expect("test manifests parse");
+        LoadedManifest {
+            manifest,
+            path: std::path::PathBuf::from("qqq.toml"),
+            source: text,
+        }
+    }
+
+    /// A scratch directory for generated TLS fixtures, named for the test.
+    ///
+    /// Pid-qualified like the workspace's `Sandbox`, so parallel tests in one
+    /// binary cannot collide. Removed by the test that created it: a shared
+    /// helper with cleanup would hide which test owns the files.
+    fn tls_fixture_dir(tag: &str) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("qqq-serve-tls-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        dir
+    }
+
+    /// A generated self-signed certificate and key, written as PEM.
+    ///
+    /// Generated, never committed: a checked-in fixture expires, and `rcgen`
+    /// is already the workspace's answer for this (`tests/tls.rs`). The SAN
+    /// is `localhost`, matching what a client verifies.
+    fn write_tls_fixture(
+        dir: &std::path::Path,
+        name: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+            .expect("rcgen accepts the SAN");
+        let key = rcgen::KeyPair::generate().expect("rcgen generates a key");
+        let cert = params
+            .self_signed(&key)
+            .expect("rcgen self-signs with the generated key");
+        let cert_path = dir.join(format!("{name}.pem"));
+        let key_path = dir.join(format!("{name}.key"));
+        std::fs::write(&cert_path, cert.pem().as_bytes()).expect("write cert");
+        std::fs::write(&key_path, key.serialize_pem().as_bytes()).expect("write key");
+        (cert_path, key_path)
+    }
+
     /// Absent `[server.websocket]` is a policy, not an absence: same-origin
     /// only, loopback names only, 1 MiB caps.
     #[test]
@@ -1520,27 +1642,138 @@ mod tests {
     }
 
     #[test]
-    fn tls_is_refused_rather_than_reported_as_on() {
-        // The defect this replaces: `--tls` parsed, `ServeOutput::tls` was true, the command
-        // printed `TLS: on`, and the listener served cleartext. A flag that reports a
-        // security feature it does not provide is worse than a flag that is absent, so the
-        // refusal has to name what is missing rather than say "unsupported".
-        let err = options(&args(&["--tls"])).expect_err("--tls must be refused");
+    fn tls_parses_and_is_decided_at_prepare_time() {
+        // This test asserted the opposite until `SRV-021` landed, and the refusal it
+        // checked said what would end it: *"when `[server.tls]` is modelled and a
+        // TLS-terminating accept path exists, this check is deleted and nothing else
+        // moves."* The section is modelled, the in-house loop terminates it, and the
+        // check is deleted — but the flag is still validated here, at parse time, and
+        // decided in `prepare`, where the manifest is visible. Keeping a test here
+        // rather than deleting it is the point: `--tls` must keep parsing to `true`,
+        // and the two mismatches below must keep refusing.
+        let o = options(&args(&["--tls"])).expect("--tls must parse");
+        assert!(o.tls);
+    }
+
+    /// **`--tls` without `[server.tls]` is refused at prepare time.**
+    ///
+    /// The flag has no certificate to present; serving cleartext while the
+    /// invocation asked for TLS repeats the defect the old parse-time refusal
+    /// replaced. Through `prepare`, not `options`: the flag alone cannot know
+    /// whether the section exists.
+    #[test]
+    fn tls_without_a_section_is_refused_at_prepare_time() {
+        let loaded = loaded_manifest("");
+        let opts = options(&args(&["--tls"])).expect("--tls parses");
+        // `let-else`, not `expect_err`: `Prepared` carries no `Debug`, and
+        // deriving it for one assertion would publish a debug rendering of a
+        // type whose fields are still settling.
+        let Err(err) = prepare(&loaded, &opts) else {
+            panic!("--tls without a section must be refused");
+        };
         assert!(
-            err.message.contains("not implemented"),
-            "the message must say the flag is not implemented: {}",
+            err.message.contains("[server.tls]"),
+            "the refusal must name the missing section: {}",
             err.message
         );
+    }
+
+    /// **A `[server.tls]` section without `--tls` is refused at prepare time.**
+    ///
+    /// Serving cleartext with a TLS identity on file leaves configured
+    /// security unapplied — the same silent mismatch the flag side refuses.
+    /// Fail closed in both directions, or neither refusal means anything.
+    #[test]
+    fn a_tls_section_without_the_flag_is_refused_at_prepare_time() {
+        let loaded = loaded_manifest(
+            "[server.tls]\ncert_file = \"certs/server.pem\"\nkey_file = \"certs/server.key\"\n",
+        );
+        let opts = options(&[]).expect("no flags parse");
+        let Err(err) = prepare(&loaded, &opts) else {
+            panic!("a section without --tls must be refused");
+        };
         assert!(
-            err.message.contains("cleartext"),
-            "the message must say what would actually happen: {}",
+            err.message.contains("--tls"),
+            "the refusal must name the missing flag: {}",
             err.message
         );
-        let remediation = err.remediation.as_deref().unwrap_or_default();
-        assert!(
-            remediation.contains("reverse proxy") || remediation.contains("terminate"),
-            "the remediation must name a way to get TLS today: {remediation}"
+    }
+
+    /// **`build_tls` with missing files names the key file first.**
+    ///
+    /// `CertificateSource::resolve` loads the key before the certificate, so
+    /// when both are missing the error names the key — the file whose load is
+    /// attempted first. The assertion pins that order rather than merely
+    /// asserting failure: an error naming the wrong file sends the reader to
+    /// fix a path while the real breakage is elsewhere.
+    #[test]
+    fn build_tls_with_missing_files_names_the_key_file() {
+        let server = manifest_server(
+            "[server.tls]\ncert_file = \"no/such/cert.pem\"\nkey_file = \"no/such/key.pem\"\n",
         );
+        let err = build_tls(&server).expect_err("missing files must be refused");
+        assert!(
+            err.to_string().contains("no/such/key.pem"),
+            "the refusal must name the key file: {err}"
+        );
+    }
+
+    /// **`build_tls` with generated files builds the documented policy.**
+    ///
+    /// Not merely `is_some`: the assertion reads the built configuration's
+    /// ALPN list, proving the manifest's files reached the rustls policy
+    /// rather than a placeholder. `http/1.1`-only is `TlsConfig::new`'s
+    /// conservative default — the in-house loop has no h2 driver, so an
+    /// offered `h2` would advertise a loop that does not exist (`SRV-022`).
+    #[test]
+    fn build_tls_with_generated_files_builds_http11_only() {
+        let dir = tls_fixture_dir("build-ok");
+        let (cert, key) = write_tls_fixture(&dir, "ok");
+        let server = manifest_server(&format!(
+            "[server.tls]\ncert_file = '{}'\nkey_file = '{}'\n",
+            cert.display(),
+            key.display()
+        ));
+        let config = build_tls(&server)
+            .expect("generated files must build")
+            .expect("a section must produce a configuration");
+        assert_eq!(
+            config.alpn_protocols,
+            vec![b"http/1.1".to_vec()],
+            "the built policy must offer exactly HTTP/1.1"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **`prepare` with `--tls` and a section attaches the identity.**
+    ///
+    /// The full decision path without a socket: flag plus section plus
+    /// readable files yields a `Prepared` whose server configuration carries
+    /// TLS. A test that stopped at `build_tls` could not see a `prepare`
+    /// that forgot to attach it.
+    #[test]
+    fn prepare_with_tls_and_a_section_attaches_the_identity() {
+        let dir = tls_fixture_dir("prepare-ok");
+        let (cert, key) = write_tls_fixture(&dir, "ok");
+        let text = format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\n[server]\n\
+             routes = [{{ path = \"/\", methods = [\"GET\"], handler = \"root\" }}]\n\
+             [server.tls]\ncert_file = '{}'\nkey_file = '{}'\n",
+            cert.display(),
+            key.display()
+        );
+        let loaded = LoadedManifest {
+            manifest: qqq_cap::manifest::Manifest::parse(&text).expect("test manifest parses"),
+            path: std::path::PathBuf::from("qqq.toml"),
+            source: text,
+        };
+        let opts = options(&args(&["--tls"])).expect("--tls parses");
+        let prepared = prepare(&loaded, &opts).expect("flag plus section plus files prepares");
+        assert!(
+            prepared.config.tls.is_some(),
+            "prepare must attach the built identity to the server configuration"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

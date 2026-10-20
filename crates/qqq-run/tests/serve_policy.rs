@@ -117,7 +117,7 @@ impl Drop for Serving {
 /// Attempting to bind the same port is free: while the server holds it the bind fails with
 /// `AddrInUse`, and the moment it stops holding it the bind succeeds. Nothing is accepted
 /// and nothing is counted.
-fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
+fn start(dir: &Sandbox, tag: &str, accepts: u32, extra: &[&str]) -> Serving {
     // **A port race is retried, not waited out** -- `CodeRabbit` finding #15, and a CI failure.
     //
     // `try_wait` returning a status means the child **exited**. The port is then not ours and never
@@ -130,14 +130,16 @@ fn start(dir: &Sandbox, tag: &str, accepts: u32) -> Serving {
     const ATTEMPTS: usize = 5;
     for attempt in 1..=ATTEMPTS {
         let port = free_port();
+        let mut argv = vec![
+            "serve".to_owned(),
+            "--listen".to_owned(),
+            format!("127.0.0.1:{port}"),
+            "--accept-limit".to_owned(),
+            accepts.to_string(),
+        ];
+        argv.extend(extra.iter().map(|s| (*s).to_owned()));
         let child = Command::new(env!("CARGO_BIN_EXE_qqqai"))
-            .args([
-                "serve",
-                "--listen",
-                &format!("127.0.0.1:{port}"),
-                "--accept-limit",
-                &accepts.to_string(),
-            ])
+            .args(argv)
             .current_dir(&dir.path)
             .env("HOME", &dir.path)
             .env("USERPROFILE", &dir.path)
@@ -388,7 +390,7 @@ fn a_manifest_that_forgets_default_auth_refuses_its_routes() {
     let s = Sandbox::new("deny-default");
     s.write("qqq.toml", DENY_BY_DEFAULT);
 
-    let serving = start(&s, "deny-default", 1);
+    let serving = start(&s, "deny-default", 1, &[]);
     let response = get(serving.port, "/healthz");
 
     assert_eq!(
@@ -418,7 +420,7 @@ fn an_explicitly_public_route_reaches_the_dispatcher() {
          [[server.routes]]\npath = \"/healthz\"\nmethods = [\"GET\"]\nhandler = \"health\"\n",
     );
 
-    let serving = start(&s, "public", 1);
+    let serving = start(&s, "public", 1, &[]);
     let response = get(serving.port, "/healthz");
 
     assert_ne!(
@@ -453,7 +455,7 @@ fn an_unimplemented_authenticator_refuses_and_names_itself() {
          auth = \"bearer-jwt\"\n",
     );
 
-    let serving = start(&s, "bearer", 1);
+    let serving = start(&s, "bearer", 1, &[]);
     let response = get(serving.port, "/orders");
 
     assert_eq!(
@@ -475,7 +477,7 @@ fn a_route_that_does_not_exist_is_a_404_and_not_a_403() {
     let s = Sandbox::new("no-route");
     s.write("qqq.toml", DENY_BY_DEFAULT);
 
-    let serving = start(&s, "no-route", 1);
+    let serving = start(&s, "no-route", 1, &[]);
     let response = get(serving.port, "/not-declared");
 
     assert_eq!(
@@ -508,7 +510,7 @@ fn the_manifest_cors_policy_reaches_the_response() {
     let s = Sandbox::new("cors-allow");
     s.write("qqq.toml", CORS_MANIFEST);
 
-    let serving = start(&s, "cors-allow", 1);
+    let serving = start(&s, "cors-allow", 1, &[]);
     let response = request(
         serving.port,
         "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n",
@@ -531,7 +533,7 @@ fn an_origin_outside_the_manifest_list_is_not_granted() {
     let s = Sandbox::new("cors-deny");
     s.write("qqq.toml", CORS_MANIFEST);
 
-    let serving = start(&s, "cors-deny", 1);
+    let serving = start(&s, "cors-deny", 1, &[]);
     let response = request(
         serving.port,
         "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example.com\r\nConnection: close\r\n\r\n",
@@ -566,7 +568,7 @@ fn the_manifest_body_limit_is_enforced_on_a_real_request() {
          [[server.routes]]\npath = \"/orders\"\nmethods = [\"POST\"]\nhandler = \"create\"\n",
     );
 
-    let serving = start(&s, "body-limit", 1);
+    let serving = start(&s, "body-limit", 1, &[]);
     let body = "x".repeat(64);
     let response = request(
         serving.port,
@@ -595,7 +597,7 @@ fn a_body_under_the_limit_is_not_refused_by_it() {
          [[server.routes]]\npath = \"/orders\"\nmethods = [\"POST\"]\nhandler = \"create\"\n",
     );
 
-    let serving = start(&s, "body-under", 1);
+    let serving = start(&s, "body-under", 1, &[]);
     let body = "x".repeat(64);
     let response = request(
         serving.port,
@@ -763,7 +765,7 @@ fn a_manifest_connection_ceiling_is_applied() {
     let s = Sandbox::new("conn-ceiling");
     s.write("qqq.toml", CONNECTION_CEILING_ONE);
 
-    let serving = start(&s, "conn-ceiling", 3);
+    let serving = start(&s, "conn-ceiling", 3, &[]);
 
     // Hold the tenant's only slot. Held, not dropped: a dropped stream releases the slot
     // and the next connection would be admitted, making this a test of the happy path.
@@ -794,7 +796,7 @@ fn raising_the_ceiling_lets_a_second_connection_through() {
     let raised = CONNECTION_CEILING_ONE.replace("max_connections = 1", "max_connections = 4");
     s.write("qqq.toml", &raised);
 
-    let serving = start(&s, "conn-ceiling-high", 3);
+    let serving = start(&s, "conn-ceiling-high", 3, &[]);
 
     let held = hold_open(serving.port);
 
@@ -814,4 +816,258 @@ fn raising_the_ceiling_lets_a_second_connection_through() {
     );
 
     drop(held);
+}
+
+// ---------------------------------------------------------------------------
+// TLS termination (`SRV-021`)
+// ---------------------------------------------------------------------------
+
+/// A generated certificate and key, written as PEM into the sandbox.
+///
+/// Generated, never committed: a checked-in fixture expires. The SAN is
+/// `localhost`, matching what the test client verifies.
+fn write_tls_fixture(sandbox: &Sandbox) -> (String, String, Vec<u8>) {
+    let params =
+        rcgen::CertificateParams::new(vec!["localhost".to_owned()]).expect("rcgen accepts the SAN");
+    let key = rcgen::KeyPair::generate().expect("rcgen generates a key");
+    let cert = params
+        .self_signed(&key)
+        .expect("rcgen self-signs with the generated key");
+    sandbox.write("cert.pem", &cert.pem());
+    sandbox.write("key.pem", &key.serialize_pem());
+    let der = cert.der().to_vec();
+    let prefix = sandbox.path.display().to_string();
+    (
+        format!("{prefix}/cert.pem"),
+        format!("{prefix}/key.pem"),
+        der,
+    )
+}
+
+/// GET over a real TLS handshake, trusting exactly `der`.
+///
+/// A current-thread runtime inside a sync test: the handshake, write, and
+/// read are async, and the harness around them is not. Returns the
+/// negotiated TLS version (the client's observation that encryption
+/// happened) and the raw HTTP response.
+fn tls_get(port: u16, der: &[u8], raw: &str) -> (String, String) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the TLS client")
+        .block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(rustls::pki_types::CertificateDer::from(der.to_vec()))
+                .expect("server cert is a root here");
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect");
+            let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+            let mut stream = connector.connect(name, tcp).await.expect("handshake");
+            let version = stream
+                .get_ref()
+                .1
+                .protocol_version()
+                .map_or_else(|| "none".to_owned(), |v| format!("{v:?}"));
+            stream.write_all(raw.as_bytes()).await.expect("write");
+            let mut out = Vec::new();
+            stream.read_to_end(&mut out).await.expect("read");
+            (version, String::from_utf8_lossy(&out).into_owned())
+        })
+}
+
+/// **TLS serves the same bytes as cleartext, through the same dispatcher.**
+///
+/// Two sandboxes with the same project name, one served cleartext and one
+/// served `--tls`: the responses must be byte-identical, proving the
+/// decrypted stream flows through the identical handler path rather than a
+/// parallel one. The unbuilt dispatcher answers 503 with `X-QQQ-Error`, and
+/// that fingerprint is the comparison point — asserting a 200 would fail
+/// against a correct server with no built component. The negotiated version
+/// is asserted client-side, which is the only observation point that sees
+/// encryption rather than assuming it.
+#[test]
+fn tls_serves_the_same_bytes_as_cleartext() {
+    const ROUTES: &str = "[server]\ndefault_auth = \"none\"\n\
+         [[server.routes]]\npath = \"/healthz\"\nmethods = [\"GET\"]\nhandler = \"health\"\n";
+
+    let clear = Sandbox::new("tls-clear");
+    // The two manifests differ only in the section: same name (so the
+    // unbuilt dispatcher's message matches byte for byte), same routes.
+    clear.write(
+        "qqq.toml",
+        &format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n{ROUTES}"),
+    );
+
+    let tls = Sandbox::new("tls-terminated");
+    let (cert, key, der) = write_tls_fixture(&tls);
+    tls.write(
+        "qqq.toml",
+        &format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n{ROUTES}\
+             [server.tls]\ncert_file = '{cert}'\nkey_file = '{key}'\n"
+        ),
+    );
+
+    let plain = start(&clear, "tls-clear", 1, &[]);
+    let serving = start(&tls, "tls-terminated", 1, &["--tls"]);
+
+    let raw = "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    let clear_response = get(plain.port, "/healthz");
+    let (version, tls_response) = tls_get(serving.port, &der, raw);
+
+    assert!(
+        version.contains("TLSv1_3"),
+        "the session must negotiate TLS 1.3, not cleartext: {version}"
+    );
+    assert_eq!(
+        status(&tls_response),
+        status(&clear_response),
+        "TLS and cleartext must reach the same dispatcher:\nTLS:\n{tls_response}\nclear:\n{clear_response}"
+    );
+    assert_eq!(
+        tls_response, clear_response,
+        "the decrypted stream must serve byte-identical responses"
+    );
+}
+
+/// **A `[server.tls]` section without `--tls` refuses at startup.**
+///
+/// The other fail-closed direction, from the binary: a configured identity
+/// left unapplied must not serve cleartext quietly. Same shape as above —
+/// a fast non-zero exit naming the missing flag.
+#[test]
+fn a_tls_section_without_the_flag_refuses_at_startup() {
+    let dir = Sandbox::new("tls-section-no-flag");
+    let (cert, key, _der) = write_tls_fixture(&dir);
+    dir.write(
+        "qqq.toml",
+        &format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[server]\ndefault_auth = \"none\"\n\
+             [[server.routes]]\npath = \"/healthz\"\nmethods = [\"GET\"]\nhandler = \"health\"\n\
+             [server.tls]\ncert_file = '{cert}'\nkey_file = '{key}'\n"
+        ),
+    );
+    let port = free_port();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_qqqai"))
+        .args([
+            "serve",
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--accept-limit",
+            "1",
+        ])
+        .current_dir(&dir.path)
+        .env("HOME", &dir.path)
+        .env("USERPROFILE", &dir.path)
+        .env("CARGO_TARGET_DIR", dir.path.join(".cargo-target"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("qqqai serve must spawn");
+    // Polled, not `wait_timeout` (unstable): `try_wait` reads the exit
+    // without consuming the child, in this file's established style.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            // Kill before panicking: a server that serves here is the bug,
+            // and a live child on a claimed port poisons the next test.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("a section without --tls must exit, not serve");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        !status.success(),
+        "a section without --tls must fail, not serve cleartext"
+    );
+    // The refusal renders on stdout, not stderr: this CLI's contract emits
+    // errors as envelopes on the same stream as output.
+    let mut output = String::new();
+    child
+        .stdout
+        .take()
+        .expect("piped stdout")
+        .read_to_string(&mut output)
+        .expect("read stdout");
+    assert!(
+        output.contains("--tls"),
+        "the refusal must name the missing flag:\n{output}"
+    );
+}
+///
+/// The unit tests prove `prepare` refuses; this proves the refusal reaches
+/// the operator through the real entry path — a non-zero exit before any
+/// listener binds, naming the missing section. A server that started
+/// cleartext here would repeat the defect `SRV-021` closed.
+#[test]
+fn tls_without_a_section_refuses_at_startup() {
+    let dir = Sandbox::new("tls-no-section");
+    dir.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[server]\ndefault_auth = \"none\"\n\
+         [[server.routes]]\npath = \"/healthz\"\nmethods = [\"GET\"]\nhandler = \"health\"\n",
+    );
+    let port = free_port();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_qqqai"))
+        .args([
+            "serve",
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--accept-limit",
+            "1",
+            "--tls",
+        ])
+        .current_dir(&dir.path)
+        .env("HOME", &dir.path)
+        .env("USERPROFILE", &dir.path)
+        .env("CARGO_TARGET_DIR", dir.path.join(".cargo-target"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("qqqai serve must spawn");
+    // Polled, not `wait_timeout` (unstable): `try_wait` reads the exit
+    // without consuming the child, in this file's established style.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            // Kill before panicking: a server that serves here is the bug,
+            // and a live child on a claimed port poisons the next test.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("--tls without a section must exit, not serve");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        !status.success(),
+        "--tls without a section must fail, not serve cleartext"
+    );
+    // The refusal renders on stdout, not stderr: this CLI's contract emits
+    // errors as envelopes on the same stream as output (`Output::new` takes
+    // `stdout`), so reading stderr would assert about an empty pipe.
+    let mut output = String::new();
+    child
+        .stdout
+        .take()
+        .expect("piped stdout")
+        .read_to_string(&mut output)
+        .expect("read stdout");
+    assert!(
+        output.contains("[server.tls]"),
+        "the refusal must name the missing section:\n{output}"
+    );
 }

@@ -76,6 +76,37 @@ pub use crate::manifest::METHODS;
 // The section
 // ---------------------------------------------------------------------------
 
+/// Check a `[server.tls]` table (`SRV-021`).
+///
+/// Paths are checked for shape only — empty, whitespace-only, or NUL-bearing
+/// — never for existence: the files live where the server runs, and `qqqai
+/// check` must accept a manifest whose certificate is not on the author's
+/// machine. Existence and parse errors surface at serve time, naming the
+/// file, through `CertificateSource::resolve`.
+fn validate_tls(tls: &crate::manifest::ServerTls) -> Result<(), ManifestError> {
+    for (field, value) in [
+        ("server.tls.cert_file", tls.cert_file.as_str()),
+        ("server.tls.key_file", tls.key_file.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(ManifestError::InvalidPath {
+                path: value.to_owned(),
+                reason: format!(
+                    "{field} must name a file; an empty path would fail at serve \
+                     time with a read error, far from the line that is wrong"
+                ),
+            });
+        }
+        if value.contains('\0') {
+            return Err(ManifestError::InvalidPath {
+                path: value.to_owned(),
+                reason: format!("{field} must not contain a NUL byte"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Check a `[server.websocket]` table (`F-14`).
 ///
 /// Origins admit the literal `"*"` (the explicit any-origin opt-in, which
@@ -243,6 +274,12 @@ impl Server {
 
         if let Some(ws) = &self.websocket {
             validate_websocket(ws)?;
+        }
+
+        // `[server.tls]` — `SRV-021`'s TLS identity. Shape only (see
+        // `validate_tls`): the files are read where the server runs.
+        if let Some(tls) = &self.tls {
+            validate_tls(tls)?;
         }
 
         Ok(())
@@ -425,7 +462,7 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{RequestLimits, TenantLimit};
+    use crate::manifest::{RequestLimits, ServerTls, TenantLimit};
 
     fn route(path: &str, methods: &[&str]) -> Route {
         Route {
@@ -495,6 +532,7 @@ mod tests {
             cors: None,
             limits: None,
             websocket: None,
+            tls: None,
         };
         let open_routes = s.unauthenticated_routes();
         assert_eq!(open_routes.len(), 1);
@@ -854,9 +892,78 @@ allow_origins = ["https://app.example.com"]
                 )]),
             }),
             websocket: None,
+            // Populated for the same reason as `limits` above: a `None` here
+            // would let a serialization bug in the TLS shape pass unnoticed.
+            tls: Some(ServerTls {
+                cert_file: "certs/server.pem".to_owned(),
+                key_file: "certs/server.key".to_owned(),
+            }),
         };
         let text = toml::to_string(&s).expect("serializes");
         let back: Server = toml::from_str(&text).expect("parses");
         assert_eq!(back, s, "round-trip changed the value:\n{text}");
+    }
+
+    // -- [server.tls] ------------------------------------------------------
+
+    /// A TLS section naming files validates: existence is serve-time.
+    #[test]
+    fn a_tls_section_naming_files_validates() {
+        let mut s = server(vec![route("/orders", &["POST"])]);
+        s.tls = Some(ServerTls {
+            cert_file: "certs/server.pem".to_owned(),
+            key_file: "certs/server.key".to_owned(),
+        });
+        assert!(s.validate().is_ok());
+        assert!(s.tls.is_some(), "absent TLS must stay absent, not default");
+    }
+
+    /// **An empty `cert_file` is refused, not defaulted.**
+    #[test]
+    fn an_empty_tls_cert_file_is_refused() {
+        let mut s = server(vec![route("/orders", &["POST"])]);
+        s.tls = Some(ServerTls {
+            cert_file: String::new(),
+            key_file: "certs/server.key".to_owned(),
+        });
+        let err = s
+            .validate()
+            .expect_err("an empty cert path must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("server.tls.cert_file"),
+            "the refusal must name the field: {text}"
+        );
+    }
+
+    /// **A whitespace-only `key_file` is refused like an empty one.**
+    #[test]
+    fn a_whitespace_tls_key_file_is_refused() {
+        let mut s = server(vec![route("/orders", &["POST"])]);
+        s.tls = Some(ServerTls {
+            cert_file: "certs/server.pem".to_owned(),
+            key_file: "   ".to_owned(),
+        });
+        let err = s.validate().expect_err("a blank key path must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("server.tls.key_file"),
+            "the refusal must name the field: {text}"
+        );
+    }
+
+    /// **A NUL byte in a TLS path is refused.**
+    #[test]
+    fn a_nul_byte_in_a_tls_path_is_refused() {
+        let mut s = server(vec![route("/orders", &["POST"])]);
+        s.tls = Some(ServerTls {
+            cert_file: "certs/serv\0er.pem".to_owned(),
+            key_file: "certs/server.key".to_owned(),
+        });
+        let err = s.validate().expect_err("a NUL path must be refused");
+        assert!(
+            err.to_string().contains("NUL"),
+            "the refusal must name the reason: {err}"
+        );
     }
 }

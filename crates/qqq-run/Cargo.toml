@@ -35,6 +35,10 @@ qqq-abi = { path = "../qqq-abi", version = "0.1.1" }
 # only place in this workspace where a manifest can be turned into a router -- and the
 # right place, because converting intent into a running server is orchestration.
 qqq-serve = { path = "../qqq-serve", version = "0.1.1" }
+# The TLS configuration `build_tls` carries: `TlsConfig::build` returns
+# `Arc<rustls::ServerConfig>`, so naming the type needs the edge. External
+# leaf — no topological direction to violate.
+rustls.workspace = true
 # The transport primitives `qqqai serve` binds with: `ListenAddr` and `Shutdown`.
 #
 # `qqq-serve` does not re-export them, so the CLI needs its own edge. The direction
@@ -101,6 +105,15 @@ wat = "1"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Generated, never committed, TLS fixtures for the `build_tls` tests: the same
+# pin qqq-serve's own TLS tests use (`rcgen = "0.14.10"` with `pem`), so the
+# two suites generate identical material and neither embeds a certificate that
+# can expire.
+rcgen = { version = "0.14.10", features = ["pem"] }
+# The TLS client the binary-level `serve_policy` tests handshake with: the same
+# pin the served path terminates with (`tokio-rustls = "0.26.5"`), so client
+# and server cannot drift onto different TLS stacks.
+tokio-rustls = "0.26.5"
 # The `verify` tests sign with the project's own signer rather than embedding a `.sig`
 # fixture, so the pair cannot drift: a stored blob would be a second copy of the format.
 qqq-pkg = { path = "../qqq-pkg", version = "0.1.1" }

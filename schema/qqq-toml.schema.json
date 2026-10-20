@@ -747,6 +747,17 @@
           },
           "type": "array"
         },
+        "tls": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServerTls"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[server.tls]` — the TLS identity, absent meaning cleartext (`SRV-021`)."
+        },
         "websocket": {
           "anyOf": [
             {
@@ -760,6 +771,27 @@
         }
       },
       "title": "qqq-toml#Server",
+      "type": "object"
+    },
+    "ServerTls": {
+      "$id": "https://qqq.codes/schema/qqq-toml#ServerTls",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `ServerTls` table.",
+      "properties": {
+        "cert_file": {
+          "description": "The PEM certificate chain file, leaf first.",
+          "type": "string"
+        },
+        "key_file": {
+          "description": "The PEM private key file.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cert_file",
+        "key_file"
+      ],
+      "title": "qqq-toml#ServerTls",
       "type": "object"
     },
     "SqlCapability": {

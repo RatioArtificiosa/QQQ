@@ -99,6 +99,7 @@ pub mod trace_context;
 
 pub use body_bytes::{BodyBytes, BodyHandler};
 pub mod conn;
+pub mod conn_stream;
 pub mod cors;
 pub mod h2;
 pub mod http1;

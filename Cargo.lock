@@ -1695,10 +1695,13 @@ dependencies = [
  "qqq-io",
  "qqq-pkg",
  "qqq-serve",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-rustls",
  "wasmtime",
  "wat",
 ]

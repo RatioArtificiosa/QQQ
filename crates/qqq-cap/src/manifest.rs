@@ -1773,6 +1773,14 @@ pub struct Server {
     /// only with 1 MiB caps (`F-14`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub websocket: Option<WebsocketPolicy>,
+    /// `[server.tls]` — the TLS identity, absent meaning cleartext (`SRV-021`).
+    ///
+    /// Absent does not mean "no TLS support": it means this deployment serves
+    /// cleartext, and `--tls` against such a manifest is refused rather than
+    /// served hollow. The files are read at serve time, not at parse time, so
+    /// `qqqai check` accepts paths that only exist where the server runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<ServerTls>,
 }
 
 /// `[server.limits]` — the per-tenant **request** limits.
@@ -2092,6 +2100,30 @@ pub struct Cors {
     pub max_age: Option<u64>,
 }
 
+/// `[server.tls]` — the TLS identity (`SRV-021`).
+///
+/// Modelled here as the **file format** it is; `qqq-serve::tls` builds the
+/// rustls configuration from these values and owns the handshake. The two
+/// are separate deliberately: whether a manifest *names* files is a
+/// parse-time question, and whether those files hold a matching
+/// certificate and key is a serve-time one — `qqqai check` must accept
+/// paths that only exist where the server runs.
+///
+/// Only file paths are modelled, matching the one `CertificateSource`
+/// variant an operator can write down (`Files`): ACME issuance is refused
+/// a platform key the manifest cannot see cannot be named in it. ALPN is
+/// deliberately not modelled: the in-house accept loop is HTTP/1.1-only
+/// (`SRV-022`), so an `alpn` knob could advertise a loop that does not
+/// exist on this path.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerTls {
+    /// The PEM certificate chain file, leaf first.
+    pub cert_file: String,
+    /// The PEM private key file.
+    pub key_file: String,
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -2307,6 +2339,56 @@ allow_origins = ["https://app.example.com"]
         assert_eq!(m.server.len(), 0);
         assert_eq!(m.server.default_auth, AuthMode::Deny);
         assert!(m.server.cors.is_none());
+        assert!(m.server.tls.is_none(), "absent TLS stays absent");
+    }
+
+    /// **`[server.tls]` parses and its values survive (`SRV-021`).**
+    ///
+    /// Values, not mere success: a parse that succeeds while dropping the
+    /// table repeats the silent-drop defect this module exists to prevent.
+    #[test]
+    fn a_server_tls_section_is_parsed_and_not_dropped() {
+        let text = format!(
+            "{MINIMAL}\n[server.tls]\ncert_file = \"certs/server.pem\"\n\
+             key_file = \"certs/server.key\"\n"
+        );
+        let m = Manifest::parse(&text).expect("[server.tls] must parse");
+        let tls = m.server.tls.expect("[server.tls] must survive parsing");
+        assert_eq!(tls.cert_file, "certs/server.pem");
+        assert_eq!(tls.key_file, "certs/server.key");
+    }
+
+    /// **An empty `[server.tls]` path is refused at parse time (`SRV-021`).**
+    ///
+    /// Through `parse`, not merely `Server::validate`: a check that exists
+    /// but is not called is the defect this project keeps finding.
+    #[test]
+    fn an_empty_server_tls_path_is_refused_at_parse_time() {
+        let text =
+            format!("{MINIMAL}\n[server.tls]\ncert_file = \"\"\nkey_file = \"certs/server.key\"\n");
+        let err = Manifest::parse(&text).expect_err("an empty cert path must be refused");
+        assert!(
+            err.to_string().contains("server.tls.cert_file"),
+            "the refusal must name the field: {err}"
+        );
+    }
+
+    /// **An unknown `[server.tls]` field is refused, not ignored (`SRV-021`).**
+    ///
+    /// This pins the no-`alpn`-knob decision: the in-house accept loop is
+    /// HTTP/1.1-only, so an `alpn` spelling must fail loudly rather than sit
+    /// inert while the operator believes it negotiates.
+    #[test]
+    fn an_unknown_server_tls_field_is_refused() {
+        let text = format!(
+            "{MINIMAL}\n[server.tls]\ncert_file = \"c.pem\"\nkey_file = \"k.key\"\n\
+             alpn = [\"h2\"]\n"
+        );
+        let err = Manifest::parse(&text).expect_err("an unknown TLS field must be refused");
+        assert!(
+            err.to_string().contains("alpn"),
+            "the refusal must name the field: {err}"
+        );
     }
 
     /// **A bad `[server]` section is rejected by `Manifest::parse` itself.**

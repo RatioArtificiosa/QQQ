@@ -58,6 +58,7 @@ use qqq_io::listener::{AcceptError, ListenAddr, Listener, ListenerConfig, Shutdo
 
 use crate::access_log::{Level, Logger, Record, TraceId};
 use crate::conn::{Action, CloseReason, Connection, ConnectionConfig, ConnectionLedger};
+use crate::conn_stream::ConnStream;
 use crate::http1::{self, ParseError, RequestHead, Version};
 use crate::limits::{GlobalBucket, GlobalBudget};
 use crate::response::{self, Response};
@@ -177,6 +178,15 @@ pub struct ServerConfig {
     /// listener, the connections in flight and the exit all take the one path that already
     /// has tests.
     pub accept_limit: Option<u64>,
+    /// Terminate TLS on every accepted connection, or `None` for cleartext (`SRV-021`).
+    ///
+    /// `None` is the honest default: without a certificate the server has nothing
+    /// to present, and a self-signed placeholder would be the invented identity
+    /// `qqq-serve::tls` exists to prevent. The manifest path installs the
+    /// configuration `qqq-serve::tls::TlsConfig::build` produces from
+    /// `[server.tls]`; a handshake failure refuses the connection rather than
+    /// serving cleartext by accident.
+    pub tls: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl ServerConfig {
@@ -214,6 +224,8 @@ impl ServerConfig {
             // default bound would be a number this crate invented that silently stopped
             // serving. `qqqai serve --accept-limit` sets it.
             accept_limit: None,
+            // Cleartext by default: see `ServerConfig::tls`.
+            tls: None,
         }
     }
 }
@@ -664,6 +676,23 @@ struct Shared {
     loopback_only: bool,
     /// The process-wide WebSocket buffer budget, in bytes.
     ws_buffer: Arc<tokio::sync::Semaphore>,
+    /// Terminate TLS on every connection, or `None` for cleartext (`SRV-021`).
+    ///
+    /// The `Arc` is what the acceptor is built from per connection: wrapping
+    /// it in `TlsAcceptor` is one `Arc` clone, so every connection negotiates
+    /// the same policy the manifest installed without a value that could
+    /// drift. `TlsAcceptor` itself is stored nowhere because it is `Clone`
+    /// but not `Debug`, and this bundle derives both.
+    tls: Option<Arc<rustls::ServerConfig>>,
+    /// How long a TLS handshake may take (`SRV-021`).
+    ///
+    /// Read from the connection configuration's header timeout at build
+    /// time, not from a new knob: a client dribbling handshake bytes is the
+    /// TLS analogue of a client dribbling a request head, which is exactly
+    /// what the header timeout exists to bound. A separate knob would be a
+    /// second answer to "how long before first byte", and the two could
+    /// disagree about which attack they bound.
+    handshake_timeout: std::time::Duration,
 }
 
 /// Build the shared state once, so every connection task clones one `Arc`
@@ -724,6 +753,81 @@ fn shared_for(config: &ServerConfig, logger: Logger) -> Shared {
         ws: config.ws.clone(),
         loopback_only: config.addr.is_loopback(),
         ws_buffer,
+        // One `Arc` clone, not one value: wrapping it in an acceptor is
+        // itself one `Arc` clone, so every connection negotiates the same
+        // policy the manifest installed without a value that could drift.
+        tls: config.tls.clone(),
+        handshake_timeout: config.connection.header_timeout,
+    }
+}
+
+/// Open one TCP stream as cleartext or TLS (`SRV-021`).
+///
+/// `None` when the handshake failed: the slot is released and the failure
+/// recorded as the protocol error it is — the peer violated TLS before any
+/// request existed. Serving cleartext by accident would be the silent
+/// downgrade `serve_hyper_tls` refuses in its own docs, so there is no
+/// fallback branch here, only `None`.
+///
+/// The open is recorded here rather than in `serve` so the accounting sits
+/// with the branch that can fail: a failed handshake records an open and
+/// its protocol-error close together, and no path opens without either
+/// serving or recording why not.
+///
+/// The admission travels as one tuple — ledger, tenant, bound, accepted
+/// count, shutdown — because spelling five parameters would push the
+/// caller over its line budget while a struct would hide which of the
+/// loop's values the refusal touches. Positions are destructured on entry,
+/// so a caller passing them in the wrong order is a type error.
+async fn open_conn_stream(
+    shared: &Shared,
+    stream: TcpStream,
+    admission: (
+        &Arc<tokio::sync::Mutex<ConnectionLedger>>,
+        TenantKey,
+        Option<u64>,
+        &Arc<std::sync::atomic::AtomicU64>,
+        &Shutdown,
+    ),
+) -> Option<ConnStream> {
+    let (ledger, tenant, limit, accepted, shutdown) = admission;
+    if let Some(m) = shared.metrics.as_deref() {
+        m.connection_opened();
+    }
+    let Some(config) = shared.tls.as_ref() else {
+        return Some(ConnStream::Plain(stream));
+    };
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(config));
+    // Bounded by the header timeout: an untimed handshake lets a client hold
+    // a ledger slot and a task forever by sending nothing, which is the
+    // slow-loris the header timeout exists to bound — the handshake is time
+    // to first decrypted byte. A timed-out handshake refuses exactly like a
+    // failed one: the peer never established, so there is nothing to serve.
+    let handshake = tokio::time::timeout(shared.handshake_timeout, acceptor.accept(stream));
+    let Ok(Ok(tls)) = handshake.await else {
+        if let Some(m) = shared.metrics.as_deref() {
+            m.connection_closed(metric_outcome_of(Served::BadRequest));
+        }
+        let mut l = ledger.lock().await;
+        l.release(tenant);
+        drop(l);
+        stop_after_the_bound(limit, accepted, shutdown);
+        return None;
+    };
+    Some(ConnStream::Tls(Box::new(tls)))
+}
+
+/// Close a refused connection: drain on a TLS port, plaintext 503 otherwise.
+///
+/// Extracted from `serve` rather than inlined, because `serve` is at its
+/// line budget without it. The peer on a TLS port expects a `ServerHello`,
+/// so an HTTP 503 would be undecipherable bytes rather than a signal —
+/// drain for an orderly close instead. On cleartext the 503 is the signal.
+async fn close_refused(mut stream: TcpStream, tls: bool) {
+    if tls {
+        drain_for_refusal(&mut stream).await;
+    } else {
+        let _ = close_immediately(stream, 503).await;
     }
 }
 
@@ -837,7 +941,9 @@ pub async fn serve(
                     if let Some(m) = shared.metrics.as_deref() {
                         m.record_global_connection_refusal();
                     }
-                    let _ = close_immediately(stream, 503).await;
+                    // No plaintext body on a TLS port: the peer expects a
+                    // `ServerHello` (see `close_refused`).
+                    close_refused(stream, shared.tls.is_some()).await;
                     // A refusal is still an accept: without this the bound
                     // never sees globally-refused connections, and the
                     // ledger path's lesson (`tests/accept_bound.rs`) repeats
@@ -852,7 +958,9 @@ pub async fn serve(
                         // server will not answer spends the attacker's cost on
                         // the defender, which is the wrong way round.
                         drop(l);
-                        let _ = close_immediately(stream, 503).await;
+                        // No plaintext body on a TLS port, for the reason the
+                        // global-budget refusal above states.
+                        close_refused(stream, shared.tls.is_some()).await;
                         // A refusal is still an **accept**: the counter on the
                         // acceptor was incremented for it before this task was
                         // spawned, deliberately, because the bound counts
@@ -869,9 +977,10 @@ pub async fn serve(
                     }
                 }
 
-                if let Some(m) = shared.metrics.as_deref() {
-                    m.connection_opened();
-                }
+                let slot = (&ledger, id.tenant, limit, &accepted, &shutdown_for_task);
+                let Some(stream) = open_conn_stream(&shared, stream, slot).await else {
+                    return;
+                };
 
                 let ctx = ConnectionContext {
                     id: &id,
@@ -1203,7 +1312,7 @@ pub(crate) fn emit_record(logger: &Logger, record: Record) {
 /// discarded by a RST before the client has read it. Dropping a `TcpStream` with unread
 /// data in flight is how a client receives a connection reset instead of a body.
 async fn write_flat_response(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     conn: &mut Connection,
     head: &RequestHead,
     response: &Response,
@@ -1326,7 +1435,7 @@ pub(crate) fn is_head(head: &RequestHead) -> bool {
 /// The drain comes first: closing with the refused body unread makes the stack send
 /// RST instead of FIN, and the RST discards the typed refusal before the client reads
 /// it. `drain_for_refusal` documents the Windows measurement.
-async fn reject_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
+async fn reject_body(stream: &mut ConnStream, head: &RequestHead) -> Served {
     drain_for_refusal(stream).await;
     let resp = response::error_response(
         &Error::new(
@@ -1375,7 +1484,7 @@ pub(crate) const SPECIAL_ROUTE_BODY_MESSAGE: &str =
 /// The drain comes first: closing with the refused body unread makes the stack
 /// send RST instead of FIN, and the RST discards the typed refusal before the
 /// client reads it — a refused request the client never sees is not explicit.
-async fn reject_special_route_body(stream: &mut TcpStream, head: &RequestHead) -> Served {
+async fn reject_special_route_body(stream: &mut ConnStream, head: &RequestHead) -> Served {
     drain_for_refusal(stream).await;
     let bytes = response::write_response(
         &response::from_error(&response::parse_error_response(SPECIAL_ROUTE_BODY_MESSAGE)),
@@ -1405,7 +1514,7 @@ async fn reject_special_route_body(stream: &mut TcpStream, head: &RequestHead) -
 /// whole protocol transition happening in the middle of it — and because inlining it
 /// pushed that function past the line limit, which is the extraction the lint asked for.
 async fn serve_ws_route(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     head: &RequestHead,
     handler: &dyn crate::ws_conn::WebSocketHandler,
     ctx: &ConnectionContext<'_>,
@@ -1486,7 +1595,7 @@ async fn serve_ws_route(
 /// reply to a malformed head, and `Connection::on_parse_error` records the same
 /// outcome, so the machine and the socket cannot disagree.
 async fn reject_parse_error(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     conn: &mut Connection,
     err: &ParseError,
 ) -> Served {
@@ -1680,7 +1789,7 @@ pub(crate) fn apply_cors(
 /// Returns `None` when the request is not for the metrics path, so the caller falls through
 /// unchanged.
 async fn maybe_serve_metrics(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     head: &RequestHead,
     path: &str,
     ctx: &ConnectionContext<'_>,
@@ -1721,7 +1830,7 @@ async fn maybe_serve_metrics(
 /// decide how to parse the body, so omitting it makes the response unparseable by the tools this
 /// endpoint exists for — reachable and useless.
 async fn serve_metrics(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     head: &RequestHead,
     path: &str,
     metrics: &crate::metrics::HttpMetrics,
@@ -1749,7 +1858,7 @@ async fn serve_metrics(
 }
 
 async fn serve_preflight(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     head: &RequestHead,
     path: &str,
     policy: PreflightRequest<'_>,
@@ -1800,7 +1909,7 @@ async fn serve_preflight(
 /// failed *mid-body* from one that completed.
 #[allow(clippy::too_many_arguments)]
 async fn serve_streaming(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     stream_handler: &crate::stream::StreamingHandler,
     head: &RequestHead,
     path: &str,
@@ -2077,7 +2186,7 @@ impl ConnectionId {
 /// and `ConnectionConfig` is four small fields, so the clone costs less than the
 /// indirection that would avoid it.
 async fn serve_connection(
-    mut stream: TcpStream,
+    mut stream: ConnStream,
     table: &RouteTable,
     dispatch: &Dispatch,
     config: &ConnectionConfig,
@@ -2316,7 +2425,7 @@ async fn serve_connection(
 /// able to forget.
 #[allow(clippy::too_many_arguments)]
 async fn serve_special_route(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     head: &RequestHead,
     path: &str,
     table: &RouteTable,
@@ -2484,7 +2593,7 @@ fn stop_after_the_bound(
 /// place, it can be read in full.
 #[allow(clippy::too_many_arguments)]
 async fn refuse_before_reading(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     head: &RequestHead,
     path: &str,
     table: &RouteTable,
@@ -2628,7 +2737,7 @@ async fn refuse_before_reading(
 /// A bare `403` tells neither of them which line to look at. The mode is in the body and in
 /// the `X-QQQ-Error` header so a human and a script each get it in the form they read.
 async fn refuse_auth(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     head: &RequestHead,
     path: &str,
     tenant: &str,
@@ -2660,7 +2769,7 @@ async fn refuse_auth(
 /// as pool exhaustion — and the same status a rotation flood must receive no
 /// matter which identity it wears this request.
 async fn refuse_global(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     head: &RequestHead,
     path: &str,
     tenant: &str,
@@ -2691,7 +2800,7 @@ async fn refuse_global(
 /// does not serve, and saying more (which names are served, why this one is
 /// not) teaches a rebinding attacker exactly what to try next.
 async fn refuse_host(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     head: &RequestHead,
     path: &str,
     tenant: &str,
@@ -2713,7 +2822,7 @@ async fn refuse_host(
 }
 
 async fn refuse_limits(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     head: &RequestHead,
     path: &str,
     tenant: &str,
@@ -2908,7 +3017,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// its remaining contents are genuinely consumed. That is the only place that
 /// knows how many bytes the body still owes.
 async fn read_head(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     buf: &mut Vec<u8>,
     config: &ConnectionConfig,
 ) -> std::result::Result<RequestHead, ReadOutcome> {
@@ -3077,7 +3186,7 @@ async fn read_head(
 /// the body, so "the body was not read" is only observable against a route that is not
 /// streaming — which the first version of this comment did not say.
 async fn drain_body(
-    stream: &mut TcpStream,
+    stream: &mut ConnStream,
     buf: &mut Vec<u8>,
     head: &RequestHead,
 ) -> Option<(crate::body_bytes::BodyBytes, u64)> {
@@ -3239,7 +3348,7 @@ pub(crate) const REFUSAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 ///
 /// Errors are ignored: this is a courtesy to the stack, and a refusal whose drain fails is
 /// still a refusal.
-async fn drain_for_refusal(stream: &mut TcpStream) {
+async fn drain_for_refusal(stream: &mut (impl tokio::io::AsyncRead + Unpin)) {
     let mut buf = [0u8; 1024];
     let mut total = 0usize;
     while total < REFUSAL_DRAIN_BYTES {
@@ -3451,7 +3560,8 @@ mod tests {
             }
         });
 
-        let (mut stream, _) = listener.accept().await.expect("peer arrives");
+        let (stream, _) = listener.accept().await.expect("peer arrives");
+        let mut stream = ConnStream::Plain(stream);
         let mut buf = Vec::new();
         let parsed = read_head(&mut stream, &mut buf, &ConnectionConfig::default()).await;
         writer.await.expect("writer finishes");

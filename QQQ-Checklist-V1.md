@@ -3487,7 +3487,9 @@ Items are grouped below by **phase**, because dependency order matters more than
     `a_per_tenant_entry_keyed_by_the_peer_address_is_applied` with the control
     `a_per_tenant_entry_for_another_address_is_not_applied` in `qqq-serve`. Fault-injected
     by removing the key check: **detected** in both `qqq-cap` and `qqq-run`. See `§O-185`.
-- [ ] **SRV-021** Model the `[server.tls]` manifest section and wire a TLS-terminating accept path into `qqqai serve`.
+- [x] **SRV-021** Model the `[server.tls]` manifest section and wire a TLS-terminating accept path into `qqqai serve`.
+  → Done: both halves landed — `ServerTls { cert_file, key_file }` on `Server` with shape-only validation (existence is serve-time), and the in-house accept loop terminates via `ConnStream::Tls` through the same handlers (genericized from `TcpStream`, no socket-specific API was used). `--tls` is honored when flag and section agree and refused both mismatch directions with the cause named; `ServeOutput.tls` now reports an effective state. No ALPN knob (in-house is HTTP/1.1-only per SRV-022) and no mTLS knob (refused elsewhere) — both pinned by tests.
+  → Measured: 7 manifest tests (parse+validate+deny `alpn`), 5 in-house TLS serve tests (keep-alive through TLS, garbage gets no HTTP with gauge proof, cleartext refused, idle handshake timed out, ledger refusal quiet with release — all fault-proven red), 6 run unit tests (both refusals, key-first file naming, http/1.1-only policy, prepare attaches), 3 binary tests (TLS serves byte-identical bytes to cleartext with TLS 1.3 negotiated, both refusals exit non-zero from the real entry path).
   → §6.4 `qqq-serve` — the HTTP and application server
   → **This row exists because its absence was found by reading a remediation string** (`§O-283`).
     `SRV-007` delivered the TLS **library** — `qqq-serve::tls`, rustls 0.23, the explicit cipher

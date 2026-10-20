@@ -45,7 +45,6 @@
 use std::net::SocketAddr;
 
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 
 use crate::access_log::{Level, Logger, Record, TraceId};
 use crate::http1::{RequestHead, Version};
@@ -124,7 +123,7 @@ pub struct StreamWriter<'a> {
 enum Sink<'a> {
     /// An in-house socket: head bytes, version framing, terminator.
     Socket {
-        stream: &'a mut TcpStream,
+        stream: &'a mut crate::conn_stream::ConnStream,
         version: Version,
     },
     /// A hyper response body: unframed pieces, closed by dropping.
@@ -154,7 +153,7 @@ impl<'a> StreamWriter<'a> {
     /// the socket failed. The caller must **not** retry with a different status: nothing
     /// has been committed if this returns an error, and something has if it does not.
     pub async fn begin(
-        stream: &'a mut TcpStream,
+        stream: &'a mut crate::conn_stream::ConnStream,
         response: &Response,
         version: Version,
     ) -> std::io::Result<Self> {

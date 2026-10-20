@@ -40269,7 +40269,47 @@ feature. Lesson with teeth: the process doc's "current pin" (§160)
 still said 48.0.5 two bumps later — descriptive pin statements rot, and
 the bump now updates it as part of the unit rather than leaving it for
 a review that never comes. NOTE (merge record): the stashed SRV-021
-branch also numbers its observation §O-765; on unstash it renumbers to
+branch also numbered its observation §O-765; on unstash it renumbered to
 §O-766, and this entry stays.
+## §O-766 - SRV-021: `--tls` is honored, and the handlers never knew the socket changed
+
+(Merge record: written as §O-765 on a branch stashed during the
+advisory tripwire; renumbered on unstash beside §O-765, which the bump
+claimed first.)
+
+The in-house handlers take `TcpStream` in seventeen signatures, which
+looked like a genericization project — until the scan showed zero
+socket-specific calls: only read, write, flush, and `shutdown`, all
+`AsyncRead`/`AsyncWrite`. The mechanical answer was not seventeen generic
+parameters but one enum: `ConnStream::Plain | Tls`, with delegation and
+no pin projection (both variants `Unpin`). The TLS session state (~1.2
+KiB) rides boxed so the per-connection value stays pointer-sized. The
+handshake runs after ledger admission (the slot accounts its cost),
+bounded by the header timeout (a dribbling handshake is a dribbling
+head), and a failure records `BadRequest → ProtocolError` — the peer
+violated TLS before any request existed — with the slot released and the
+bound honored, never a cleartext fallback. Fail closed both directions
+at `prepare`: `--tls` without a section has nothing to present, and a
+section without `--tls` would leave a configured identity unapplied.
+ALPN stays http/1.1-only by construction (no knob, pinned by a deny
+test), because the in-house loop has no h2 driver per SRV-022. Three
+review rounds shaped the code: the `Shared` bundle keeps
+`Arc<rustls::ServerConfig>` (the acceptor is `Clone` but not `Debug`),
+the open is recorded where the branch can fail, and `serve()` stays
+under its line budget by the file's own extract-don't-inline rule.
+Measured: manifest 7, in-house TLS 5, run unit 6, binary 3 — every seam
+fault-proven red with byte-identical restores green; the binary parity
+test serves byte-identical responses over TLS 1.3 and cleartext.
+Independent review returned 3 HIGHs, all fixed with tests: the handshake
+is bounded by the header timeout (an idle handshake closes and frees its
+slot, proven by a test that hangs without the bound); the negative tests
+expect the close so a hang fails; ledger and global refusals drain
+without a plaintext body on TLS ports. Two rebuttals with reasons:
+handshake failures are observed through the open/close gauge (no log
+facility exists that would not corrupt access-log semantics), and no
+WS-over-TLS integration test (the frame loop is transport-agnostic and
+the upgrade signature is compile-checked).
+`crates/qqq-serve/src/conn_stream.rs`, `crates/qqq-serve/src/server.rs`,
+`crates/qqq-run/src/serve.rs`, `crates/qqq-cap/src/manifest.rs`.
 
 *End of `QQQ-Observations-and-Memories.md`.*

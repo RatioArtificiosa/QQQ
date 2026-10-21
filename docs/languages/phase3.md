@@ -248,7 +248,7 @@ compiler, stale result, missing report, vacuous test, or an unexpected result
 fails the gate for review.
 
 LANG-039/040 remain partial: this generates a measured **HTTP probe matrix** and
-checks all 40 obligations; the existing `conformance/suite.json` still owns the
+checks all 45 obligations; the existing `conformance/suite.json` still owns the
 full language × capability matrix. Its four non-Rust rows remain gaps. Declaring
 WIT types does not prove the host implements each capability.
 
@@ -279,3 +279,23 @@ comes from the canonical WIT; dry-run predicts every command; failed builds reta
 the prior artifact; Rust CLI/manifest compatibility passes; new-language HTTP and
 large-buffer vectors pass; wrong ABI fails before live publication; no new grants,
 no budget increase, and no unexecuted language is marked supported.
+
+---
+
+## WASI 0.3 emission verdicts (measured 2026-10-21, Windows host)
+
+Question answered: can any pinned toolchain emit a component targeting WASI 0.3
+today? Method: installed-toolchain probes (`rustup target list`, binary presence
+checks) plus the repo-pinned toolchain versions from `crates/qqq-run/src/build.rs`
+docs. Verdict for all five languages: **BLOCKED** — recorded with owner and
+re-measure tripwire, never faked; the 0.2 paths are unchanged.
+
+| Language | Probe (measured output) | Verdict | Owner / re-measure on |
+|---|---|---|---|
+| Rust | `rustup target list`: wasip1, wasip1-threads, wasip2 installed; **no `wasm32-wasip3`** target offered (rustc 1.99.1) | BLOCKED — no target to emit | upstream rustup stable channel shipping wasip3 |
+| Go / TinyGo | `tinygo`: not installed (`go 1.27.0` present); repo pins `wit-bindgen-go 0.7.0` + Binaryen 133 (wasip2-era), no 0.3 emission path evidenced | BLOCKED — unmeasurable here, no upstream 0.3 path | TinyGo documenting a wasip3/0.3 target |
+| Python | `componentize-py`: not installed (CPython 3.13.2 present); repo pins `componentize-py 0.25.1` (packages interpreter for wasip2) | BLOCKED | upstream release noting 0.3 output |
+| C / C++ | `clang`, `wasm-ld`: not installed; repo pins WASI SDK 34 Clang with a wasip2 sysroot + `wit-bindgen 0.62.0` | BLOCKED | WASI SDK sysroot with 0.3 support |
+| TypeScript / AssemblyScript | `asc`: not installed (`node v22.22.0`, `tsc 5.9.3` present); repo pins `ComponentizeJS 0.23.0` (wasip2 output) | BLOCKED | upstream release noting 0.3 output |
+
+Each row maps to its ledger item (`LANG-041`…`LANG-045`, ticked with this table as evidence). Re-measure per row when its tripwire fires; until then the dual-ABI work proceeds with 0.2 guests plus WAT fixtures, per the migration goal's Phase 3.

@@ -337,6 +337,41 @@
       "review_by": "2026-10-30",
       "reason": "Implement the CI job that fails when the parity matrix gains an unexplained gap.",
       "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-041": {
+      "status": "blocked-by-upstream-and-time",
+      "owner": "QQQ language maintainer",
+      "review_by": "2027-01-20",
+      "reason": "Rust 0.3 emission verdict: BLOCKED — no wasm32-wasip3 target in stable rustup; re-measure when one ships.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-042": {
+      "status": "blocked-by-upstream-and-time",
+      "owner": "QQQ language maintainer",
+      "review_by": "2027-01-20",
+      "reason": "Go/TinyGo 0.3 emission verdict: BLOCKED — no installed toolchain and no upstream 0.3 emission path evidenced; re-measure when TinyGo documents a wasip3/0.3 target.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-043": {
+      "status": "blocked-by-upstream-and-time",
+      "owner": "QQQ language maintainer",
+      "review_by": "2027-01-20",
+      "reason": "Python 0.3 emission verdict: BLOCKED — componentize-py absent and pinned 0.25.1 packages for wasip2; re-measure on a release noting 0.3 output.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-044": {
+      "status": "blocked-by-upstream-and-time",
+      "owner": "QQQ language maintainer",
+      "review_by": "2027-01-20",
+      "reason": "C/C++ 0.3 emission verdict: BLOCKED — no clang/WASI SDK here and pinned SDK 34 sysroot is wasip2; re-measure on a sysroot with 0.3 support.",
+      "evidence": "docs/languages/phase3.md"
+    },
+    "LANG-045": {
+      "status": "blocked-by-upstream-and-time",
+      "owner": "QQQ language maintainer",
+      "review_by": "2027-01-20",
+      "reason": "TypeScript/AssemblyScript 0.3 emission verdict: BLOCKED — asc/ComponentizeJS absent and pinned 0.23.0 emits wasip2; re-measure on a release noting 0.3 output.",
+      "evidence": "docs/languages/phase3.md"
     }
   }
 }

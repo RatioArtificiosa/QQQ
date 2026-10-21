@@ -38,8 +38,11 @@ pub const SCHEMA_VERSION: &str = "1.0.0";
 
 /// The version of the component-model ABI QQQ targets.
 ///
-/// Proposal §C-003: QQQ targets WASI 0.3 (Preview 3). Recorded here as data
-/// rather than prose so code and docs cannot disagree.
+/// Proposal §C-003: QQQ targets the WASI 0.3 line (Preview 3). Recorded here as
+/// the line (`"0.3"`), not a point release: `0.3.2` is within `0.3`, and naming
+/// a point release would claim support for 0.3.x features that are measured
+/// separately (see the WASI 0.3.2 migration ledger). Recorded as data rather
+/// than prose so code and docs cannot disagree.
 pub const WASI_TARGET_VERSION: &str = "0.3";
 
 /// The Wasmtime minor line QQQ pins (Proposal `§D-003`).

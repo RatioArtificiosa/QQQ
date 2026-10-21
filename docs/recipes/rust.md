@@ -23,6 +23,7 @@ four and stopped being true at five.
 ```bash
 rg 'host_[a-z0-9_]+::register\(' crates/qqq-host/src/linker.rs
 #   host_wasi::register      <- the baseline, not a QQQ capability
+#   host_test::register      <- assertions, ungated: the functions refuse without test state
 #   host_clock::register
 #   host_crypto::register
 #   host_http::register

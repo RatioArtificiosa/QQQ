@@ -52,7 +52,7 @@ WebAssembly Interface Types — the IDL used to declare component interfaces.
 
 ## WASI
 
-WebAssembly System Interface. QQQ **targets** **WASI 0.3 (Preview 3)** — native `async`, `stream` and `future` — and currently **builds against Preview 2**: `[build] target` accepts only `wasm32-wasip2`, and the engine enables neither `wasm_component_model_async` nor stack switching. `wasm32-wasip3` is anticipated, and no toolchain emits it yet.
+WebAssembly System Interface. QQQ **targets** **WASI 0.3.2** (ratified 2026-10-13; see 0.3.2 release) — native `async`, `stream` and `future` — and currently **builds against Preview 2**: `[build] target` accepts only `wasm32-wasip2`, and the engine enables neither `wasm_component_model_async` nor stack switching. `wasm32-wasip3` is anticipated, and no toolchain measured here emits it yet (see WASI 0.3.2 migration ledger).
 
 [→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
 

@@ -24,21 +24,21 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `MKT` | Market research, positioning, competitive analysis | 16 | Founder |
 | `POS` | Product positioning and messaging | 6 | Founder |
 | `ARCH` | Architecture decisions and crate topology | 16 | Systems lead |
-| `HOST` | `qqq-host` execution engine | 24 | Systems engineer |
+| `HOST` | `qqq-host` execution engine | 27 | Systems engineer |
 | `CAP` | Capability resolution pipeline | 24 | Security engineer |
 | `SEC` | Security engineering, audits, hardening | 30 | Security engineer |
-| `CON` | Contracts: WIT interfaces, manifest schema, versioning | 18 | Architect |
-| `ABI` | WIT package authoring and binding generation | 16 | Runtime engineer |
+| `CON` | Contracts: WIT interfaces, manifest schema, versioning | 19 | Architect |
+| `ABI` | WIT package authoring and binding generation | 18 | Runtime engineer |
 | `SRV` | HTTP/application server | 22 | Systems engineer |
 | `PKG` | Package manager and registry | 24 | Platform engineer |
 | `SUP` | Supply chain: signing, provenance, SBOM | 12 | Security engineer |
 | `REG` | Q-Block definition, its vocabulary and its five capability levels | 20 | Architect |
 | `DX` | Developer experience, CLI ergonomics, errors | 20 | DX engineer |
 | `CLI` | CLI commands | 24 | DX engineer |
-| `TEST` | Test runner and test infrastructure | 19 | Runtime engineer |
+| `TEST` | Test runner and test infrastructure | 20 | Runtime engineer |
 | `MIG` | Migration tooling | 14 | DX engineer |
 | `AI` | `qqq:ai` inference capability | 10 | Runtime engineer |
-| `LANG` | Language toolchains (5 languages) | 40 | Runtime engineer |
+| `LANG` | Language toolchains (5 languages) | 45 | Runtime engineer |
 | `AGENT` | Agent face: MCP, schemas, machine contracts | 25 | Architect |
 | `PERF` | Performance: benchmarks, budgets, optimizations | 28 | Performance engineer |
 | `DET` | Determinism and replay | 16 | Systems engineer |
@@ -53,7 +53,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 618 items.**
+**Total: 630 items.**
 
 ### Status legend
 
@@ -1534,6 +1534,12 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: the four probe assertions from `.scratch/witprobe` are ported to `crates/qqq-host/tests/engine.rs` with control cases: an unsatisfied import fails instantiation and names it, a component with no imports runs, fuel exhaustion traps while the host survives, and an epoch deadline interrupts a spinning guest. The scratch crate is deleted.
   → Partial: the assertions are ported; `.scratch/witprobe` still exists and must be deleted.
   → §6.1 `qqq-host` — the execution engine
+- [ ] **HOST-025** Implement the dual-ABI host: retain the 0.2 linker path and add a 0.3 path, with unknown imports failing closed on both, and instantiate a 0.2 guest and a 0.3 guest in the same build.
+  → §6.1 `qqq-host` — the execution engine
+- [ ] **HOST-026** Measure WASI 0.3.1-feature support (`implements`, `map`) in the pinned wasmtime engine with a dedicated red-first test; record the blocker and stop the 0.3 path if unsupported.
+  → §6.1 `qqq-host` — the execution engine
+- [ ] **HOST-027** Decide retire-or-keep for the 0.2 linker path with a recorded migration window, after determinism work settles.
+  → §6.1 `qqq-host` — the execution engine
 
 ### CON — Contracts
 
@@ -1972,6 +1978,8 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Verified live: `python tools/check_no_ambient.py` →
     `NO-HIDDEN-GLOBAL-STATE RULE PASSED`.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
+- [ ] **CON-019** Extend conformance execution to a 0.3 guest: fixtures, runner, and a dual-ABI instantiation case that fails closed on unknown imports.
+  → §2.4 NN-4 — Multi-Language by Design
 
 ---
 
@@ -3602,6 +3610,10 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §2.4 NN-4 — Multi-Language by Design
 - [ ] **ABI-016** Resolve open question `OQ-005`: ratify the shared-memory policy at the interface level.
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
+- [ ] **ABI-017** Publish the 0.3 interface set beside 0.2 with explicit versioning; a 0.2 import resolves to the 0.2 implementation or fails closed — never reinterprets.
+  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
+- [ ] **ABI-018** Record the `abi.host` policy decision: WASI releases never bump `abi.host`; only an incompatible QQQ-interface change does (with the comparison that justifies no-bump, or the bump with its host-gated rollout).
+  → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
 
 ---
 
@@ -4353,6 +4365,26 @@ Each language has eight required items. The parity matrix makes any gap visible.
     that matters for drift — it **fails when a declared status disagrees with
     `build::toolchain_for`**, so the day a language starts building, CI goes red until the fixture
     moves. Its `--self-test` injects both faults and detects both (§O-354).
+- [x] **LANG-041** Rust 0.3 emission verdict: BLOCKED — no `wasm32-wasip3` target in the stable toolchain.
+  → Done: verdict recorded BLOCKED on 2026-10-21. `rustup target list` offers wasip1, wasip1-threads, wasip2 only (rustc 1.99.1); no wasip3 target exists to retarget to. Owner upstream (rustup stable channel); re-measure when a wasip3 target ships. No faking: the 0.2 path is unchanged.
+  → Measured: `rustup target list | grep wasi` → `wasm32-wasip1`, `wasm32-wasip1-threads`, `wasm32-wasip2 (installed)`; `rustc 1.99.1`.
+  → §6.10 Language toolchains — one per target language
+- [x] **LANG-042** Go/TinyGo 0.3 emission verdict: BLOCKED — toolchain absent here and no upstream 0.3 path evidenced.
+  → Done: verdict recorded BLOCKED on 2026-10-21. `tinygo` is not installed on this machine; the repo pins `wit-bindgen-go 0.7.0` + Binaryen 133 (wasip2-era, per `crates/qqq-run/src/build.rs` docs) with no documented wasip3/0.3 emission path. Owner upstream (TinyGo); re-measure when TinyGo documents a 0.3 target. No faking: the 0.2 path is unchanged.
+  → Measured: `tinygo version` → not recognized; `go version go1.27.0`; repo pins per build.rs docs.
+  → §6.10 Language toolchains — one per target language
+- [x] **LANG-043** Python 0.3 emission verdict: BLOCKED — `componentize-py` absent and pinned to wasip2-era output.
+  → Done: verdict recorded BLOCKED on 2026-10-21. `componentize-py` is not installed (CPython 3.13.2 present); the repo pins `componentize-py 0.25.1`, which packages the interpreter for wasip2. Owner upstream; re-measure on a release noting 0.3 output. No faking: the 0.2 path is unchanged.
+  → Measured: `pip show componentize-py` → not found; repo pin 0.25.1 per build.rs docs.
+  → §6.10 Language toolchains — one per target language
+- [x] **LANG-044** C/C++ 0.3 emission verdict: BLOCKED — no clang/WASI SDK here and the pinned sysroot is wasip2.
+  → Done: verdict recorded BLOCKED on 2026-10-21. `clang`/`wasm-ld` are not installed on this machine; the repo pins WASI SDK 34 Clang with a wasip2 sysroot + `wit-bindgen 0.62.0`. Owner upstream (WASI SDK sysroot with 0.3 support). No faking: the 0.2 path is unchanged.
+  → Measured: `clang --version` → not recognized; repo pins per build.rs docs.
+  → §6.10 Language toolchains — one per target language
+- [x] **LANG-045** TypeScript/AssemblyScript 0.3 emission verdict: BLOCKED — no asc/ComponentizeJS here and pinned output is wasip2.
+  → Done: verdict recorded BLOCKED on 2026-10-21. `asc` is not installed (node v22.22.0 + `tsc 5.9.3` present); the repo pins `ComponentizeJS 0.23.0`, which emits wasip2. Owner upstream; re-measure on a release noting 0.3 output. No faking: the 0.2 path is unchanged.
+  → Measured: `asc --version` → not recognized; repo pins per build.rs docs.
+  → §6.10 Language toolchains — one per target language
 
 ---
 
@@ -4766,6 +4798,8 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Done: the `h2spec` job in `.github/workflows/ci.yml` enforces it — pinned h2spec v2.2.1, the `h2spec_serve` example as driver, full suite plus strict with a verdict gate, ubuntu-only by recorded reason (framing is OS-independent), including the serve-step repair that lets both suites reach the verdict step.
   → Measured: HTTP/2 conformance green on six consecutive main runs (job durations) — 39287458939 (1m38s), 39316557447 (3m35s), 39333972512 (5m28s), 39350898727 (5m16s), 39369173115 (1m12s), 39379499462 (1m25s).
   → §6.4 `qqq-serve` — the HTTP and application server
+- [ ] **TEST-020** Add dual-ABI instantiation coverage: a 0.2 guest and a 0.3 guest in the same host build, plus the unknown-import rejection on both paths.
+  → §6.1 `qqq-host` — the execution engine
 
 ### MIG — Migration
 
@@ -5818,17 +5852,17 @@ open: the definition is what this landing writes, and the enforcement lands with
 | Phase | Milestone | Items |
 |---|---|---|
 | P0 Foundation | M0 | 79 |
-| P1 Heartbeat | M1 | 58 |
+| P1 Heartbeat | M1 | 62 |
 | P2 Capability engine | M2 | 54 |
-| P3 HTTP | M3 | 38 |
+| P3 HTTP | M3 | 40 |
 | P4 DX v0 | M4 | 64 |
-| P5 Languages | M5, M8 | 40 |
+| P5 Languages | M5, M8 | 45 |
 | P6 Packages | M6 | 36 |
-| P7 Agent face | M9 | 58 |
+| P7 Agent face | M9 | 59 |
 | P8 Perf/determinism/obs | continuous | 62 |
 | P9 V1 release | M10, M11 | 75 |
 | P10 Beyond V1 | post-1.0 | 54 |
-| **Total** | | **618** |
+| **Total** | | **630** |
 
 **Coverage rule:** every section of `QQQ-Proposal-V1.md` carrying implementation work has at least one item above. The only Proposal sections with no items are §0.1–§0.2, §1.3, §3.3, §13.1 and the appendices, which are narrative, justification or registers rather than buildable work.
 

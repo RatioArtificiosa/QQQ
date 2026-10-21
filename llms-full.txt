@@ -217,8 +217,8 @@ Populated only from repository evidence. Nothing here is a roadmap promise.
 | Area | Status |
 |---|---|
 | Core runtime | IN PROGRESS — pre-alpha workspace, 12 crates (11 shipped plus the never-shipped `xtask` gate runner) |
-| WebAssembly execution | IMPLEMENTED — Wasmtime 48.0.5 pinned, real components served over HTTP |
-| Capability model | IMPLEMENTED — manifest to grants to per-instance linker; 5 host modules bound (WASI baseline, clock, crypto, http, test assertions); sql, kv, fs, queue, env, ai, dns, trace, secrets declared, not yet bound |
+| WebAssembly execution | IMPLEMENTED — Wasmtime 48.0.7 pinned, real components served over HTTP |
+| Capability model | IMPLEMENTED — manifest to grants to per-instance linker; 5 host modules registered (WASI baseline and test assertions unconditional, clock/crypto/http when granted); sql, kv, fs, queue, env, ai, dns, trace, secrets declared, not yet bound |
 | CLI | IN PROGRESS — new, build, run, dev, serve, test, inspect, audit, MCP and more |
 | Language support | IN PROGRESS — Rust narrow probe passing; AssemblyScript, C/C++, TypeScript engine path, Go, Python experimental (see table above) |
 | AOT | IN PROGRESS — managed cache and native emission; trust design open |
@@ -995,20 +995,20 @@ merging; this draft is not a release or a claim that persistent agents are compl
 
 | Scope | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| All checklist items | 292 | 3 | 319 | 4 | 0 | 0 | 618 | 47.2% |
+| All checklist items | 297 | 3 | 326 | 4 | 0 | 0 | 630 | 47.1% |
 
 ### By phase
 
 | Phase | Milestone(s) | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | P0 | M0 | 50 | 0 | 29 | 0 | 0 | 0 | 79 | 63.3% |
-| P1 | M1 | 53 | 0 | 5 | 0 | 0 | 0 | 58 | 91.4% |
+| P1 | M1 | 53 | 0 | 9 | 0 | 0 | 0 | 62 | 85.5% |
 | P2 | M2 | 52 | 0 | 0 | 2 | 0 | 0 | 54 | 96.3% |
-| P3 | M3 | 33 | 0 | 5 | 0 | 0 | 0 | 38 | 86.8% |
+| P3 | M3 | 33 | 0 | 7 | 0 | 0 | 0 | 40 | 82.5% |
 | P4 | M4 | 32 | 0 | 32 | 0 | 0 | 0 | 64 | 50.0% |
-| P5 | M5, M8 | 15 | 0 | 23 | 2 | 0 | 0 | 40 | 37.5% |
+| P5 | M5, M8 | 20 | 0 | 23 | 2 | 0 | 0 | 45 | 44.4% |
 | P6 | M6 | 1 | 0 | 35 | 0 | 0 | 0 | 36 | 2.8% |
-| P7 | M9 | 25 | 2 | 31 | 0 | 0 | 0 | 58 | 43.1% |
+| P7 | M9 | 25 | 2 | 32 | 0 | 0 | 0 | 59 | 42.4% |
 | P8 | continuous | 23 | 0 | 39 | 0 | 0 | 0 | 62 | 37.1% |
 | P9 | M10, M11 | 1 | 1 | 73 | 0 | 0 | 0 | 75 | 1.3% |
 | P10 | post-1.0 | 7 | 0 | 47 | 0 | 0 | 0 | 54 | 13.0% |
@@ -1023,21 +1023,21 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P0 | LIC | 7 | 0 | 5 | 0 | 0 | 0 | 12 | 58.3% |
 | P0 | PLAN | 7 | 0 | 13 | 0 | 0 | 0 | 20 | 35.0% |
 | P1 | ARCH | 12 | 0 | 4 | 0 | 0 | 0 | 16 | 75.0% |
-| P1 | CON | 18 | 0 | 0 | 0 | 0 | 0 | 18 | 100.0% |
-| P1 | HOST | 23 | 0 | 1 | 0 | 0 | 0 | 24 | 95.8% |
+| P1 | CON | 18 | 0 | 1 | 0 | 0 | 0 | 19 | 94.7% |
+| P1 | HOST | 23 | 0 | 4 | 0 | 0 | 0 | 27 | 85.2% |
 | P2 | CAP | 24 | 0 | 0 | 0 | 0 | 0 | 24 | 100.0% |
 | P2 | SEC | 28 | 0 | 0 | 2 | 0 | 0 | 30 | 93.3% |
-| P3 | ABI | 14 | 0 | 2 | 0 | 0 | 0 | 16 | 87.5% |
+| P3 | ABI | 14 | 0 | 4 | 0 | 0 | 0 | 18 | 77.8% |
 | P3 | SRV | 19 | 0 | 3 | 0 | 0 | 0 | 22 | 86.4% |
 | P4 | CLI | 22 | 0 | 2 | 0 | 0 | 0 | 24 | 91.7% |
 | P4 | DIST | 0 | 0 | 20 | 0 | 0 | 0 | 20 | 0.0% |
 | P4 | DX | 10 | 0 | 10 | 0 | 0 | 0 | 20 | 50.0% |
-| P5 | LANG | 15 | 0 | 23 | 2 | 0 | 0 | 40 | 37.5% |
+| P5 | LANG | 20 | 0 | 23 | 2 | 0 | 0 | 45 | 44.4% |
 | P6 | PKG | 1 | 0 | 23 | 0 | 0 | 0 | 24 | 4.2% |
 | P6 | SUP | 0 | 0 | 12 | 0 | 0 | 0 | 12 | 0.0% |
 | P7 | AGENT | 14 | 1 | 10 | 0 | 0 | 0 | 25 | 56.0% |
 | P7 | MIG | 0 | 0 | 14 | 0 | 0 | 0 | 14 | 0.0% |
-| P7 | TEST | 11 | 1 | 7 | 0 | 0 | 0 | 19 | 57.9% |
+| P7 | TEST | 11 | 1 | 8 | 0 | 0 | 0 | 20 | 55.0% |
 | P8 | DET | 4 | 0 | 12 | 0 | 0 | 0 | 16 | 25.0% |
 | P8 | OBS | 11 | 0 | 7 | 0 | 0 | 0 | 18 | 61.1% |
 | P8 | PERF | 8 | 0 | 20 | 0 | 0 | 0 | 28 | 28.6% |
@@ -2284,7 +2284,7 @@ WebAssembly Interface Types — the IDL used to declare component interfaces.
 
 ### WASI
 
-WebAssembly System Interface. QQQ **targets** **WASI 0.3 (Preview 3)** — native `async`, `stream` and `future` — and currently **builds against Preview 2**: `[build] target` accepts only `wasm32-wasip2`, and the engine enables neither `wasm_component_model_async` nor stack switching. `wasm32-wasip3` is anticipated, and no toolchain emits it yet.
+WebAssembly System Interface. QQQ **targets** **WASI 0.3.2** (ratified 2026-10-13; see 0.3.2 release) — native `async`, `stream` and `future` — and currently **builds against Preview 2**: `[build] target` accepts only `wasm32-wasip2`, and the engine enables neither `wasm_component_model_async` nor stack switching. `wasm32-wasip3` is anticipated, and no toolchain measured here emits it yet (see WASI 0.3.2 migration ledger).
 
 [→ Proposal §0.6](../QQQ-Proposal-V1.md#06-glossary)
 
@@ -3136,7 +3136,7 @@ compiler, stale result, missing report, vacuous test, or an unexpected result
 fails the gate for review.
 
 LANG-039/040 remain partial: this generates a measured **HTTP probe matrix** and
-checks all 40 obligations; the existing `conformance/suite.json` still owns the
+checks all 45 obligations; the existing `conformance/suite.json` still owns the
 full language × capability matrix. Its four non-Rust rows remain gaps. Declaring
 WIT types does not prove the host implements each capability.
 
@@ -3167,6 +3167,26 @@ comes from the canonical WIT; dry-run predicts every command; failed builds reta
 the prior artifact; Rust CLI/manifest compatibility passes; new-language HTTP and
 large-buffer vectors pass; wrong ABI fails before live publication; no new grants,
 no budget increase, and no unexecuted language is marked supported.
+
+---
+
+### WASI 0.3 emission verdicts (measured 2026-10-21, Windows host)
+
+Question answered: can any pinned toolchain emit a component targeting WASI 0.3
+today? Method: installed-toolchain probes (`rustup target list`, binary presence
+checks) plus the repo-pinned toolchain versions from `crates/qqq-run/src/build.rs`
+docs. Verdict for all five languages: **BLOCKED** — recorded with owner and
+re-measure tripwire, never faked; the 0.2 paths are unchanged.
+
+| Language | Probe (measured output) | Verdict | Owner / re-measure on |
+|---|---|---|---|
+| Rust | `rustup target list`: wasip1, wasip1-threads, wasip2 installed; **no `wasm32-wasip3`** target offered (rustc 1.99.1) | BLOCKED — no target to emit | upstream rustup stable channel shipping wasip3 |
+| Go / TinyGo | `tinygo`: not installed (`go 1.27.0` present); repo pins `wit-bindgen-go 0.7.0` + Binaryen 133 (wasip2-era), no 0.3 emission path evidenced | BLOCKED — unmeasurable here, no upstream 0.3 path | TinyGo documenting a wasip3/0.3 target |
+| Python | `componentize-py`: not installed (CPython 3.13.2 present); repo pins `componentize-py 0.25.1` (packages interpreter for wasip2) | BLOCKED | upstream release noting 0.3 output |
+| C / C++ | `clang`, `wasm-ld`: not installed; repo pins WASI SDK 34 Clang with a wasip2 sysroot + `wit-bindgen 0.62.0` | BLOCKED | WASI SDK sysroot with 0.3 support |
+| TypeScript / AssemblyScript | `asc`: not installed (`node v22.22.0`, `tsc 5.9.3` present); repo pins `ComponentizeJS 0.23.0` (wasip2 output) | BLOCKED | upstream release noting 0.3 output |
+
+Each row maps to its ledger item (`LANG-041`…`LANG-045`, ticked with this table as evidence). Re-measure per row when its tripwire fires; until then the dual-ABI work proceeds with 0.2 guests plus WAT fixtures, per the migration goal's Phase 3.
 
 ---
 
@@ -3598,6 +3618,7 @@ four and stopped being true at five.
 ```bash
 rg 'host_[a-z0-9_]+::register\(' crates/qqq-host/src/linker.rs
 ##   host_wasi::register      <- the baseline, not a QQQ capability
+##   host_test::register      <- assertions, ungated: the functions refuse without test state
 ##   host_clock::register
 ##   host_crypto::register
 ##   host_http::register
@@ -4825,7 +4846,7 @@ the third leg and is verified by `check_reconciliation.py`.
 | A-1 | `docs/QQQAI-Full-Conversation-Complete.md` describes Bun's "11-day Zig→Rust rewrite with 13,000+ unsafe memory blocks" as fact | **Unverifiable — treat as hearsay** | This claim originated in an AI-generated attachment and cannot be verified from primary sources. Our proposal must not rest on it. Bun is a serious engineering effort; we compete on architecture, not on the premise that they did it badly. |
 | A-2 | "Bun is 42,000+ RPS" | **Unverified and version-dependent** | Numbers like this are hardware- and workload-specific and rot within months. We cite *our own* measured numbers only, with methodology. |
 | A-3 | "Wasmtime" recommended without a version | **Corrected** | Pinned to **Wasmtime 48.x** (crates.io `newest` at time of writing: `48.0.2`, published 2026-09-10; `49.0.0-rc.1` is a release candidate). Engine upgrades are a scheduled activity, not an accident. |
-| A-4 | WASI version never stated; implicitly Preview 2 | **Corrected** | QQQ targets **WASI 0.3 (Preview 3)**, which adds native `async`, `stream` and `future`. `wasi-http` in Wasmtime now has p3 enabled by default. Preview 2 remains supported for compatibility. |
+| A-4 | WASI version never stated; implicitly Preview 2 | **Corrected** | QQQ targets **WASI 0.3.2** (Preview 3 line), which adds native `async`, `stream` and `future`. `wasi-http` in Wasmtime now has p3 enabled by default. Preview 2 remains supported for compatibility. |
 | A-5 | `qqq` as crate/CLI name | **Corrected** | `qqq` is **taken on crates.io** (v0.2.0) and on npm (v0.0.6); `github.com/qqq` is an existing user account. Decision: product **QQQ**, CLI/crate/npm **`qqqai`** (verified free on all three), domain **qqq.codes**. |
 | A-6 | "Open source with MIT or Apache-2.0" (NN-8) vs. the later instruction to charge businesses | **Genuine conflict, resolved** | §13.2: Apache-2.0 for the runtime (satisfying NN-8); commercial licence for the additive Fabric governance layer (satisfying the business requirement). The conflict is documented rather than hidden. |
 

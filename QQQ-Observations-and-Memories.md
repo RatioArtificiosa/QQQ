@@ -40510,4 +40510,24 @@ grants proves the wrong property.
 `crates/qqq-host/src/arch003.rs`, `crates/qqq-host/src/arch012.rs`,
 `crates/qqq-host/tests/dual_abi.rs`.
 
+## §O-776 - PERF-028 fourth rotation: Intel 8370C joins Ubuntu 26, all deltas inside tolerance
+
+The t3 commit's own CI run refused with the fourth new-fleet identity:
+Intel Xeon Platinum 8370C on kernel 7.0.0-1017-azure, 16 GiB — the same
+Ubuntu-26 migration, a different CPU. Reviewed per §O-543 against the
+nearest same-CPU entry (8370C + qqqai 0.1.1, kernel 6.17): raw
+(new−old)/old deltas hello −4.2% (faster), json −0.1% (flat), multi
+−4.3% (slower throughput), tailp99 +6.3% (slower). Every delta sits
+inside the ±25%/±20% gate with within-run spreads of 7–23% on n=3, the same order
+as the historical spreads, and there is no hot-path mechanism (linker
+routing branches at build time, audit-table rows that exist only in
+tests, docs — the request path is untouched). Recorded as measured;
+future comparisons run against these medians. The RED/GREEN selector
+proof ran against the shipped functions (`select_baseline` refuses on
+the 14-entry baseline, selects entry 15 on the 15-entry one, `compare`
+zero failures at gate tolerance), and the candidate was appended
+byte-identical to the artifact the CI runner wrote — no hand transcription.
+Committed as reviewed entry 15.
+`.github/perf/baseline.json` (read-only proof), `tools/run_perf_regression.py`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

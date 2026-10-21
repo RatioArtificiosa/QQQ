@@ -55,6 +55,12 @@
   proof. Entry 14 (AMD EPYC 9V74 on kernel 7.0, from run 39534871987's
   artifact): hello ran hot at +27.6% vs its 6.17 twin with a 25%
   within-run spread — recorded as measured, no hot-path mechanism.
+  Entry 15 (Intel 8370C on kernel 7.0, from run 39596490823's
+  artifact): raw deltas vs its 6.17 same-CPU twin hello −4.2% (faster),
+  json −0.1% (flat), multi −4.3% (slower throughput), tailp99 +6.3%
+  (slower) — all inside gate tolerance with 7–23% within-run spreads,
+  recorded as measured, no hot-path mechanism (linker routing + audit
+  tables, never the request path).
 
 - **det**: prove DET-008 end to end with a real guest: record captures
   exactly what the guest observed, replay feeds the log's values (never

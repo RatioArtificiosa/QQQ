@@ -35,8 +35,10 @@
   2–10%, aot/PERF-007 MET at 0.371 ms vs 5 ms). Red-first: the shipped
   selector refuses the candidate before, selects and compares clean
   after. Entry 13 (Intel 8573C on kernel 7.0, from run 39456310921's
-  artifact) followed the same procedure: worst delta
-  +2.3%, same RED/GREEN proof.
+  artifact) followed the same procedure: worst delta +2.3%, same RED/GREEN
+  proof. Entry 14 (AMD EPYC 9V74 on kernel 7.0, from run 39534871987's
+  artifact): hello ran hot at +27.6% vs its 6.17 twin with a 25%
+  within-run spread — recorded as measured, no hot-path mechanism.
 
 - **det**: prove DET-008 end to end with a real guest: record captures
   exactly what the guest observed, replay feeds the log's values (never

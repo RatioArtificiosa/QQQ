@@ -40462,4 +40462,22 @@ halves of the migration story on one commit. No code changed anywhere
 in this loop; the tree at the SHA is untouched.
 `.github/perf/baseline.json` (read-only proof), `tools/run_perf_regression.py`.
 
+## §O-774 - PERF-028 third rotation: 9V74 joins Ubuntu 26, running hot
+
+The O-773 commit's own CI run refused with the third new-fleet
+identity: AMD EPYC 9V74 on kernel 7.0.0. Reviewed per §O-543 against
+the nearest same-CPU entry (9V74 + `qqqai` 0.1.1, entry `531c8ec`):
+hello +27.6%, json −15.9%, multi −16.4%, tailp99 +22.7%. The hello
+delta crosses the +25% gate — recorded, not hidden: within-run spread
+is 25% on n=3 (493k→616k), the same order as the old entry's own
+spread, and there is no hot-path mechanism (records-only commits plus
+a cert-validation lock patch that never touches the socket harness;
+the wasmtime 48.0.7 engine upgrade is the only code-adjacent delta and
+it shipped green suites). A baseline records what the runner did, and
+future comparisons run against these medians — which is exactly what
+makes the hot hello visible if it ever becomes a real shift. Committed
+as reviewed entry 14, byte-identical to the tool's canonical
+serialization, with the same RED/GREEN selector proof.
+`.github/perf/baseline.json`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

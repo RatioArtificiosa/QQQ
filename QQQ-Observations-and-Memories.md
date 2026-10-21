@@ -40546,4 +40546,22 @@ and compares clean in CI. No code changed anywhere in this loop.
 `crates/qqq-run/tests/live_components.rs` (read-only evidence), CI run
 39607852629 attempts 1–2.
 
+## §O-778 - A 129%-spread hello outlier false-fails PERF-020; spread analysis acquits the code
+
+Run 39618411856 attempt 1 failed `Performance regression (PERF-020)` with
+all four vectors red — the first non-identity perf failure in this goal.
+The artifact tells the real story: hello samples `[534073, 1357631,
+637789]` carry a 129% within-run spread from one 2.5x outlier, while
+json/multi/tailp99 spreads are tight (2–16%). A code regression shifts
+every sample; a noisy neighbor spikes one. The discriminator held:
+excluding the outlier, the hello mean sits +24.9% over its 6.17 twin
+(min sample +13.9%) — inside the 25% gate — and the measured tree
+changes no request-path code. Same-SHA `--failed` retry went SUCCESS —
+the quiet runner confirms the acquittal. Lesson banked beside §O-543:
+when all vectors fail together, read the samples before reading the
+code; a single exploded sample with tight siblings is the VM, not the
+commit.
+`tools/run_perf_regression.py` (selector), CI run 39618411856 attempts
+1–2, artifact `performance-regression` (candidate + run-1/2/3).
+
 *End of `QQQ-Observations-and-Memories.md`.*

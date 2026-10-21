@@ -4,8 +4,30 @@
 
 ### Security
 
-- **wasi**: dual-ABI host path for WASI 0.3.2 (`HOST-025`, `HOST-026`,
-  `TEST-020`): `AbiVersion::detect` routes `@0.3.x` imports to a new
+- **abi**: publish the 0.3 interface set beside 0.2 with explicit versions
+  (`ABI-017`): `qqq_abi::registry::wasi03_interface_for` maps
+  `wasi:clocks/monotonic-clock@0.3.2` to `clock.monotonic` — the same
+  capability as its 0.2 twin, never reinterpreted — and `qqqai`'s
+  `capability_for_import` resolves 0.3 guest imports through it; unserved
+  0.3 names (including the 0.3 wall clock the host does not implement)
+  stay unmapped so the caller reports them instead of guessing. A
+  host↔ABI agreement test pins the served and published names
+  byte-identical. The 0.3 mapping is revision-gated: a 0.2 WASI clock
+  stays unmapped (the unconditional baseline serves it, no grant
+  involved). Each seam fault-proven red.
+
+- **abi**: record the `abi.host` no-bump decision (`ABI-018`, D-WASI-3):
+  the WASI 0.3.2 migration adds a host-side 0.3 path but changes no QQQ
+  interface — the `qqq:` surface is pinned by
+  `qqq_interface_surface_is_pinned_for_the_abi_host_decision`, so an
+  incompatible change fails the build and forces the bump explicitly —
+  therefore the registry range stays `>=0.2,<0.4`, unchanged. Client-side
+  refusal: `qqq_pkg::semver::check_host_requirement` admits in-range
+  hosts and refuses out-of-range ones with `VersionUnsatisfiable`
+  (`QQQ-5004`) naming the range and the version.
+
+- **wasi**: dual-ABI host path for WASI 0.3.2 (`HOST-025`, `TEST-020`):
+  `AbiVersion::detect` routes `@0.3.x` imports to a new
   `build_linker_v03` while 0.2 guests keep the retained `build_linker`
   byte for byte; unrecognized versions build no linker. The 0.3 clock
   (`wasi:clocks/monotonic-clock@0.3.2` `now`/`get-resolution`) is

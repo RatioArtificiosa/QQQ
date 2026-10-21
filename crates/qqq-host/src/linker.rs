@@ -1712,6 +1712,59 @@ mod tests {
         }
     }
 
+    /// **ABI-017** — host and ABI agree on the 0.3 clock name, exactly.
+    ///
+    /// The served name (`host_wasi03::MONOTONIC_CLOCK_03`, pinned byte-identical
+    /// to the real v0.3.2 WIT) and the published name (`wasi03_interface_for`,
+    /// what `qqqai inspect` reports) must be the same string: a version drift
+    /// between them would serve one interface while reporting another, and the
+    /// report is what a grant decision is made on.
+    #[test]
+    fn host_and_abi_agree_on_the_wasi03_clock() {
+        let served = crate::host_wasi03::MONOTONIC_CLOCK_03;
+        let published = qqq_abi::registry::wasi03_interface_for(Capability::ClockMonotonic)
+            .expect("the 0.3 clock must be published beside the 0.2 clock it twins");
+        assert_eq!(
+            served, published,
+            "the served 0.3 name and the published 0.3 name drifted apart"
+        );
+    }
+
+    /// **ABI-017** — every served 0.3 instance is published, not just the clock.
+    ///
+    /// The agreement test above pins one name. This pins the *coverage*: each
+    /// distinct instance in `host_wasi03::SERVED_03` must have a
+    /// `wasi03_interface_for` row, or a second served 0.3 interface would ship
+    /// while `inspect` understates the grant it needs — the silent direction.
+    /// A new 0.3 implementation adds its row in the same commit, or this test
+    /// fails the build.
+    #[test]
+    fn every_served_03_instance_is_published_in_the_registry() {
+        use std::collections::BTreeSet;
+        let instances: BTreeSet<&str> = crate::host_wasi03::SERVED_03
+            .iter()
+            .map(|entry| {
+                entry
+                    .rsplit_once('/')
+                    .map_or(*entry, |(instance, _)| instance)
+            })
+            .collect();
+        assert!(
+            !instances.is_empty(),
+            "SERVED_03 must not be empty, or this test proves nothing"
+        );
+        for instance in instances {
+            let published: Vec<&str> = Capability::all()
+                .iter()
+                .filter_map(|&c| qqq_abi::registry::wasi03_interface_for(c))
+                .collect();
+            assert!(
+                published.contains(&instance),
+                "served 0.3 instance `{instance}` has no published row: add it to `wasi03_interface_for` in the same commit"
+            );
+        }
+    }
+
     /// Interface names must be well-formed and versioned, because they are part
     /// of the machine contract an agent reads.
     ///

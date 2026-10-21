@@ -423,6 +423,29 @@ pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
         return matches.into_iter().max_by_key(|c| exposure_rank(*c));
     }
 
+    // The 0.3 set beside 0.2 (**ABI-017**): versioned WASI names resolve to
+    // the same capabilities, never reinterpreted onto 0.2 implementations.
+    // The version gate matters: the table names exact 0.3 revisions, and a
+    // 0.2 WASI import (e.g. the `wasi:clocks/monotonic-clock@0.2.9` every
+    // `wasm32-wasip2` `std` pulls in) is served by the *unconditional* WASI
+    // baseline, not by any grant — resolving it here would demand a grant
+    // the runtime never checks and break the reference application's
+    // grants-exactly-what-it-imports proof. An unserved 0.3 name falls
+    // through to `None` below, which the caller reports instead of guessing
+    // a capability that would not help.
+    let wasi03: Vec<qqq_cap::Capability> = qqq_cap::Capability::all()
+        .iter()
+        .copied()
+        .filter(|&c| {
+            qqq_abi::registry::wasi03_interface_for(c)
+                .is_some_and(|p| strip_version(p) == wanted && is_wasi03_revision(interface))
+        })
+        .collect();
+
+    if !wasi03.is_empty() {
+        return wasi03.into_iter().max_by_key(|c| exposure_rank(*c));
+    }
+
     // Then the package-level fallback, for single-interface packages where the
     // registry's `name` is already exact.
     //
@@ -497,6 +520,21 @@ fn strip_version(interface: &str) -> String {
         .unwrap_or(interface)
         .trim()
         .to_owned()
+}
+
+/// Whether an import declares a WASI 0.3 revision.
+///
+/// The 0.3 table (`wasi03_interface_for`) is compared version-stripped, so
+/// without this gate a 0.2 WASI name would match a 0.3 row on the interface
+/// path alone — reinterpreting a baseline-served import as a grant-backed
+/// one. Only the `major.minor` prefix decides, mirroring
+/// `AbiVersion::detect`: patch versions never change the shape.
+#[must_use]
+fn is_wasi03_revision(interface: &str) -> bool {
+    interface
+        .rsplit('@')
+        .next()
+        .is_some_and(|v| v.starts_with("0.3."))
 }
 
 /// Turn a failed import check into the error a user can act on.
@@ -1492,6 +1530,51 @@ mod tests {
     fn capability_lookup_refuses_to_guess() {
         assert!(capability_for_import("qqq:nonexistent/thing@1.0.0").is_none());
         assert!(capability_for_import("wasi:cli/stdout@0.2.0").is_none());
+    }
+
+    /// **ABI-017** — a 0.3 import resolves to the same capability as its 0.2
+    /// twin, and an unserved 0.3 name resolves to nothing.
+    ///
+    /// `wasi:clocks/monotonic-clock@0.3.2` needs `clock.monotonic` — the grant
+    /// the 0.3 host path checks — while `wasi:http/incoming-handler@0.3.2`
+    /// names an interface no table serves and must stay unmapped so the
+    /// caller reports it instead of guessing a capability that would not help.
+    #[test]
+    fn wasi03_clock_import_resolves_to_the_monotonic_capability() {
+        use qqq_cap::Capability;
+        assert_eq!(
+            capability_for_import("wasi:clocks/monotonic-clock@0.3.2"),
+            Some(Capability::ClockMonotonic)
+        );
+        assert_eq!(
+            capability_for_import("wasi:http/incoming-handler@0.3.2"),
+            None
+        );
+    }
+
+    /// **ABI-017, the negative half**: a 0.2 WASI clock must not resolve
+    /// through the 0.3 table.
+    ///
+    /// Regression test for the reinterpretation the first revision shipped:
+    /// version-stripped comparison matched `wasi:clocks/monotonic-clock@0.2.9`
+    /// (which every `wasm32-wasip2` `std` pulls in, and which the
+    /// *unconditional* WASI baseline serves) against the 0.3 row, demanding
+    /// a grant the runtime never checks and breaking the reference
+    /// application's grants-exactly-what-it-imports proof (`lang005`). The
+    /// 0.3 mapping is revision-gated; 0.2 WASI names stay unmapped.
+    #[test]
+    fn wasi02_clock_does_not_resolve_through_the_03_table() {
+        use qqq_cap::Capability;
+        assert_eq!(
+            capability_for_import("wasi:clocks/monotonic-clock@0.2.9"),
+            None
+        );
+        // Patch releases never change the shape, so any 0.3.x resolves —
+        // the same rule `AbiVersion::detect` routes by.
+        assert_eq!(
+            capability_for_import("wasi:clocks/monotonic-clock@0.3.0"),
+            Some(Capability::ClockMonotonic)
+        );
     }
 
     /// The two halves of `qqq:clock` resolve to **different** capabilities.

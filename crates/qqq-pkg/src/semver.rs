@@ -306,6 +306,48 @@ impl fmt::Display for Requirement {
     }
 }
 
+/// Whether this host satisfies a component's declared `abi.host` range.
+///
+/// The client-side refusal **ABI-018 / Phase 6** requires: a component whose
+/// requirement (e.g. the registry contract's `>=0.2,<0.4`) does not admit
+/// this host's version is refused with `VersionUnsatisfiable` (`QQQ-5004`)
+/// naming the range and the version — never served under unasked-for
+/// semantics, the same fail-closed direction as the linker's `Unknown`
+/// refusal.
+///
+/// ```
+/// use qqq_pkg::semver::check_host_requirement;
+///
+/// check_host_requirement(">=0.2,<0.4", "0.3.5").expect("0.3 is in range");
+/// let err = check_host_requirement(">=0.2,<0.4", "0.4.0").expect_err("0.4 is out of range");
+/// assert!(format!("{err:?}").contains("VersionUnsatisfiable"));
+/// ```
+///
+/// # Errors
+///
+/// `QQQ-5004` when the requirement cannot be parsed (as
+/// [`Requirement::parse`] reports it), when the host version is not
+/// `major.minor.patch`, or when the version falls outside the range.
+pub fn check_host_requirement(requirement: &str, host_version: &str) -> Result<()> {
+    let req = Requirement::parse(requirement)?;
+    let host: Version = host_version.parse().map_err(|_| {
+        Error::new(
+            ErrorCode::VersionUnsatisfiable,
+            format!("`{host_version}` is not a valid host version"),
+        )
+        .with_cause("a host version is `major.minor.patch`".to_owned())
+    })?;
+    if req.matches(&host) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::VersionUnsatisfiable,
+        format!("host version {host_version} is outside the declared `abi.host` range `{requirement}`"),
+    )
+    .with_cause(format!("`{requirement}` does not admit `{host_version}`"))
+    .with_remediation("run on a host satisfying the declared range, or republish the component against a wider one"))
+}
+
 /// Parse one comma-separated clause.
 ///
 /// `whole` is the original requirement text, used only so an error quotes what
@@ -914,5 +956,37 @@ mod tests {
         assert_eq!(Requirement::parse(">=1.0").unwrap().clause_count(), 1);
         assert_eq!(Requirement::parse("1.2").unwrap().clause_count(), 1);
         assert!(!Requirement::parse(">=1.0").unwrap().is_any());
+    }
+
+    /// **ABI-018 / Phase 6** — a component whose declared `abi.host` range
+    /// admits this host runs; one outside it is refused with a clear code.
+    ///
+    /// The registry contract's example range is `>=0.2,<0.4`: a 0.2 or 0.3
+    /// host satisfies it, a 0.4 or 0.1 host does not. The refusal is
+    /// `VersionUnsatisfiable` (`QQQ-5004`) naming the range and the version —
+    /// the same fail-closed direction as the linker's `Unknown` refusal,
+    /// never served under unasked-for semantics.
+    #[test]
+    fn an_in_range_host_satisfies_the_declared_abi_host_range() {
+        check_host_requirement(">=0.2,<0.4", "0.2.0").expect("0.2 is in range");
+        check_host_requirement(">=0.2,<0.4", "0.3.5").expect("0.3 is in range");
+    }
+
+    #[test]
+    fn an_out_of_range_host_is_refused_with_a_clear_code() {
+        for version in ["0.4.0", "0.1.9", "1.0.0"] {
+            let err = check_host_requirement(">=0.2,<0.4", version)
+                .expect_err(&format!("{version} is outside >=0.2,<0.4"));
+            assert_eq!(
+                err.code,
+                ErrorCode::VersionUnsatisfiable,
+                "an out-of-range host is a version refusal: {err:?}"
+            );
+            let text = err.render();
+            assert!(
+                text.contains(">=0.2,<0.4") && text.contains(version),
+                "the refusal must name the range and the host version: {text}"
+            );
+        }
     }
 }

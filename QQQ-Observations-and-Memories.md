@@ -40564,4 +40564,37 @@ commit.
 `tools/run_perf_regression.py` (selector), CI run 39618411856 attempts
 1–2, artifact `performance-regression` (candidate + run-1/2/3).
 
+## §O-779 - The 0.3 set is published as a separate mapping, not a second row in the same table
+
+ABI-017 could have added a `wasi:` row to the `interfaces()` table — and
+that would have broken the load-bearing invariant
+`every_capability_maps_to_exactly_one_interface` (`ClockMonotonic` would
+map twice), which is what makes `interface_for` a safe answer for the
+linker. So the 0.3 set lives beside the table as `wasi03_interface_for`
+(one row today, versioned so the published set names exact revisions),
+`capability_for_import` consults it after the precise qqq: table, and a
+host↔ABI agreement test pins served and published names byte-identical.
+The shape rule: a new ABI revision gets a new mapping with its own
+uniqueness story, never a second row in a table whose invariant is
+singleness. Unserved 0.3 names (wall clock included) map to nothing by
+design — the absence is the refusal.
+`crates/qqq-abi/src/registry.rs`, `crates/qqq-run/src/run.rs`,
+`crates/qqq-host/src/linker.rs` (agreement test).
+
+## §O-780 - The no-bump decision is a test, not a paragraph
+
+ABI-018 could have been a prose note saying "the qqq: surface did not
+change" — and the next migration would have no way to know whether that
+was still true. Instead the decision is
+`qqq_interface_surface_is_pinned_for_the_abi_host_decision`: the exact
+13-name `qqq:` set is asserted, so any incompatible QQQ change fails the
+build and forces the bump explicitly. The WASI 0.3 set cannot trip it
+(it lives outside the table by §O-779's design), so extending WASI
+coverage never masquerades as a QQQ break. The client side is the same
+shape: `check_host_requirement` turns the registry's example range into
+an executable refusal with `QQQ-5004`, tested in-range and out-of-range
+rather than described. Policy that cannot fail is commentary; this one
+can — which is what makes it a decision and not a wish.
+`crates/qqq-abi/src/registry.rs`, `crates/qqq-pkg/src/semver.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

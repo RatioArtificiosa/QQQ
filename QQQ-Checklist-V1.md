@@ -3612,9 +3612,13 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §2.4 NN-4 — Multi-Language by Design
 - [ ] **ABI-016** Resolve open question `OQ-005`: ratify the shared-memory policy at the interface level.
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-017** Publish the 0.3 interface set beside 0.2 with explicit versioning; a 0.2 import resolves to the 0.2 implementation or fails closed — never reinterprets.
+- [x] **ABI-017** Publish the 0.3 interface set beside 0.2 with explicit versioning; a 0.2 import resolves to the 0.2 implementation or fails closed — never reinterprets.
+  → Done: `qqq_abi::registry::wasi03_interface_for` publishes `wasi:clocks/monotonic-clock@0.3.2` for `ClockMonotonic` (only what the 0.3 host path serves — no wall-clock row); `capability_for_import` in `qqq-run` resolves 0.3 guest imports through it; `host_and_abi_agree_on_the_wasi03_clock` pins served and published names byte-identical.
+  → Measured: `wasi03_names_resolve_beside_02` (registry), `wasi03_clock_import_resolves_to_the_monotonic_capability` + `capability_lookup_refuses_to_guess` (run), `host_and_abi_agree_on_the_wasi03_clock` (host) — each fault-proven red (wrong-capability mapping, version drift); `cargo xtask ci` GATE GREEN 146; Copilot review cleared (§O-779).
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
-- [ ] **ABI-018** Record the `abi.host` policy decision: WASI releases never bump `abi.host`; only an incompatible QQQ-interface change does (with the comparison that justifies no-bump, or the bump with its host-gated rollout).
+- [x] **ABI-018** Record the `abi.host` policy decision: WASI releases never bump `abi.host`; only an incompatible QQQ-interface change does (with the comparison that justifies no-bump, or the bump with its host-gated rollout).
+  → Done: no-bump — the migration adds a host-side 0.3 path but changes no `qqq:` interface, proven by `qqq_interface_surface_is_pinned_for_the_abi_host_decision` (exact 13-name pin; any incompatible QQQ change fails the build and forces the bump explicitly), so the registry range stays `>=0.2,<0.4` (D-WASI-3, verified not edited here). Client-side refusal: `qqq_pkg::semver::check_host_requirement` admits 0.2/0.3 hosts under the registry's example range and refuses 0.1/0.4+/1.0 with `VersionUnsatisfiable` (`QQQ-5004`) naming range and version.
+  → Measured: `an_in_range_host_satisfies_the_declared_abi_host_range`, `an_out_of_range_host_is_refused_with_a_clear_code`, `qqq_interface_surface_is_pinned_for_the_abi_host_decision` — each fault-proven red (inverted admission, surface drift); `cargo xtask ci` GATE GREEN 146; Copilot review cleared (§O-780).
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
 
 ---

@@ -218,6 +218,50 @@ pub fn interface_path_for(c: Capability) -> Option<&'static str> {
     })
 }
 
+/// The WASI 0.3 interface a capability unlocks, if the host serves one —
+/// **ABI-017**, the 0.3 set published beside 0.2.
+///
+/// Only what the 0.3 host path implements is listed: today that is the
+/// monotonic clock alone. The wall clock has no row even though WASI 0.3.2
+/// defines one, because the host does not serve it — mapping it would claim
+/// a servability the host lacks, and `qqqai inspect` would report a grant as
+/// sufficient that fails at instantiation.
+///
+/// # Why versioned, when `interface_path_for` is not
+///
+/// Because ABI-017 publishes the set *with explicit versions*: the string
+/// names the exact interface revision the host serves, and the anti-drift
+/// test in `qqq-host` asserts it byte-identical to the served name. Callers
+/// comparing imports strip the version first (a patch release never changes
+/// the shape), so the version pins the claim without narrowing the match.
+///
+/// ```
+/// use qqq_abi::registry::wasi03_interface_for;
+/// use qqq_cap::capability::Capability;
+///
+/// assert_eq!(
+///     wasi03_interface_for(Capability::ClockMonotonic),
+///     Some("wasi:clocks/monotonic-clock@0.3.2")
+/// );
+/// assert_eq!(wasi03_interface_for(Capability::ClockWall), None);
+/// ```
+#[must_use]
+pub fn wasi03_interface_for(c: Capability) -> Option<&'static str> {
+    use Capability::ClockMonotonic;
+
+    // One row, deliberately: every entry is a servability promise, and the
+    // host serves exactly one 0.3 interface. A second 0.3 implementation
+    // adds its row here in the same commit — the qqq-host agreement tests
+    // (`host_and_abi_agree_on_the_wasi03_clock` for the name,
+    // `every_served_03_instance_is_published_in_the_registry` for the
+    // coverage) fail the build otherwise.
+    if c == ClockMonotonic {
+        Some("wasi:clocks/monotonic-clock@0.3.2")
+    } else {
+        None
+    }
+}
+
 /// The interfaces that represent ambient capabilities: time, randomness,
 /// observability and the privileged `secrets`.
 ///
@@ -524,6 +568,56 @@ mod tests {
         assert_eq!(i.name, "qqq:crypto@1.0.0");
         let i = interface_for(Capability::SqlQuery).expect("must map");
         assert_eq!(i.name, "qqq:sql@1.0.0");
+    }
+
+    /// **ABI-018** — the no-bump comparison, in code.
+    ///
+    /// WASI releases never bump `abi.host`; only an incompatible QQQ-interface
+    /// change does (D-WASI-3). This test pins the exact `qqq:` interface set
+    /// this migration ships: adding, removing, or renaming a QQQ interface
+    /// fails the build and forces the bump decision — silently drifting the
+    /// surface past the decision is what this prevents. The WASI 0.3 set lives
+    /// outside this table (`wasi03_interface_for`), so extending WASI coverage
+    /// never trips it; only QQQ's own interfaces can.
+    #[test]
+    fn qqq_interface_surface_is_pinned_for_the_abi_host_decision() {
+        let table = interfaces();
+        let names: Vec<&str> = table.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "qqq:ai@1.0.0",
+                "qqq:clock@1.0.0",
+                "qqq:crypto@1.0.0",
+                "qqq:dns@1.0.0",
+                "qqq:env@1.0.0",
+                "qqq:fs@1.0.0",
+                "qqq:http@1.0.0",
+                "qqq:kv@1.0.0",
+                "qqq:log@1.0.0",
+                "qqq:queue@1.0.0",
+                "qqq:secrets@1.0.0",
+                "qqq:sql@1.0.0",
+                "qqq:trace@1.0.0",
+            ],
+            "the qqq: surface changed: decide the abi.host bump explicitly (ABI-018), then update this pin"
+        );
+    }
+
+    /// **ABI-017** — the 0.3 set beside 0.2, with explicit versions.
+    ///
+    /// The versioned 0.3 clock resolves to the same capability the 0.2 clock
+    /// does — never reinterpreted, never a second mapping for one grant.
+    /// The wall clock has no 0.3 row because the host does not serve one;
+    /// mapping it would claim a servability the host lacks.
+    #[test]
+    fn wasi03_names_resolve_beside_02() {
+        assert_eq!(
+            wasi03_interface_for(Capability::ClockMonotonic),
+            Some("wasi:clocks/monotonic-clock@0.3.2")
+        );
+        assert_eq!(wasi03_interface_for(Capability::ClockWall), None);
+        assert_eq!(wasi03_interface_for(Capability::SqlQuery), None);
     }
 
     #[test]

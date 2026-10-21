@@ -1534,7 +1534,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: the four probe assertions from `.scratch/witprobe` are ported to `crates/qqq-host/tests/engine.rs` with control cases: an unsatisfied import fails instantiation and names it, a component with no imports runs, fuel exhaustion traps while the host survives, and an epoch deadline interrupts a spinning guest. The scratch crate is deleted.
   → Partial: the assertions are ported; `.scratch/witprobe` still exists and must be deleted.
   → §6.1 `qqq-host` — the execution engine
-- [ ] **HOST-025** Implement the dual-ABI host: retain the 0.2 linker path and add a 0.3 path, with unknown imports failing closed on both, and instantiate a 0.2 guest and a 0.3 guest in the same build.
+- [x] **HOST-025** Implement the dual-ABI host: retain the 0.2 linker path and add a 0.3 path, with unknown imports failing closed on both, and instantiate a 0.2 guest and a 0.3 guest in the same build.
+  → Done: `AbiVersion::detect` routes `@0.3.x` to new `build_linker_v03` (grant-gated 0.3 clock + `host_test`, no 0.2 baseline by design) while 0.2 keeps `build_linker` byte for byte; `crates/qqq-host/src/host_wasi03.rs` serves sync `now`/`get-resolution` from the real v0.3.2 WIT (tag `bdadbbb`, vendored with provenance) and traps `wait-until`/`wait-for` by name; `Unknown` builds no linker. ARCH-003/ARCH-012 tables extended 14→18 over the new module.
+  → Measured: `a_v02_guest_instantiates_and_runs_on_the_retained_path`, `a_v03_guest_instantiates_and_runs_on_the_new_path`, `async_03_imports_trap_by_name`, `an_unknown_03_import_fails_closed_and_names_itself`, `v03_clock_without_grant_fails_closed`, `v03_clock_rechecks_grant_at_call_time` — 6/6 each, every seam fault-proven red (no-op stub, wrong-path routing, ungranted clock) with logs in scratch; `cargo xtask ci` GATE GREEN 146; Copilot review + focused re-review cleared (§O-775).
   → §6.1 `qqq-host` — the execution engine
 - [ ] **HOST-026** Measure WASI 0.3.1-feature support (`implements`, `map`) in the pinned wasmtime engine with a dedicated red-first test; record the blocker and stop the 0.3 path if unsupported.
   → §6.1 `qqq-host` — the execution engine
@@ -4798,7 +4800,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Done: the `h2spec` job in `.github/workflows/ci.yml` enforces it — pinned h2spec v2.2.1, the `h2spec_serve` example as driver, full suite plus strict with a verdict gate, ubuntu-only by recorded reason (framing is OS-independent), including the serve-step repair that lets both suites reach the verdict step.
   → Measured: HTTP/2 conformance green on six consecutive main runs (job durations) — 39287458939 (1m38s), 39316557447 (3m35s), 39333972512 (5m28s), 39350898727 (5m16s), 39369173115 (1m12s), 39379499462 (1m25s).
   → §6.4 `qqq-serve` — the HTTP and application server
-- [ ] **TEST-020** Add dual-ABI instantiation coverage: a 0.2 guest and a 0.3 guest in the same host build, plus the unknown-import rejection on both paths.
+- [x] **TEST-020** Add dual-ABI instantiation coverage: a 0.2 guest and a 0.3 guest in the same host build, plus the unknown-import rejection on both paths.
+  → Done: `crates/qqq-host/tests/dual_abi.rs` compiles real components, reads real import tables through `component_type().imports()`, and drives detection → linker → instantiate → run on one engine build; covers 0.2 run, 0.3 run, async trap-by-name, unknown-0.3-import fail-closed, ungranted-0.3-clock fail-closed, and call-time recheck against a mis-built linker.
+  → Measured: same 6/6 as HOST-025 above (`cargo test -p qqq-host --test dual_abi`), each with red-first fault proof; detector unit tests (`version_detection_names_the_declared_abi`, `unknown_abi_builds_no_linker`) plus anti-drift WIT test in `host_wasi03.rs` pin the routing tables.
   → §6.1 `qqq-host` — the execution engine
 
 ### MIG — Migration

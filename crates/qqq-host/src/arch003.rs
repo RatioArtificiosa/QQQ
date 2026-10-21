@@ -21,8 +21,8 @@
 //! | `qqq-abi`'s `every_interface_has_wit_source` | Every **interface** in the registry has WIT source | An interface having *some* WIT says nothing about whether a given **function** inside it does |
 //! | `SEC-011`'s boundary table | Every `func_wrap` in the host declares its input boundaries | That is about *boundaries*, not about WIT presence at all |
 //!
-//! Measured: all eight host functions do appear in a WIT file, and **nothing
-//! enforced that**. A ninth added tomorrow with no WIT definition would compile
+//! Measured: every host function then present did appear in a WIT file, and **nothing
+//! enforced that**. A new one added tomorrow with no WIT definition would compile
 //! into a release build, which is precisely what the invariant forbids. The
 //! property held by care rather than by construction (`§O-111`) — the same shape
 //! as `ARCH-012`, in the same file, found in the same session.
@@ -51,7 +51,7 @@
 //!
 //! # What this cannot check, stated rather than implied
 //!
-//! [`scan`] counts `func_wrap` calls in **the three host modules it is given**.
+//! [`scan`] counts `func_wrap` calls in **the host modules it is given**.
 //! A host function registered anywhere else — a new `host_kv.rs` — would not be
 //! seen, and the rule would not fire. That is a real limit and it is why
 //! [`HOST_MODULES`] is a named constant with a test asserting the directory
@@ -67,7 +67,7 @@
 /// module added to the tree without being added here is caught by
 /// [`every_host_module_is_scanned`], so the rule cannot silently apply to three
 /// files out of four.
-pub const HOST_MODULES: [&str; 6] = [
+pub const HOST_MODULES: [&str; 7] = [
     "host_clock.rs",
     "host_crypto.rs",
     "host_secrets.rs",
@@ -77,6 +77,16 @@ pub const HOST_MODULES: [&str; 6] = [
     // enforces starts with "every host module is scanned" -- an unlisted module
     // would escape the rule whether or not it happens to contain registrations.
     "host_wasi.rs",
+    // WASI 0.3 sync clocks (`HOST-025`). Hand-written `func_wrap` like
+    // `host_clock` (not `add_to_linker_sync`), so its four registrations
+    // (`now`, `get-resolution`, and the two async trapping stubs
+    // `wait-until`/`wait-for`) are scanned and counted. The stubs are written
+    // as explicit literals, not a loop over a `&str` table, precisely so the
+    // literal-anchored scanner sees them: a loop variable would be invisible
+    // to the "exhaustive by construction" audit while still binding host
+    // functions. The `KNOWN_ASYNC_03` table stays as the declared contract
+    // the anti-drift test pins; the registrations are its implementation.
+    "host_wasi03.rs",
     // A host module using `bindgen!` rather than `func_wrap`: `qqq:http`'s functions
     // take records, which `func_wrap` cannot express. It registers through the
     // generated `add_to_linker`, so like `host_wasi` it contributes no
@@ -115,7 +125,7 @@ pub const HOST_MODULES: [&str; 6] = [
 /// The number is not a transcription: [`registered_from_sources`] derives it from
 /// the source with the standard library available, and `arch012`'s
 /// both-directions scan independently confirms `AUDITED` matches the tree.
-pub const EXPECTED_REGISTRATIONS: usize = 14;
+pub const EXPECTED_REGISTRATIONS: usize = 18;
 
 /// Why a WIT-definition check could not be completed.
 ///
@@ -178,13 +188,14 @@ impl std::error::Error for Indeterminate {}
 /// Because `include_str!` is the compiler reading the file, so the content is
 /// baked into the crate and cannot change between a check and the code it is
 /// checking. It also means the scanner needs no I/O and can run anywhere.
-pub const HOST_SOURCES: [(&str, &str); 6] = [
+pub const HOST_SOURCES: [(&str, &str); 7] = [
     ("host_clock.rs", include_str!("host_clock.rs")),
     ("host_crypto.rs", include_str!("host_crypto.rs")),
     ("host_secrets.rs", include_str!("host_secrets.rs")),
     // Read so the "every host module is scanned" test can see it, even though it
     // registers no `func_wrap` of its own.
     ("host_wasi.rs", include_str!("host_wasi.rs")),
+    ("host_wasi03.rs", include_str!("host_wasi03.rs")),
     ("host_http.rs", include_str!("host_http.rs")),
     ("host_test.rs", include_str!("host_test.rs")),
 ];
@@ -290,7 +301,20 @@ pub fn wit_defines(name: &str) -> bool {
     qqq_abi::wit::ALL_WIT
         .iter()
         .any(|(_pkg, src)| wit_declares_function(src, name))
+        || wit_declares_function(WASI03_CLOCK_WIT, name)
 }
+
+/// The real v0.3.2 `monotonic-clock` WIT, vendored with provenance at
+/// `crates/qqq-host/tests/fixtures/wasi-0.3.2-monotonic-clock.wit`.
+///
+/// `host_wasi03` registers `now` (also defined by `qqq:clock`, so it needs no
+/// second authority) and `get-resolution` — the WASI 0.3 spelling of `qqq:clock`'s
+/// `resolution`. No `qqq:` WIT defines that spelling, so without this second
+/// source the WIT rule would report the 0.3 path as dissenting from an interface
+/// it correctly implements. The anti-drift test in `host_wasi03.rs` pins the
+/// correspondence line by line against this same file; this constant only lets
+/// the rule consult the authority that test already establishes.
+const WASI03_CLOCK_WIT: &str = include_str!("../tests/fixtures/wasi-0.3.2-monotonic-clock.wit");
 
 /// Whether one WIT source declares `name: func` — synchronously or `async`.
 ///

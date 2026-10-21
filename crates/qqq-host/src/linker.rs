@@ -1100,6 +1100,101 @@ pub fn required_interfaces(grants: &GrantSet) -> Vec<&'static str> {
     out
 }
 
+/// The ABI a component declares, derived from its import names.
+///
+/// Dual-ABI routing needs a name for the decision *before* any path runs:
+/// a component importing `wasi:http/incoming-handler@0.3.2` must not fall
+/// through to the 0.2 path and surface as a generic "unknown import", and
+/// an unrecognized version must not silently default to either path and
+/// instantiate under semantics it did not ask for.
+///
+/// Versions are read off the `@x.y.z` suffix of each import name. Only the
+/// major.minor prefix decides: patch versions, prereleases, and build
+/// metadata never change routing, because they never change the interface
+/// shape the host must provide.
+///
+/// ```
+/// use qqq_host::linker::AbiVersion;
+///
+/// assert_eq!(
+///     AbiVersion::detect(["wasi:clocks/monotonic-clock@0.3.2"]),
+///     AbiVersion::V03
+/// );
+/// assert_eq!(
+///     AbiVersion::detect(["wasi:http/incoming-handler@0.2.0"]),
+///     AbiVersion::V02
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbiVersion {
+    /// 0.2 interfaces (`*@0.2.x`), or qqq-namespaced imports, which are the
+    /// current ABI by construction. The retained path serves these.
+    V02,
+    /// 0.3 interfaces (`*@0.3.x`). The new path serves these.
+    V03,
+    /// No recognized version: empty import lists and unknown versions
+    /// (`@0.4.x`, unversioned non-qqq names). Never silently treated as
+    /// either path; callers fail closed.
+    Unknown,
+}
+
+impl AbiVersion {
+    /// Classify a component's imports by the ABI they declare.
+    ///
+    /// Precedence is deliberate, not incidental: a guest importing *both* a
+    /// 0.2 and a 0.3 interface needs the 0.3 path (the newer semantics must
+    /// win, or the 0.3 import would be served something older than it asked
+    /// for). `qqq:` names carry no WASI version, so a list of only those is
+    /// the current ABI — but an empty list names nothing, and `all()` on an
+    /// empty iterator is `true`, so emptiness is checked first: a test built
+    /// on an empty list would pass for the wrong reason.
+    ///
+    /// Mixed recognized-plus-unknown versions refuse at different layers, both
+    /// fail-closed: 0.2 + unknown routes `V02` and the unknown name then fails
+    /// at instantiation as an unknown import, while `qqq:` + unknown routes
+    /// `Unknown` and builds no linker at all. Neither defaults to serving an
+    /// unasked-for semantic; the difference is only which backstop fires.
+    ///
+    /// ```
+    /// use qqq_host::linker::AbiVersion;
+    ///
+    /// // An unrecognized version defaults to neither path.
+    /// assert_eq!(AbiVersion::detect(["wasi:http/incoming-handler@0.4.0"]), AbiVersion::Unknown);
+    /// // No imports name no ABI.
+    /// assert_eq!(AbiVersion::detect([] as [&str; 0]), AbiVersion::Unknown);
+    /// // Mixed 0.2 and 0.3 needs the newer semantics, or the 0.3 import
+    /// // would be served something older than it asked for.
+    /// assert_eq!(
+    ///     AbiVersion::detect([
+    ///         "wasi:http/incoming-handler@0.2.0",
+    ///         "wasi:clocks/monotonic-clock@0.3.2"
+    ///     ]),
+    ///     AbiVersion::V03
+    /// );
+    /// ```
+    pub fn detect<'a>(imports: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut saw_v02 = false;
+        let mut saw_other = false;
+        let mut any = false;
+        for name in imports {
+            any = true;
+            let version = name.rsplit('@').next().unwrap_or("");
+            if version.starts_with("0.3.") {
+                return Self::V03;
+            } else if version.starts_with("0.2.") {
+                saw_v02 = true;
+            } else if !name.starts_with("qqq:") {
+                saw_other = true;
+            }
+        }
+        if !any || saw_other && !saw_v02 {
+            Self::Unknown
+        } else {
+            Self::V02
+        }
+    }
+}
+
 /// The result of building a linker for one instance.
 ///
 /// Carries the linker together with the interfaces it actually bound, so a
@@ -1279,6 +1374,124 @@ pub fn build_linker<'a>(
         bound: BoundInterfaces {
             interfaces,
             unimplemented,
+        },
+        _engine: std::marker::PhantomData,
+    })
+}
+
+/// Build a linker for the ABI a component declares (`HOST-025`).
+///
+/// `V02` is exactly [`build_linker`] — the retained path, byte for byte the
+/// same code, so every 0.2 test keeps proving the 0.2 path while this function
+/// exists. `V03` builds the 0.3 subset from [`crate::host_wasi03`] (the
+/// grant-gated versioned clock) plus `host_test`, and nothing else — notably
+/// not the 0.2 WASI baseline, which would serve unasked-for semantics under
+/// 0.3 routing (see [`build_linker_v03`]).
+///
+/// `Unknown` is refused, not defaulted: instantiating a guest whose version
+/// could not be determined would serve it under semantics it did not ask for,
+/// and the only safe answer is no linker at all.
+///
+/// # Why async 0.3 imports trap instead of refusing to link
+///
+/// The 0.3 linker registers async names as trapping stubs (see
+/// [`crate::host_wasi03`]) — but only when the clock grant justifies the
+/// instance at all: an ungranted guest finds the whole 0.3 clock absent and
+/// fails closed at instantiation. When granted, instantiating succeeds, and
+/// calling an async stub traps naming engine async support and the path to
+/// unblock it. That follows the repo's own precedent (`host_test` registers
+/// unconditionally and refuses without test state): an absent import gives a
+/// generic unknown import, which names the wrong problem, while the trap
+/// names the missing capability. Unknown 0.3 names — anything no table names
+/// — still fail closed at instantiation, which is the correct backstop.
+///
+/// # Errors
+///
+/// Returns an error when `abi` is [`AbiVersion::Unknown`], or when Wasmtime
+/// rejects a definition (which would indicate a QQQ bug rather than user error).
+///
+/// ```
+/// use qqq_cap::manifest::Manifest;
+/// use qqq_cap::resolve::GrantSet;
+/// use qqq_host::linker::{AbiVersion, build_linker_for_abi};
+///
+/// let manifest = Manifest::parse(
+///     "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[capabilities.clock]\nmonotonic = true\n",
+/// )
+/// .expect("fixture manifest parses");
+/// let engine = wasmtime::Engine::new(&wasmtime::Config::new()).expect("engine builds");
+/// let built = build_linker_for_abi(&engine, &GrantSet::from_manifest(&manifest), AbiVersion::V03)
+///     .expect("0.3 linker builds");
+/// assert!(
+///     built.bound.interfaces.iter().any(|i| i.contains("0.3.2")),
+///     "the 0.3 linker binds the versioned clock: {:?}",
+///     built.bound.interfaces
+/// );
+/// ```
+///
+/// ```rust
+/// use qqq_cap::resolve::GrantSet;
+/// use qqq_host::linker::{AbiVersion, build_linker_for_abi};
+///
+/// let engine = wasmtime::Engine::new(&wasmtime::Config::new()).expect("engine builds");
+/// // An undeterminable version builds no linker: instantiating under
+/// // unasked-for semantics is what dual-ABI exists to prevent.
+/// let err = build_linker_for_abi(&engine, &GrantSet::empty(), AbiVersion::Unknown)
+///     .expect_err("an unknown ABI must not get a linker");
+/// assert!(format!("{err:#}").contains("no recognizable WASI version"));
+/// ```
+pub fn build_linker_for_abi<'a>(
+    engine: &'a wasmtime::Engine,
+    grants: &GrantSet,
+    abi: AbiVersion,
+) -> wasmtime::Result<BuiltLinker<'a>> {
+    match abi {
+        AbiVersion::V02 => build_linker(engine, grants),
+        AbiVersion::V03 => build_linker_v03(engine, grants),
+        AbiVersion::Unknown => Err(wasmtime::Error::msg(
+            "cannot build a linker: the component declares no recognizable WASI version; \
+             refusing rather than serving it under 0.2 semantics it did not ask for",
+        )),
+    }
+}
+
+/// The 0.3 path: the versioned clock plus `host_test`, and nothing else.
+///
+/// The two registrations are conditional for the same reasons their 0.2
+/// counterparts are: the 0.3 clock instance is bound only when
+/// [`Capability::ClockMonotonic`] is granted (see [`crate::host_wasi03` — an
+/// ungranted guest fails closed at instantiation), and an assertion interface
+/// with no test state behind it refuses rather than passes (see
+/// `host_test`'s module docs).
+///
+/// Deliberately NOT included: the 0.2 WASI baseline (`host_wasi`). A guest
+/// routed here declared `@0.3.x` imports; serving it `@0.2.x` names under the
+/// 0.3 routing would be the silent reinterpretation dual-ABI exists to
+/// prevent. A 0.3 guest importing any 0.3 name outside the clock fails closed
+/// at instantiation — the correct backstop until the surface grows.
+fn build_linker_v03<'a>(
+    engine: &'a wasmtime::Engine,
+    grants: &GrantSet,
+) -> wasmtime::Result<BuiltLinker<'a>> {
+    use crate::host_test;
+    use crate::host_wasi03;
+
+    let mut linker: Linker<StoreData> = Linker::new(engine);
+    host_wasi03::register(&mut linker, grants)?;
+    host_test::register(&mut linker)?;
+
+    // The reported set follows the grant, as in [`build_linker`]: an
+    // ungranted clock is absent from the linker, so claiming it here would
+    // certify an authority the instance does not have.
+    let mut interfaces = vec!["qqq:test/assertions@1.0.0".to_owned()];
+    if grants.grants(Capability::ClockMonotonic) {
+        interfaces.insert(0, host_wasi03::MONOTONIC_CLOCK_03.to_owned());
+    }
+    Ok(BuiltLinker {
+        linker,
+        bound: BoundInterfaces {
+            interfaces,
+            unimplemented: Vec::new(),
         },
         _engine: std::marker::PhantomData,
     })
@@ -2250,5 +2463,98 @@ mod tests {
             digest,
             "a capability-free manifest is the empty grant set"
         );
+    }
+
+    // -- Dual ABI: 0.2 retained, 0.3 routed (HOST-025) ---------------------
+
+    /// **HOST-025, written first and failing first: the linker must know which
+    /// ABI a component declares.**
+    ///
+    /// Today every import name is treated as versionless: a component importing
+    /// `wasi:http/incoming-handler@0.3.0` falls through to the same path as a
+    /// 0.2 guest, and the mismatch surfaces — if at all — as a generic
+    /// "unknown import" rather than a version decision. A dual-ABI host cannot
+    /// route what it cannot name, so detection comes before any 0.3 path.
+    #[test]
+    fn version_detection_names_the_declared_abi() {
+        use super::AbiVersion;
+
+        // A 0.2 guest: unversioned and @0.2.x names route to the retained path.
+        assert_eq!(
+            AbiVersion::detect(["wasi:http/incoming-handler@0.2.0"]),
+            AbiVersion::V02,
+            "a 0.2 import must route to the retained path"
+        );
+        assert_eq!(
+            AbiVersion::detect(["qqq:clock/wall-clock@1.0.0"]),
+            AbiVersion::V02,
+            "an unversioned qqq import is the current ABI and stays on the 0.2 path"
+        );
+        // A 0.3 guest: @0.3.x names route to the new path.
+        assert_eq!(
+            AbiVersion::detect(["wasi:http/incoming-handler@0.3.2"]),
+            AbiVersion::V03,
+            "a 0.3 import must route to the 0.3 path"
+        );
+        // Anything else is unknown, never silently 0.2: defaulting an
+        // unrecognized version to the old path would instantiate a guest
+        // under semantics it did not ask for.
+        assert_eq!(
+            AbiVersion::detect(["wasi:http/incoming-handler@0.4.0"]),
+            AbiVersion::Unknown,
+            "an unrecognized version must not default to either path"
+        );
+        assert_eq!(
+            AbiVersion::detect([] as [&str; 0]),
+            AbiVersion::Unknown,
+            "no imports names no ABI"
+        );
+    }
+
+    /// **An undeterminable version builds no linker.**
+    ///
+    /// `build_linker_for_abi` with `Unknown` fails rather than defaulting to
+    /// either path: instantiating under unasked-for semantics is exactly what
+    /// dual-ABI exists to prevent, so the only honest construction is none.
+    #[test]
+    fn unknown_abi_builds_no_linker() {
+        use super::build_linker_for_abi;
+        use qqq_cap::resolve::GrantSet;
+
+        let engine = wasmtime::Engine::new(&wasmtime::Config::new()).expect("test engine builds");
+        let err = build_linker_for_abi(&engine, &GrantSet::empty(), AbiVersion::Unknown)
+            .expect_err("an unknown ABI must not get a linker");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("no recognizable WASI version"),
+            "the refusal must name the problem, not fail silently: {text}"
+        );
+    }
+
+    /// **The served and refused 0.3 tables do not overlap.**
+    ///
+    /// A function the host both binds and refuses would instantiate guests and
+    /// then trap them on call — the worst of both worlds. This is a property
+    /// of the tables, not of any one guest, so it is asserted here rather than
+    /// in any guest test.
+    #[test]
+    fn served_and_refused_03_tables_do_not_overlap() {
+        use crate::host_wasi03::{KNOWN_ASYNC_03, SERVED_03};
+
+        for refused in KNOWN_ASYNC_03 {
+            assert!(
+                !SERVED_03.contains(refused),
+                "async-refused {refused} must not also be served"
+            );
+        }
+        // And the reverse direction reads better than it needs to be: every
+        // served name must parse as `instance/function`, or it cannot match a
+        // real import string.
+        for served in SERVED_03 {
+            assert!(
+                served.contains('/') && served.contains("@0.3."),
+                "served entries must be versioned instance/function pairs: {served}"
+            );
+        }
     }
 }

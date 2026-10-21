@@ -168,7 +168,7 @@ impl Enforcement {
 /// disagree in either direction, so a `func_wrap` added without a row here is a
 /// test failure rather than an unexamined call path. That is the property that
 /// makes the table a check rather than documentation.
-pub const AUDITED: [AuditedCall; 14] = [
+pub const AUDITED: [AuditedCall; 18] = [
     AuditedCall {
         file: "host_clock.rs",
         function: "now",
@@ -283,6 +283,47 @@ pub const AUDITED: [AuditedCall; 14] = [
         // No capability is required, and the reason is that one does not exist to require:
         // an assertion interface is not a capability. It is linked when a runner drives the
         // guest and not when a server does -- see `Enforcement::Ungated`. Appends a guest-evaluated assertion to the failure list, so one run reports every failure.
+        enforced_by: Enforcement::Ungated,
+    },
+    AuditedCall {
+        file: "host_wasi03.rs",
+        function: "now",
+        interface: "wasi:clocks/monotonic-clock@0.3.2",
+        capability: Some(Capability::ClockMonotonic),
+        // Per-function recheck, mirroring `host_clock`'s monotonic `now`:
+        // registration is conditional on the grant AND the body re-checks it,
+        // so a mis-built linker still denies. The audit's `UnbackedClaim`
+        // check verifies the body consults the grant.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_wasi03.rs",
+        function: "get-resolution",
+        interface: "wasi:clocks/monotonic-clock@0.3.2",
+        capability: Some(Capability::ClockMonotonic),
+        // Interface-gated like the 0.2 `resolution`: the tick interval is
+        // configuration, not a reading, so the registration gate (no grant,
+        // no instance) is the check and the body needs none.
+        enforced_by: Enforcement::InterfaceGated,
+    },
+    AuditedCall {
+        file: "host_wasi03.rs",
+        function: "wait-until",
+        interface: "wasi:clocks/monotonic-clock@0.3.2",
+        capability: None,
+        // Ungated because there is no grant to check: the stub traps for every
+        // caller, granted or not, naming the missing engine async support. It
+        // is reachable only when the clock grant justified the instance, so an
+        // ungranted guest never meets this trap — it fails closed earlier, at
+        // instantiation, on the absent instance.
+        enforced_by: Enforcement::Ungated,
+    },
+    AuditedCall {
+        file: "host_wasi03.rs",
+        function: "wait-for",
+        interface: "wasi:clocks/monotonic-clock@0.3.2",
+        capability: None,
+        // As `wait-until` above: a named trap, not a grant decision.
         enforced_by: Enforcement::Ungated,
     },
 ];
@@ -940,7 +981,7 @@ mod tests {
         for row in &AUDITED {
             assert!(!row.function.is_empty(), "{row:?}");
             assert!(
-                row.interface.starts_with("qqq:"),
+                row.interface.starts_with("qqq:") || row.interface.starts_with("wasi:"),
                 "an interface must be namespaced: {row:?}"
             );
             assert_eq!(

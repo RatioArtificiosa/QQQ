@@ -114,6 +114,7 @@ pub mod host_secrets;
 /// ```
 pub mod host_test;
 mod host_wasi;
+mod host_wasi03;
 pub mod instance;
 /// Calling a guest: the edge between the host and an application component.
 ///

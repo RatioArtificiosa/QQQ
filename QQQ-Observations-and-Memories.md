@@ -40480,4 +40480,34 @@ as reviewed entry 14, byte-identical to the tool's canonical
 serialization, with the same RED/GREEN selector proof.
 `.github/perf/baseline.json`.
 
+## §O-775 - Copilot review catches a grant bypass the tests baked in: the 0.3 clock served time to empty-grant stores
+
+Independent review (Copilot BYO proxy, first pass on the t3 dual-ABI diff)
+returned one HIGH finding the green suite had certified: `host_wasi03`
+registered `now`/`get-resolution` unconditionally and `build_linker_v03`
+ignored its grants, so a guest with no `ClockMonotonic` grant read the clock
+through the 0.3 path while the 0.2 path denies it — and the integration test
+had baked the bypass in with `GrantSet::empty()`. The defect class is
+exactly what review is for: the code did what the tests said, and what the
+tests said was wrong. Fixed per the 0.2 precedent (`host_clock`): registration
+conditional on the grant (absent instance, fail-closed at instantiation),
+`now` re-checks per call with a `denied()` trap, `get-resolution` carries no
+recheck mirroring 0.2 `resolution`, and `bound.interfaces` follows the grant
+so the report cannot certify an unheld authority. Reproduced first with two
+failing tests (`v03_clock_without_grant_fails_closed`,
+`v03_clock_rechecks_grant_at_call_time` — red log `t3-grant-red.log`, green
+`t3-grant-green.log`), then fixed. Same review also unrolled the async-stub
+loop into explicit literals (a loop variable is invisible to the
+literal-anchored ARCH-003/ARCH-012 scanners while still binding host
+functions — AUDITED 16→18), and corrected two doc overclaims (mixed-version
+refusal layers; 0.2 baseline deliberately excluded from the 0.3 linker).
+Re-review cleared all five with one new LOW (README "0.3 clocks
+unconditional" contradicted the new gate), fixed by regrouping the
+parenthetical. Lesson recorded: a versioned name must never be a wider
+authority than the unversioned one, and a test that passes on the wrong
+grants proves the wrong property.
+`crates/qqq-host/src/host_wasi03.rs`, `crates/qqq-host/src/linker.rs`,
+`crates/qqq-host/src/arch003.rs`, `crates/qqq-host/src/arch012.rs`,
+`crates/qqq-host/tests/dual_abi.rs`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -4,6 +4,22 @@
 
 ### Security
 
+- **wasi**: dual-ABI host path for WASI 0.3.2 (`HOST-025`, `HOST-026`,
+  `TEST-020`): `AbiVersion::detect` routes `@0.3.x` imports to a new
+  `build_linker_v03` while 0.2 guests keep the retained `build_linker`
+  byte for byte; unrecognized versions build no linker. The 0.3 clock
+  (`wasi:clocks/monotonic-clock@0.3.2` `now`/`get-resolution`) is
+  grant-gated exactly like the 0.2 monotonic clock — ungranted guests
+  fail closed at instantiation on the absent instance, and `now`
+  re-checks `ClockMonotonic` per call — while `wait-until`/`wait-for`
+  (real `async func` in the v0.3.2 WIT, tag `bdadbbb`) trap by name
+  citing the missing engine async support. Independent review caught
+  the first revision serving time to empty-grant stores; reproduced
+  with two failing tests before the fix (`§O-775`). Six integration
+  tests (0.2 run, 0.3 run, async trap, unknown import, no-grant
+  refusal, call-time recheck), each fault-proven red, plus the
+  ARCH-003/ARCH-012 audit tables extended 14→18 over the new module.
+
 - **sec**: upgrade rustls-webpki 0.103.15 → 0.103.16 for
   RUSTSEC-2026-0382 (issue #9): affected versions accept certificate
   paths with distrusted emSign intermediates (CVE-2026-111943,

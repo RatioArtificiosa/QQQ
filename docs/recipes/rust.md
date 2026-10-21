@@ -14,15 +14,16 @@ bind, and they are listed at the end as absences rather than omitted — a reade
 ## What the host actually binds
 
 `wit/` declares <!-- qqq:claim wit-packages -->15<!-- /qqq:claim --> packages. `qqq-host`'s linker
-registers <!-- qqq:claim host-bound-modules -->5<!-- /qqq:claim --> modules: the **WASI baseline**,
-**three** capability modules, and `qqq:test/assertions` -- which a test runner links and nothing
-grants, because an assertion interface is not a capability. The count is five and the *kinds* are
+registers <!-- qqq:claim host-bound-modules -->6<!-- /qqq:claim --> modules: the **WASI baseline**,
+the **versioned 0.3 clock**, **three** capability modules, and `qqq:test/assertions` -- which a test runner links and nothing
+grants, because an assertion interface is not a capability. The count is six and the *kinds* are
 three, which is why the sentence no longer says "plus three capability modules": that was true at
 four and stopped being true at five.
 
 ```bash
 rg 'host_[a-z0-9_]+::register\(' crates/qqq-host/src/linker.rs
 #   host_wasi::register      <- the baseline, not a QQQ capability
+#   host_wasi03::register    <- the 0.3 clock, versioned sync shapes; async names trap by name
 #   host_test::register      <- assertions, ungated: the functions refuse without test state
 #   host_clock::register
 #   host_crypto::register

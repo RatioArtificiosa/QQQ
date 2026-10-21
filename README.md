@@ -210,7 +210,7 @@ Populated only from repository evidence. Nothing here is a roadmap promise.
 |---|---|
 | Core runtime | IN PROGRESS — pre-alpha workspace, 12 crates (11 shipped plus the never-shipped `xtask` gate runner) |
 | WebAssembly execution | IMPLEMENTED — Wasmtime 48.0.7 pinned, real components served over HTTP |
-| Capability model | IMPLEMENTED — manifest to grants to per-instance linker; 5 host modules registered (WASI baseline and test assertions unconditional, clock/crypto/http when granted); sql, kv, fs, queue, env, ai, dns, trace, secrets declared, not yet bound |
+| Capability model | IMPLEMENTED — manifest to grants to per-instance linker; 6 host modules registered (WASI baseline and test assertions unconditional, 0.3 clock and clock/crypto/http when granted); sql, kv, fs, queue, env, ai, dns, trace, secrets declared, not yet bound |
 | CLI | IN PROGRESS — new, build, run, dev, serve, test, inspect, audit, MCP and more |
 | Language support | IN PROGRESS — Rust narrow probe passing; AssemblyScript, C/C++, TypeScript engine path, Go, Python experimental (see table above) |
 | AOT | IN PROGRESS — managed cache and native emission; trust design open |

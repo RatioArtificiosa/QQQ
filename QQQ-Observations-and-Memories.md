@@ -40597,4 +40597,28 @@ rather than described. Policy that cannot fail is commentary; this one
 can — which is what makes it a decision and not a wish.
 `crates/qqq-abi/src/registry.rs`, `crates/qqq-pkg/src/semver.rs`.
 
+## §O-781 - Fifth rotation identity (9V45/7.0): a fast json baseline is recorded as measured, with the anomaly dissected
+
+Run 39647076896 attempt 1 refused with the fifth new-fleet identity:
+AMD EPYC 9V45 on kernel 7.0.0-1017-azure. Raw deltas vs the two 6.17
+same-CPU twins: hello −6%/−14%, json +24%/+35%, multi −3%/+0%,
+tailp99 −9%. Three of four vectors sit with their twins; json jumps
++24–35% faster. Dissection before recording: (a) within-run spread 7%,
+median of three tight samples — not an outlier artifact; (b) no
+hot-path mechanism — the measured commit's Phase-4 code runs at
+admission (import mapping) and in tests, never per-request, and the
+request path is byte-identical to the parent that passed all other
+runners; (c) one low multi sample (9095) does not move its median.
+A same-SHA rerun for a confirmatory second sample landed on a 7763/7.0
+runner (GATE OK vs entry 11) — fleet luck, so no second 9V45/7.0 sample
+exists. Recorded as measured per the entry-14 precedent, with a
+deliberate asymmetry noted: a fast baseline risks future false-fails,
+so the json jump is named here rather than smoothed over — if 9V45/7.0
+reruns cluster near 2600–2800 instead of 3500, that cluster reopens
+this entry. The RED/GREEN selector proof ran against the shipped
+functions (refuses on the 15-entry baseline, selects entry 16 and
+compares clean on the 16-entry one).
+`.github/perf/baseline.json` (read-only proof), CI runs 39647076896
+attempts 1–2, artifact `performance-regression` attempt 1.
+
 *End of `QQQ-Observations-and-Memories.md`.*

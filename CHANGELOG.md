@@ -82,7 +82,16 @@
   json −0.1% (flat), multi −4.3% (slower throughput), tailp99 +6.3%
   (slower) — all inside gate tolerance with 7–23% within-run spreads,
   recorded as measured, no hot-path mechanism (linker routing + audit
-  tables, never the request path).
+  tables, never the request path). Entry 16 (AMD 9V45 on kernel 7.0,
+  from run 39647076896's artifact): raw deltas vs 6.17 same-CPU twins
+  hello −6%/−14% (faster), json +24%/+35% (faster throughput),
+  multi −3%/+0% (flat), tailp99 −9% (faster) — inside gate tolerance;
+  the json jump is clean (7% spread, median of 3, no hot-path
+  mechanism: import mapping at admission, never per-request), with one
+  low multi sample (9095) that does not move the median. Same-SHA rerun
+  for a confirmatory sample landed on a different runner (7763/7.0,
+  GATE OK vs entry 11) — fleet luck, not evidence against; recorded as
+  measured per the entry-14 precedent.
 
 - **det**: prove DET-008 end to end with a real guest: record captures
   exactly what the guest observed, replay feeds the log's values (never

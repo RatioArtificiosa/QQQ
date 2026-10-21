@@ -40530,4 +40530,20 @@ byte-identical to the artifact the CI runner wrote — no hand transcription.
 Committed as reviewed entry 15.
 `.github/perf/baseline.json` (read-only proof), `tools/run_perf_regression.py`.
 
+## §O-777 - Entry 15's first CI run red on Windows, green on same-SHA retry: a cache-child race, not a regression
+
+Run 39607852629 attempt 1 failed only `Rust (windows-latest)`, only
+`qqq-run`'s `native_output_is_real_and_cache_survives_engine_recreation`:
+the re-executed child binary never wrote `child-hit`, so the parent's
+`read(...).unwrap()` died with file-not-found. Three legs mark it a
+flake, not a regression: the pushed commit changes no code (baseline
+entry + prose; the 0.2 guest path it exercises is byte-identical to the
+parent), the parent code SHA `c1d1b4c` passed the same Windows job, and
+the local Windows gate on this exact tree is GREEN 146 (it runs the
+same test). Same-SHA `--failed` retry (attempt 2) went fully green —
+including PERF-020, which is also the live proof that entry 15 selects
+and compares clean in CI. No code changed anywhere in this loop.
+`crates/qqq-run/tests/live_components.rs` (read-only evidence), CI run
+39607852629 attempts 1–2.
+
 *End of `QQQ-Observations-and-Memories.md`.*

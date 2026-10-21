@@ -40442,4 +40442,24 @@ correlation to chase. `bridge21/` logs (test, checks, test-linux,
 docker-stats with timestamps) under the goal scratch; the sampler
 format re-verified live (timestamp + `name CPU% Mem / 8GiB` rows).
 
+## §O-773 - DET-008's red SHA goes green on same-SHA retry: the fleet lottery, evidenced
+
+Run `39369173115` (DET-008's push) failed PERF-020 on identity refusal:
+kernel 7.0 against eleven 6.17 entries — no comparison ran, so per
+§O-543 there was nothing to rerun twice, and the entry-12 procedure
+closed that half. The same-SHA rerun has now completed green (perf job
+5m32s), which the disposition needs explained, not just celebrated:
+the rerun landed on the old fleet (EPYC 7763, kernel 6.17.0, same
+memory and `qqqai` 0.1.1 as the reviewed entry) and matched reviewed
+entry `70ac18c` — verified locally by running the shipped selector on
+the run's own candidate artifact (selects `70ac18c…`, compare zero
+failures). Deltas vs that entry: hello +4.6%, json +1.4%, multi −3.6%,
+tailp99 +3.7%, all inside the 25%/20% gates; within-run spreads 3–16%,
+no 35% pathology. So the original red was fleet rotation (deterministic
+refusal, fixed by procedure) and the green is the old-fleet twin of the
+same SHA measuring inside tolerance — variance plus rotation, both
+halves of the migration story on one commit. No code changed anywhere
+in this loop; the tree at the SHA is untouched.
+`.github/perf/baseline.json` (read-only proof), `tools/run_perf_regression.py`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

@@ -26,6 +26,21 @@
   hosts and refuses out-of-range ones with `VersionUnsatisfiable`
   (`QQQ-5004`) naming the range and the version.
 
+- **conformance**: execute against a 0.3 guest (`CON-019`). Instance creation
+  routes by declared ABI (`linker_for_component` in the single assembly
+  step, so sync and async paths cannot disagree; only a positive 0.3
+  declaration diverts, everything else — including empty and unrecognized
+  versions — keeps the retained 0.2 path) and `qqqai run`'s pre-flight
+  admits a granted 0.3 import. The conformance suite gains two execution
+  cases over a committed 0.3 fixture guest (WAT source + build-pinned
+  bytes): 0.3 clock required as `clock.monotonic`, unserved 0.3 names
+  reported as unmapped. CLI end-to-end: granted 0.3 runs, ungranted 0.3
+  names its capability, unknown 0.3 names its import. Each seam
+  fault-proven red. Recorded finding: `qqqai run` refuses all WASI-0.2
+  guests at pre-flight today (their 14 baseline imports match no granted
+  package) — pre-existing, unchanged by this migration, owned by no item
+  yet (`§O-782`).
+
 - **wasi**: dual-ABI host path for WASI 0.3.2 (`HOST-025`, `TEST-020`):
   `AbiVersion::detect` routes `@0.3.x` imports to a new
   `build_linker_v03` while 0.2 guests keep the retained `build_linker`

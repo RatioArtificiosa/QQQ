@@ -995,14 +995,14 @@ merging; this draft is not a release or a claim that persistent agents are compl
 
 | Scope | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| All checklist items | 301 | 3 | 322 | 4 | 0 | 0 | 630 | 47.8% |
+| All checklist items | 302 | 3 | 321 | 4 | 0 | 0 | 630 | 47.9% |
 
 ### By phase
 
 | Phase | Milestone(s) | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | P0 | M0 | 50 | 0 | 29 | 0 | 0 | 0 | 79 | 63.3% |
-| P1 | M1 | 54 | 0 | 8 | 0 | 0 | 0 | 62 | 87.1% |
+| P1 | M1 | 55 | 0 | 7 | 0 | 0 | 0 | 62 | 88.7% |
 | P2 | M2 | 52 | 0 | 0 | 2 | 0 | 0 | 54 | 96.3% |
 | P3 | M3 | 35 | 0 | 5 | 0 | 0 | 0 | 40 | 87.5% |
 | P4 | M4 | 32 | 0 | 32 | 0 | 0 | 0 | 64 | 50.0% |
@@ -1023,7 +1023,7 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P0 | LIC | 7 | 0 | 5 | 0 | 0 | 0 | 12 | 58.3% |
 | P0 | PLAN | 7 | 0 | 13 | 0 | 0 | 0 | 20 | 35.0% |
 | P1 | ARCH | 12 | 0 | 4 | 0 | 0 | 0 | 16 | 75.0% |
-| P1 | CON | 18 | 0 | 1 | 0 | 0 | 0 | 19 | 94.7% |
+| P1 | CON | 19 | 0 | 0 | 0 | 0 | 0 | 19 | 100.0% |
 | P1 | HOST | 24 | 0 | 3 | 0 | 0 | 0 | 27 | 88.9% |
 | P2 | CAP | 24 | 0 | 0 | 0 | 0 | 0 | 24 | 100.0% |
 | P2 | SEC | 28 | 0 | 0 | 2 | 0 | 0 | 30 | 93.3% |
@@ -3252,10 +3252,10 @@ application's by a test.
 #### The conformance row
 
 **Measured.** Rust passes the whole suite. `conformance/suite.json` declares
-<!-- qqq:claim conformance-cases -->8<!-- /qqq:claim --> cases, of which
+<!-- qqq:claim conformance-cases -->10<!-- /qqq:claim --> cases, of which
 <!-- qqq:claim conformance-definition-cases -->6<!-- /qqq:claim --> are **definitions** enforced by a
 checker that runs in both gates, and
-<!-- qqq:claim conformance-execution-cases -->2<!-- /qqq:claim --> **execute** against a built guest:
+<!-- qqq:claim conformance-execution-cases -->4<!-- /qqq:claim --> **execute** against a built guest (two on the reference application, two on the committed 0.3 fixture guest):
 
 ```bash
 python tools/check_conformance.py --matrix     # rust: yes, for all 15 capabilities

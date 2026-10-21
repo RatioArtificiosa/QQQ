@@ -49,7 +49,7 @@ use qqq_cap::resolve::GrantSet;
 use qqq_core::{Error, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
 use wasmtime::StoreLimits;
-use wasmtime::component::Linker;
+use wasmtime::component::{Component, Linker};
 
 /// The host-state type every store carries.
 ///
@@ -1452,6 +1452,73 @@ pub fn build_linker_for_abi<'a>(
             "cannot build a linker: the component declares no recognizable WASI version; \
              refusing rather than serving it under 0.2 semantics it did not ask for",
         )),
+    }
+}
+
+/// Build the linker for the component in hand, routing by its declared ABI.
+///
+/// This is what instance creation calls: the component's imports are read
+/// off the compiled artifact (never trusted from the caller), classified by
+/// [`AbiVersion::detect`], and only a positive 0.3 declaration diverts to the
+/// 0.3 path. Everything else — 0.2 names, `qqq:` names, components with no
+/// imports at all, unrecognized versions — keeps the retained 0.2 linker
+/// byte for byte.
+///
+/// # Why this is not `build_linker_for_abi`
+///
+/// That function takes a caller-named ABI, and `Unknown` there is a caller
+/// error: refusing to build is the honest answer. Here there is no caller
+/// naming anything — the component's own imports are the declaration, and an
+/// empty import list names nothing rather than naming it wrongly. Routing
+/// `Unknown` to the retained path preserves today's behavior exactly: a
+/// component with no imports instantiates as before, and an unrecognized
+/// version fails closed at instantiation with Wasmtime's unknown-import
+/// error naming the import, which is the correct backstop.
+///
+/// # Errors
+///
+/// Returns an error when Wasmtime rejects a definition, which would indicate
+/// a QQQ bug rather than user error. Unknown imports are NOT an error here:
+/// they fail closed one step later, at instantiation, naming the import.
+///
+/// ```
+/// use qqq_cap::manifest::Manifest;
+/// use qqq_cap::resolve::GrantSet;
+/// use qqq_host::linker::linker_for_component;
+///
+/// let manifest = Manifest::parse(
+///     "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[capabilities.clock]\nmonotonic = true\n",
+/// )
+/// .expect("fixture manifest parses");
+/// let engine = wasmtime::Engine::new(&wasmtime::Config::new()).expect("engine builds");
+/// let guest = r#"(component
+///   (import "wasi:clocks/monotonic-clock@0.3.2" (instance $clock
+///     (export "now" (func (result u64)))))
+///   (core module $m)
+///   (core instance $i (instantiate $m))
+/// )"#;
+/// let component = wasmtime::component::Component::new(&engine, guest).expect("guest compiles");
+/// let built = linker_for_component(&engine, &GrantSet::from_manifest(&manifest), &component)
+///     .expect("a 0.3 guest routes to the 0.3 linker");
+/// assert!(
+///     built.bound.interfaces.iter().any(|i| i.contains("0.3.2")),
+///     "routing serves the declared ABI: {:?}",
+///     built.bound.interfaces
+/// );
+/// ```
+pub fn linker_for_component<'a>(
+    engine: &'a wasmtime::Engine,
+    grants: &GrantSet,
+    component: &Component,
+) -> wasmtime::Result<BuiltLinker<'a>> {
+    let names: Vec<String> = component
+        .component_type()
+        .imports(engine)
+        .map(|(name, _ty)| name.to_owned())
+        .collect();
+    match AbiVersion::detect(names.iter().map(String::as_str)) {
+        AbiVersion::V03 => build_linker_v03(engine, grants),
+        AbiVersion::V02 | AbiVersion::Unknown => build_linker(engine, grants),
     }
 }
 

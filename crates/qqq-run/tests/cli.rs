@@ -2037,6 +2037,31 @@ const NEEDS_WALL_CLOCK: &str = r#"(component
   (core instance $i (instantiate $m))
 )"#;
 
+/// A component importing the served 0.3 clock, as WAT.
+///
+/// The CON-019 fixture for the real entry path: `qqqai run` must route this
+/// guest to the 0.3 implementation (`Instance::create` does since the routing
+/// change) and run it, rather than failing closed on an unknown import as it
+/// did when only the 0.2 linker existed.
+const NEEDS_03_CLOCK: &str = r#"(component
+  (import "wasi:clocks/monotonic-clock@0.3.2" (instance $clock
+    (export "now" (func (result u64)))
+    (export "get-resolution" (func (result u64)))))
+  (core module $m)
+  (core instance $i (instantiate $m))
+)"#;
+
+/// A component importing an unserved 0.3 interface, as WAT.
+///
+/// The fail-closed control for the 0.3 run path: no table serves this name,
+/// so creation must refuse naming the import rather than running.
+const NEEDS_UNKNOWN_03: &str = r#"(component
+  (import "wasi:http/incoming-handler@0.3.2" (instance $h
+    (export "handle" (func))))
+  (core module $m)
+  (core instance $i (instantiate $m))
+)"#;
+
 /// A component that reads the wall clock **at instantiation**, so a replay log has something in it.
 ///
 /// # Why this is not `NEEDS_WALL_CLOCK`
@@ -2227,7 +2252,79 @@ fn run_executes_when_the_capability_is_granted() {
     s.run(&["run", &wasm]).assert_ok().assert_contains("ran in");
 }
 
-/// `--cap` **cannot widen** what the manifest granted.
+/// **CON-019** — a granted 0.3 guest runs end to end through the real binary.
+///
+/// The 0.3 path is unreachable from the CLI unless creation routes by declared
+/// ABI: before the routing change this failed closed with an unknown import,
+/// exactly as a 0.2-only host should. `ran in` proves the guest executed,
+/// not merely linked.
+#[test]
+fn run_03_guest_with_grant_runs() {
+    let s = Sandbox::new("run-03-granted");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.clock]\nmonotonic = true\n",
+    );
+    let Some(wasm) = encode(&s, "clock03", NEEDS_03_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    s.run(&["run", &wasm]).assert_ok().assert_contains("ran in");
+}
+
+/// **CON-019** — an ungranted 0.3 guest is refused, and the error names the capability.
+///
+/// The CLI-level fail-closed half: without the grant the 0.3 instance is
+/// absent, and the error must name `clock.monotonic` with its stanza — the
+/// same advice `inspect` gives, on the path that enforces it.
+#[test]
+fn run_03_guest_without_grant_refuses_naming_capability() {
+    let s = Sandbox::new("run-03-ungranted");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    let Some(wasm) = encode(&s, "clock03", NEEDS_03_CLOCK) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    let run = s.run(&["run", &wasm]);
+    run.assert_failed()
+        .assert_contains("wasi:clocks/monotonic-clock@0.3.2")
+        .assert_contains("clock.monotonic");
+}
+
+/// **CON-019** — an unserved 0.3 import fails closed through the real binary.
+///
+/// No table serves `wasi:http/incoming-handler@0.3.2`, so no grant can satisfy
+/// it. The failure must name the import rather than implicating a capability:
+/// there is no capability that would help, and naming one would send the
+/// reader to a stanza that cannot fix the run.
+#[test]
+fn run_unknown_03_import_fails_closed() {
+    let s = Sandbox::new("run-03-unknown");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [capabilities.clock]\nmonotonic = true\n",
+    );
+    let Some(wasm) = encode(&s, "unknown03", NEEDS_UNKNOWN_03) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    let run = s.run(&["run", &wasm]);
+    run.assert_failed()
+        .assert_contains("wasi:http/incoming-handler@0.3.2");
+    assert!(
+        !run.all().contains("capability:"),
+        "no capability can satisfy an unserved import, so none must be implicated: {}",
+        run.all()
+    );
+}
 ///
 /// The narrowing-only invariant, asserted at the command line rather than only
 /// in the resolver's unit tests. A flag that could add authority would be a way

@@ -32,6 +32,8 @@
 
 use qqq_cap::manifest::Manifest;
 use qqq_cap::resolve::GrantSet;
+use qqq_host::config::StoreLimits;
+use qqq_host::instance::{Instance, PreparedComponent};
 use qqq_host::linker::{AbiVersion, StoreData, build_linker, build_linker_for_abi};
 use wasmtime::component::Component;
 use wasmtime::{Engine, Store};
@@ -42,6 +44,30 @@ fn engine() -> Engine {
     let mut config = wasmtime::Config::new();
     config.wasm_component_model(true);
     Engine::new(&config).expect("engine must build with QQQ's feature set")
+}
+
+/// The engine `Instance::create` needs: the production posture plus fuel
+/// metering and epoch interruption, which `ReadyStore::prepare` applies to
+/// every store (fuel budget, epoch deadline). A plain component-model engine
+/// would make creation itself fail, and the failure would name metering —
+/// not routing — so the routing tests would pass or fail for the wrong
+/// reason.
+fn creation_engine() -> Engine {
+    let mut config = wasmtime::Config::new();
+    config.wasm_component_model(true);
+    config.consume_fuel(true);
+    config.epoch_interruption(true);
+    Engine::new(&config).expect("creation engine must build")
+}
+
+fn instance_limits() -> StoreLimits {
+    StoreLimits {
+        memory_bytes: 16 * 1024 * 1024,
+        fuel: 10_000_000,
+        epoch_deadline_ms: 5_000,
+        max_open_handles: 64,
+        max_subrequests: 32,
+    }
 }
 
 fn grants_for(toml: &str) -> GrantSet {
@@ -405,5 +431,157 @@ fn v03_clock_rechecks_grant_at_call_time() {
     assert!(
         text.contains("clock") || text.contains("Clock"),
         "the trap must name the clock capability: {text}"
+    );
+}
+
+/// **Creation routes a 0.3 guest to the 0.3 implementation — CON-019.**
+///
+/// The linker-level tests above prove detection and linking; this proves the
+/// path `qqqai run` and `qqqai serve` actually take. `Instance::create` builds
+/// its linker from the component in hand today (the retained 0.2 path, which
+/// knows no 0.3 names), so a granted 0.3 guest fails creation with an unknown
+/// import — the red this test is written to show first. The fix routes
+/// creation by declared ABI. The guest runs its real export twice through
+/// the real instance: presence of a linker is not proof the clock serves.
+#[test]
+fn instance_create_routes_03_guest_to_its_implementation() {
+    let engine = creation_engine();
+    let prepared = PreparedComponent::compile(&engine, GUEST_03_CLOCK.as_bytes())
+        .expect("the 0.3 guest must compile");
+    let instance = Instance::create(&engine, &prepared, &monotonic_grants(), instance_limits())
+        .expect("a granted 0.3 guest must create: creation routes by declared ABI");
+    let (first, second) = instance
+        .run(|store, wasm| {
+            let run = wasm.get_typed_func::<(), (u64,)>(&mut *store, "run")?;
+            let (first,) = run.call(&mut *store, ())?;
+            let (second,) = run.call(&mut *store, ())?;
+            Ok((first, second))
+        })
+        .expect("the 0.3 guest must run through creation, not only link");
+    assert!(
+        second >= first,
+        "the guest must observe a monotonic clock through creation: {first} then {second}"
+    );
+}
+
+/// **Creation keeps an ungranted 0.3 guest fail-closed — CON-019.**
+///
+/// Same creation path, empty grants: the 0.3 instance is absent (grant-gated
+/// registration), so creation must refuse naming the clock — never serve
+/// time, never a generic error that hides which authority is missing.
+#[test]
+fn instance_create_keeps_ungranted_03_guest_fail_closed() {
+    let engine = creation_engine();
+    let prepared = PreparedComponent::compile(&engine, GUEST_03_CLOCK.as_bytes())
+        .expect("the 0.3 guest must compile");
+    let err = Instance::create(&engine, &prepared, &GrantSet::empty(), instance_limits())
+        .expect_err("an ungranted 0.3 guest must not create");
+    let text = err.render();
+    assert!(
+        text.contains("monotonic-clock"),
+        "the refusal must name the ungranted clock: {text}"
+    );
+}
+
+/// **Creation keeps unknown imports fail-closed — CON-019.**
+///
+/// The routing must not become a default: a version nobody registered still
+/// refuses at creation, through the same path, naming the missing import.
+#[test]
+fn instance_create_keeps_unknown_imports_fail_closed() {
+    let engine = creation_engine();
+    let wat = GUEST_03_CLOCK.replace(
+        "wasi:clocks/monotonic-clock@0.3.2",
+        "wasi:http/incoming-handler@0.3.2",
+    );
+    let prepared = PreparedComponent::compile(&engine, wat.as_bytes())
+        .expect("the unknown guest must compile");
+    let err = Instance::create(&engine, &prepared, &monotonic_grants(), instance_limits())
+        .expect_err("an unregistered 0.3 import must not create");
+    let text = err.render();
+    assert!(
+        text.contains("incoming-handler"),
+        "the refusal must name the missing import: {text}"
+    );
+}
+
+/// **CON-019** — an unrecognized version fails closed at creation.
+///
+/// `Unknown` routes to the retained path rather than erroring at link time:
+/// the refusal happens at instantiation with Wasmtime's unknown-import error
+/// naming the versioned import — the same fail-closed backstop as before,
+/// never a new link-time refusal for a guest that names nothing wrong.
+#[test]
+fn instance_create_keeps_unrecognized_version_fail_closed() {
+    const GUEST_04: &str = r#"(component
+      (import "wasi:http/incoming-handler@0.4.0" (instance $h
+        (export "handle" (func))))
+      (core module $m)
+      (core instance $i (instantiate $m))
+    )"#;
+    let engine = creation_engine();
+    let prepared =
+        PreparedComponent::compile(&engine, GUEST_04.as_bytes()).expect("the guest must compile");
+    let err = Instance::create(&engine, &prepared, &GrantSet::empty(), instance_limits())
+        .expect_err("an unrecognized version must not create");
+    let text = err.render();
+    assert!(
+        text.contains("incoming-handler@0.4.0"),
+        "the refusal must name the versioned import: {text}"
+    );
+}
+
+/// **CON-019** — a guest with no imports keeps the retained path.
+///
+/// An empty import list names no ABI (`Unknown`), and that must not become a
+/// link-time refusal: the component instantiates exactly as it did before the
+/// dual-ABI work, through the 0.2 builder, with an empty grant set.
+#[test]
+fn instance_create_keeps_no_import_guest_on_the_retained_path() {
+    // Plain `r"..."`: the bare guest names no interfaces, so there are no
+    // quotes inside and hashes would be decoration rather than escaping.
+    const BARE: &str = r"(component
+      (core module $m)
+      (core instance $i (instantiate $m))
+    )";
+    let engine = creation_engine();
+    let prepared =
+        PreparedComponent::compile(&engine, BARE.as_bytes()).expect("the bare guest must compile");
+    let instance = Instance::create(&engine, &prepared, &GrantSet::empty(), instance_limits())
+        .expect("a guest with no imports must create on the retained path");
+    assert!(
+        instance.is_usable(),
+        "the instance must be usable: nothing about it changed"
+    );
+}
+
+/// **CON-019** — a mixed 0.2+0.3 guest routes 0.3 and fails closed naming the 0.2 half.
+///
+/// Precedence sends any 0.3 import down the 0.3 path, whose linker binds no
+/// `qqq:` names: even fully granted, the 0.2 half fails at instantiation with
+/// an unknown import. Fail-closed, no reinterpretation — a guest that asks
+/// for two ABIs at once gets neither silently served as the other. (Review
+/// follow-up: the 0.3 linker deliberately excludes the 0.2 baseline, so this
+/// pin also guards that exclusion.)
+#[test]
+fn instance_create_routes_mixed_guest_03_and_names_the_02_half() {
+    const GUEST_MIXED: &str = r#"(component
+      (import "qqq:clock/wall-clock@1.0.0" (instance $w
+        (export "now" (func (result u64)))))
+      (import "wasi:clocks/monotonic-clock@0.3.2" (instance $clock
+        (export "now" (func (result u64)))))
+      (core module $m)
+      (core instance $i (instantiate $m))
+    )"#;
+    let engine = creation_engine();
+    let prepared = PreparedComponent::compile(&engine, GUEST_MIXED.as_bytes())
+        .expect("the guest must compile");
+    let both = grants_for("wall = true\n");
+    let err = Instance::create(&engine, &prepared, &both, instance_limits())
+        .expect_err("a mixed-ABI guest must not instantiate under either path");
+    let text = err.render();
+    assert!(
+        text.contains("qqq:clock/wall-clock"),
+        "the refusal must name the 0.2 half the 0.3 linker does not bind: {text}"
     );
 }

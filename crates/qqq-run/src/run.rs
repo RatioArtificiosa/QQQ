@@ -332,6 +332,13 @@ pub fn check_imports(
     for import in &required {
         if provided_names.contains(&package_of(import)) {
             satisfied.push(import.clone());
+        } else if is_served_03_import(import, grants) {
+            // The dual-ABI path (CON-019): a 0.3 import the host serves when
+            // granted satisfies pre-flight exactly when the grant is present.
+            // Package comparison cannot see it — no `qqq:` package covers a
+            // `wasi:` name — so the capability mapping decides, and the grant
+            // decides with it.
+            satisfied.push(import.clone());
         } else {
             missing.push(import.clone());
         }
@@ -342,6 +349,20 @@ pub fn check_imports(
         satisfied,
         missing,
     }
+}
+
+/// Whether an import is a 0.3 name the host serves **and** the grants cover.
+///
+/// The two halves are inseparable: the mapping alone would admit an ungranted
+/// 0.3 import past pre-flight (and `Instance::create` would refuse it one
+/// step later with a link error instead of this diagnostic), while the grant
+/// alone would admit nothing — grants name capabilities, not interfaces.
+/// Unserved names (including 0.2 WASI baseline names, which need no grant at
+/// all) stay missing here exactly as before: this gate changes nothing about
+/// the 0.2 path.
+fn is_served_03_import(interface: &str, grants: &GrantSet) -> bool {
+    is_wasi03_revision(interface)
+        && capability_for_import(interface).is_some_and(|c| grants.grants(c))
 }
 
 /// Reduce an interface or package name to `namespace:name`, dropping both the
@@ -1574,6 +1595,103 @@ mod tests {
         assert_eq!(
             capability_for_import("wasi:clocks/monotonic-clock@0.3.0"),
             Some(Capability::ClockMonotonic)
+        );
+    }
+
+    /// A 0.3 guest for pre-flight tests: imports only the served 0.3 clock.
+    ///
+    /// The same shape the dual-ABI integration suite drives through the real
+    /// linker, reduced to the import under test — pre-flight reads imports,
+    /// never executes, so the core module is intentionally empty.
+    const GUEST_03_CLOCK_WAT: &str = r#"(component
+      (import "wasi:clocks/monotonic-clock@0.3.2" (instance $clock
+        (export "now" (func (result u64)))))
+      (core module $m)
+      (core instance $i (instantiate $m))
+    )"#;
+
+    /// **CON-019** — pre-flight admits a served 0.3 import when granted.
+    ///
+    /// Red-first: `check_imports` matches `qqq:` packages only, so the 0.3
+    /// clock lands in `missing` and `run` refuses a guest the host would
+    /// serve. The fix consults the capability mapping *and* the grant — the
+    /// mapping alone would admit ungranted guests past pre-flight (refused
+    /// one step later with a link error instead of this diagnostic), while
+    /// the grant alone admits nothing.
+    #[test]
+    fn check_imports_satisfies_a_granted_03_clock() {
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        let engine = wasmtime::Engine::new(&config).expect("engine builds");
+        let bytes = wat::parse_str(GUEST_03_CLOCK_WAT).expect("fixture must assemble");
+        let prepared = PreparedComponent::compile(&engine, &bytes).expect("fixture must compile");
+        let manifest = qqq_cap::manifest::Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[capabilities.clock]\nmonotonic = true\n",
+        )
+        .expect("fixture manifest parses");
+        let check = check_imports(&prepared, &engine, &GrantSet::from_manifest(&manifest));
+        assert!(
+            check.is_satisfied(),
+            "a granted 0.3 import must satisfy pre-flight: {check:?}"
+        );
+        assert!(check.missing.is_empty());
+    }
+
+    /// **CON-019** — pre-flight refuses an ungranted 0.3 import by name.
+    ///
+    /// The fail-closed half at the CLI boundary: the missing list must name
+    /// the 0.3 import (so `import_error` can point at `clock.monotonic` and
+    /// its stanza), never silently drop it or reinterpret it onto 0.2.
+    #[test]
+    fn check_imports_reports_an_ungranted_03_clock_as_missing() {
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        let engine = wasmtime::Engine::new(&config).expect("engine builds");
+        let bytes = wat::parse_str(GUEST_03_CLOCK_WAT).expect("fixture must assemble");
+        let prepared = PreparedComponent::compile(&engine, &bytes).expect("fixture must compile");
+        let check = check_imports(&prepared, &engine, &GrantSet::empty());
+        assert!(!check.is_satisfied());
+        assert!(
+            check
+                .missing
+                .iter()
+                .any(|i| i.contains("wasi:clocks/monotonic-clock@0.3.2")),
+            "the 0.3 import must be reported missing by name: {:?}",
+            check.missing
+        );
+    }
+
+    /// **CON-019** — pre-flight leaves 0.2 WASI baseline names untouched.
+    ///
+    /// The 0.2 WASI clock is served by the unconditional baseline with no
+    /// grant involved; resolving it here would demand a grant the runtime
+    /// never checks. This pins the conservative direction: the 0.3 gate adds
+    /// exactly the served-and-granted names and changes nothing else.
+    #[test]
+    fn check_imports_leaves_02_wasi_names_missing_as_before() {
+        const GUEST_02_CLOCK_WAT: &str = r#"(component
+          (import "wasi:clocks/monotonic-clock@0.2.9" (instance $clock
+            (export "now" (func (result u64)))))
+          (core module $m)
+          (core instance $i (instantiate $m))
+        )"#;
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        let engine = wasmtime::Engine::new(&config).expect("engine builds");
+        let bytes = wat::parse_str(GUEST_02_CLOCK_WAT).expect("fixture must assemble");
+        let prepared = PreparedComponent::compile(&engine, &bytes).expect("fixture must compile");
+        let manifest = qqq_cap::manifest::Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[capabilities.clock]\nmonotonic = true\n",
+        )
+        .expect("fixture manifest parses");
+        let check = check_imports(&prepared, &engine, &GrantSet::from_manifest(&manifest));
+        assert!(
+            check
+                .missing
+                .iter()
+                .any(|i| i.contains("wasi:clocks/monotonic-clock@0.2.9")),
+            "0.2 baseline names stay missing exactly as before: {:?}",
+            check.missing
         );
     }
 

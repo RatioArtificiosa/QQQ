@@ -43,7 +43,7 @@ use wasmtime::component::{Component, Instance as WasmInstance, Linker};
 use wasmtime::{Store, StoreLimitsBuilder};
 
 use crate::config::{EngineConfig, StoreLimits};
-use crate::linker::{StoreData, build_linker};
+use crate::linker::{StoreData, linker_for_component};
 use crate::trap::Trap;
 
 /// A compiled component, ready to instantiate many times.
@@ -616,7 +616,14 @@ impl<'a> Instance<'a> {
         limits: StoreLimits,
         opts: &InstanceOptions,
     ) -> Result<Self> {
-        let mut ready = ReadyStore::prepare(ExecutionContext::Sync, engine, grants, limits, opts)?;
+        let mut ready = ReadyStore::prepare(
+            ExecutionContext::Sync,
+            engine,
+            grants,
+            limits,
+            opts,
+            prepared.component(),
+        )?;
         let instance = instantiator(&ready.linker, &mut ready.store, prepared)
             .map_err(|e| instantiation_error(&e, prepared, grants))?;
         Ok(Self::finish(
@@ -729,7 +736,14 @@ impl<'a> Instance<'a> {
         limits: StoreLimits,
         opts: &InstanceOptions,
     ) -> Result<Self> {
-        let mut ready = ReadyStore::prepare(ExecutionContext::Async, engine, grants, limits, opts)?;
+        let mut ready = ReadyStore::prepare(
+            ExecutionContext::Async,
+            engine,
+            grants,
+            limits,
+            opts,
+            prepared.component(),
+        )?;
         let instance = instantiator_async(&ready.linker, &mut ready.store, prepared)
             .await
             .map_err(|e| instantiation_error(&e, prepared, grants))?;
@@ -1244,6 +1258,7 @@ impl ReadyStore {
         grants: &GrantSet,
         limits: StoreLimits,
         opts: &InstanceOptions,
+        component: &Component,
     ) -> Result<Self> {
         // Determinism without a deterministic scheduler is not a weaker version of
         // determinism; it is a false contract. A debug-only assertion let release
@@ -1406,8 +1421,15 @@ impl ReadyStore {
             store.epoch_deadline_async_yield_and_update(crate::EPOCH_YIELD_TICKS);
         }
 
-        // -- Build the linker from the grants ALONE ----------------------
-        let built = build_linker(engine, grants).map_err(|e| {
+        // -- Linker: grants for authority, declared ABI for routing --------
+        //
+        // The grants decide *authority*; the component's declared ABI decides
+        // *which implementation* serves it. Routing lives here — the one
+        // assembly step — rather than in each constructor, so the sync and
+        // async paths cannot disagree about which linker a 0.3 guest gets.
+        // Only a positive 0.3 declaration diverts; everything else keeps the
+        // retained 0.2 path byte for byte (see `linker_for_component`).
+        let built = linker_for_component(engine, grants, component).map_err(|e| {
             Error::new(
                 ErrorCode::InternalInvariantViolated,
                 "failed to construct the capability linker",

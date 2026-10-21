@@ -40621,4 +40621,22 @@ compares clean on the 16-entry one).
 `.github/perf/baseline.json` (read-only proof), CI runs 39647076896
 attempts 1–2, artifact `performance-regression` attempt 1.
 
+## §O-782 - `qqqai run` refuses every WASI-0.2 guest at pre-flight — pre-existing, out of scope, recorded
+
+Wiring 0.3 creation required reading `run`'s pre-flight, which revealed:
+`check_imports` compares interface packages against granted `qqq:`
+packages only, so all 14 WASI baseline imports of a std guest land in
+`missing` and `run` refuses with QQQ-6003. Measured, not inferred:
+`qqqai run` on `examples/orders-api` fails naming the 14 wasi: imports
+(logged under scratch `launch-orders-run2.log`). The 0.2 linker path
+would instantiate it fine — the refusal happens before Wasmtime is
+reached. This predates the migration (no 0.2 code path changed here)
+and fixing it means deciding whether the unconditional WASI baseline
+satisfies pre-flight without a grant — a product decision with its own
+red-first test, not a drive-by inside CON-019. It is left exactly as
+found; the 0.3 path added alongside it is grant-gated the same way the
+0.2 clock is, so the new code neither widens nor narrows the old rule.
+CON-019's `run` coverage uses wasi-free fixtures, which is also why the
+0.2 equivalent guest in the launch checks carries no wasi: imports.
+
 *End of `QQQ-Observations-and-Memories.md`.*

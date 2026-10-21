@@ -143,6 +143,31 @@
         "kind": "no-unmapped-qqq-interfaces"
       },
       "assert_comment": "The assertion is declared HERE rather than in the runner, so the fixture is the contract and every consumer -- the Rust test that runs in the rust CI job and `tools/run_conformance.py`, which runs against any guest -- reads one statement of it. Two derivations of one fact can disagree while both look authoritative."
+    },
+    {
+      "id": "dual-abi-03-clock-required",
+      "kind": "execution",
+      "capability": "core",
+      "summary": "a wasi:clocks/monotonic-clock@0.3.x import resolves to clock.monotonic, so the 0.3 guest's authority is named, never reinterpreted onto 0.2",
+      "runner": "crates/qqq-run/tests/conformance_exec.rs",
+      "guest": "conformance/fixtures/wasi03-clock.component.wasm",
+      "assert": {
+        "kind": "wasi03-clock-required"
+      },
+      "assert_comment": "The 0.3 half of the dual-ABI contract (HOST-025, CON-019): the report must require the 0.3 clock as clock.monotonic. A guest declaring 0.3 that the report leaves unmapped would fail closed later with a link error instead of a capability the developer can grant. The `guest` names a committed fixture because no toolchain emits 0.3 yet (all LANG-041..045 verdicts are BLOCKED) — a fixture built from committed WAT, pinned byte-identical by the runner, which the default reference guest cannot supply."
+    },
+    {
+      "id": "dual-abi-03-unserved-reported",
+      "kind": "execution",
+      "capability": "core",
+      "summary": "unserved 0.3 imports are reported as unmapped, never claimed and never silently dropped",
+      "runner": "crates/qqq-run/tests/conformance_exec.rs",
+      "guest": "conformance/fixtures/wasi03-clock.component.wasm",
+      "assert": {
+        "kind": "wasi03-unserved-reported",
+        "value": ["wasi:http/incoming-handler@0.3.2"]
+      },
+      "assert_comment": "The fail-closed half: an interface no table serves must appear under `unmapped_interfaces` so an auditor sees it. Silently dropping it would understate the surface; requiring it would claim an authority the host cannot provide. The listed names are the fixture's contract — a 0.3 import that vanishes from both lists is the defect this case exists to catch."
     }
   ],
   "exceptions": []

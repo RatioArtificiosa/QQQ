@@ -410,6 +410,13 @@ def validate(fixture: dict, *, languages: list[str], supported: str,
                 )
             elif not (ROOT / runner).exists():
                 problems.append(f"case `{cid}` is run by `{runner}`, which does not exist")
+            guest = case.get("guest")
+            if guest is not None and not (ROOT / guest).is_file():
+                problems.append(
+                    f"case `{cid}` names guest `{guest}`, which is not a committed file. "
+                    "A fixture guest that does not exist is an obligation no artifact can "
+                    "satisfy -- the same defect as a runner that does not exist, one level down."
+                )
             if case.get("enforced_by"):
                 problems.append(
                     f"case `{cid}` is an execution case and also names `enforced_by`. A case is one "
@@ -570,6 +577,13 @@ def self_test(fixture: dict, ctx: dict) -> int:
     f = copy.deepcopy(fixture)
     f["cases"][0]["enforced_by"] = "tools/check_not_a_real_checker.py"
     injections.append(("a case enforced by a script that does not exist", f, ctx))
+
+    f = copy.deepcopy(fixture)
+    for case in f["cases"]:
+        if case.get("kind") == "execution":
+            case["guest"] = "conformance/fixtures/does-not-exist.wasm"
+            break
+    injections.append(("an execution case naming a guest file that does not exist", f, ctx))
 
     # **The invocation is REMOVED from a gate rather than a one-gate-only checker being named.**
     #

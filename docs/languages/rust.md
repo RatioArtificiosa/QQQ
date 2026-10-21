@@ -58,10 +58,10 @@ application's by a test.
 ### The conformance row
 
 **Measured.** Rust passes the whole suite. `conformance/suite.json` declares
-<!-- qqq:claim conformance-cases -->8<!-- /qqq:claim --> cases, of which
+<!-- qqq:claim conformance-cases -->10<!-- /qqq:claim --> cases, of which
 <!-- qqq:claim conformance-definition-cases -->6<!-- /qqq:claim --> are **definitions** enforced by a
 checker that runs in both gates, and
-<!-- qqq:claim conformance-execution-cases -->2<!-- /qqq:claim --> **execute** against a built guest:
+<!-- qqq:claim conformance-execution-cases -->4<!-- /qqq:claim --> **execute** against a built guest (two on the reference application, two on the committed 0.3 fixture guest):
 
 ```bash
 python tools/check_conformance.py --matrix     # rust: yes, for all 15 capabilities

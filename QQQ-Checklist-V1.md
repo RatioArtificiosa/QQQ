@@ -1980,7 +1980,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Verified live: `python tools/check_no_ambient.py` →
     `NO-HIDDEN-GLOBAL-STATE RULE PASSED`.
   → §2.5 NN-5 — Explicit Contracts Over Implicit Behavior
-- [ ] **CON-019** Extend conformance execution to a 0.3 guest: fixtures, runner, and a dual-ABI instantiation case that fails closed on unknown imports.
+- [x] **CON-019** Extend conformance execution to a 0.3 guest: fixtures, runner, and a dual-ABI instantiation case that fails closed on unknown imports.
+  → Done: `Instance::create*` routes by declared ABI through `linker_for_component` (only V03 diverts; everything else keeps the retained 0.2 path byte for byte); `qqqai run` pre-flight admits granted 0.3 imports; `conformance/fixtures/wasi03-clock.{wat,component.wasm}` committed with an import-set pin test; suite.json gains `dual-abi-03-clock-required` + `dual-abi-03-unserved-reported` with per-case guests, implemented in both runners (Rust `conformance_exec.rs` + `tools/run_conformance.py`) with self-test coverage; CLI end-to-end (run granted 0.3, refuse ungranted naming the capability, refuse unknown naming the import).
+  → Measured: 6 Instance routing tests (0.3 routes+grants, ungranted/unknown/unrecognized-version fail closed, no-import + mixed-version routing pinned) + 3 check_imports tests + 3 CLI tests + 2 conformance runner cases + fixture pin — each fault-proven red (wrong-linker routing, Unknown-to-error, disabled pre-flight branch, muted assertion, hand-edited fixture); `conformance_exec` 4/4 incl. `--ignored`, py self-tests green, `cargo xtask ci` GATE GREEN 146, Copilot review cleared with 2 LOWs fixed and re-verified (§O-782 for the run-refuses-wasi discovery).
   → §2.4 NN-4 — Multi-Language by Design
 
 ---

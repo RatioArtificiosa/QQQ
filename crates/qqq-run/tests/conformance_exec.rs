@@ -66,6 +66,16 @@ struct Case {
     id: String,
     kind: String,
     summary: String,
+    /// A committed fixture guest this case runs against instead of the
+    /// reference application, relative to the repository root.
+    ///
+    /// The default guest is the built reference app — right for language
+    /// conformance, wrong for the dual-ABI cases: no toolchain emits 0.3
+    /// (every LANG-041..045 verdict is BLOCKED), so the 0.3 guest is a
+    /// committed fixture built from committed WAT. A case that needs a 0.3
+    /// guest and does not name one silently runs against the 0.2 reference
+    /// app and passes vacuously — the defect this field exists to prevent.
+    guest: Option<String>,
     /// **The assertion, read from the fixture rather than hard-coded here.** An execution case used
     /// to mean whatever a `match id` in this file said it meant, so every other consumer of the
     /// suite would have had to re-derive it -- and two derivations of one fact can disagree while
@@ -111,6 +121,10 @@ fn cases() -> Vec<Case> {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+            guest: c
+                .get("guest")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
             assertion: c.get("assert").cloned().unwrap_or(serde_json::Value::Null),
         })
         .collect()
@@ -118,7 +132,12 @@ fn cases() -> Vec<Case> {
 
 /// The ids this file implements. A case in the fixture and absent here is a **defect**, not a
 /// skip: see the module docs.
-const IMPLEMENTED: [&str; 2] = ["component-layer", "qqq-imports-all-mapped"];
+const IMPLEMENTED: [&str; 4] = [
+    "component-layer",
+    "qqq-imports-all-mapped",
+    "dual-abi-03-clock-required",
+    "dual-abi-03-unserved-reported",
+];
 
 /// **The drift guard.** Runs everywhere, in milliseconds.
 ///
@@ -156,10 +175,17 @@ fn every_execution_case_is_implemented_here() {
     }
 }
 
-/// **`TEST-016` — every execution case, run against the built Rust guest.**
+/// **`TEST-016` — every execution case, run against its guest.**
+///
+/// Cases without their own `guest` run against the reference application,
+/// built here by the product's own command. Cases naming a fixture guest
+/// (the dual-ABI 0.3 cases — no toolchain emits 0.3, so the guest is
+/// committed) run against that file instead, inspected by the same binary
+/// through the same report shape. One runner, one report contract, no
+/// per-case special handling beyond resolving which artifact to read.
 #[test]
 #[ignore = "compiles a guest; runs in the rust CI job on all three platforms"]
-fn every_execution_case_passes_against_the_rust_guest() {
+fn every_execution_case_passes() {
     let root = repo_root();
     let guest = root.join("examples").join("orders-api");
     assert!(
@@ -185,21 +211,7 @@ fn every_execution_case_passes_against_the_rust_guest() {
         String::from_utf8_lossy(&built.stderr)
     );
 
-    let artifact = out.join("orders-api.component.wasm");
-    let inspected = Command::new(env!("CARGO_BIN_EXE_qqqai"))
-        .args(["inspect", "--json"])
-        .arg(&artifact)
-        .current_dir(&root)
-        .output()
-        .expect("`qqqai inspect` must be runnable");
-    assert!(
-        inspected.status.success(),
-        "`qqqai inspect` must read the artifact it was just handed.\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&inspected.stdout),
-        String::from_utf8_lossy(&inspected.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&inspected.stdout)
-        .expect("`inspect --json` emits one JSON document");
+    let reference = out.join("orders-api.component.wasm");
 
     let mut failures: Vec<String> = Vec::new();
     let execution: Vec<Case> = cases()
@@ -217,14 +229,46 @@ fn every_execution_case_passes_against_the_rust_guest() {
     );
 
     for case in &execution {
+        let artifact = match &case.guest {
+            Some(g) => {
+                let path = root.join(g);
+                assert!(
+                    path.is_file(),
+                    "case `{}` names fixture guest `{g}`, which does not exist",
+                    case.id
+                );
+                path
+            }
+            None => reference.clone(),
+        };
+        let inspected = Command::new(env!("CARGO_BIN_EXE_qqqai"))
+            .args(["inspect", "--json"])
+            .arg(&artifact)
+            .current_dir(&root)
+            .output()
+            .expect("`qqqai inspect` must be runnable");
+        assert!(
+            inspected.status.success(),
+            "`qqqai inspect` must read the artifact it was just handed ({}).\nstdout: {}\nstderr: {}",
+            artifact.display(),
+            String::from_utf8_lossy(&inspected.stdout),
+            String::from_utf8_lossy(&inspected.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&inspected.stdout)
+            .expect("`inspect --json` emits one JSON document");
         if let Err(why) = run_case(case, &report) {
-            failures.push(format!("  {} ({}) -- {why}", case.id, case.summary));
+            failures.push(format!(
+                "  {} ({}) on {} -- {why}",
+                case.id,
+                case.summary,
+                artifact.display()
+            ));
         }
     }
 
     assert!(
         failures.is_empty(),
-        "{} of the fixture's execution cases failed against the Rust guest:\n{}",
+        "{} of the fixture's execution cases failed:\n{}",
         failures.len(),
         failures.join("\n")
     );
@@ -235,12 +279,15 @@ fn every_execution_case_passes_against_the_rust_guest() {
 /// # Why this dispatches on the FIXTURE rather than on the case's id
 ///
 /// Because `TEST-016` wants the runner to be *"an independently usable tool"*, and a tool cannot
-/// reuse an assertion that is a `match id` arm inside a test file. The vocabulary is three words
-/// wide and is declared in `conformance/suite.json`; every consumer reads the same statement, so
-/// they cannot drift.
+/// reuse an assertion that is a `match id` arm inside a test file. The vocabulary is declared in
+/// `conformance/suite.json`; every consumer reads the same statement, so they cannot drift.
 ///
 /// An unknown assertion is an **error**, not a pass: this is the function that would otherwise turn
 /// the drift guard into a formality.
+///
+/// The 0.3 assertions live in helpers rather than inline arms so this dispatch
+/// stays readable as the vocabulary grows: each new interface set adds arms,
+/// and a 100-line match is where new arms stop being reviewed.
 fn run_case(case: &Case, report: &serde_json::Value) -> Result<(), String> {
     let data = report
         .get("data")
@@ -306,8 +353,166 @@ fn run_case(case: &Case, report: &serde_json::Value) -> Result<(), String> {
             }
         }
 
+        // A 0.3 clock import resolves to clock.monotonic (**CON-019**). The 0.2 twin is served
+        // and reported the same way; matching on the `0.3.` revision prefix (not the exact
+        // version) is what keeps a patch release from silently dropping out of the report —
+        // the same rule `AbiVersion::detect` routes by.
+        "wasi03-clock-required" => check_wasi03_clock_required(data),
+
+        // Unserved 0.3 imports are reported, never claimed and never dropped (**CON-019**).
+        //
+        // See `check_wasi03_unserved_reported`: the fixture declares the names it expects,
+        // an entry that vanishes is the defect, and an empty `value` is an error.
+        "wasi03-unserved-reported" => check_wasi03_unserved_reported(case, assertion, data),
+
         other => Err(format!(
             "no check is implemented for the assertion `{other}`; the vocabulary is declared in `conformance/suite.json`"
         )),
+    }
+}
+
+/// The committed 0.3 fixture bytes declare exactly the imports its WAT source does.
+///
+/// The `.wasm` is what both runners execute against; the `.wat` is what a human
+/// reviews. If either drifts — a hand-edited binary, a fixture edit without a
+/// rebuild — the suite would assert against imports nobody wrote (or miss ones
+/// somebody did), which is the defect committed binaries are notorious for.
+/// Compared as import sets rather than bytes, so an encoder upgrade that
+/// reorders bytes cannot fail this for the wrong reason.
+///
+/// The set itself is pinned exactly, not as a subset: an extra import would be
+/// an unreviewed authority in the fixture, and a missing one would leave a
+/// case asserting over imports that are not there.
+#[test]
+fn fixture_wat_and_bytes_agree_on_imports() {
+    let root = repo_root();
+    let wat_path = root
+        .join("conformance")
+        .join("fixtures")
+        .join("wasi03-clock.component.wat");
+    let wasm_path = wat_path.with_extension("wasm");
+    let wat = std::fs::read_to_string(&wat_path)
+        .unwrap_or_else(|e| panic!("{} must be readable: {e}", wat_path.display()));
+    let from_wat =
+        wat::parse_str(&wat).unwrap_or_else(|e| panic!("the fixture WAT must assemble: {e}"));
+    let committed = std::fs::read(&wasm_path)
+        .unwrap_or_else(|e| panic!("{} must exist: {e}", wasm_path.display()));
+
+    let mut engine_config = wasmtime::Config::new();
+    engine_config.wasm_component_model(true);
+    let engine = wasmtime::Engine::new(&engine_config).expect("engine builds");
+
+    let mut from_wat_names: Vec<String> = wasmtime::component::Component::new(&engine, &from_wat)
+        .expect("assembled fixture must parse")
+        .component_type()
+        .imports(&engine)
+        .map(|(name, _ty)| name.to_owned())
+        .collect();
+    from_wat_names.sort();
+    from_wat_names.dedup();
+    let mut committed_names: Vec<String> = wasmtime::component::Component::new(&engine, &committed)
+        .expect("committed fixture must parse")
+        .component_type()
+        .imports(&engine)
+        .map(|(name, _ty)| name.to_owned())
+        .collect();
+    committed_names.sort();
+    committed_names.dedup();
+
+    assert_eq!(
+        from_wat_names, committed_names,
+        "fixture source and bytes disagree on imports"
+    );
+    assert_eq!(
+        committed_names,
+        vec![
+            "wasi:clocks/monotonic-clock@0.3.2",
+            "wasi:http/incoming-handler@0.3.2",
+        ],
+        "the fixture must declare exactly the served clock and one unserved 0.3 name: {committed_names:?}"
+    );
+}
+
+/// A 0.3 clock import resolves to clock.monotonic (**CON-019**).
+///
+/// Matching on the `0.3.` revision prefix (not the exact version) is what keeps
+/// a patch release from silently dropping out of the report — the same rule
+/// `AbiVersion::detect` routes by. The 0.2 twin is served and reported the same
+/// way, so this arm says nothing about 0.2 names by design.
+fn check_wasi03_clock_required(data: &serde_json::Value) -> Result<(), String> {
+    let required: Vec<serde_json::Value> = data
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let found = required.iter().any(|r| {
+        r.get("name").and_then(serde_json::Value::as_str) == Some("clock.monotonic")
+            && r.get("interface")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|i| i.starts_with("wasi:clocks/monotonic-clock@0.3."))
+    });
+    if found {
+        Ok(())
+    } else {
+        Err(format!(
+            "no required clock.monotonic from a wasi:clocks/monotonic-clock@0.3.x import: {data}"
+        ))
+    }
+}
+
+/// Unserved 0.3 imports are reported as unmapped, never claimed and never dropped (**CON-019**).
+///
+/// The fixture declares the names it expects under `unmapped_interfaces` in `value`:
+/// an entry that vanishes from the report entirely is the defect this case exists to
+/// catch (a surface the auditor cannot see), while an entry that moves to `required`
+/// would claim an authority the host cannot provide. An empty `value` list is an
+/// error here, not a pass — a case that asserts nothing over an empty loop proves
+/// nothing (§O-280).
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "matches run_case arm shape; the caller holds the owned report"
+)]
+fn check_wasi03_unserved_reported(
+    case: &Case,
+    assertion: &serde_json::Value,
+    data: &serde_json::Value,
+) -> Result<(), String> {
+    let want: Vec<String> = assertion
+        .get("value")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if want.is_empty() {
+        return Err(format!(
+            "case `{}` declares no `value`, so there is nothing to check",
+            case.id
+        ));
+    }
+    let unmapped: Vec<String> = data
+        .get("unmapped_interfaces")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let missing: Vec<String> = want
+        .into_iter()
+        .filter(|w| !unmapped.iter().any(|u| u == w))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "these 0.3 imports are neither required nor reported as unmapped: {}",
+            missing.join(", ")
+        ))
     }
 }

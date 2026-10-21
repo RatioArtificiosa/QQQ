@@ -40420,4 +40420,26 @@ change, lock-only plus records. Triage issue #9. Two tripwires in one
 day is the process working as designed, not a bad day: both were caught
 by automation within the hour, both ship ahead of any clock.
 
+## §O-772 - Bridge21: re-bridge on the final tree, still green, still inside limits
+
+Bridge20 ran on `143df71`, then two record-only commits (bridge20's
+own record, the webpki lock bump) and no code change — but the rule is
+the final code tree, not the almost-final one, so the full family
+re-ran on `756683d`: `test` exit 0 ("All Linux gates passed", 87
+suites / 0 bad), `checks` GATE GREEN 146, `test-linux` exit True (88 /
+0 bad). The webpki patch changed no Linux behavior the suites can see,
+which is exactly what the re-run proves rather than assumes. Resources
+(121 continuous one-minute samples, fresh per-run log): CPU mean 68.3%
+(idle-diluted across three phases, same caveat as bridge20), max
+826.4%; MEM max 3.99 GiB = 49.8% of the 8 GiB compose limit — the
+highest yet, same order as bridge19's 3.70 GiB, and the top samples are
+all cargo build bursts across three run containers. Against the
+brief's set (19: 318.1%/805.0%/3.70 GiB; 18: 268.6%/719.8%/2.26 GiB):
+max CPU repeats the family signature, memory sits at the high end of
+the normal band, mean is diluted by inter-phase idle. Judgement NORMAL:
+inside limits throughout, understood causes, all outcomes green, no
+correlation to chase. `bridge21/` logs (test, checks, test-linux,
+docker-stats with timestamps) under the goal scratch; the sampler
+format re-verified live (timestamp + `name CPU% Mem / 8GiB` rows).
+
 *End of `QQQ-Observations-and-Memories.md`.*

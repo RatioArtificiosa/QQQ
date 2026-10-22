@@ -1,0 +1,2 @@
+REQUIRED: [{"interface": "wasi:clocks/monotonic-clock@0.3.2", "name": "clock.monotonic"}]
+UNMAPPED: []

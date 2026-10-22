@@ -1,0 +1,22 @@
+TOOLCHAIN MATRIX RE-PROBE — 2026-10-22 (t5 verification; LANG-041..045 stay BLOCKED)
+
+rustup target list --installed:
+  wasm32-unknown-unknown, wasm32-wasip2 (+ host triples x86_64-pc-windows-msvc,
+  x86_64-unknown-linux-gnu); available but NOT installed: wasm32-wasip1, wasm32-wasip1-threads.
+  => NO wasm32-wasip3 target exists at all. Rust stays on 0.2 (LANG-041).
+
+tinygo version: not recognized (absent). Go/TinyGo stays on 0.2 (LANG-042).
+
+python -c "import componentize_py": ModuleNotFoundError; pip: "Package(s) not found".
+CPython 3.13 present but componentize-py absent. Python stays on 0.2 (LANG-043).
+
+clang --version: not recognized (absent). C/C++ stays on 0.2 (LANG-044).
+
+asc --version: not recognized (absent; node present but no AssemblyScript
+compiler, ComponentizeJS 0.23.0 emits wasip2 per build.rs pins).
+TypeScript/AssemblyScript stays on 0.2 (LANG-045).
+
+Conclusion: matrix unchanged since the 2026-10-21 measurement — no toolchain
+emits 0.3, so per D-WASI-8 there is no retargeting to do and nothing is faked.
+Per-language execution conformance is the 0.2 suite, green in every gate
+(conformance_exec incl. --ignored, run_language_probes, run_conformance).

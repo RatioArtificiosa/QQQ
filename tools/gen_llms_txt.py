@@ -329,6 +329,13 @@ CURATED: list[tuple[str, str, str, str]] = [
         "machinery",
     ),
     (
+        "docs/wasi-032-post-migration-report.md",
+        "The WASI 0.3.2 post-migration measurement report (Phase 7B): every "
+        "§6.12 field measured or marked UNVERIFIED, with commands and outputs.",
+        "both",
+        "machinery",
+    ),
+    (
         "docs/verified-facts.md",
         "Facts asserted in the Proposal, each classified by how perishable it "
         "is and when it was last checked.",

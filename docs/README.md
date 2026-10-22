@@ -117,6 +117,7 @@ asking rather than assuming.
 | [`threat-model.md`](threat-model.md) | Assets, adversaries, the code defending each, and residual risk (`SEC-001`) |
 | [`out-of-scope.md`](out-of-scope.md) | What QQQ does not defend against, and what to do instead (`SEC-030`) |
 | [`abi-cost-measured.md`](abi-cost-measured.md) | The measured ABI-crossing costs (`PERF-005`), replacing §9.3's estimates |
+| [`wasi-032-post-migration-report.md`](wasi-032-post-migration-report.md) | The WASI 0.3.2 post-migration measurement report: every §6.12 field measured or marked UNVERIFIED |
 | [`advisories/`](advisories/README.md) | The public security-advisory register (`SEC-023`) |
 | [`wasmtime-advisory-process.md`](wasmtime-advisory-process.md) | The 72-hour patched-engine commitment |
 | [`unsafe-audit.md`](unsafe-audit.md) | The zero-`unsafe` result and how it is verified (`SEC-020`) |

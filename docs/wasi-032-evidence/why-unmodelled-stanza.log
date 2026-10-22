@@ -1,0 +1,10 @@
+sql.query DENIED (default: not granted by any layer)
+
+add to qqq.toml:
+
+    [[capabilities.sql]]
+    name = "orders"
+    driver = "postgres"
+    host = "db.internal:5432"
+    # secret = "env:ORDERS_DB_URL"
+    # execute = true  # for sql.execute; query-only without it

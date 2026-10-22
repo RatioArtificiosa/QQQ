@@ -1,0 +1,15 @@
+error[QQQ-6003]: the component imports `wasi:clocks/monotonic-clock@0.3.2` that no grant provides
+
+  missing: wasi:clocks/monotonic-clock@0.3.2
+  granted: 
+  project: deny
+  capability: clock.monotonic
+
+  ÔåÆ add to qqq.toml:
+
+    [capabilities.clock]
+    wall = true            # for clock.wall
+    monotonic = true       # for clock.monotonic
+
+  Docs: https://qqq.codes/errors/QQQ-6003
+

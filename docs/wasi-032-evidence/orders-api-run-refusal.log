@@ -1,0 +1,10 @@
+error[QQQ-6003]: the component imports 14 interfaces that no grant provides
+
+  missing: wasi:cli/environment@0.2.9, wasi:cli/exit@0.2.9, wasi:cli/stderr@0.2.9, wasi:cli/stdin@0.2.9, wasi:cli/stdout@0.2.9, wasi:cli/terminal-input@0.2.9, wasi:cli/terminal-output@0.2.9, wasi:cli/terminal-stderr@0.2.9, wasi:cli/terminal-stdin@0.2.9, wasi:cli/terminal-stdout@0.2.9, wasi:clocks/monotonic-clock@0.2.9, wasi:io/error@0.2.9, wasi:io/poll@0.2.9, wasi:io/streams@0.2.9
+  granted: qqq:http/http@1.0.0
+  project: orders-api
+
+  ÔåÆ run `qqqai caps` to see what is granted, and `qqqai why <capability>` to understand a decision
+
+  Docs: https://qqq.codes/errors/QQQ-6003
+

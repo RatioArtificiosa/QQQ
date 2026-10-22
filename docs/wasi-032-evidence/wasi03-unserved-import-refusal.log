@@ -1,0 +1,10 @@
+error[QQQ-6003]: the component imports `wasi:http/incoming-handler@0.3.2` that no grant provides
+
+  missing: wasi:http/incoming-handler@0.3.2
+  granted: 
+  project: unknown
+
+  ÔåÆ run `qqqai caps` to see what is granted, and `qqqai why <capability>` to understand a decision
+
+  Docs: https://qqq.codes/errors/QQQ-6003
+

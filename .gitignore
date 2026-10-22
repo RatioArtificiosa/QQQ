@@ -148,6 +148,10 @@ fuzz/corpus/*/
 # Local tooling
 .tools/
 *.log
+# Committed measurement evidence is not local tooling output: the WASI 0.3.2
+# post-migration report cites these transcripts by repo path, so they must be
+# committable. Same negation pattern as the fixture rules above.
+!docs/wasi-032-evidence/*.log
 
 # Graf's local code-graph index (`.graf/index.db`). It is a per-machine SQLite
 # cache rebuilt from the tree, so it is a build artifact rather than source: it

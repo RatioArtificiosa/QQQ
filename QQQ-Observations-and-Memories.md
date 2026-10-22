@@ -40714,4 +40714,24 @@ record of the outage
 (`docs/wasi-032-evidence/linux-bridge-checks-stats.log`).
 `tools/qqqdev.ps1`, `docker/entrypoint.sh`.
 
+## §O-787 - A version bump alone orphans a perf baseline, even on identical hardware
+
+CI PERF-020 failed with "no reviewed baseline matches profile
+ubuntu-latest and runner identity" on a tree whose only delta was
+docs. Root cause was not code and not new hardware: entry 5 already
+covered the same Xeon 6973P-C, but identity matching is exact on
+toolchains, and qqqai had moved 0.0.0 → 0.1.1. The fix was a reviewed
+entry 17, and the review compared same-hardware vectors (entry 5):
+hello +10.0%, json −7.3%, multi −5.6%, tailp99 +7.7% — all inside the
+25%/20% tolerances with overlapping within-run spreads. The next CI
+run then failed hello at +28.4% (limit +25%) against entry 7 on a
+9V45 runner — while both runs' own samples showed wild outliers in
+both directions (entry 7 itself carries a 3.3x sample). Two same-SHA
+reruns went green, so the marginal fail was shared-runner noise, not
+a regression, dispositioned per §O-543 with vectors and spreads on
+record. Lesson: a red that names identity first is a fleet question;
+a red that names a vector needs the spread before it becomes a code
+question — read which one failed before deciding what to fix.
+`.github/perf/baseline.json`, `tools/run_perf_regression.py`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

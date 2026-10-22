@@ -108,5 +108,16 @@ never a guess.
   (`docs/wasi-032-evidence/linux-bridge-testlinux-verdict-excerpt.log`;
   per-run stats in
   `docs/wasi-032-evidence/linux-bridge-testlinux-stats.log`).
+- Resource normality (all legs, 8 GiB compose limit): `test` leg peaks
+  ~287% CPU / 3.7 GiB (`linux-bridge-stats.log` — the `jolly_black`
+  rows are an unrelated container on the shared daemon, different
+  31.31 GiB limit); `checks` cold-mount phases run long (`check_xrefs`
+  1320s, `sync_docs` 1330s, xrefs self-test 3051s;
+  `linux-bridge-checks.log`) then settle; cached re-runs idle near 0%
+  (`linux-bridge-test2-stats.log`, `linux-bridge-testlinux-stats.log`;
+  the outage timestamp gap sits in `linux-bridge-checks-stats.log`).
+  No leg exceeded 4 GiB, no OOM, no throttling — NORMAL against the
+  prior bridges' comparison set (compile bursts, test plateaus, same
+  ceiling).
 - Registry handoff: PENDING — the registry tree is read-only from this goal;
   the registry coder copies §6.12 from this file.

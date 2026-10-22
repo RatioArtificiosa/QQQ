@@ -40675,4 +40675,43 @@ GATE GREEN 146, 2026-10-22). Revisit trigger: both tripwires firing
 (the second is already §15's recorded tripwire).
 `QQQ-Checklist-V1.md` (HOST-027).
 
+## §O-785 - A measurement report cites the committed tree, never temp scratch
+
+The Phase 7B report cited launch transcripts by their temp-scratch
+paths. Independent review refused it: scratch is gitignored, deleted
+when the goal ends, and invisible to every future agent — a citation
+that rots the moment the goal closes is not evidence. The fix
+committed 20 transcripts under `docs/wasi-032-evidence/`, each cited
+by the report by exact repo path, and added a `.gitignore` negation
+(`!docs/wasi-032-evidence/*.log`, the same pattern the fixture
+negations already use — without it `git add` silently stages nothing,
+which the re-review caught before commit). The rule going forward: a
+report's every citation resolves in the committed tree, verified by
+matching each cited path against the files on disk, not by the
+author's memory of what was saved where.
+`docs/wasi-032-post-migration-report.md`,
+`docs/wasi-032-evidence/`, `.gitignore`.
+
+## §O-786 - A fast red after an outage is environment-first suspect
+
+A power cut killed the Linux `checks` bridge run mid-phase. The
+re-run came back with `test FAILED (39s)` — too fast for the suite,
+on a tree whose identical phase was green in the Windows gate minutes
+earlier (`docs/wasi-032-evidence/linux-bridge-checks.log` holds both
+the red and the otherwise-all-green run). The gate log keeps only
+phase summaries, so the phase was reproduced directly with output
+captured (no test failure in it), then the bridge `test` leg re-ran
+green on the same tree (`All Linux gates passed`, banner `4c14a09`
+tree clean:
+`docs/wasi-032-evidence/linux-bridge-test2-verdict-excerpt.log`) —
+and CI on the pushed SHA is green independently. Same-tree greens
+against one fast red on a cold post-reboot mount = transient,
+dispositioned as environmental per the same-SHA rule, not dismissed.
+Side observation, both numbers committed: the cold-mount `check_xrefs`
+self-test took 3051s in that same checks log, so a rebooted bridge is
+slow, not stuck — and the stats sampler's timestamp gap is the honest
+record of the outage
+(`docs/wasi-032-evidence/linux-bridge-checks-stats.log`).
+`tools/qqqdev.ps1`, `docker/entrypoint.sh`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

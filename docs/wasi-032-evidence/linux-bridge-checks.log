@@ -1,0 +1,525 @@
+
+????????????????????????????????????????????????????????????????????
+  Repository checkers, on Linux
+????????????????????????????????????????????????????????????????????
+── QQQ Linux verification ──────────────────────────────────────
+   commit   4c14a09  (tree clean)
+   rustc    rustc 1.98.1 (48a229cea 2026-09-01)
+   platform x86_64-linux
+────────────────────────────────────────────────────────────────
+── clippy with CI's toolchain (1.98) ──
+   passed
+ok   check_panic_strategy   (0s)
+ok   check_done_lines       (0s)
+ok   check_error_all        (0s)
+ok   check_lifecycle_counts (0s)
+ok   check_metric_cardinality (0s)
+ok   check_tiers            (0s)
+ok   check_milestones       (0s)
+ok   check_security_scope   (0s)
+ok   check_advisories       (0s)
+ok   check_language_parity  (0s)
+ok   check_batch_first      (0s)
+ok   check_checklist_counts (0s)
+ok   check_admission        (0s)
+ok   milestone_dashboard    (0s)
+ok   orders-fmt             (0s)
+ok   check_tombstones       (0s)
+ok   check_toolchain        (1s)
+ok   gen_schemas            (1s)
+ok   check_wit_bindings     (1s)
+ok   check_glossary         (1s)
+ok   check_wit_errors       (1s)
+ok   gen_backlog            (1s)
+ok   check_verified_facts   (1s)
+ok   check_error_catalogue  (1s)
+ok   check_threat_model     (1s)
+ok   check_reconciliation   (1s)
+ok   check_schema_conformance (1s)
+ok   check_wit_deprecated   (1s)
+ok   check_glossary_usage   (1s)
+ok   check_wit              (1s)
+ok   check_bench_contract   (1s)
+ok   check_wit_since        (1s)
+ok   check_wit_reference    (1s)
+ok   check_wit_style        (1s)
+ok   check_topology         (1s)
+ok   check_license_boundary (2s)
+ok   check_scope_table      (2s)
+ok   gen_llms_txt           (2s)
+ok   check_no_ambient       (3s)
+ok   check_subprocess_encoding (3s)
+ok   check_doc_claims       (3s)
+ok   deny                   (4s)
+ok   check_source_claims    (4s)
+ok   check_agent_cookbook   (5s)
+ok   machete                (6s)
+ok   check_spdx             (6s)
+ok   check_unicode_escapes  (7s)
+ok   check_include_str      (8s)
+ok   check_public_reachability (8s)
+ok   check_no_poison_expect (8s)
+ok   fmt                    (10s)
+ok   check_agent_bench      (10s)
+ok   check_checklist_citations (11s)
+ok   normalize_eol          (12s)
+ok   check_wit_vendoring    (142s)
+ok   check_coderabbit_config (142s)
+ok   check_xrefs            (1320s)
+ok   sync_docs              (1330s)
+run  clippy
+ok   clippy                 (2s)
+run  build
+ok   build                  (0s)
+run  test
+FAIL test                   (39s)
+   Compiling qqq-host v0.1.1 (/workspace/crates/qqq-host)
+   Compiling qqq-serve v0.1.1 (/workspace/crates/qqq-serve)
+warning: corrupt incremental compilation artifact found at `/linux-target/debug/incremental/qqq_serve-1bxc8pumtk39z/s-hngefjkfyr-1ghrh8f-working/dep-graph.bin`. This file will automatically be ignored and deleted. If you see this message repeatedly or can provoke it without manually manipulating the compiler's artifacts, please file an issue. The incremental compilation system relies on hardlinks and filesystem locks behaving correctly, and may not deal well with OS crashes, so whatever information you can provide about your filesystem or other state may be very relevant
+
+   Compiling qqq-run v0.1.1 (/workspace/crates/qqq-run)
+error: linking with `cc` failed: exit status: 1
+  |
+  = note:  "cc" "-m64" "/linux-target/debug/deps/rustcdmxXKK/symbols.o" "<16 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libtest-*,libgetopts-*,librustc_std_workspace_std-*}.rlib" "/linux-target/debug/deps/{libqqq_host-250308598efd403d,libtokio_rustls-366a0892a9a11765,librustls_native_certs-c5e0e0f9ac46cfed,libopenssl_probe-47137aa04ed57faf,librustls-1b4837a4c8439bdc,libwebpki-f78f0a3a990cfe09,libuntrusted-8055f65bbdae234c,libaws_lc_rs-3633c47fa9e2373b,libaws_lc_sys-10e6faa3e1fb3788,librustls_pki_types-4486473d8dcc7d68,libqqq_abi-c137e0e3dc218483,libblake3-ca4bc979ca049588,libconstant_time_eq-556ba5c346cd85c9,libarrayvec-b81d69db4300a9bd,libwasmtime_wasi-f653b8571c069b77,liburl-66150f9f25718898,libidna-7b02bf911c61d913,libidna_adapter-65db624c8cb62c80,libicu_properties-da2681cb284e9d93,libicu_properties_data-7bcae9ffe762364e,libicu_normalizer-e96f0f9d0da9b8e7,libicu_normalizer_data-b551a21b27e21b45,libicu_collections-b52008a408deeee3,libutf8_iter-453156d845ce2dbb,libpotential_utf-655281d79bfdec70,libicu_provider-73361f2d06e99be0,libicu_locale_core-92900d25e39643ad,libtinystr-5ea49f3c3a2a924d,liblitemap-25f8635559e250b7,libwriteable-b67b3700c005c341,libzerovec-c888255d661f15fc,libzerotrie-a292950dd8d55936,libyoke-bac8f76486e2168e,libstable_deref_trait-f2bda869048be30b,libzerofrom-96f66cbedb5af753,libform_urlencoded-82d7bd066569dde4,libpercent_encoding-35f24beca0647fec,libcap_primitives-0a63b3d7cd71efd6,libfs_set_times-776236fad4a87c13,libio_lifetimes-f0861accaf13407f,libipnet-eac8ccbcd62a3eff,libmaybe_owned-e9825dd517c3c7f1,libio_extras-299ada6850746831,libio_lifetimes-46941248462f4727,libambient_authority-03745d9737153f26,librustix_linux_procfs-32f1690586cd45f5,librand-509b698b181392aa,libchacha20-198685c5f88ecb5f,libcpufeatures-acdca27cdf8694f5,libwasmtime_wasi_io-9ab15d3eb5ba469c,libtracing-62bcc37a50afc0d8,libtracing_core-302ab6695e334391,libtokio-581330bc05c9a986,libsignal_hook_registry-e4956c7b46bffb8b,liberrno-68620e4e1b9bd636,libsocket2-3ecbb1b1e7339952,libbytes-b501b7b4bbf5f757,libmio-6ce3d954f60da31d,libed25519_dalek-ef96278df986416d,libcurve25519_dalek-3af70f9be2db4b44,libzeroize-0a7a415bfa6b7017,libed25519-491da7c5a3cdd33e,libsignature-a0cab1d1c92c58de,libwasmtime-91c601be2ae66ca6,libwasmtime_internal_cranelift-0b8192cf6543a277,libcranelift_native-f94b69aa1790498a,libitertools-f849e9a05bb6c466,libcranelift_frontend-4b8008c4a02f44c4,libwasm_compose-61d3808c3e13e584,libwat-c4ab42d12ae9ff85,libwast-5c29a511bff4785e,libwasm_encoder-e86ed9271c17b84e,libunicode_width-f5131267029ef310,libpetgraph-affa963de4927fae,libfixedbitset-1666737c3f6203f4,libtempfile-5090350d9cb09a26,libgetrandom-37c3c1cb51fb44ed,librand_core-78e1a554fd5f081a,libfastrand-5a38d067a8c1d5f0,libmemfd-00560aec833510d7,libwasmtime_internal_jit_icache_coherence-56deb572d9da82b6,libencoding_rs-d06c01be17700328,libscopeguard-b7b9c61459d75535,libsimdutf8-515caa73dba0b48c,libcore_detect-6387b7d9a9ffda99,libaddr2line-419946c8e903e387,libittapi-991da5b03b0e86ae,libittapi_sys-c4b5129c0307532d,libonce_cell-af391c8642c0481a,librayon-901cb0c45c33a4e0,librayon_core-a3a042f6380a1339,libcrossbeam_deque-4a4786a8da5e49f5,libcrossbeam_epoch-01fe33af75c611c4,libcrossbeam_utils-3f32b81fdb171c29,libeither-37975d6b21518585,libwasmtime_internal_cache-9b175a3a219bab82,libzstd-572cd8effa0be22e,libzstd_safe-bcb514714a14b13c,libzstd_sys-ba92969de5422ca4,libdirectories_next-5647c7ba08d9e450,libdirs_sys_next-49def622528ad803,libbase64-ade28cef8ce8d4a5,libfxprof_processed_profile-61d1438d0bd3ddb1,libdebugid-3b8a53a6aeefefe5,libuuid-c2f1ba759cee7743,libwit_parser-73d718d432d21f7e,libunicode_ident-c82b0e89eaf402bc,libserde_json-06ca88d4b527c776,libitoa-fbffcad61e20d4af,libzmij-fc7f8a17e4f7b001,libid_arena-a417322178fd7559,libfutures-64acd06698273884,libfutures_util-b30c8e04f8acc7c7,libfutures_io-5fa0a54c5ddac58b,libslab-2309b23d357a3f1a,libfutures_channel-f2aa8a0b698a45f6,libpin_project_lite-97e169cb03e3acbe,libfutures_sink-b170481fb073b13d,libfutures_task-dab5a0964b57d614,libfutures_core-403b16f41f45ceca,libwasmtime_internal_jit_debug-5a29779915e1f348,libwasmtime_internal_fiber-b036a10a7986d1b4,librustix-5f5fbc75dfe7ccc1,liblinux_raw_sys-7efc27d16a6b68fc,liblibc-2d2ce6edf8e6d5a2,libwasmtime_internal_unwinder-23111749765c27d3,libcranelift_codegen-1b4939e0e8b7f13d,libpulley_interpreter-d77e7c97c9b8eab1,libcranelift_assembler_x64-6437cafbb80201c0,libcranelift_codegen_shared-2b767d676406b7de,libregalloc2-b2fad2094720ce1c,libbumpalo-0ac2e980412f5647,librustc_hash-c9ff5bbd42c650ef,liballocator_api2-d705e929d9b04b78,libcranelift_control-c91ead37925654b3,libarbitrary-02088f62406472fc,libwasmtime_environ-0e54814203d62a3d,libwasmprinter-a652bf7d7948284d,libtermcolor-6fcf661212e2f4cb,libpostcard-4599635e83f9807f,libcobs-a4a2fef02eb6b96a,libthiserror-3f53daf0a2f88fcd,libgimli-09a81d88182773b1,libfnv-cbef442cbc2835c8,libhashbrown-0876753ba61f4c6b,libcpp_demangle-9aa5756030aa6948,librustc_demangle-b28a4eb9c1e4369d,libcranelift_bforest-21c0348147b4c439,liblog-bf2feb5aab2a5cf8,libwasm_encoder-452f7c8b66bd2333,libleb128fmt-e6ec09550bf2f6a0,libwasmtime_internal_component_util-751f10da1740ff3d,libsmallvec-0af4d69bd427e86a,libtarget_lexicon-9b5a79671b63d337,libobject-4a51d5e743fbc240,libcrc32fast-d0e28ed8ca6838c7,libmemchr-0c934035b2244976,libwasmparser-3df23fbe0d0b210e,libbitflags-3fee272635dbf7a8,libsemver-3391867ee8c4625f,libindexmap-ba299ff24ca4332b,libequivalent-bef6dd803e70111b,libcranelift_entity-d51b3b2fa99e6ce6,libcranelift_bitset-bdaa23711d18b068,libwasmtime_internal_core-f8b4a14991a3806f,liblibm-a32dbaf8901aa5d0,libhashbrown-96d4db12e602bb5c,libfoldhash-c0f0fc1b12680c5f,libanyhow-133c9577e4468898,libqqq_cap-b77583e8cbb0f7f7,libqqq_core-df8e8916d995dd2d,libtoml-86f5a2abcccecf57,libtoml_writer-2e09e54a2572b69d,libwinnow-200bf1fbab7755fc,libtoml_parser-80a6ea53adf925c5,libwinnow-3ebbe7915548ec51,libserde_spanned-26b613cbeca60161,libtoml_datetime-ed9fa4e5b763b0e0,libhmac-0dead8b9e3a55b4d,libsha2-7fe69b36b1e85037,libcpufeatures-bc941088f45c7721,libcfg_if-970bc493ba2d23e5,libdigest-1844203f39bea570,libsubtle-3e8ad1b9e7a23790,libblock_buffer-af35b9fb63763e8a,libcrypto_common-3bb29e09c70ae7bd,libgeneric_array-0a521d0b1efdf38e,libtypenum-94c78da15fa8ffc1,libserde-cd7a52087c7342d1,libserde_core-9f87f53f964678c7}.rlib" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libstd-*,libpanic_unwind-*,libobject-*,libmemchr-*,libaddr2line-*,libgimli-*,libcfg_if-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libminiz_oxide-*,libadler2-*,libunwind-*,liblibc-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "-Wl,-Bdynamic" "-lgcc_s" "-lutil" "-lrt" "-lpthread" "-lm" "-ldl" "-lc" "-L" "/linux-target/debug/deps/rustcdmxXKK/raw-dylibs" "-B<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-fuse-ld=lld" "-Wl,--eh-frame-hdr" "-Wl,-z,noexecstack" "-L" "/linux-target/debug/build/blake3-a5f069f7ef88438e/out" "-L" "/linux-target/debug/build/aws-lc-sys-2e720c89e48d4306/out" "-L" "/linux-target/debug/build/wasmtime-e5d13a549b50729f/out" "-L" "/linux-target/debug/build/ittapi-sys-df9ec9ea4c3e948b/out" "-L" "/linux-target/debug/build/zstd-sys-3fba631e19c8967b/out" "-L" "/linux-target/debug/build/wasmtime-internal-jit-debug-8e871f9ea6922086/out" "-L" "/linux-target/debug/build/ring-2e03e458da8844b9/out" "-L" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib" "-o" "/linux-target/debug/deps/subrequest_limits-b0ebba9272694be2" "-Wl,--gc-sections" "-pie" "-Wl,-z,relro,-z,now" "-nodefaultlibs"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: rust-lld: error: undefined hidden symbol: core::ptr::drop_glue::<alloc::boxed::Box<dyn core::any::Any + core::marker::Send>> (.llvm.13293976845604828868)
+          >>> referenced by mod.rs:823 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ptr/mod.rs:823)
+          >>>               qqq_host-250308598efd403d.27b8cngwaay8f15s28kqawqw9.0vsgjra.rcgu.o:(core::ptr::drop_glue::<tokio::runtime::task::core::Stage<<wasmtime_wasi::p2::write_stream::AsyncWriteStream>::new<core::pin::Pin<alloc::boxed::Box<dyn tokio::io::async_write::AsyncWrite + core::marker::Send + core::marker::Sync>>>::{closure#0}>> (.llvm.1090402196553962069)) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by mod.rs:823 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ptr/mod.rs:823)
+          >>>               qqq_host-250308598efd403d.27b8cngwaay8f15s28kqawqw9.0vsgjra.rcgu.o:(<tokio::runtime::task::core::Core<<wasmtime_wasi::p2::write_stream::AsyncWriteStream>::new<core::pin::Pin<alloc::boxed::Box<dyn tokio::io::async_write::AsyncWrite + core::marker::Send + core::marker::Sync>>>::{closure#0}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::set_stage) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by mod.rs:823 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ptr/mod.rs:823)
+          >>>               qqq_host-250308598efd403d.27b8cngwaay8f15s28kqawqw9.0vsgjra.rcgu.o:(<tokio::runtime::task::core::Core<<wasmtime_wasi::p2::write_stream::AsyncWriteStream>::new<core::pin::Pin<alloc::boxed::Box<dyn tokio::io::async_write::AsyncWrite + core::marker::Send + core::marker::Sync>>>::{closure#0}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>::set_stage) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced 2 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.12.llvm.13293976845604828868
+          >>> referenced by ub_checks.rs:73 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ub_checks.rs:73)
+          >>>               qqq_host-250308598efd403d.3cjcygyek8qyy46073rj4o115.0vsgjra.rcgu.o:(<alloc::sync::Arc<dyn qqq_host::guest_output::GuestSink>>::drop_slow) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.47.llvm.13293976845604828868
+          >>> referenced by ub_checks.rs:73 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ub_checks.rs:73)
+          >>>               qqq_host-250308598efd403d.3cjcygyek8qyy46073rj4o115.0vsgjra.rcgu.o:(<alloc::sync::Arc<dyn qqq_host::guest_output::GuestSink>>::drop_slow) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.14.llvm.13293976845604828868
+          >>> referenced by ub_checks.rs:73 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ub_checks.rs:73)
+          >>>               qqq_host-250308598efd403d.3cjcygyek8qyy46073rj4o115.0vsgjra.rcgu.o:(<alloc::sync::Arc<dyn qqq_host::guest_output::GuestSink>>::drop_slow) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.49.llvm.13293976845604828868
+          >>> referenced by ub_checks.rs:73 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ub_checks.rs:73)
+          >>>               qqq_host-250308598efd403d.3cjcygyek8qyy46073rj4o115.0vsgjra.rcgu.o:(<alloc::sync::Arc<dyn qqq_host::guest_output::GuestSink>>::drop_slow) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: core::ptr::drop_glue::<[qqq_host::audit::PendingRow]> (.llvm.13293976845604828868)
+          >>> referenced by mod.rs:818 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ptr/mod.rs:818)
+          >>>               qqq_host-250308598efd403d.3cjcygyek8qyy46073rj4o115.0vsgjra.rcgu.o:(<alloc::sync::Arc<std::sync::poison::mutex::Mutex<alloc::vec::Vec<qqq_host::audit::PendingRow>>>>::drop_slow) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.26.llvm.13293976845604828868
+          >>> referenced by option.rs:0 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/option.rs:0)
+          >>>               qqq_host-250308598efd403d.6ejmyij10ithqj2cyjfo5gdcw.0vsgjra.rcgu.o:(<wasmtime::runtime::fiber::BlockingContext>::with::<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::context::StoreContextMut<qqq_host::linker::StoreData>>::with_blocking<core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData> as wasmtime::runtime::vm::VMStore>::block_on_debug_handler::{closure#0}>::{closure#0}>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.25.llvm.13293976845604828868
+          >>> referenced by option.rs:0 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/option.rs:0)
+          >>>               qqq_host-250308598efd403d.6ejmyij10ithqj2cyjfo5gdcw.0vsgjra.rcgu.o:(<wasmtime::runtime::fiber::BlockingContext>::with::<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::context::StoreContextMut<qqq_host::linker::StoreData>>::with_blocking<core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData> as wasmtime::runtime::vm::VMStore>::block_on_debug_handler::{closure#0}>::{closure#0}>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.28.llvm.13293976845604828868
+          >>> referenced by option.rs:0 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/option.rs:0)
+          >>>               qqq_host-250308598efd403d.6ejmyij10ithqj2cyjfo5gdcw.0vsgjra.rcgu.o:(<wasmtime::runtime::fiber::BlockingContext>::with::<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::context::StoreContextMut<qqq_host::linker::StoreData>>::with_blocking<core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData> as wasmtime::runtime::vm::VMStore>::block_on_debug_handler::{closure#0}>::{closure#0}>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.27.llvm.13293976845604828868
+          >>> referenced by option.rs:0 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/option.rs:0)
+          >>>               qqq_host-250308598efd403d.6ejmyij10ithqj2cyjfo5gdcw.0vsgjra.rcgu.o:(<wasmtime::runtime::fiber::BlockingContext>::with::<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::context::StoreContextMut<qqq_host::linker::StoreData>>::with_blocking<core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData> as wasmtime::runtime::vm::VMStore>::block_on_debug_handler::{closure#0}>::{closure#0}>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: core::ptr::drop_glue::<std::os::fd::owned::OwnedFd> (.llvm.13293976845604828868)
+          >>> referenced by mod.rs:823 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ptr/mod.rs:823)
+          >>>               qqq_host-250308598efd403d.c647ctv2wtdgfzccslvbgchm2.0vsgjra.rcgu.o:(core::ptr::drop_glue::<tokio_rustls::common::handshake::MidHandshake<tokio_rustls::client::TlsStream<tokio::net::tcp::stream::TcpStream>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by mod.rs:823 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ptr/mod.rs:823)
+          >>>               qqq_host-250308598efd403d.c647ctv2wtdgfzccslvbgchm2.0vsgjra.rcgu.o:(core::ptr::drop_glue::<tokio_rustls::common::handshake::MidHandshake<tokio_rustls::client::TlsStream<tokio::net::tcp::stream::TcpStream>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by mod.rs:823 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ptr/mod.rs:823)
+          >>>               qqq_host-250308598efd403d.c647ctv2wtdgfzccslvbgchm2.0vsgjra.rcgu.o:(core::ptr::drop_glue::<tokio_rustls::common::handshake::MidHandshake<tokio_rustls::client::TlsStream<tokio::net::tcp::stream::TcpStream>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced 34 more times
+          
+          rust-lld: error: undefined hidden symbol: core::ptr::drop_glue::<tokio::runtime::scheduler::Context> (.llvm.13293976845604828868)
+          >>> referenced by mod.rs:823 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ptr/mod.rs:823)
+          >>>               qqq_host-250308598efd403d.cavn6i2zawmcbcx059w2c67qx.0vsgjra.rcgu.o:(<tokio::runtime::scheduler::current_thread::CoreGuard>::enter::<<tokio::runtime::scheduler::current_thread::CoreGuard>::block_on<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<<qqq_host::linker::StoreData>::send_via<qqq_host::egress::EgressTransport<qqq_host::egress::SystemTransport, qqq_host::egress::PlainTransport>, qqq_host::egress::SystemResolver>::{closure#0}>>>>::{closure#0}, core::option::Option<core::result::Result<qqq_host::host_http::bindings::qqq::http::http::Response, qqq_host::host_http::bindings::qqq::http::http::HttpError>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.d77bb027380070860e435c84749703dd.0.llvm.7597308411410831874
+          >>> referenced by mod.rs:352 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.26.5/src/common/mod.rs:352)
+          >>>               qqq_host-250308598efd403d.c647ctv2wtdgfzccslvbgchm2.0vsgjra.rcgu.o:(<tokio_rustls::common::handshake::MidHandshake<tokio_rustls::client::TlsStream<tokio::net::tcp::stream::TcpStream>> as core::future::future::Future>::poll) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by mod.rs:352 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.26.5/src/common/mod.rs:352)
+          >>>               qqq_host-250308598efd403d.8qsammbyqlun1hrzerov0uzfw.0vsgjra.rcgu.o:(qqq_host::egress::exchange_hop::<qqq_host::egress::EgressTransport<qqq_host::egress::SystemTransport, qqq_host::egress::PlainTransport>>::{closure#0} (.llvm.12530691934410409392)) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by mod.rs:352 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.26.5/src/common/mod.rs:352)
+          >>>               qqq_host-250308598efd403d.8qsammbyqlun1hrzerov0uzfw.0vsgjra.rcgu.o:(qqq_host::egress::exchange_hop::<qqq_host::egress::EgressTransport<qqq_host::egress::SystemTransport, qqq_host::egress::PlainTransport>>::{closure#0} (.llvm.12530691934410409392)) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced 2 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.83820a4b32924c2f56b30c94cb0ac670.206.llvm.8912301863651401289
+          >>> referenced by std_tls.rs:21 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-48.0.7/src/runtime/vm/sys/unix/../std_tls.rs:21)
+          >>>               qqq_host-250308598efd403d.54ljjq28ibqu82rp2j4hp0uwx.0vsgjra.rcgu.o:(wasmtime::runtime::component::concurrent::poll_and_block::<(alloc::vec::Vec<alloc::vec::Vec<u8>>,), core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = core::result::Result<(alloc::vec::Vec<alloc::vec::Vec<u8>>,), wasmtime_internal_core::error::error::Error>> + core::marker::Send>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by std_tls.rs:21 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-48.0.7/src/runtime/vm/sys/unix/../std_tls.rs:21)
+          >>>               qqq_host-250308598efd403d.54ljjq28ibqu82rp2j4hp0uwx.0vsgjra.rcgu.o:(wasmtime::runtime::component::concurrent::poll_and_block::<(alloc::vec::Vec<alloc::string::String>,), core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = core::result::Result<(alloc::vec::Vec<alloc::string::String>,), wasmtime_internal_core::error::error::Error>> + core::marker::Send>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by std_tls.rs:21 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-48.0.7/src/runtime/vm/sys/unix/../std_tls.rs:21)
+          >>>               qqq_host-250308598efd403d.54ljjq28ibqu82rp2j4hp0uwx.0vsgjra.rcgu.o:(wasmtime::runtime::component::concurrent::poll_and_block::<(alloc::vec::Vec<(wasmtime::runtime::component::resources::host_static::Resource<wasmtime_wasi::filesystem::Descriptor>, alloc::string::String)>,), core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = core::result::Result<(alloc::vec::Vec<(wasmtime::runtime::component::resources::host_static::Resource<wasmtime_wasi::filesystem::Descriptor>, alloc::string::String)>,), wasmtime_internal_core::error::error::Error>> + core::marker::Send>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced 53 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.83820a4b32924c2f56b30c94cb0ac670.205.llvm.8912301863651401289
+          >>> referenced by wake.rs:374 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/task/wake.rs:374)
+          >>>               qqq_host-250308598efd403d.54ljjq28ibqu82rp2j4hp0uwx.0vsgjra.rcgu.o:(wasmtime::runtime::component::concurrent::poll_and_block::<(alloc::vec::Vec<alloc::vec::Vec<u8>>,), core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = core::result::Result<(alloc::vec::Vec<alloc::vec::Vec<u8>>,), wasmtime_internal_core::error::error::Error>> + core::marker::Send>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by wake.rs:374 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/task/wake.rs:374)
+          >>>               qqq_host-250308598efd403d.54ljjq28ibqu82rp2j4hp0uwx.0vsgjra.rcgu.o:(wasmtime::runtime::component::concurrent::poll_and_block::<(alloc::vec::Vec<alloc::string::String>,), core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = core::result::Result<(alloc::vec::Vec<alloc::string::String>,), wasmtime_internal_core::error::error::Error>> + core::marker::Send>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by wake.rs:374 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/task/wake.rs:374)
+          >>>               qqq_host-250308598efd403d.54ljjq28ibqu82rp2j4hp0uwx.0vsgjra.rcgu.o:(wasmtime::runtime::component::concurrent::poll_and_block::<(alloc::vec::Vec<(wasmtime::runtime::component::resources::host_static::Resource<wasmtime_wasi::filesystem::Descriptor>, alloc::string::String)>,), core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = core::result::Result<(alloc::vec::Vec<(wasmtime::runtime::component::resources::host_static::Resource<wasmtime_wasi::filesystem::Descriptor>, alloc::string::String)>,), wasmtime_internal_core::error::error::Error>> + core::marker::Send>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced 53 more times
+          
+          rust-lld: error: undefined hidden symbol: core::ptr::drop_glue::<[qqq_host::host_http::bindings::qqq::http::http::Header]> (.llvm.13293976845604828868)
+          >>> referenced by mod.rs:818 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ptr/mod.rs:818)
+          >>>               qqq_host-250308598efd403d.bc3z7upl6f4riw83tc77g7l5b.0vsgjra.rcgu.o:(<qqq_host::host_http::bindings::qqq::http::http::Header as wasmtime::runtime::component::func::typed::Lift>::linear_lift_list_from_memory) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by mod.rs:818 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ptr/mod.rs:818)
+          >>>               qqq_host-250308598efd403d.2svkb04pm1qdb027g68ma7kao.0vsgjra.rcgu.o:(qqq_host::host_http::map_request) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.e26cef0c4bf6f9eb2df3ef9b2522c064.1.llvm.17711746271769450807
+          >>> referenced by mod.rs:91 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/multi_thread/mod.rs:91)
+          >>>               qqq_host-250308598efd403d.9gzusb8uklnh3q4yjf7v5w37g.0vsgjra.rcgu.o:(<tokio::runtime::runtime::Runtime>::block_on_inner::<core::pin::Pin<alloc::boxed::Box<<qqq_host::linker::StoreData>::send_via<qqq_host::egress::EgressTransport<qqq_host::egress::SystemTransport, qqq_host::egress::PlainTransport>, qqq_host::egress::SystemResolver>::{closure#0}>>>) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.11.llvm.13293976845604828868
+          >>> referenced by rt.rs:44 (/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/rt.rs:44)
+          >>>               qqq_host-250308598efd403d.8qsammbyqlun1hrzerov0uzfw.0vsgjra.rcgu.o:(qqq_host::egress::exchange_hop::<qqq_host::egress::EgressTransport<qqq_host::egress::SystemTransport, qqq_host::egress::PlainTransport>>::{closure#0} (.llvm.12530691934410409392)) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.22.llvm.13293976845604828868
+          >>> referenced by fiber.rs:852 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-48.0.7/src/runtime/fiber.rs:852)
+          >>>               qqq_host-250308598efd403d.3b4ttc6o6a3pii554z9x9wan3.0vsgjra.rcgu.o:(<alloc::boxed::Box<wasmtime::runtime::fiber::make_fiber_unchecked<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, wasmtime::runtime::fiber::on_fiber<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::context::StoreContextMut<qqq_host::linker::StoreData>>::on_fiber<core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::instance::Instance>::new_started<qqq_host::linker::StoreData>::{closure#0}::{closure#0}>::{closure#0}::{closure#0}>::{closure#0}::{closure#0}>::{closure#0}> as core::ops::function::FnOnce<(core::result::Result<core::ptr::non_null::NonNull<core::task::wake::Context>, wasmtime_internal_core::error::error::Error>, &mut wasmtime_internal_fiber::Suspend<core::result::Result<core::ptr::non_null::NonNull<core::task::wake::Context>, wasmtime_internal_core::error::error::Error>, wasmtime::runtime::fiber::StoreFiberYield, core::result::Result<(), wasmtime_internal_core::error::error::Error>>)>>::call_once) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by fiber.rs:852 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-48.0.7/src/runtime/fiber.rs:852)
+          >>>               qqq_host-250308598efd403d.3b4ttc6o6a3pii554z9x9wan3.0vsgjra.rcgu.o:(<alloc::boxed::Box<wasmtime::runtime::fiber::make_fiber_unchecked<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, wasmtime::runtime::fiber::on_fiber<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::context::StoreContextMut<qqq_host::linker::StoreData>>::on_fiber<core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::instance::Instance>::new_started<qqq_host::linker::StoreData>::{closure#0}::{closure#0}>::{closure#0}::{closure#0}>::{closure#0}::{closure#0}>::{closure#0}> as core::ops::function::FnOnce<(core::result::Result<core::ptr::non_null::NonNull<core::task::wake::Context>, wasmtime_internal_core::error::error::Error>, &mut wasmtime_internal_fiber::Suspend<core::result::Result<core::ptr::non_null::NonNull<core::task::wake::Context>, wasmtime_internal_core::error::error::Error>, wasmtime::runtime::fiber::StoreFiberYield, core::result::Result<(), wasmtime_internal_core::error::error::Error>>)>>::call_once) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.05ea988d358d246fd36771f0c6c5f6ed.24.llvm.13293976845604828868
+          >>> referenced by fiber.rs:852 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-48.0.7/src/runtime/fiber.rs:852)
+          >>>               qqq_host-250308598efd403d.3b4ttc6o6a3pii554z9x9wan3.0vsgjra.rcgu.o:(<alloc::boxed::Box<wasmtime::runtime::fiber::make_fiber_unchecked<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, wasmtime::runtime::fiber::on_fiber<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::context::StoreContextMut<qqq_host::linker::StoreData>>::on_fiber<core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::instance::Instance>::new_started<qqq_host::linker::StoreData>::{closure#0}::{closure#0}>::{closure#0}::{closure#0}>::{closure#0}::{closure#0}>::{closure#0}> as core::ops::function::FnOnce<(core::result::Result<core::ptr::non_null::NonNull<core::task::wake::Context>, wasmtime_internal_core::error::error::Error>, &mut wasmtime_internal_fiber::Suspend<core::result::Result<core::ptr::non_null::NonNull<core::task::wake::Context>, wasmtime_internal_core::error::error::Error>, wasmtime::runtime::fiber::StoreFiberYield, core::result::Result<(), wasmtime_internal_core::error::error::Error>>)>>::call_once) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          >>> referenced by fiber.rs:852 (/home/qqq/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-48.0.7/src/runtime/fiber.rs:852)
+          >>>               qqq_host-250308598efd403d.3b4ttc6o6a3pii554z9x9wan3.0vsgjra.rcgu.o:(<alloc::boxed::Box<wasmtime::runtime::fiber::make_fiber_unchecked<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, wasmtime::runtime::fiber::on_fiber<wasmtime::runtime::store::StoreInner<qqq_host::linker::StoreData>, core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::store::context::StoreContextMut<qqq_host::linker::StoreData>>::on_fiber<core::result::Result<(), wasmtime_internal_core::error::error::Error>, <wasmtime::runtime::instance::Instance>::new_started<qqq_host::linker::StoreData>::{closure#0}::{closure#0}>::{closure#0}::{closure#0}>::{closure#0}::{closure#0}>::{closure#0}> as core::ops::function::FnOnce<(core::result::Result<core::ptr::non_null::NonNull<core::task::wake::Context>, wasmtime_internal_core::error::error::Error>, &mut wasmtime_internal_fiber::Suspend<core::result::Result<core::ptr::non_null::NonNull<core::task::wake::Context>, wasmtime_internal_core::error::error::Error>, wasmtime::runtime::fiber::StoreFiberYield, core::result::Result<(), wasmtime_internal_core::error::error::Error>>)>>::call_once) in archive /linux-target/debug/deps/libqqq_host-250308598efd403d.rlib
+          collect2: error: ld returned 1 exit status
+          
+
+error: could not compile `qqq-host` (test "subrequest_limits") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+warning: `qqq-serve` (lib) generated 1 warning
+
+run  lang001
+ok   lang001                (25s)
+run  lang002
+ok   lang002                (18s)
+run  lang003
+ok   lang003                (3s)
+run  conformance_exec
+ok   conformance_exec       (2s)
+run  lang005
+ok   lang005                (1s)
+run  audit_load
+ok   audit_load             (176s)
+run  orders-clippy
+ok   orders-clippy          (0s)
+run  orders-test
+ok   orders-test            (23s)
+run  f01-probe
+ok   f01-probe              (70s)
+run  unsafe-scan
+ok   unsafe-scan            (0s)
+run  help-brevity
+ok   help-brevity           (0s)
+run  check_conformance
+ok   check_conformance      (0s)
+run  check_conformance
+ok   check_conformance      (0s)
+run  check_error_standard
+ok   check_error_standard   (0s)
+run  check_gate_parity
+ok   check_gate_parity      (0s)
+run  audit_unsafe
+ok   audit_unsafe           (2s)
+run  audit_unsafe
+ok   audit_unsafe           (3s)
+run  audit_unsafe
+ok   audit_unsafe           (2s)
+run  check_admission
+ok   check_admission        (0s)
+run  check_advisories
+ok   check_advisories       (0s)
+run  check_agent_bench
+ok   check_agent_bench      (0s)
+run  check_agent_cookbook
+ok   check_agent_cookbook   (1s)
+run  check_api_examples
+ok   check_api_examples     (16s)
+run  check_api_examples
+ok   check_api_examples     (0s)
+run  check_bench_contract
+ok   check_bench_contract   (0s)
+run  check_checklist_citations
+ok   check_checklist_citations (10s)
+run  check_checklist_counts
+ok   check_checklist_counts (1s)
+run  check_coderabbit_config
+ok   check_coderabbit_config (1561s)
+run  check_conformance
+ok   check_conformance      (1s)
+run  check_corpus_at_rest
+ok   check_corpus_at_rest   (0s)
+run  check_corpus_repair
+ok   check_corpus_repair    (0s)
+run  check_corpus_repair
+ok   check_corpus_repair    (0s)
+run  check_doc_claims
+ok   check_doc_claims       (0s)
+run  check_done_lines
+ok   check_done_lines       (0s)
+run  check_error_all
+ok   check_error_all        (0s)
+run  check_error_catalogue
+ok   check_error_catalogue  (4s)
+run  check_error_standard
+ok   check_error_standard   (0s)
+run  check_gate_parity
+ok   check_gate_parity      (0s)
+run  check_glossary
+ok   check_glossary         (3s)
+run  check_glossary_usage
+ok   check_glossary_usage   (0s)
+run  check_handoff
+ok   check_handoff          (0s)
+run  check_include_str
+ok   check_include_str      (2s)
+run  check_language_parity
+ok   check_language_parity  (0s)
+run  check_license_boundary
+ok   check_license_boundary (0s)
+run  check_lifecycle_counts
+ok   check_lifecycle_counts (0s)
+run  check_live_dev
+ok   check_live_dev         (0s)
+run  check_metric_cardinality
+ok   check_metric_cardinality (0s)
+run  check_milestones
+ok   check_milestones       (0s)
+run  check_no_poison_expect
+ok   check_no_poison_expect (34s)
+run  check_panic_strategy
+ok   check_panic_strategy   (0s)
+run  check_public_reachability
+ok   check_public_reachability (1s)
+run  check_reconciliation
+ok   check_reconciliation   (4s)
+run  check_sbom
+ok   check_sbom             (0s)
+run  check_schema_conformance
+ok   check_schema_conformance (17s)
+run  check_scope_table
+ok   check_scope_table      (0s)
+run  check_security_scope
+ok   check_security_scope   (0s)
+run  check_source_claims
+ok   check_source_claims    (0s)
+run  check_spdx
+ok   check_spdx             (1s)
+run  check_subprocess_encoding
+ok   check_subprocess_encoding (0s)
+run  check_threat_model
+ok   check_threat_model     (0s)
+run  check_tiers
+ok   check_tiers            (0s)
+run  check_tombstones
+ok   check_tombstones       (0s)
+run  check_toolchain
+ok   check_toolchain        (0s)
+run  check_unicode_escapes
+ok   check_unicode_escapes  (0s)
+run  check_verified_facts
+ok   check_verified_facts   (0s)
+run  check_wit
+ok   check_wit              (0s)
+run  check_wit_bindings
+ok   check_wit_bindings     (0s)
+run  check_wit_reference
+ok   check_wit_reference    (0s)
+run  check_wit_style
+ok   check_wit_style        (0s)
+run  check_wit_vendoring
+ok   check_wit_vendoring    (199s)
+run  check_xrefs
+ok   check_xrefs            (2s)
+run  det009_trials
+ok   det009_trials          (0s)
+run  fault_inject_live_components
+ok   fault_inject_live_components (0s)
+run  gen_backlog
+ok   gen_backlog            (0s)
+run  gen_llms_txt
+ok   gen_llms_txt           (1s)
+run  milestone_dashboard
+ok   milestone_dashboard    (0s)
+run  normalize_eol
+ok   normalize_eol          (0s)
+run  run_conformance
+ok   run_conformance        (0s)
+run  run_conformance
+ok   run_conformance        (0s)
+run  run_conformance
+ok   run_conformance        (0s)
+run  run_language_probes
+ok   run_language_probes    (0s)
+run  run_perf_regression
+ok   run_perf_regression    (0s)
+run  self_test_schemas
+ok   self_test_schemas      (8s)
+run  self_test_xrefs
+ok   self_test_xrefs        (3051s)
+run  self_test_xrefs
+ok   self_test_xrefs        (0s)
+---- summary ----
+fmt                      ok (10s)
+deny                     ok (4s)
+machete                  ok (6s)
+orders-fmt               ok (0s)
+check_admission          ok (0s)
+check_advisories         ok (0s)
+check_agent_bench        ok (10s)
+check_agent_cookbook     ok (5s)
+check_batch_first        ok (0s)
+check_bench_contract     ok (1s)
+check_checklist_citations ok (11s)
+check_checklist_counts   ok (0s)
+check_coderabbit_config  ok (142s)
+check_doc_claims         ok (3s)
+check_done_lines         ok (0s)
+check_error_all          ok (0s)
+check_error_catalogue    ok (1s)
+check_glossary           ok (1s)
+check_glossary_usage     ok (1s)
+check_include_str        ok (8s)
+check_language_parity    ok (0s)
+check_license_boundary   ok (2s)
+check_lifecycle_counts   ok (0s)
+check_metric_cardinality ok (0s)
+check_milestones         ok (0s)
+check_no_ambient         ok (3s)
+check_no_poison_expect   ok (8s)
+check_panic_strategy     ok (0s)
+check_public_reachability ok (8s)
+check_reconciliation     ok (1s)
+check_schema_conformance ok (1s)
+check_scope_table        ok (2s)
+check_security_scope     ok (0s)
+check_source_claims      ok (4s)
+check_spdx               ok (6s)
+check_subprocess_encoding ok (3s)
+check_threat_model       ok (1s)
+check_tiers              ok (0s)
+check_tombstones         ok (0s)
+check_toolchain          ok (1s)
+check_topology           ok (1s)
+check_unicode_escapes    ok (7s)
+check_verified_facts     ok (1s)
+check_wit                ok (1s)
+check_wit_bindings       ok (1s)
+check_wit_deprecated     ok (1s)
+check_wit_errors         ok (1s)
+check_wit_reference      ok (1s)
+check_wit_since          ok (1s)
+check_wit_style          ok (1s)
+check_wit_vendoring      ok (142s)
+check_xrefs              ok (1320s)
+gen_backlog              ok (1s)
+gen_llms_txt             ok (2s)
+gen_schemas              ok (1s)
+milestone_dashboard      ok (0s)
+normalize_eol            ok (12s)
+sync_docs                ok (1330s)
+clippy                   ok (2s)
+build                    ok (0s)
+test                     FAILED (39s)
+lang001                  ok (25s)
+lang002                  ok (18s)
+lang003                  ok (3s)
+conformance_exec         ok (2s)
+lang005                  ok (1s)
+audit_load               ok (176s)
+orders-clippy            ok (0s)
+orders-test              ok (23s)
+f01-probe                ok (70s)
+unsafe-scan              ok (0s)
+help-brevity             ok (0s)
+check_conformance        ok (0s)
+check_conformance        ok (0s)
+check_error_standard     ok (0s)
+check_gate_parity        ok (0s)
+audit_unsafe             ok (2s)
+audit_unsafe             ok (3s)
+audit_unsafe             ok (2s)
+check_admission          ok (0s)
+check_advisories         ok (0s)
+check_agent_bench        ok (0s)
+check_agent_cookbook     ok (1s)
+check_api_examples       ok (16s)
+check_api_examples       ok (0s)
+check_bench_contract     ok (0s)
+check_checklist_citations ok (10s)
+check_checklist_counts   ok (1s)
+check_coderabbit_config  ok (1561s)
+check_conformance        ok (1s)
+check_corpus_at_rest     ok (0s)
+check_corpus_repair      ok (0s)
+check_corpus_repair      ok (0s)
+check_doc_claims         ok (0s)
+check_done_lines         ok (0s)
+check_error_all          ok (0s)
+check_error_catalogue    ok (4s)
+check_error_standard     ok (0s)
+check_gate_parity        ok (0s)
+check_glossary           ok (3s)
+check_glossary_usage     ok (0s)
+check_handoff            ok (0s)
+check_include_str        ok (2s)
+check_language_parity    ok (0s)
+check_license_boundary   ok (0s)
+check_lifecycle_counts   ok (0s)
+check_live_dev           ok (0s)
+check_metric_cardinality ok (0s)
+check_milestones         ok (0s)
+check_no_poison_expect   ok (34s)
+check_panic_strategy     ok (0s)
+check_public_reachability ok (1s)
+check_reconciliation     ok (4s)
+check_sbom               ok (0s)
+check_schema_conformance ok (17s)
+check_scope_table        ok (0s)
+check_security_scope     ok (0s)
+check_source_claims      ok (0s)
+check_spdx               ok (1s)
+check_subprocess_encoding ok (0s)
+check_threat_model       ok (0s)
+check_tiers              ok (0s)
+check_tombstones         ok (0s)
+check_toolchain          ok (0s)
+check_unicode_escapes    ok (0s)
+check_verified_facts     ok (0s)
+check_wit                ok (0s)
+check_wit_bindings       ok (0s)
+check_wit_reference      ok (0s)
+check_wit_style          ok (0s)
+check_wit_vendoring      ok (199s)
+check_xrefs              ok (2s)
+det009_trials            ok (0s)
+fault_inject_live_components ok (0s)
+gen_backlog              ok (0s)
+gen_llms_txt             ok (1s)
+milestone_dashboard      ok (0s)
+normalize_eol            ok (0s)
+run_conformance          ok (0s)
+run_conformance          ok (0s)
+run_conformance          ok (0s)
+run_language_probes      ok (0s)
+run_perf_regression      ok (0s)
+self_test_schemas        ok (8s)
+self_test_xrefs          ok (3051s)
+self_test_xrefs          ok (0s)
+GATE RED: test
+Exception: E:\QQQ\tools\qqqdev.ps1:188
+Line |
+ 188 |      if ($code -ne 0) { throw "checkers FAILED (exit $code)" }
+     |                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | checkers FAILED (exit 1)
+BRIDGE_CHECKS_EXIT=1 

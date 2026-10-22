@@ -1,0 +1,19 @@
+time="2026-10-22T13:07:26-06:00" level=warning msg="volume \"qqq-dev_cargo-registry\" already exists but was not created by Docker Compose. Use `external: true` to use an existing volume"
+ Container qqq-dev-linux-run-f507cb8aa1d2 Creating 
+ Container qqq-dev-linux-run-f507cb8aa1d2 Created 
+--- modelled: why crypto.hash ---
+crypto.hash GRANTED by manifest
+EXIT=0
+--- unmodelled: why sql.query ---
+sql.query DENIED (default: not granted by any layer)
+
+add to qqq.toml:
+
+    [[capabilities.sql]]
+    name = "orders"
+    driver = "postgres"
+    host = "db.internal:5432"
+    # secret = "env:ORDERS_DB_URL"
+    # execute = true  # for sql.execute; query-only without it
+EXIT=1
+WHY_LINUX_EXIT=0 

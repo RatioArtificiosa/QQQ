@@ -52,7 +52,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 ## The machinery behind the documents
 
 - [docs/abi-cost-measured.md](docs/abi-cost-measured.md) — The measured ABI-crossing costs (`PERF-005`), replacing the estimates in §9.3, with the environment, the estimate-by-estimate comparison, and an explicit statement of what was not measured. (19 KB)
-- [docs/wasi-032-post-migration-report.md](docs/wasi-032-post-migration-report.md) — The WASI 0.3.2 post-migration measurement report (Phase 7B): every §6.12 field measured or marked UNVERIFIED, with commands and outputs. (8 KB)
+- [docs/wasi-032-post-migration-report.md](docs/wasi-032-post-migration-report.md) — The WASI 0.3.2 post-migration measurement report (Phase 7B): every §6.12 field measured or marked UNVERIFIED, with commands and outputs. (10 KB)
 - [docs/verified-facts.md](docs/verified-facts.md) — Facts asserted in the Proposal, each classified by how perishable it is and when it was last checked. (8 KB)
 - [docs/reconciliation.md](docs/reconciliation.md) — Corrections made to the Proposal, with the reasoning. (4 KB)
 - [docs/wasmtime-advisory-process.md](docs/wasmtime-advisory-process.md) — How a Wasmtime security advisory is handled. _(human)_ (11 KB)

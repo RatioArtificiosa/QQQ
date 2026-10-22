@@ -40657,4 +40657,22 @@ keyword. That test is the tripwire that re-opens this item; until then
 there is nothing to stop.
 `crates/qqq-host/src/host_wasi03.rs`, `crates/qqq-host/tests/fixtures/wasi-0.3.2-monotonic-clock.wit`.
 
+## §O-784 - Retire-or-keep, decided: KEEP, with a conditional window instead of a date
+
+HOST-027 asked for the decision after determinism settles. Determinism
+has not settled (12 DET items open, engine-wide work outside this
+migration), and waiting for it would leave the ledger's question
+unowned indefinitely — the exact failure the item was created to
+prevent. So the decision is KEEP with a window defined by conditions,
+not a calendar date: no retirement before (a) determinism trials go
+green on the 0.3 path AND (b) a registry range narrows that strands no
+deployed 0.2 component. Neither condition is met, so no retirement is
+scheduled; naming a date anyway would be a plan disguised as a window.
+The retention is enforced, not asserted: deleting the 0.2 path fails
+the 0.2 dual-ABI tests, the no-import creation test, and the linker
+unit suite — 12+ tests that run green in every gate (`cargo xtask ci`
+GATE GREEN 146, 2026-10-22). Revisit trigger: both tripwires firing
+(the second is already §15's recorded tripwire).
+`QQQ-Checklist-V1.md` (HOST-027).
+
 *End of `QQQ-Observations-and-Memories.md`.*

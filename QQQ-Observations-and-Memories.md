@@ -40639,4 +40639,22 @@ found; the 0.3 path added alongside it is grant-gated the same way the
 CON-019's `run` coverage uses wasi-free fixtures, which is also why the
 0.2 equivalent guest in the launch checks carries no wasi: imports.
 
+## §O-783 - WASI 0.3.1 features measured absent on the pinned stack; sync-only 0.3 path unaffected
+
+HOST-026 asked whether the pinned engine supports 0.3.1's `implements`
+and `map<K,V>` (release notes: both required for 0.3.1+ compatibility).
+Measured, not inferred: (a) the pinned wit-parser 0.254.2 keyword table
+(vendored sources, `wit-parser-0.254.2/src/ast/lex.rs`) has `map` but no
+`implements`; (b) wasmtime-wasi 48.0.7 is enabled with `features =
+["p2"]` only (workspace `Cargo.toml`), and its own vendored `p3/` WIT is
+0.3.0-level — no `implements`, no `map<`. So the blocker is recorded and
+the stop condition is scoped precisely: nothing may *serve* 0.3.1
+shapes, which nothing does — the shipped 0.3 path serves versioned
+*sync* shapes that need neither feature, and a new anti-drift test
+(`served_03_needs_no_031_features`, fault-injected red via a `map<...>`
+fixture line) fails the build the day the vendored WIT gains either
+keyword. That test is the tripwire that re-opens this item; until then
+there is nothing to stop.
+`crates/qqq-host/src/host_wasi03.rs`, `crates/qqq-host/tests/fixtures/wasi-0.3.2-monotonic-clock.wit`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

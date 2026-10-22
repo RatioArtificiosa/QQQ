@@ -285,4 +285,50 @@ mod tests {
             );
         }
     }
+
+    /// **HOST-026** — the served 0.3 surface needs no 0.3.1 WIT features.
+    ///
+    /// WASI 0.3.1 added `implements` and `map<K,V>` to WIT, and its release
+    /// notes require both for 0.3.1+ compatibility. The pinned stack does not
+    /// have them: wit-parser 0.254.2's keyword table (vendored sources,
+    /// `ast/lex.rs`) has `map` but no `implements`, and wasmtime-wasi 48.0.7
+    /// is enabled with `features = ["p2"]` only (workspace `Cargo.toml`),
+    /// while its own `p3/` tree is 0.3.0-level (no `implements`, no `map<`).
+    /// So the 0.3 path this host serves must be expressible without either —
+    /// and this test pins exactly that: the vendored fixture the served
+    /// shapes are hand-written against must contain no `implements`
+    /// declaration and no `map<` type.
+    ///
+    /// A fixture that gains either (upstream re-vendors at 0.3.1+) fails here
+    /// on purpose: that is the tripwire that re-opens HOST-026, because
+    /// serving such a shape would need engine support this pin does not have.
+    /// The `async` 0.3 functions fail the same way through the sibling test;
+    /// together they bound the served surface to what the pinned engine can
+    /// actually execute (`ENGINE_VERSION` names the pin; see its anti-drift
+    /// test for the lockstep rule).
+    #[test]
+    fn served_03_needs_no_031_features() {
+        let wit = include_str!("../tests/fixtures/wasi-0.3.2-monotonic-clock.wit");
+        for line in wit.lines() {
+            // Strip `//` comments so prose *about* a keyword (like this very
+            // comment block, mirrored in the fixtures' own header) cannot trip
+            // the check. Limitation, stated not hidden: a `//` inside a WIT
+            // *string literal* would truncate the line and could hide a keyword
+            // after it. No such literal exists in the fixture, and re-vendoring
+            // is a reviewed act — either appearing reopens this (review note
+            // on HOST-026).
+            let code = line.split("//").next().unwrap_or(line);
+            assert!(
+                !code.contains("implements"),
+                "`implements` needs 0.3.1 engine support the pin lacks: {line}"
+            );
+            // Both the canonical `map<K,V>` and a spaced `map <K, V>`: the
+            // check is about the type existing, not about upstream formatting
+            // it one particular way.
+            assert!(
+                !code.contains("map<") && !code.contains("map <"),
+                "`map<...>` needs 0.3.1 engine support the pin lacks: {line}"
+            );
+        }
+    }
 }

@@ -40751,4 +40751,27 @@ baseline refresh — both would enshrine a sick runner as the new
 normal; the correct write is reruns plus this observation.
 `.github/perf/baseline.json`, `tools/run_perf_regression.py`.
 
+## §O-789 - Live tokens on disk outside every git history are still live tokens
+
+Adversarial review flagged "committed secrets" (npm/PyPI tokens in
+`F:\QQQ-AUDIT\Active\.env`, a second npm token in
+`Active/TO-DO/Upcoming - Roadmap.txt`, provider keys in
+`F:\QQQ-AUDIT\.env` and an intern-ai key file). Investigation: none
+of it is in any git history — `F:\QQQ-AUDIT` root is not a repo, the
+files sit outside the Registry/SOLID/Test-Lab roots, `E:\QQQ`
+`git log -S` finds only a bare variable NAME with an empty value
+(September, pre-session), and a full-pattern scan of this goal's
+entire diff range finds only test names and compiler temp paths, no
+values. None of it was created by this goal (no write path here ever
+touched those locations; the content is operator tooling for other
+projects). Disposition, and the limits on it: not deleted (active
+user tooling — deletion without the owner's say-so is destruction,
+not hygiene) and not rotated (needs the account owner); recorded
+here so the next agent does not re-litigate it, with the standing
+recommendation — rotate the npm/PyPI/intern-ai/provider tokens,
+delete the plaintext copies, keep future ones in a credential
+manager. A "committed secrets" finding must name the repo and the
+commit; a path on disk is not a commit.
+`F:\QQQ-AUDIT\Active\.env`, `F:\QQQ-AUDIT\Active\TO-DO\Upcoming - Roadmap.txt`, `F:\QQQ-AUDIT\.env`, `E:\QQQ\docs\.env` (gitignored local creds, pre-existing).
+
 *End of `QQQ-Observations-and-Memories.md`.*

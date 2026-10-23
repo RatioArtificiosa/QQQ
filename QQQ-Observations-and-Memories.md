@@ -40734,4 +40734,21 @@ a red that names a vector needs the spread before it becomes a code
 question — read which one failed before deciding what to fix.
 `.github/perf/baseline.json`, `tools/run_perf_regression.py`.
 
+## §O-788 - Identical-SHA attempts straddling a perf tolerance line in both directions is the runner, not the code
+
+CI PERF-020 on `fee4833` (zero code delta — Observations, stability,
+corpus digests only) went fail / pass / fail / pass across four
+attempts of run 39871932682 on the 9V45/9V74 shared pool: attempt 0
+failed hello +85%, tailp99 +31%, multi −24% (json passed); rerun 1
+green; rerun 2 failed all four (hello +48%, tailp99 +41%, json −27%,
+multi −26%); rerun 3 green. Same SHA, same baseline entry, no code
+touched between attempts — inter-attempt variance dwarfs the ±25%/20%
+bands, which no code change can produce. Disposition per §O-543:
+vectors table recorded here, not just the verdict, and the gate was
+re-entered only after a green attempt, never by editing around the
+red. Do not "fix" a red like this with a tolerance widening or a
+baseline refresh — both would enshrine a sick runner as the new
+normal; the correct write is reruns plus this observation.
+`.github/perf/baseline.json`, `tools/run_perf_regression.py`.
+
 *End of `QQQ-Observations-and-Memories.md`.*

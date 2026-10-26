@@ -1,0 +1,13 @@
+Provenance: captured 2026-10-26 on E:\QQQ @ 4397689 + uncommitted core-only change (pre-commit verification).
+Default suite: 119 passed + 1 doctest (TEST_EXIT=0).
+No-default suite: pure tests only, 107 passed + 1 doctest (NOTEST_EXIT=0); fs tests correctly absent.
+
+=== RT-CORE-001 verification: default behavior unchanged, features present === 
+43976896f6baf6e7769b32427a9780c329fcd1ab
+test result: ok. 119 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+TEST_EXIT=0 
+
+test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+NOTEST_EXIT=0 

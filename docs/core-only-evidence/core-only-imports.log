@@ -1,0 +1,19 @@
+Provenance: captured 2026-10-26 on E:\QQQ @ 4397689 (clean tree plus the
+uncommitted core-only change under review) by the goal harness; commands are
+quoted verbatim below. Full transcripts remain in the harness scratch dir.
+
+Artifact: throwaway cdylib probe in scratch (NOT committed) linking qqq-pkg
+with --no-default-features --features core-only, rooted by an exported
+qqq_probe() that calls Digest::of, StoreLayout paths, and verify(), plus a
+deliberate std::fs::read probe (qqq_fs_probe) to characterize the target.
+
+wasm-tools validate: ok. Import lines in linked module: 0.
+wasi_snapshot_preview1 matches: 0 (findstr found none).
+Exports present: (export "memory" (memory 0)); (export "qqq_fs_probe" (func $qqq_fs_probe)); (export "qqq_probe" (func $qqq_probe))
+Meaning: even an explicit std::fs call links to a static always-failing shim;
+there is no host surface (no fs/net syscalls) reachable from core-only code.
+The source gates (#[cfg(feature = "fs")] on every std::fs use) are what keep
+fs calls out of shipped code so they fail at compile time, not as runtime traps.
+
+BUILD_EXIT=0 
+VALIDATE_EXIT=0 

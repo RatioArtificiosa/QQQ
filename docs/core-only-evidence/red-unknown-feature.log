@@ -1,0 +1,11 @@
+Provenance: captured 2026-10-26 on E:\QQQ @ 4397689 (clean tree plus the
+uncommitted core-only change under review) by the goal harness; commands are
+quoted verbatim below. Full transcripts remain in the harness scratch dir.
+
+Command: cargo build -p qqq-pkg --no-default-features --features core-only --target wasm32-unknown-unknown
+(no [features] section existed yet)
+
+=== RED: wasm core-only build on the pristine tree (no [features] yet) === 
+43976896f6baf6e7769b32427a9780c329fcd1ab
+error: the package 'qqq-pkg' does not contain this feature: core-only
+BUILD_EXIT=101 

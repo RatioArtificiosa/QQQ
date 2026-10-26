@@ -1,0 +1,25 @@
+Provenance: captured 2026-10-26 on E:\QQQ @ 4397689 (clean tree plus the
+uncommitted core-only change under review) by the goal harness; commands are
+quoted verbatim below. Full transcripts remain in the harness scratch dir.
+
+Mid-gating run (store.rs gated, signature.rs not yet): the wasm32-unknown-unknown
+target was absent from the pinned 1.98 toolchain -> E0463. Fixed by
+`rustup target add wasm32-unknown-unknown` (recorded for RT-CORE-005). Same run:
+no-default host suite green (107 passed) proving the pure suite stands alone.
+
+=== RED (mid-gating): core-only wasm build must fail on the remaining fs uses === 
+43976896f6baf6e7769b32427a9780c329fcd1ab
+error[E0463]: can't find crate for `core`
+For more information about this error, try `rustc --explain E0463`.
+error: could not compile `cfg-if` (lib) due to 1 previous error
+error: could not compile `typenum` (lib) due to 1 previous error
+error: could not compile `winnow` (lib) due to 1 previous error
+error: could not compile `memchr` (lib) due to 1 previous error
+BUILD_EXIT=101 
+=== no-default host tests: pure suite must stay green === 
+test lock::tests::every_lockfile_error_renders_with_a_remediation ... ok
+test lock::tests::malformed_toml_is_reported_as_a_syntax_error ... ok
+test semver::tests::an_error_in_a_later_clause_quotes_the_whole_requirement ... ok
+test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+NOTEST_EXIT=0 

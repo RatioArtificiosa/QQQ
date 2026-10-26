@@ -1041,6 +1041,16 @@ jobs:
         # job uses, rather than `cargo install`: it FAILS when the tool
         # cannot be obtained instead of letting anything skip silently.
         uses: taiki-e/install-action@wasm-tools
+      # RT-CORE-005: the core-only wasm build is a first-class CI signal, not a
+      # local-only probe. `rustup target add` is idempotent, so this also covers
+      # runners whose toolchain predates the `wasm32-unknown-unknown` entry in
+      # `rust-toolchain.toml`. The import scan lives in committed evidence
+      # (`docs/core-only-evidence/`); CI re-proves the build stays green.
+      - name: core-only wasm build + tests (RT-CORE-004/005)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build -p qqq-pkg --no-default-features --features core-only --target wasm32-unknown-unknown
+          cargo test -p qqq-pkg --no-default-features --features core-only
       - name: gate (cargo xtask ci)
         run: cargo xtask ci
 

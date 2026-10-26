@@ -1,0 +1,56 @@
+Provenance: captured 2026-10-26 on E:/QQQ @ 4397689 + uncommitted core-only change.
+Command: cargo tree -p qqq-pkg --target wasm32-unknown-unknown --no-default-features --features core-only --edges no-dev --prefix none
+Note: no getrandom, no tokio/hyper, no fs-pulling crates beyond std itself.
+
+qqq-pkg v0.1.1 (E:\QQQ\crates\qqq-pkg)
+ed25519-dalek v2.2.0
+curve25519-dalek v4.1.3
+cfg-if v1.0.5
+digest v0.10.7
+block-buffer v0.10.4
+generic-array v0.14.7
+typenum v1.20.1
+version_check v0.9.5
+crypto-common v0.1.7
+generic-array v0.14.7 (*)
+typenum v1.20.1
+subtle v2.6.1
+zeroize v1.9.0
+rustc_version v0.4.1
+semver v1.0.28
+ed25519 v2.2.3
+signature v2.2.0
+sha2 v0.10.9
+cfg-if v1.0.5
+digest v0.10.7 (*)
+subtle v2.6.1
+zeroize v1.9.0
+qqq-core v0.1.1 (E:\QQQ\crates\qqq-core)
+serde v1.0.229
+serde_core v1.0.229
+serde_derive v1.0.229 (proc-macro)
+proc-macro2 v1.0.107
+unicode-ident v1.0.26
+quote v1.0.47
+proc-macro2 v1.0.107 (*)
+syn v3.0.6
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+unicode-ident v1.0.26
+serde_json v1.0.151
+itoa v1.0.18
+memchr v2.8.3
+serde_core v1.0.229
+zmij v1.0.23
+serde v1.0.229 (*)
+sha2 v0.10.9 (*)
+toml v0.9.12+spec-1.1.0
+serde_core v1.0.229
+serde_spanned v1.1.1
+serde_core v1.0.229
+toml_datetime v0.7.5+spec-1.1.0
+serde_core v1.0.229
+toml_parser v1.1.3+spec-1.1.0
+winnow v1.0.4
+toml_writer v1.1.2+spec-1.1.0
+winnow v0.7.15

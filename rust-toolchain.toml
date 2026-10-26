@@ -39,5 +39,8 @@
 [toolchain]
 channel = "1.98"
 components = ["rustfmt", "clippy"]
-targets = ["wasm32-wasip2"]
+# wasm32-wasip2 is the guest target the conformance suite builds; wasm32-unknown-unknown
+# is the core-only verification target (`qqq-pkg --no-default-features --features core-only`,
+# RT-CORE-004/005). Both are provisioned here so local and CI toolchains agree.
+targets = ["wasm32-wasip2", "wasm32-unknown-unknown"]
 profile = "minimal"

@@ -215,6 +215,9 @@ impl StoreLayout {
     }
 
     /// Whether an artifact is present.
+    ///
+    /// Filesystem-backed: gated out of `core-only` builds.
+    #[cfg(feature = "fs")]
     #[must_use]
     pub fn contains(&self, digest: &Digest) -> bool {
         self.artifact_path(digest).is_file()
@@ -234,6 +237,8 @@ impl StoreLayout {
     /// a truncated write, a partial copy, or a substituted file all leave
     /// something at that path. Reading without verifying would make the store a
     /// cache that silently serves the wrong bytes, which is worse than no cache.
+    /// Filesystem-backed: gated out of `core-only` builds.
+    #[cfg(feature = "fs")]
     pub fn read(&self, digest: &Digest) -> Result<Vec<u8>> {
         let path = self.artifact_path(digest);
         let bytes = std::fs::read(&path).map_err(|e| {
@@ -278,6 +283,8 @@ impl StoreLayout {
     /// then hold bytes under a path that does not describe them — permanently
     /// breaking the invariant the whole design rests on. Computing it here makes
     /// that impossible rather than merely discouraged.
+    /// Filesystem-backed: gated out of `core-only` builds.
+    #[cfg(feature = "fs")]
     pub fn write(&self, bytes: &[u8]) -> Result<Digest> {
         let digest = Digest::of(bytes);
         let path = self.artifact_path(&digest);
@@ -314,6 +321,8 @@ impl StoreLayout {
     /// reaching for the network. Sorted so the listing is deterministic, which
     /// matters because it appears in `--json` output that an agent diffs.
     #[must_use]
+    /// Filesystem-backed: gated out of `core-only` builds.
+    #[cfg(feature = "fs")]
     pub fn list(&self) -> Vec<Digest> {
         let mut out = Vec::new();
         let algo_dir = self.root.join(DIGEST_ALGORITHM);
@@ -354,6 +363,8 @@ impl StoreLayout {
 
     /// How many artifacts are stored.
     #[must_use]
+    /// Filesystem-backed: gated out of `core-only` builds.
+    #[cfg(feature = "fs")]
     pub fn count(&self) -> usize {
         self.list().len()
     }
@@ -369,14 +380,6 @@ impl StoreLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn temp_root(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!("qqq-store-test-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).expect("create temp dir");
-        p
-    }
 
     /// A known-answer digest, so the test fails if the hashing changes rather
     /// than merely if it becomes non-deterministic.
@@ -488,6 +491,31 @@ mod tests {
             "got {}",
             meta.display()
         );
+    }
+}
+
+// Filesystem-backed tests live in their own module so the unconditional
+// suite stays runnable without `std::fs` (and therefore on
+// `wasm32-unknown-unknown`): nothing here may migrate upward without
+// taking the `fs` gate with it.
+#[cfg(all(test, feature = "fs"))]
+mod fs_tests {
+    #![allow(
+        clippy::indexing_slicing,
+        reason = "test assertions index inline vectors"
+    )]
+    #![allow(
+        clippy::expect_used,
+        reason = "test setup must create temp dirs; a Result here would trade readability for nothing (workspace F-18 convention: test modules carry reasoned allows)"
+    )]
+    use super::*;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("qqq-store-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("create temp dir");
+        p
     }
 
     // -- reading and writing -----------------------------------------------

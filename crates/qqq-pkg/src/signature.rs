@@ -438,11 +438,15 @@ pub fn verify(
 
 /// Read an artifact and its `.sig` beside it, and verify.
 ///
+/// Filesystem-backed: gated out of `core-only` builds; pass bytes to
+/// [`verify`] instead.
+///
 /// # Errors
 ///
 /// `QQQ-5002` for a verification failure, or the filesystem error rendered as `QQQ-5002` —
 /// an artifact `verify` cannot read is a verification that did not happen, and reporting it
 /// as success would be the worst of the available answers.
+#[cfg(feature = "fs")]
 pub fn verify_files(
     artifact: &std::path::Path,
     policy: &TrustPolicy,

@@ -1537,14 +1537,17 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **HOST-025** Implement the dual-ABI host: retain the 0.2 linker path and add a 0.3 path, with unknown imports failing closed on both, and instantiate a 0.2 guest and a 0.3 guest in the same build.
   → Done: `AbiVersion::detect` routes `@0.3.x` to new `build_linker_v03` (grant-gated 0.3 clock + `host_test`, no 0.2 baseline by design) while 0.2 keeps `build_linker` byte for byte; `crates/qqq-host/src/host_wasi03.rs` serves sync `now`/`get-resolution` from the real v0.3.2 WIT (tag `bdadbbb`, vendored with provenance) and traps `wait-until`/`wait-for` by name; `Unknown` builds no linker. ARCH-003/ARCH-012 tables extended 14→18 over the new module.
   → Measured: `a_v02_guest_instantiates_and_runs_on_the_retained_path`, `a_v03_guest_instantiates_and_runs_on_the_new_path`, `async_03_imports_trap_by_name`, `an_unknown_03_import_fails_closed_and_names_itself`, `v03_clock_without_grant_fails_closed`, `v03_clock_rechecks_grant_at_call_time` — 6/6 each, every seam fault-proven red (no-op stub, wrong-path routing, ungranted clock) with logs in scratch; `cargo xtask ci` GATE GREEN 146; Copilot review + focused re-review cleared (§O-775).
+  → Done (RT-WASI-001 re-measure 2026-10-26): dual_abi 12/12 green + conformance_exec green (2 passed, 1 ignored by design) on 6903ad5; `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §6.1 `qqq-host` — the execution engine
 - [x] **HOST-026** Measure WASI 0.3.1-feature support (`implements`, `map`) in the pinned wasmtime engine with a dedicated red-first test; record the blocker and stop the 0.3 path if unsupported.
   → Done: measured BLOCKED on 2026-10-22. wit-parser 0.254.2's keyword table (vendored sources, `ast/lex.rs`) has `map` but no `implements`; wasmtime-wasi 48.0.7 is enabled with `features = ["p2"]` only (workspace `Cargo.toml:133`) while its own `p3/` tree is 0.3.0-level (no `implements`, no `map<`). So the 0.3 path serves sync 0.3.0 shapes only: async names trap by name (t3), and a new `served_03_needs_no_031_features` anti-drift test fails the build if the vendored WIT ever gains either keyword. No stop of the shipped path: it needs neither feature — the stop condition fires only on serving 0.3.1 shapes, which nothing does.
   → Measured: `Select-String` over vendored `lex.rs` (map keyword present, no implements) + `get-childitem -recurse` over wasmtime-wasi `src/p3` (0.3.0 package versions only); `cargo test -p qqq-host --lib host_wasi03` 2/2 green, fault-injected red via a `map<...>` fixture line (log in scratch) with byte-identical restore; `cargo xtask ci` GATE GREEN 146; Copilot review: no blockers, 2 LOW doc/test-precision notes both addressed and re-verified (§O-783).
+  → Done (RT-WASI-002 re-measure 2026-10-26): implements/map still absent (wit-parser 0.254.2, wasmtime-wasi 48.0.7 p3 tree 0.3.0-level — re-probed, identical result); tripwire green; report + evidence log in 6903ad5; `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §6.1 `qqq-host` — the execution engine
 - [x] **HOST-027** Decide retire-or-keep for the 0.2 linker path with a recorded migration window, after determinism work settles.
   → Done: KEEP — no retirement in this migration window. Retirement is conditioned on BOTH tripwires firing: (a) determinism trials green on the 0.3 path (12 DET items still open; the served 0.3 surface adds no new determinism surface — sync reads through the existing ambient — but the trials belong to the DET items' own acceptance, not to this migration), and (b) a registry `abi.host` range narrowing that strands no deployed 0.2 component (D-WASI-2: no flag day). Neither condition is met, so no retirement date is set; naming a date without them would be a plan, not a migration window. Revisit trigger: both tripwires (§15 already owns the second).
   → Measured: retention proven, not asserted — `a_v02_guest_instantiates_and_runs_on_the_retained_path`, `instance_create_keeps_no_import_guest_on_the_retained_path`, and the full 0.2 conformance suite run green in every gate on this tree (`cargo xtask ci` GATE GREEN 146, 2026-10-22). Deleting the 0.2 path fails 12+ dual-ABI tests plus the linker unit suite — the retention is enforced by tests, not by this sentence.
+  → Done (RT-ABI-002 re-measure 2026-10-26): 0.2 path retained, no retirement date, both tripwires still unfired; dual_abi green on 6903ad5; `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §6.1 `qqq-host` — the execution engine
 
 ### CON — Contracts
@@ -1987,6 +1990,7 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **CON-019** Extend conformance execution to a 0.3 guest: fixtures, runner, and a dual-ABI instantiation case that fails closed on unknown imports.
   → Done: `Instance::create*` routes by declared ABI through `linker_for_component` (only V03 diverts; everything else keeps the retained 0.2 path byte for byte); `qqqai run` pre-flight admits granted 0.3 imports; `conformance/fixtures/wasi03-clock.{wat,component.wasm}` committed with an import-set pin test; suite.json gains `dual-abi-03-clock-required` + `dual-abi-03-unserved-reported` with per-case guests, implemented in both runners (Rust `conformance_exec.rs` + `tools/run_conformance.py`) with self-test coverage; CLI end-to-end (run granted 0.3, refuse ungranted naming the capability, refuse unknown naming the import).
   → Measured: 6 Instance routing tests (0.3 routes+grants, ungranted/unknown/unrecognized-version fail closed, no-import + mixed-version routing pinned) + 3 check_imports tests + 3 CLI tests + 2 conformance runner cases + fixture pin — each fault-proven red (wrong-linker routing, Unknown-to-error, disabled pre-flight branch, muted assertion, hand-edited fixture); `conformance_exec` 4/4 incl. `--ignored`, py self-tests green, `cargo xtask ci` GATE GREEN 146, Copilot review cleared with 2 LOWs fixed and re-verified (§O-782 for the run-refuses-wasi discovery).
+  → Done (RT-EVID-001 re-measure 2026-10-26): conformance_exec green on 6903ad5 (2 passed, 1 ignored — the ignored case compiles a guest and runs in the CI gate); `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §2.4 NN-4 — Multi-Language by Design
 
 ---
@@ -3625,6 +3629,7 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **ABI-018** Record the `abi.host` policy decision: WASI releases never bump `abi.host`; only an incompatible QQQ-interface change does (with the comparison that justifies no-bump, or the bump with its host-gated rollout).
   → Done: no-bump — the migration adds a host-side 0.3 path but changes no `qqq:` interface, proven by `qqq_interface_surface_is_pinned_for_the_abi_host_decision` (exact 13-name pin; any incompatible QQQ change fails the build and forces the bump explicitly), so the registry range stays `>=0.2,<0.4` (D-WASI-3, verified not edited here). Client-side refusal: `qqq_pkg::semver::check_host_requirement` admits 0.2/0.3 hosts under the registry's example range and refuses 0.1/0.4+/1.0 with `VersionUnsatisfiable` (`QQQ-5004`) naming range and version.
   → Measured: `an_in_range_host_satisfies_the_declared_abi_host_range`, `an_out_of_range_host_is_refused_with_a_clear_code`, `qqq_interface_surface_is_pinned_for_the_abi_host_decision` — each fault-proven red (inverted admission, surface drift); `cargo xtask ci` GATE GREEN 146; Copilot review cleared (§O-780).
+  → Done (RT-ABI-001/003 re-measure 2026-10-26): 13-name pin unchanged (`cargo test -p qqq-abi` 18 unit + 25 doctest green; abi_roundtrip 6/6); runtime docs agree with `>=0.2,<0.4`, registry untouched; commit 6903ad5; `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §6.3 `qqq-abi` — WIT interfaces as the single source of truth
 
 ---
@@ -4380,22 +4385,27 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [x] **LANG-041** Rust 0.3 emission verdict: BLOCKED — no `wasm32-wasip3` target in the stable toolchain.
   → Done: verdict recorded BLOCKED on 2026-10-21. `rustup target list` offers wasip1, wasip1-threads, wasip2 only (rustc 1.99.1); no wasip3 target exists to retarget to. Owner upstream (rustup stable channel); re-measure when a wasip3 target ships. No faking: the 0.2 path is unchanged.
   → Measured: `rustup target list | grep wasi` → `wasm32-wasip1`, `wasm32-wasip1-threads`, `wasm32-wasip2 (installed)`; `rustc 1.99.1`.
+  → Done (RT-LANG-001 re-measure 2026-10-26): still BLOCKED — no `wasm32-wasip3` in installed targets (`wasm32-unknown-unknown` + `wasm32-wasip2` only; `rustc 1.98.1`); evidence log in 6903ad5; `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §6.10 Language toolchains — one per target language
 - [x] **LANG-042** Go/TinyGo 0.3 emission verdict: BLOCKED — toolchain absent here and no upstream 0.3 path evidenced.
   → Done: verdict recorded BLOCKED on 2026-10-21. `tinygo` is not installed on this machine; the repo pins `wit-bindgen-go 0.7.0` + Binaryen 133 (wasip2-era, per `crates/qqq-run/src/build.rs` docs) with no documented wasip3/0.3 emission path. Owner upstream (TinyGo); re-measure when TinyGo documents a 0.3 target. No faking: the 0.2 path is unchanged.
   → Measured: `tinygo version` → not recognized; `go version go1.27.0`; repo pins per build.rs docs.
+  → Done (RT-LANG-002 re-measure 2026-10-26): still BLOCKED — `tinygo` not installed; no 0.3 emission path; commit 6903ad5; `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §6.10 Language toolchains — one per target language
 - [x] **LANG-043** Python 0.3 emission verdict: BLOCKED — `componentize-py` absent and pinned to wasip2-era output.
   → Done: verdict recorded BLOCKED on 2026-10-21. `componentize-py` is not installed (CPython 3.13.2 present); the repo pins `componentize-py 0.25.1`, which packages the interpreter for wasip2. Owner upstream; re-measure on a release noting 0.3 output. No faking: the 0.2 path is unchanged.
   → Measured: `pip show componentize-py` → not found; repo pin 0.25.1 per build.rs docs.
+  → Done (RT-LANG-003 re-measure 2026-10-26): still BLOCKED — `componentize-py` not installed (CPython 3.13.2 present); commit 6903ad5; `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §6.10 Language toolchains — one per target language
 - [x] **LANG-044** C/C++ 0.3 emission verdict: BLOCKED — no clang/WASI SDK here and the pinned sysroot is wasip2.
   → Done: verdict recorded BLOCKED on 2026-10-21. `clang`/`wasm-ld` are not installed on this machine; the repo pins WASI SDK 34 Clang with a wasip2 sysroot + `wit-bindgen 0.62.0`. Owner upstream (WASI SDK sysroot with 0.3 support). No faking: the 0.2 path is unchanged.
   → Measured: `clang --version` → not recognized; repo pins per build.rs docs.
+  → Done (RT-LANG-004 re-measure 2026-10-26): still BLOCKED — `clang`/`wasm-ld` absent; commit 6903ad5; `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §6.10 Language toolchains — one per target language
 - [x] **LANG-045** TypeScript/AssemblyScript 0.3 emission verdict: BLOCKED — no asc/ComponentizeJS here and pinned output is wasip2.
   → Done: verdict recorded BLOCKED on 2026-10-21. `asc` is not installed (node v22.22.0 + `tsc 5.9.3` present); the repo pins `ComponentizeJS 0.23.0`, which emits wasip2. Owner upstream; re-measure on a release noting 0.3 output. No faking: the 0.2 path is unchanged.
   → Measured: `asc --version` → not recognized; repo pins per build.rs docs.
+  → Done (RT-LANG-005 re-measure 2026-10-26): still BLOCKED — `asc` absent (`node v22.22.0` + `tsc 5.9.3` present); commit 6903ad5; `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §6.10 Language toolchains — one per target language
 
 ---
@@ -4813,6 +4823,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [x] **TEST-020** Add dual-ABI instantiation coverage: a 0.2 guest and a 0.3 guest in the same host build, plus the unknown-import rejection on both paths.
   → Done: `crates/qqq-host/tests/dual_abi.rs` compiles real components, reads real import tables through `component_type().imports()`, and drives detection → linker → instantiate → run on one engine build; covers 0.2 run, 0.3 run, async trap-by-name, unknown-0.3-import fail-closed, ungranted-0.3-clock fail-closed, and call-time recheck against a mis-built linker.
   → Measured: same 6/6 as HOST-025 above (`cargo test -p qqq-host --test dual_abi`), each with red-first fault proof; detector unit tests (`version_detection_names_the_declared_abi`, `unknown_abi_builds_no_linker`) plus anti-drift WIT test in `host_wasi03.rs` pin the routing tables.
+  → Done (RT-WASI-003/004 re-measure 2026-10-26): `async_03_imports_trap_by_name` green (no async executor, 0.3 async unserved); 0.3 HTTP import refused closed by name (no 0.3 HTTP served); dual_abi 12/12 on 6903ad5; `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §6.1 `qqq-host` — the execution engine
 
 ### MIG — Migration

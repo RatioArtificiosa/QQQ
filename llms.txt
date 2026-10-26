@@ -41,7 +41,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [docs/glossary.md](docs/glossary.md) — The 18 defined terms. Several are load-bearing and mean something narrower here than in general use. (8 KB)
 - [docs/threat-model.md](docs/threat-model.md) — The adversaries QQQ defends against, and what it explicitly does not. (11 KB)
 - [docs/out-of-scope.md](docs/out-of-scope.md) — What is deliberately not defended, so absences are decisions rather than oversights. (7 KB)
-- [docs/languages/phase3.md](docs/languages/phase3.md) — Measured language probes, decisions, owned gaps and the path to production drivers. (18 KB)
+- [docs/languages/phase3.md](docs/languages/phase3.md) — Measured language probes, decisions, owned gaps and the path to production drivers. (19 KB)
 - [docs/languages/rust.md](docs/languages/rust.md) — The Rust toolchain's state, and its limitations — each measured rather than recalled. Read this before believing a Rust build is servable. (8 KB)
 - [docs/recipes/rust.md](docs/recipes/rust.md) — Task-oriented Rust recipes for the capabilities the host actually binds, and the §11.3 recipes that cannot be written yet, with what to do instead. (9 KB)
 - [docs/profiling.md](docs/profiling.md) — Where the time goes: which profilers exist on which platform, the measured `--version` startup table, and why `criterion` was rejected twice. (8 KB)
@@ -52,7 +52,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 ## The machinery behind the documents
 
 - [docs/abi-cost-measured.md](docs/abi-cost-measured.md) — The measured ABI-crossing costs (`PERF-005`), replacing the estimates in §9.3, with the environment, the estimate-by-estimate comparison, and an explicit statement of what was not measured. (19 KB)
-- [docs/wasi-032-post-migration-report.md](docs/wasi-032-post-migration-report.md) — The WASI 0.3.2 post-migration measurement report (Phase 7B): every §6.12 field measured or marked UNVERIFIED, with commands and outputs. (10 KB)
+- [docs/wasi-032-post-migration-report.md](docs/wasi-032-post-migration-report.md) — The WASI 0.3.2 post-migration measurement report (Phase 7B): every §6.12 field measured or marked UNVERIFIED, with commands and outputs. (12 KB)
 - [docs/verified-facts.md](docs/verified-facts.md) — Facts asserted in the Proposal, each classified by how perishable it is and when it was last checked. (8 KB)
 - [docs/reconciliation.md](docs/reconciliation.md) — Corrections made to the Proposal, with the reasoning. (4 KB)
 - [docs/wasmtime-advisory-process.md](docs/wasmtime-advisory-process.md) — How a Wasmtime security advisory is handled. _(human)_ (11 KB)

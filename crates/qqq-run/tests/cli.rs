@@ -2232,6 +2232,73 @@ fn run_refuses_an_ungranted_import_and_names_the_right_capability() {
     );
 }
 
+/// RT-WASI-006 — refusing a WASI-baseline guest is intentional, not a regression.
+///
+/// `orders-api` imports the 14-interface WASI 0.2 baseline and grants only
+/// `qqq:http/http`. `run` must refuse before instantiation with QQQ-6003
+/// naming every missing import — the same fail-closed pre-flight as the
+/// single-import case above, extended to the full baseline set. This pins
+/// the documented decision (RT-WASI-006: document, do not widen grants):
+/// if a future change grants the baseline implicitly or drops an import
+/// from the error, this test fails.
+const NEEDS_WASI_BASELINE: &str = r#"(component
+  (import "wasi:cli/environment@0.2.9" (instance $e))
+  (import "wasi:cli/exit@0.2.9" (instance $x))
+  (import "wasi:cli/stdin@0.2.9" (instance $in))
+  (import "wasi:cli/stdout@0.2.9" (instance $out))
+  (import "wasi:cli/stderr@0.2.9" (instance $err))
+  (import "wasi:cli/terminal-input@0.2.9" (instance $ti))
+  (import "wasi:cli/terminal-output@0.2.9" (instance $to))
+  (import "wasi:cli/terminal-stdin@0.2.9" (instance $tsi))
+  (import "wasi:cli/terminal-stdout@0.2.9" (instance $tso))
+  (import "wasi:cli/terminal-stderr@0.2.9" (instance $tse))
+  (import "wasi:clocks/monotonic-clock@0.2.9" (instance $clock))
+  (import "wasi:io/error@0.2.9" (instance $ioe))
+  (import "wasi:io/poll@0.2.9" (instance $poll))
+  (import "wasi:io/streams@0.2.9" (instance $streams))
+  (core module $m)
+  (core instance $i (instantiate $m))
+)"#;
+
+/// The 14-interface baseline is refused by name, and every name appears.
+#[test]
+fn run_refuses_the_wasi_baseline_by_name() {
+    let s = Sandbox::new("run-baseline-refused");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    let Some(wasm) = encode(&s, "baseline", NEEDS_WASI_BASELINE) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    let run = s.run(&["run", &wasm]);
+    run.assert_failed().assert_contains("QQQ-6003");
+    let out = run.all();
+    for iface in [
+        "wasi:cli/environment@0.2.9",
+        "wasi:cli/exit@0.2.9",
+        "wasi:cli/stdin@0.2.9",
+        "wasi:cli/stdout@0.2.9",
+        "wasi:cli/stderr@0.2.9",
+        "wasi:cli/terminal-input@0.2.9",
+        "wasi:cli/terminal-output@0.2.9",
+        "wasi:cli/terminal-stdin@0.2.9",
+        "wasi:cli/terminal-stdout@0.2.9",
+        "wasi:cli/terminal-stderr@0.2.9",
+        "wasi:clocks/monotonic-clock@0.2.9",
+        "wasi:io/error@0.2.9",
+        "wasi:io/poll@0.2.9",
+        "wasi:io/streams@0.2.9",
+    ] {
+        assert!(
+            out.contains(iface),
+            "the refusal must name every missing import, missing: {iface}\n{out}"
+        );
+    }
+}
+
 /// The same component **runs** once the capability is granted.
 ///
 /// The positive control. Without it, a `run` that refused everything would pass

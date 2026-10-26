@@ -218,7 +218,7 @@ Populated only from repository evidence. Nothing here is a roadmap promise.
 |---|---|
 | Core runtime | IN PROGRESS — pre-alpha workspace, 12 crates (11 shipped plus the never-shipped `xtask` gate runner) |
 | WebAssembly execution | IMPLEMENTED — Wasmtime 48.0.7 pinned, real components served over HTTP |
-| Capability model | IMPLEMENTED — manifest to grants to per-instance linker; 6 host modules registered (WASI baseline and test assertions unconditional, 0.3 clock and clock/crypto/http when granted); sql, kv, fs, queue, env, ai, dns, trace, secrets declared, not yet bound |
+| Capability model | IMPLEMENTED — manifest to grants to per-instance linker; 6 host modules registered (WASI baseline and test assertions unconditional, the sync-only 0.3 clock and the 0.2 clock/crypto/http when granted — no 0.3 HTTP served); sql, kv, fs, queue, env, ai, dns, trace, secrets declared, not yet bound |
 | CLI | IN PROGRESS — new, build, run, dev, serve, test, inspect, audit, MCP and more |
 | Language support | IN PROGRESS — Rust narrow probe passing; AssemblyScript, C/C++, TypeScript engine path, Go, Python experimental (see table above) |
 | AOT | IN PROGRESS — managed cache and native emission; trust design open |
@@ -3188,6 +3188,23 @@ re-measure tripwire, never faked; the 0.2 paths are unchanged.
 
 Each row maps to its ledger item (`LANG-041`…`LANG-045`, ticked with this table as evidence). Re-measure per row when its tripwire fires; until then the dual-ABI work proceeds with 0.2 guests plus WAT fixtures, per the migration goal's Phase 3.
 
+#### Re-measure 2026-10-26 (RT-WASI-005, RT-LANG-001–005; Windows host)
+
+Same question, same method (`rustup target list --installed`, binary
+presence checks, repo-pinned versions from `crates/qqq-run/src/build.rs`
+docs). Verdict for all five languages: **still BLOCKED** — no toolchain
+emits 0.3, nothing was built, nothing is claimed.
+
+| Language | Probe (measured output, 2026-10-26) | Verdict | Owner / re-measure on |
+|---|---|---|---|
+| Rust | `rustup target list --installed`: wasip2, wasm32-unknown-unknown (+ host triples x86_64-pc-windows-msvc); **no `wasm32-wasip3`** target offered (active toolchain `rustc 1.98.1`, `cargo 1.98.1`, `wasm-tools 1.262.0`) | BLOCKED — no target to emit | upstream rustup stable channel shipping wasip3 |
+| Go / TinyGo | `tinygo`: not recognized (absent; `go version go1.27.0 windows/amd64` present); repo pins `wit-bindgen-go 0.7.0` + Binaryen 133 (wasip2-era) | BLOCKED — unmeasurable here, no upstream 0.3 path | TinyGo documenting a wasip3/0.3 target |
+| Python | `import componentize_py`: `ModuleNotFoundError` (CPython 3.13.2 present); repo pins `componentize-py 0.25.1` (packages interpreter for wasip2) | BLOCKED | upstream release noting 0.3 output |
+| C / C++ | `clang`, `wasm-ld`: not recognized (both absent); repo pins WASI SDK 34 Clang with a wasip2 sysroot + `wit-bindgen 0.62.0` | BLOCKED | WASI SDK sysroot with 0.3 support |
+| TypeScript / AssemblyScript | `asc`: not recognized (absent; `node v22.22.0`, `tsc 5.9.3` present); repo pins `ComponentizeJS 0.23.0` (wasip2 output) | BLOCKED | upstream release noting 0.3 output |
+
+Transcript: `docs/wasi-032-evidence/toolchain-matrix-reprobe-2026-10-26.log`. The 2026-10-21 rows above stand; this entry only re-confirms them.
+
 ---
 
 <!-- source: docs/languages/rust.md -->
@@ -4556,6 +4573,7 @@ never a guess.
 
 - Date measured: 2026-10-21 (toolchain matrix, serve, run) and 2026-10-22
   (t5 re-probe, pins, conformance, claims).
+- Re-measured 2026-10-26 (RT-WASI-002): implements/map still absent, dual-abi suite green (12 passed).
 - Commit measured: `2870b90` (`wasi: retire-or-keep the 0.2 linker path
   (HOST-027)`), tree clean — confirmed on both dates: the Linux bridge
   banner records `commit 2870b90 (tree clean)` on 10-21 and `git status`
@@ -4574,8 +4592,8 @@ never a guess.
 | Date / commit / PR | 2026-10-21/22, `2870b90`, no PR (direct push, CI per SHA) |
 | `wasmtime` version | `48.0.7` — `Cargo.lock:2649-2650` (`name = "wasmtime"`, `version = "48.0.7"`); `ENGINE_VERSION = "48.0.7"` (`crates/qqq-host/src/config.rs:556`); anti-drift test `engine_version_matches_the_pinned_dependency` fails the build on drift |
 | `wasmtime-wasi` version | `48.0.7` — `Cargo.lock:2885-2886`; workspace enables `features = ["p2"]` only (`Cargo.toml:133`) |
-| `implements` supported? | NO — blocked, measured. `wit-parser 0.254.2` keyword table (`ast/lex.rs`, vendored sources) has `map` but no `implements`; `wasmtime-wasi 48.0.7` `src/p3` tree is 0.3.0-level (no `implements`, no `map<`). Commands: `Select-String` over vendored `lex.rs` + `get-childitem -recurse` over `src/p3` (HOST-026 tick, 2026-10-22). Consequence: the 0.3 path serves sync 0.3.0 shapes only; async names (`wait-until`/`wait-for`) trap by name, never silently. Tripwire test `served_03_needs_no_031_features` fails the build if the vendored WIT ever gains either keyword. |
-| `map<K,V>` supported? | NO — blocked, measured (same commands as above). Same consequence and same tripwire. |
+| `implements` supported? | NO — blocked, measured. `wit-parser 0.254.2` keyword table (`ast/lex.rs`, vendored sources) has `map` but no `implements`; `wasmtime-wasi 48.0.7` `src/p3` tree is 0.3.0-level (no `implements`, no `map<`). Commands: `Select-String` over vendored `lex.rs` + `get-childitem -recurse` over `src/p3` (HOST-026 tick, 2026-10-22; re-measured 2026-10-26 with identical result). Consequence: the 0.3 path serves sync 0.3.0 shapes only; async names (`wait-until`/`wait-for`) trap by name, never silently. Tripwire test `served_03_needs_no_031_features` fails the build if the vendored WIT ever gains either keyword. |
+| `map<K,V>` supported? | NO — blocked, measured (same commands as above; re-verified 2026-10-26 with the same result). Same consequence and same tripwire. |
 | Rust: target / component / 0.3 imports / exec | BLOCKED — no retargeting. Per-toolchain probe 2026-10-22 (`docs/wasi-032-evidence/rustup-targets-per-toolchain.log`; active-toolchain listing in `docs/wasi-032-evidence/rustup-targets-active-toolchain.log`, active toolchain `stable`, `rustc 1.99.1`): `stable` has `wasm32-unknown-unknown` + `wasm32-wasip2`; `1.98` has `wasm32-wasip2`; `nightly`/`1.85.0`/`1.97.1` have hosts only. NO `wasm32-wasip3` target on any installed toolchain (LANG-041; the 2026-10-21 matrix in `docs/languages/phase3.md` reads the same verdict, re-probe narrative in `docs/wasi-032-evidence/toolchain-matrix-reprobe-2026-10-22.log`). No 0.3 component producible; 0.2 path unchanged. Execution conformance is the 0.2 suite, green in every gate (`conformance_exec` incl. `--ignored`, `run_language_probes`, `run_conformance`). |
 | Go / TinyGo: same | BLOCKED — `tinygo`: not installed (`go 1.27.0` present); repo pins `wit-bindgen-go 0.7.0` + Binaryen 133 (wasip2-era, no 0.3 emission path evidenced). Owner upstream TinyGo (LANG-042). Nothing faked. |
 | Python: same | BLOCKED — `import componentize_py`: `ModuleNotFoundError` (CPython 3.13.2 present); repo pins `componentize-py 0.25.1` (wasip2 output). Owner upstream (LANG-043). |
@@ -4589,6 +4607,31 @@ never a guess.
 | Checklist items updated | HOST-025, HOST-026, HOST-027, LANG-041, LANG-042, LANG-043, LANG-044, LANG-045, ABI-017, ABI-018, CON-019, TEST-020 — all ticked with `→ Done:` / `→ Measured:` lines. |
 | README / Proposal claims changed | `README.md:212-213` (Wasmtime 48.0.7, 6 modules D-WASI-4 wording); `QQQ-Proposal-V1.md` glossary WASI entry + correction A-4 + evidence B-5/B-6; `docs/languages/phase3.md` §WASI-0.3 verdicts (all BLOCKED, 2026-10-21) + t5 re-probe note; `docs/languages/rust.md`, `docs/recipes/rust.md`. |
 | Any regression | None from the migration. Three observations, all dispositioned: (1) graf MCP hang under load made one gate red — same-SHA rerun GREEN, flake with mechanism recorded (§O-543 rule followed); (2) fixture CRLF scare after fault/restore scripts — `git diff` byte-identical, restored to HEAD; (3) `orders-api` run refusal is pre-existing behaviour (§O-782), the 0.3-aware pre-flight did not change the 0.2 outcome. |
+
+### RT scope decisions, 2026-10-26 (RT-WASI-003/004/006, RT-ABI-004)
+
+- **Served 0.3 surface, exactly:** `now` and `get-resolution` from
+  `wasi:clocks/monotonic-clock@0.3.2`, grant-gated. Nothing else is
+  served. `wait-until` and `wait-for` are named traps that name engine
+  async support (`async_03_imports_trap_by_name` green); `wasi:http`
+  has no 0.3 implementation in this host, so a 0.3 HTTP import refuses
+  closed as ungranted/unmapped (`wasi03-unserved-import-refusal.log`),
+  never silently and never reinterpreted onto 0.2 (`an_unknown_03_import_fails_closed_and_names_itself`
+  green). No 0.3 streams, futures, `implements`, or `map<K,V>` anywhere.
+- **`run` vs `serve` on a WASI baseline:** `qqqai run` refuses a guest
+  whose imports are not granted (QQQ-6003 naming every missing import;
+  re-measured 2026-10-26 on `orders-api`: the same 14 wasi: imports,
+  `run_refuses_the_wasi_baseline_by_name` green in
+  `crates/qqq-run/tests/cli.rs`). This is intentional and stays:
+  granting the baseline to `run` would widen every invocation's
+  authority without a recorded decision (RT-WASI-006: document, do not
+  widen). `qqqai serve` keeps its documented per-route policy (pinned by
+  `serve_policy` tests over a real socket).
+- **Catalogue gaps reported to the registry owner:** none beyond the
+  known unserved 0.3 surface above. In particular
+  `wasi:http/incoming-handler@0.3.2` stays unmapped — do not infer
+  `http.server` from the prefix; a mapping needs a contract row
+  (RT-ABI-004). No `qqq-abi` change was made for this report.
 
 ### 0.3 guest probes (launch evidence, Windows)
 

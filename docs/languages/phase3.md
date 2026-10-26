@@ -299,3 +299,20 @@ re-measure tripwire, never faked; the 0.2 paths are unchanged.
 | TypeScript / AssemblyScript | `asc`: not installed (`node v22.22.0`, `tsc 5.9.3` present); repo pins `ComponentizeJS 0.23.0` (wasip2 output) | BLOCKED | upstream release noting 0.3 output |
 
 Each row maps to its ledger item (`LANG-041`…`LANG-045`, ticked with this table as evidence). Re-measure per row when its tripwire fires; until then the dual-ABI work proceeds with 0.2 guests plus WAT fixtures, per the migration goal's Phase 3.
+
+### Re-measure 2026-10-26 (RT-WASI-005, RT-LANG-001–005; Windows host)
+
+Same question, same method (`rustup target list --installed`, binary
+presence checks, repo-pinned versions from `crates/qqq-run/src/build.rs`
+docs). Verdict for all five languages: **still BLOCKED** — no toolchain
+emits 0.3, nothing was built, nothing is claimed.
+
+| Language | Probe (measured output, 2026-10-26) | Verdict | Owner / re-measure on |
+|---|---|---|---|
+| Rust | `rustup target list --installed`: wasip2, wasm32-unknown-unknown (+ host triples x86_64-pc-windows-msvc); **no `wasm32-wasip3`** target offered (active toolchain `rustc 1.98.1`, `cargo 1.98.1`, `wasm-tools 1.262.0`) | BLOCKED — no target to emit | upstream rustup stable channel shipping wasip3 |
+| Go / TinyGo | `tinygo`: not recognized (absent; `go version go1.27.0 windows/amd64` present); repo pins `wit-bindgen-go 0.7.0` + Binaryen 133 (wasip2-era) | BLOCKED — unmeasurable here, no upstream 0.3 path | TinyGo documenting a wasip3/0.3 target |
+| Python | `import componentize_py`: `ModuleNotFoundError` (CPython 3.13.2 present); repo pins `componentize-py 0.25.1` (packages interpreter for wasip2) | BLOCKED | upstream release noting 0.3 output |
+| C / C++ | `clang`, `wasm-ld`: not recognized (both absent); repo pins WASI SDK 34 Clang with a wasip2 sysroot + `wit-bindgen 0.62.0` | BLOCKED | WASI SDK sysroot with 0.3 support |
+| TypeScript / AssemblyScript | `asc`: not recognized (absent; `node v22.22.0`, `tsc 5.9.3` present); repo pins `ComponentizeJS 0.23.0` (wasip2 output) | BLOCKED | upstream release noting 0.3 output |
+
+Transcript: `docs/wasi-032-evidence/toolchain-matrix-reprobe-2026-10-26.log`. The 2026-10-21 rows above stand; this entry only re-confirms them.

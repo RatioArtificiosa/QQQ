@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+
+// Probe guest that exercises `qqq:log/logging` and reports a summary the
+// host asserts on. Includes a value the host is told (out of band) is
+// secret, so the redaction path is exercised end to end.
+
+[package]
+name = "probe-log"
+version = "0.1.0"
+
+[build]
+language = "rust"
+target = "wasm32-wasip2"
+profile = "release"
+
+[capabilities.log]
+
+[capabilities.secret]
+secrets = ["env:LEAK"]
+
+[capabilities.crypto]
+sign = ["ed25519"]
+
+[capabilities.http]
+server = true

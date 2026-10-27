@@ -306,13 +306,18 @@ fn ambient_interfaces() -> Vec<HostInterface> {
         iface(
             "qqq:log@1.0.0",
             &[LogWrite],
-            false,
+            // Implemented: `host_log::register` binds `logging` with
+            // host-attributed identity and secret redaction (`HOST-030`).
+            true,
             "Structured logging with host-applied redaction",
         ),
         iface(
             "qqq:trace@1.0.0",
             &[TraceWrite],
-            false,
+            // Implemented: `host_trace::register` binds `tracing` with
+            // host-owned spans, enforced parentage, and W3C traceparent
+            // (`HOST-031`). OTLP export stays OBS-012.
+            true,
             "Spans and events with W3C Trace Context propagation",
         ),
         iface(
@@ -693,7 +698,13 @@ mod tests {
             .collect();
         assert_eq!(
             implemented,
-            vec!["qqq:clock@1.0.0", "qqq:env@1.0.0", "qqq:secrets@1.0.0"],
+            vec![
+                "qqq:clock@1.0.0",
+                "qqq:env@1.0.0",
+                "qqq:log@1.0.0",
+                "qqq:secrets@1.0.0",
+                "qqq:trace@1.0.0"
+            ],
             "the set of implemented interfaces changed; update this test in the \
              same commit that lands (or removes) an implementation"
         );

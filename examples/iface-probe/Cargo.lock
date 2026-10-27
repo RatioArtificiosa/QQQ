@@ -112,7 +112,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-log"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "probe-secrets"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "probe-trace"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",

@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Probe guest that exercises `qqq:trace/tracing` and reports trace ids and
+// parentage facts the host asserts on.
+
+[package]
+name = "probe-trace"
+version = "0.1.0"
+
+[build]
+language = "rust"
+target = "wasm32-wasip2"
+profile = "release"
+
+[capabilities.trace]
+
+[capabilities.http]
+server = true

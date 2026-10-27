@@ -11,13 +11,28 @@
 //! granted" and "not in the allowlist", because distinguishing them would let
 //! a guest enumerate which variables exist. `unset` is a separate, honest
 //! state — allowed but absent — which `get-or` turns into the fallback.
+//!
+//! ```
+//! assert!(qqq_host::host_env::ENVIRONMENT.contains("environment"));
+//! ```
 
 use qqq_cap::capability::Capability::EnvRead;
 
 /// The WIT package this module implements.
+///
+/// ```
+/// assert_eq!(qqq_host::host_env::INTERFACE, "qqq:env@1.0.0");
+/// ```
 pub const INTERFACE: &str = "qqq:env@1.0.0";
 
 /// The environment interface, as a component imports it.
+///
+/// ```
+/// assert_eq!(
+///     qqq_host::host_env::ENVIRONMENT,
+///     "qqq:env/environment@1.0.0"
+/// );
+/// ```
 pub const ENVIRONMENT: &str = "qqq:env/environment@1.0.0";
 
 mod bindings {
@@ -35,6 +50,13 @@ pub use bindings::qqq::env::environment::EnvError as WitEnvError;
 ///
 /// Links `qqq:env/environment` only when `env.read` is granted; every
 /// function re-checks at call time.
+///
+/// ```
+/// let engine = wasmtime::Engine::default();
+/// let mut linker = wasmtime::component::Linker::<qqq_host::linker::StoreData>::new(&engine);
+/// qqq_host::host_env::register(&mut linker, &qqq_cap::resolve::GrantSet::empty())
+///     .expect("empty grants register nothing");
+/// ```
 ///
 /// # Errors
 ///
@@ -54,6 +76,11 @@ pub fn register(
 }
 
 /// `get(name) -> result<string, env-error>`.
+///
+/// The grant re-check is inline (not delegated to `lookup`), so the audit
+/// sees the re-check in the body that enforces it (`ARCH-012`). The WIT has
+/// no `not-granted` case — an ungranted call is `not-allowed`, which is also
+/// what an unlisted name gets, so a guest cannot probe the allowlist.
 fn register_get(
     inst: &mut wasmtime::component::LinkerInstance<'_, crate::linker::StoreData>,
 ) -> wasmtime::Result<()> {
@@ -63,14 +90,17 @@ fn register_get(
          (name,): (String,)|
          -> wasmtime::Result<(std::result::Result<String, WitEnvError>,)> {
             crate::guard::guard("qqq:env/environment.get", || {
-                let out = match lookup(store.data(), &name) {
-                    Err(e) => Err(e),
-                    Ok(None) => Err(WitEnvError::Unset),
-                    Ok(Some(bytes)) => {
-                        String::from_utf8(bytes).map_err(|_| WitEnvError::InvalidUtf8)
+                let data = store.data();
+                if !data.grants.grants(EnvRead) {
+                    return Ok((Err(WitEnvError::NotAllowed),));
+                }
+                match lookup(data, &name) {
+                    None => Ok((Err(WitEnvError::NotAllowed),)),
+                    Some(None) => Ok((Err(WitEnvError::Unset),)),
+                    Some(Some(bytes)) => {
+                        Ok((String::from_utf8(bytes).map_err(|_| WitEnvError::InvalidUtf8),))
                     }
-                };
-                Ok((out,))
+                }
             })
         },
     )?;
@@ -80,7 +110,8 @@ fn register_get(
 /// `get-or(name, default) -> result<string, env-error>`.
 ///
 /// The fallback applies to `unset` only: substituting a default for a denied
-/// capability would hide a misconfiguration.
+/// capability would hide a misconfiguration. Grant and allowlist re-checked
+/// inline, as above; `not-allowed` covers ungranted and unlisted alike.
 fn register_get_or(
     inst: &mut wasmtime::component::LinkerInstance<'_, crate::linker::StoreData>,
 ) -> wasmtime::Result<()> {
@@ -90,14 +121,17 @@ fn register_get_or(
          (name, default): (String, String)|
          -> wasmtime::Result<(std::result::Result<String, WitEnvError>,)> {
             crate::guard::guard("qqq:env/environment.get-or", || {
-                let out = match lookup(store.data(), &name) {
-                    Err(e) => Err(e),
-                    Ok(None) => Ok(default),
-                    Ok(Some(bytes)) => {
-                        String::from_utf8(bytes).map_err(|_| WitEnvError::InvalidUtf8)
+                let data = store.data();
+                if !data.grants.grants(EnvRead) {
+                    return Ok((Err(WitEnvError::NotAllowed),));
+                }
+                match lookup(data, &name) {
+                    None => Ok((Err(WitEnvError::NotAllowed),)),
+                    Some(None) => Ok((Ok(default),)),
+                    Some(Some(bytes)) => {
+                        Ok((String::from_utf8(bytes).map_err(|_| WitEnvError::InvalidUtf8),))
                     }
-                };
-                Ok((out,))
+                }
             })
         },
     )?;
@@ -128,25 +162,21 @@ fn register_allowed_names(
     Ok(())
 }
 
-/// Look a name up: the grant, then the allowlist, then the value.
+/// Look a name up in the allowlist map.
 ///
-/// The map carries every allowed name (`None` for listed-but-unset), so a
-/// missing *key* is unlisted (`not-allowed`) while a `None` *value* is
-/// `unset`. Collapsing the two would let a guest enumerate the allowlist
-/// by probing names — the precise leak the single `not-allowed` error for
-/// "ungranted or unlisted" exists to prevent.
-fn lookup(
-    data: &crate::linker::StoreData,
-    name: &str,
-) -> std::result::Result<Option<Vec<u8>>, WitEnvError> {
-    if !data.grants.grants(EnvRead) {
-        return Err(WitEnvError::NotAllowed);
-    }
-    match data.env.get(name) {
-        None => Err(WitEnvError::NotAllowed),
-        Some(None) => Ok(None),
-        Some(Some(value)) => Ok(Some(value.clone())),
-    }
+/// Returns [None] for an unlisted name and [Some(None)] for a listed-but-
+/// unset one. The grant check lives in the callers, visibly: this helper is
+/// pure lookup, so the audit ([ARCH-012]) sees the re-check in the body that
+/// enforces it rather than behind a call.
+///
+/// `Option<Option<..>>` is the model, not laziness: three states need three
+/// values, and a custom enum would rename exactly what the nesting says.
+#[allow(
+    clippy::option_option,
+    reason = "three states need three values; see above"
+)]
+fn lookup(data: &crate::linker::StoreData, name: &str) -> Option<Option<Vec<u8>>> {
+    data.env.get(name).cloned()
 }
 
 #[cfg(test)]
@@ -164,12 +194,11 @@ mod tests {
         } else {
             GrantSet::empty()
         };
-        let mut data = crate::linker::StoreData::new(grants);
-        data.env = pairs
+        let map: std::collections::BTreeMap<String, Option<Vec<u8>>> = pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.map(<[u8]>::to_vec)))
             .collect();
-        data
+        crate::linker::StoreData::new(grants).with_env(map)
     }
 
     /// Lookups distinguish the three states.
@@ -177,13 +206,11 @@ mod tests {
     fn lookup_states_are_distinct() {
         let data = data_with(true, &[("A", Some(b"1".as_slice())), ("B", None)]);
         assert_eq!(
-            lookup(&data, "A").expect("allowed").as_deref(),
+            lookup(&data, "A").flatten().as_deref(),
             Some(b"1".as_slice())
         );
-        assert_eq!(lookup(&data, "B").expect("allowed but unset"), None);
-        assert!(matches!(lookup(&data, "C"), Err(WitEnvError::NotAllowed)));
-        let data = data_with(false, &[("A", Some(b"1".as_slice()))]);
-        assert!(matches!(lookup(&data, "A"), Err(WitEnvError::NotAllowed)));
+        assert_eq!(lookup(&data, "B"), Some(None), "listed but unset");
+        assert_eq!(lookup(&data, "C"), None, "unlisted is absent");
     }
 
     /// The register links exactly when granted.

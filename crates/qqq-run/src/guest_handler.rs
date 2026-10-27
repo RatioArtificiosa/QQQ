@@ -951,6 +951,12 @@ impl GuestApp {
         let mut outcome: Option<Result<abi::Response>> = None;
         instance.run(|store, wasm| {
             outcome = Some(call_handler(&mut *store, wasm, &self.handle, request));
+            // Guest logs drain here, on every path that reaches the call:
+            // stdout carries the response, so diagnostics go to stderr where
+            // a piped consumer never sees them.
+            for record in std::mem::take(&mut store.data_mut().logs) {
+                eprintln!("qqq:log {}", qqq_host::host_log::format_record(&record));
+            }
             // The closure itself succeeds: the trap machinery is for the *guest's*
             // execution, and a host-side decode failure is not one.
             Ok(())
@@ -2299,6 +2305,200 @@ mod tests {
             "tamper=err:unavailable",
             "public-key=ok:32",
             "unknown=err:not-granted",
+        ] {
+            assert!(
+                body.contains(expected),
+                "the served summary must report {expected}: {body}"
+            );
+        }
+    }
+
+    /// **Logs travel the serve path: manifest → guest → summary, secrets never leak.**
+    ///
+    /// Builds the app the way `serve` does (grants from a manifest, material
+    /// resolved once, installed via the setter), then drives a real request
+    /// through `handle_request`. The probe guest runs the same scenario the
+    /// `iface_log` e2e covers, and the body carries the summary — so this
+    /// proves the link and the call through the production request path. The
+    /// redaction itself is covered at the store boundary there; here the
+    /// serve-specific claim is that the summary reaches the caller and the
+    /// secret value never appears in the served body.
+    #[test]
+    fn log_flows_from_manifest_to_guest_answer() {
+        fn log_probe_component() -> Option<Vec<u8>> {
+            use std::sync::OnceLock;
+            static BUILT: OnceLock<bool> = OnceLock::new();
+            let workspace =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
+            let artifact = workspace.join("target/wasm32-wasip2/release/probe_log.wasm");
+            if !artifact.is_file() {
+                let ok = *BUILT.get_or_init(|| {
+                    let has_target = std::process::Command::new("rustc")
+                        .args(["--print", "target-list"])
+                        .output()
+                        .is_ok_and(|o| {
+                            String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2")
+                        });
+                    if !has_target {
+                        println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
+                        return false;
+                    }
+                    std::process::Command::new("cargo")
+                        .args([
+                            "build",
+                            "--release",
+                            "--target",
+                            "wasm32-wasip2",
+                            "--locked",
+                        ])
+                        .current_dir(&workspace)
+                        .output()
+                        .is_ok_and(|o| o.status.success())
+                });
+                if !ok {
+                    println!("SKIP: probe guest build failed");
+                    return None;
+                }
+            }
+            Some(std::fs::read(&artifact).expect("probe component reads"))
+        }
+
+        let Some(bytes) = log_probe_component() else {
+            return;
+        };
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+             [capabilities.log]\n\
+             [capabilities.secret]\nsecrets = [\"env:LEAK\"]\n\
+             [capabilities.crypto]\nsign = [\"ed25519\"]\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("probe manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("engine config"))
+            .expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        let mut app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)
+            .expect("probe app builds");
+        let store = qqq_host::host_secrets::SecretStore::with_grants(
+            vec!["LEAK".to_owned()],
+            vec![qqq_host::host_secrets::SecretMaterial::new(
+                "LEAK",
+                b"test-only-leak-value-4f6d".to_vec(),
+                qqq_host::host_secrets::PermittedOp::all().to_vec(),
+            )],
+        );
+        app.set_secrets(store);
+        let response = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the probe request serves");
+        let body = String::from_utf8(response.body.clone()).expect("the summary is UTF-8");
+        for expected in [
+            "emit=ok",
+            "emit-secret=ok",
+            "emit-many=ok",
+            "emit-big=err:record-too-large",
+            "emit-attrs=err:record-too-large",
+        ] {
+            assert!(
+                body.contains(expected),
+                "the served summary must report {expected}: {body}"
+            );
+        }
+        assert!(
+            !body.contains("test-only-leak-value-4f6d"),
+            "the served summary must never carry the secret value: {body}"
+        );
+    }
+
+    /// **Traces travel the serve path: manifest → guest → summary.**
+    ///
+    /// Same production-path shape as the log test above: grants from a
+    /// manifest, a real request through `handle_request`, the probe guest's
+    /// scenario as the body. The span table and mirrored log rows are
+    /// asserted at the store boundary in `iface_trace`; here the claim is
+    /// that the trace scenario runs end to end when served.
+    #[test]
+    fn trace_flows_from_manifest_to_guest_answer() {
+        fn trace_probe_component() -> Option<Vec<u8>> {
+            use std::sync::OnceLock;
+            static BUILT: OnceLock<bool> = OnceLock::new();
+            let workspace =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
+            let artifact = workspace.join("target/wasm32-wasip2/release/probe_trace.wasm");
+            if !artifact.is_file() {
+                let ok = *BUILT.get_or_init(|| {
+                    let has_target = std::process::Command::new("rustc")
+                        .args(["--print", "target-list"])
+                        .output()
+                        .is_ok_and(|o| {
+                            String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2")
+                        });
+                    if !has_target {
+                        println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
+                        return false;
+                    }
+                    std::process::Command::new("cargo")
+                        .args([
+                            "build",
+                            "--release",
+                            "--target",
+                            "wasm32-wasip2",
+                            "--locked",
+                        ])
+                        .current_dir(&workspace)
+                        .output()
+                        .is_ok_and(|o| o.status.success())
+                });
+                if !ok {
+                    println!("SKIP: probe guest build failed");
+                    return None;
+                }
+            }
+            Some(std::fs::read(&artifact).expect("probe component reads"))
+        }
+
+        let Some(bytes) = trace_probe_component() else {
+            return;
+        };
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+             [capabilities.trace]\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("probe manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("engine config"))
+            .expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        let app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)
+            .expect("probe app builds");
+        let response = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the probe request serves");
+        let body = String::from_utf8(response.body.clone()).expect("the summary is UTF-8");
+        for expected in [
+            "tp-start=none",
+            "root=ok",
+            "tp-root=ok",
+            "child=ok",
+            "event=ok",
+            "attrs=ok",
+            "set-error=ok",
         ] {
             assert!(
                 body.contains(expected),

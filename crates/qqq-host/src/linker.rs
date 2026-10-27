@@ -202,6 +202,21 @@ pub struct StoreData {
     /// "ungranted or unlisted" exists to prevent.
     pub env: std::collections::BTreeMap<String, Option<Vec<u8>>>,
 
+    /// This instance's guest log records — `HOST-030`.
+    ///
+    /// Bounded (see `host_log` limits); `Instance::take_logs` drains it for
+    /// the run path to print and the serve path to emit. Read directly by
+    /// tests, like `egress_audit`: the buffer is the emission point the
+    /// wiring proves.
+    pub logs: Vec<crate::host_log::LogRecord>,
+
+    /// This instance's tracing state — `HOST-031`.
+    ///
+    /// Span table plus the active trace for `current-traceparent`. Per
+    /// instance, dropped with the store — a span cannot outlive the
+    /// execution it describes.
+    pub trace: crate::host_trace::TraceState,
+
     /// This request's hold on its tenant's shared output budget, if any.
     ///
     /// `None` is the standalone per-instance budget every existing caller
@@ -357,6 +372,10 @@ impl Default for StoreData {
             // allowlist serves none. See the field's own doc for why
             // membership is the allowlist.
             env: std::collections::BTreeMap::new(),
+            // No records and no spans: an instance that never logged holds
+            // nothing to drain.
+            logs: Vec::new(),
+            trace: crate::host_trace::TraceState::new(),
             tenant_output: None,
             // An empty environment and no wall clock: the deny-by-default answer
             // for a store that was not built from a manifest. The `expect` is
@@ -444,6 +463,10 @@ impl StoreData {
             // allowlist serves none. See the field's own doc for why
             // membership is the allowlist.
             env: std::collections::BTreeMap::new(),
+            // No records and no spans: an instance that never logged holds
+            // nothing to drain.
+            logs: Vec::new(),
+            trace: crate::host_trace::TraceState::new(),
             tenant_output,
             // Derived from the grants so a store built this way permits exactly
             // what the grant set says -- no more, and no less.
@@ -566,6 +589,10 @@ impl StoreData {
             // allowlist serves none. See the field's own doc for why
             // membership is the allowlist.
             env: std::collections::BTreeMap::new(),
+            // No records and no spans: an instance that never logged holds
+            // nothing to drain.
+            logs: Vec::new(),
+            trace: crate::host_trace::TraceState::new(),
             tenant_output: None,
             wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
@@ -625,6 +652,12 @@ impl StoreData {
     /// the manifest and the process environment and sets the same value, so
     /// a test that sets the store under examination exercises the identical
     /// enforcement the guest sees in production.
+    ///
+    /// ```
+    /// let data = qqq_host::linker::StoreData::new(qqq_cap::resolve::GrantSet::empty())
+    ///     .with_secrets(qqq_host::host_secrets::SecretStore::new());
+    /// assert!(!data.secrets.exists("anything"));
+    /// ```
     #[must_use]
     pub fn with_secrets(mut self, secrets: crate::host_secrets::SecretStore) -> Self {
         self.secrets = secrets;
@@ -637,6 +670,14 @@ impl StoreData {
     /// against the process environment and sets the same value, so a test
     /// that sets the map under examination exercises the identical
     /// enforcement the guest sees in production.
+    ///
+    /// ```
+    /// let mut map = std::collections::BTreeMap::new();
+    /// map.insert("A".to_owned(), Some(b"1".to_vec()));
+    /// let data = qqq_host::linker::StoreData::new(qqq_cap::resolve::GrantSet::empty())
+    ///     .with_env(map);
+    /// assert_eq!(data.env.get("A"), Some(&Some(b"1".to_vec())));
+    /// ```
     #[must_use]
     pub fn with_env(mut self, env: std::collections::BTreeMap<String, Option<Vec<u8>>>) -> Self {
         self.env = env;
@@ -1377,6 +1418,12 @@ pub fn build_linker<'a>(
             "qqq:env@1.0.0" => {
                 crate::host_env::register(&mut linker, grants)?;
             }
+            "qqq:log@1.0.0" => {
+                crate::host_log::register(&mut linker, grants)?;
+            }
+            "qqq:trace@1.0.0" => {
+                crate::host_trace::register(&mut linker, grants)?;
+            }
             // `qqq:http` is the interface a guest both **imports** and **exports**
             // (see `host_http`'s module docs for why the import exists even when the
             // guest never calls `send`). Registering it here is what turns a granted
@@ -1393,14 +1440,15 @@ pub fn build_linker<'a>(
                 let _bound = crate::host_http::register(&mut linker, grants)?;
             }
             // QQQ-STUB(CON-009): `qqq:fs`, `qqq:sql`, `qqq:kv`,
-            // `qqq:queue`, `qqq:dns`, `qqq:log` and `qqq:trace`
-            // have no registered interface yet. `qqq:clock`, `qqq:crypto`,
-            // `qqq:http`, `qqq:secrets` and `qqq:env` have arms (`HOST-028`
-            // owns the secrets binding, `HOST-029` the env binding;
-            // `HOST-030`..`HOST-036` own the other seven). Recording the
-            // gap keeps a partially-implemented milestone honest: a component
-            // that imports the others gets a clear diagnostic naming the
-            // capability, not Wasmtime's "unknown import".
+            // `qqq:queue` and `qqq:dns` have no registered interface yet.
+            // `qqq:clock`, `qqq:crypto`, `qqq:http`, `qqq:secrets`,
+            // `qqq:env`, `qqq:log` and `qqq:trace` have arms (`HOST-028`
+            // owns the secrets binding, `HOST-029` env, `HOST-030` log,
+            // `HOST-031` trace; `HOST-032`..`HOST-036` own the other five).
+            // Recording the gap keeps a
+            // partially-implemented milestone honest: a component that imports
+            // the others gets a clear diagnostic naming the capability, not
+            // Wasmtime's "unknown import".
             //
             // Two notes on the reference, because getting it wrong twice is
             // itself worth recording (Observations §O-020d):

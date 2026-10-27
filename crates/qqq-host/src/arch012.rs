@@ -168,7 +168,7 @@ impl Enforcement {
 /// disagree in either direction, so a `func_wrap` added without a row here is a
 /// test failure rather than an unexamined call path. That is the property that
 /// makes the table a check rather than documentation.
-pub const AUDITED: [AuditedCall; 18] = [
+pub const AUDITED: [AuditedCall; 24] = [
     AuditedCall {
         file: "host_clock.rs",
         function: "now",
@@ -325,6 +325,60 @@ pub const AUDITED: [AuditedCall; 18] = [
         capability: None,
         // As `wait-until` above: a named trap, not a grant decision.
         enforced_by: Enforcement::Ungated,
+    },
+    AuditedCall {
+        file: "host_secrets.rs",
+        function: "apply",
+        interface: "qqq:secrets/secret-use@1.0.0",
+        capability: Some(Capability::SecretUse),
+        // Per-function re-check: registration is conditional on the grant
+        // AND the body re-checks it, plus intersects the crypto grant for the
+        // operation — a mis-built linker still denies.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_secrets.rs",
+        function: "exists",
+        interface: "qqq:secrets/secret-use@1.0.0",
+        capability: Some(Capability::SecretUse),
+        // Interface-gated like the 0.2 `resolution`: the answer is a
+        // disclosure-safe boolean, so the registration gate (no grant, no
+        // instance) is the check and the body needs none beyond it — but it
+        // re-checks anyway, so a mis-built linker still denies.
+        enforced_by: Enforcement::InterfaceGated,
+    },
+    AuditedCall {
+        file: "host_secrets.rs",
+        function: "permitted-operations",
+        interface: "qqq:secrets/secret-use@1.0.0",
+        capability: Some(Capability::SecretUse),
+        // Names only, never values: the allowlist check happens per call.
+        enforced_by: Enforcement::InterfaceGated,
+    },
+    AuditedCall {
+        file: "host_env.rs",
+        function: "get",
+        interface: "qqq:env/environment@1.0.0",
+        capability: Some(Capability::EnvRead),
+        // Per-function re-check: registration is conditional on the grant AND
+        // the body re-checks it, so a mis-built linker still denies.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_env.rs",
+        function: "get-or",
+        interface: "qqq:env/environment@1.0.0",
+        capability: Some(Capability::EnvRead),
+        // The fallback applies to `unset` only; a denied read stays denied.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_env.rs",
+        function: "allowed-names",
+        interface: "qqq:env/environment@1.0.0",
+        capability: Some(Capability::EnvRead),
+        // Names only (the manifest already publishes them); re-checked.
+        enforced_by: Enforcement::InterfaceGated,
     },
 ];
 

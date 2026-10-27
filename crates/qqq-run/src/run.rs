@@ -1111,15 +1111,22 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
     )?;
 
     let started = Instant::now();
-    let outcome = instance.run_measured(|_store, _instance| {
+    let mut guest_logs = Vec::new();
+    let outcome = instance.run_measured(|store, _instance| {
         // A component with no exported entry point still instantiates and
         // drops, which is a meaningful check in itself: it proves every import
         // resolved and every limit applied. Calling a specific export is the
         // job of `qqqai serve` and the entrypoint declared in the manifest;
         // guessing an export name here would make `run` succeed or fail for
         // reasons unrelated to the capability model.
+        guest_logs = std::mem::take(&mut store.data_mut().logs);
         Ok(RunOutcome::Instantiated)
     });
+    // Guest logs go to stderr, never stdout: stdout carries the run's own
+    // output and mixing the two would corrupt piped consumers.
+    for record in &guest_logs {
+        eprintln!("qqq:log {}", qqq_host::host_log::format_record(record));
+    }
     let elapsed = started.elapsed();
 
     // -- Write the log, if one was asked for (DET-007) ------------------

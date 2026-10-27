@@ -14,8 +14,8 @@ bind, and they are listed at the end as absences rather than omitted — a reade
 ## What the host actually binds
 
 `wit/` declares <!-- qqq:claim wit-packages -->15<!-- /qqq:claim --> packages. `qqq-host`'s linker
-registers <!-- qqq:claim host-bound-modules -->8<!-- /qqq:claim --> modules: the **WASI baseline**,
-the **versioned 0.3 clock**, **five** capability modules, and `qqq:test/assertions` -- which a test runner links and nothing
+registers <!-- qqq:claim host-bound-modules -->10<!-- /qqq:claim --> modules: the **WASI baseline**,
+the **versioned 0.3 clock**, **seven** capability modules, and `qqq:test/assertions` -- which a test runner links and nothing
 grants, because an assertion interface is not a capability. The count tracks the
 linker: when a new `host_*::register` arm lands, this number, the `rg` listing
 below, and the "everything else" list move together — `check_doc_claims`
@@ -31,6 +31,8 @@ rg 'host_[a-z0-9_]+::register\(' crates/qqq-host/src/linker.rs
 #   host_http::register
 #   host_secrets::register   <- secret-use, env-resolved material; see HOST-028
 #   host_env::register       <- allowlisted reads, no inherit; see HOST-029
+#   host_log::register       <- structured logs, secret-redacted; see HOST-030
+#   host_trace::register     <- spans and W3C context; see HOST-031
 ```
 
 Everything else — `qqq:sql`, `qqq:kv`, `qqq:fs`, `qqq:queue`, `qqq:dns`,

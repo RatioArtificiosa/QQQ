@@ -104,6 +104,7 @@ pub mod host_clock;
 pub mod host_crypto;
 pub mod host_env;
 mod host_http;
+pub mod host_log;
 pub mod host_secrets;
 /// The `qqq:test/assertions` host — Checklist `TEST-007`, `TEST-008`.
 ///
@@ -114,6 +115,7 @@ pub mod host_secrets;
 /// assert_eq!(qqq_host::host_test::INTERFACE, "qqq:test/assertions@1.0.0");
 /// ```
 pub mod host_test;
+pub mod host_trace;
 mod host_wasi;
 mod host_wasi03;
 pub mod instance;

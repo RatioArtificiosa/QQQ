@@ -325,6 +325,12 @@ impl SecretStore {
     /// [`Default`] is the same state: an instance built without the manifest
     /// has no secrets to serve, and an explicit constructor would suggest the
     /// emptiness was chosen rather than defaulted.
+    ///
+    /// ```
+    /// let store = qqq_host::host_secrets::SecretStore::new();
+    /// assert!(!store.exists("anything"));
+    /// assert!(store.permitted_operations("anything").is_empty());
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -362,6 +368,16 @@ impl SecretStore {
     #[must_use]
     pub fn material_permits(&self, name: &str, op: PermittedOp) -> bool {
         self.material.get(name).is_some_and(|m| m.permits(op))
+    }
+
+    /// Whether any resolved secret value equals `value`.
+    ///
+    /// A boolean, not the bytes: the log redactor asks "is this secret?"
+    /// and gets an answer, never material. Crate-visible because only the
+    /// host's own log path has a legitimate use for the question.
+    #[must_use]
+    pub(crate) fn is_secret_value(&self, value: &[u8]) -> bool {
+        !value.is_empty() && self.material.values().any(|m| m.value.as_slice() == value)
     }
 
     /// `exists(name)`: whether a granted secret is resolved and usable.
@@ -561,9 +577,20 @@ impl Default for SecretStore {
 // ---------------------------------------------------------------------------
 
 /// The WIT package this module implements.
+///
+/// ```
+/// assert_eq!(qqq_host::host_secrets::INTERFACE, "qqq:secrets@1.0.0");
+/// ```
 pub const INTERFACE: &str = "qqq:secrets@1.0.0";
 
 /// The secret-use interface, as a component imports it.
+///
+/// ```
+/// assert_eq!(
+///     qqq_host::host_secrets::SECRET_USE,
+///     "qqq:secrets/secret-use@1.0.0"
+/// );
+/// ```
 pub const SECRET_USE: &str = "qqq:secrets/secret-use@1.0.0";
 
 mod bindings {
@@ -736,6 +763,13 @@ fn crypto_grant_for(op: PermittedOp) -> qqq_cap::capability::Capability {
 /// Links `qqq:secrets/secret-use` only when `secret.use` is granted; every
 /// function re-checks at call time, so a future change that linked it
 /// unconditionally could not serve an ungranted guest.
+///
+/// ```
+/// let engine = wasmtime::Engine::default();
+/// let mut linker = wasmtime::component::Linker::<qqq_host::linker::StoreData>::new(&engine);
+/// qqq_host::host_secrets::register(&mut linker, &qqq_cap::resolve::GrantSet::empty())
+///     .expect("empty grants register nothing");
+/// ```
 ///
 /// # The two-input rule, and why it refuses rather than guesses
 ///

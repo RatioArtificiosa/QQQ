@@ -1,0 +1,24 @@
+  OK    the real checklist is consistent
+  OK    a wrong per-area count is caught
+  OK    a wrong ┬º1 total is caught
+  OK    a wrong ┬º14 phase count is caught
+  OK    a wrong ┬º14 total is caught
+  OK    an area in no phase is caught
+  OK    --fix leaves a correct document unchanged
+  OK    --fix repairs a broken total
+  OK    a disagreeing progress TOTAL is caught
+  OK    a done-only drift is caught with the total correct
+  OK    an agreeing progress TOTAL passes
+  OK    an empty ledger never agrees, even at 0/0
+  OK    the TOTAL row parses
+  OK    a missing TOTAL row is refused
+  OK    a TOTAL row split across lines is refused
+  OK    a contradictory TOTAL row is refused
+PROGRESS AGREES -- progress.py reports 309/631, the checker agrees
+  OK    live progress.py agrees with the checker
+PROGRESS CHECK FAILED -- .scratch/progress.py is not in this checkout (untracked agent script); the measurement loop it belongs to is broken, and that absence is not agreement
+  OK    a missing progress script fails, not skips
+PROGRESS CHECK FAILED -- progress.py exceeded the 1s deadline; a hung reporter must fail, not hang the gate
+  OK    a hung progress script fails on the deadline
+
+SELF-TEST PASSED -- 19/19 case(s), every check is live

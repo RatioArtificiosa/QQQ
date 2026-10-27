@@ -154,6 +154,7 @@ fuzz/corpus/*/
 # fixture rules above.
 !docs/wasi-032-evidence/*.log
 !docs/core-only-evidence/*.log
+!docs/gate-evidence-2026-10-27/*.log
 
 # Graf's local code-graph index (`.graf/index.db`). It is a per-machine SQLite
 # cache rebuilt from the tree, so it is a build artifact rather than source: it

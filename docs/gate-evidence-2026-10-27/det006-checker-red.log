@@ -1,0 +1,6 @@
+
+  FAIL  crates/qqq-cap/src/egress.rs:1166: `HashMap` in shipped code ÔÇö use `BTreeMap`
+  FAIL  crates/qqq-cap/src/egress.rs:1166: `HashSet` in shipped code ÔÇö use `BTreeSet`
+  FAIL  crates/qqq-cap/src/egress.rs:1166: `RandomState` in shipped code ÔÇö use a fixed seed ÔÇö or remove the hash
+UNORDERED-MAP RULE FAILED
+

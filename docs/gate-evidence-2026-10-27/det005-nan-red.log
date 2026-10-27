@@ -1,0 +1,7 @@
+
+thread 'config::tests::deterministic_mode_canonicalizes_nan_bits' (224032) panicked at crates\qqq-host\src\config.rs:829:9:
+assertion `left == right` failed: deterministic NaN must read back canonical, got 0xfff8000000000000
+  left: 18444492273895866368
+ right: 9221120237041090560
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 655 filtered out; finished in 0.01s
+

@@ -1,0 +1,6 @@
+
+test config::tests::deterministic_mode_refuses_relaxed_simd ... FAILED
+thread 'config::tests::deterministic_mode_refuses_relaxed_simd' (222916) panicked at crates\qqq-host\src\config.rs:865:14:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 655 filtered out; finished in 0.01s
+error: test failed, to rerun pass `-p qqq-host --lib`
+

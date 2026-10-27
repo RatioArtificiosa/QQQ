@@ -225,6 +225,34 @@ impl KvBackend {
         }
     }
 
+    /// Evict every expired entry in `store`, returning the freed bytes.
+    ///
+    /// The slow path behind a quota refusal: the fast path evicts only the
+    /// overwritten key, so a store choked with expired *other* keys would
+    /// refuse a write that fits the live data. Reaping the whole store on
+    /// the failure path keeps the refusal honest — and each eviction is
+    /// progress, so repeated failing writes cannot loop forever.
+    fn reap_expired(&mut self, store: &str, now: u64) -> u64 {
+        let expired: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|((entry_store, _), entry)| {
+                entry_store == store && entry.expires_at.is_some_and(|at| now >= at)
+            })
+            .map(|((_, key), _)| key.clone())
+            .collect();
+        let mut freed = 0u64;
+        for key in expired {
+            if let Some(entry) = self.entries.remove(&(store.to_owned(), key.clone())) {
+                freed += key.len() as u64 + entry.value.len() as u64;
+            }
+        }
+        if let Some(total) = self.sizes.get_mut(store) {
+            *total = total.saturating_sub(freed);
+        }
+        freed
+    }
+
     /// Read a value. `None` is absence *or* expiry: the WIT promises absence
     /// is not an error, and an expired key is absent by the time anyone asks.
     ///
@@ -296,9 +324,21 @@ impl KvBackend {
             .entries
             .get(&(store.to_owned(), key.to_owned()))
             .map_or(0, |entry| key.len() as u64 + entry.value.len() as u64);
-        let total = self.sizes.get(store).copied().unwrap_or(0);
+        let mut total = self.sizes.get(store).copied().unwrap_or(0);
         if total - previous.min(total) + entry_bytes > MAX_KV_STORE_BYTES {
-            return Err(WitKvError::QuotaExceeded);
+            // Quota pressure reaps the store's expired entries and retries
+            // once, so dead keys cannot pin live writes. Only one retry:
+            // whatever remains is live data, and refusing it is the honest
+            // answer.
+            self.reap_expired(store, now);
+            total = self.sizes.get(store).copied().unwrap_or(0);
+            let previous = self
+                .entries
+                .get(&(store.to_owned(), key.to_owned()))
+                .map_or(0, |entry| key.len() as u64 + entry.value.len() as u64);
+            if total - previous.min(total) + entry_bytes > MAX_KV_STORE_BYTES {
+                return Err(WitKvError::QuotaExceeded);
+            }
         }
         self.sizes
             .insert(store.to_owned(), total - previous.min(total) + entry_bytes);
@@ -326,7 +366,16 @@ impl KvBackend {
     /// Keys under `prefix`, sorted, honoring `limit`.
     ///
     /// Expired keys are evicted as the scan notices them, so a listing never
-    /// names a key `get` would refuse to serve.
+    /// names a key `get` would refuse to serve. The scan stops once `take`
+    /// live keys are collected — a listing that already has its answer does
+    /// not walk the rest of the store — so expired keys past that point are
+    /// reaped by later calls, or by a quota pressured write.
+    ///
+    /// A single listing returns at most `MAX_KV_KEYS_LIMIT` keys: a prefix
+    /// holding more is addressable by exact key (and by narrower prefixes)
+    /// but never enumerable in one call. That ceiling is load-bearing for
+    /// the per-call allocation bound, so it is stated here rather than
+    /// discovered.
     ///
     /// ```
     /// let mut backend = qqq_host::host_kv::KvBackend::new();
@@ -372,7 +421,7 @@ impl KvBackend {
     /// let mut backend = qqq_host::host_kv::KvBackend::new();
     /// assert_eq!(backend.stored_bytes("s"), 0);
     /// backend.set("s", "k", b"v".to_vec(), None, 0).expect("fits");
-    /// assert_eq!(backend.stored_bytes("s"), 1);
+    /// assert_eq!(backend.stored_bytes("s"), 2);
     /// ```
     #[must_use]
     pub fn stored_bytes(&self, store: &str) -> u64 {
@@ -883,6 +932,34 @@ mod tests {
             backend.get("s", "k", 42),
             None,
             "the deadline is inclusive, so zero means already past"
+        );
+    }
+
+    /// Quota pressure reaps expired keys and retries: dead bytes cannot
+    /// pin live writes.
+    #[test]
+    fn quota_pressure_reaps_expired_first() {
+        let mut backend = KvBackend::new();
+        // Fill the store with keys that expire at t=10.
+        let chunk = vec![0u8; 64 * 1024];
+        let mut count = 0u32;
+        loop {
+            match backend.set("s", &format!("k{count}"), chunk.clone(), Some(10), 0) {
+                Ok(()) => count += 1,
+                Err(WitKvError::QuotaExceeded) => break,
+                Err(other) => panic!("unexpected failure: {other:?}"),
+            }
+            assert!(count < 10_000, "the quota must backpressure");
+        }
+        // Past every deadline, a fresh write still fits: the failing write
+        // reaps the dead store first instead of refusing against dead bytes.
+        backend
+            .set("s", "fresh", b"v".to_vec(), None, 1_000)
+            .expect("dead bytes must not pin the quota");
+        assert_eq!(backend.get("s", "fresh", 1_000), Some(b"v".to_vec()));
+        assert!(
+            backend.stored_bytes("s") <= MAX_KV_STORE_BYTES,
+            "the reaped store accounts live bytes only"
         );
     }
 

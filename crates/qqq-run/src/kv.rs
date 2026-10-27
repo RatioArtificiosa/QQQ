@@ -33,6 +33,11 @@ use qqq_host::host_kv::{KvBackend, KvConfig, KvView};
 /// and a `stores()` answer with the same name twice would be a lie about
 /// the configuration, however it arrived.
 ///
+/// Names are otherwise verbatim: surrounding whitespace is significant,
+/// not trimmed. Trimming would silently rename a declared store; the
+/// manifest says `stores = [" s "]`, the host serves `" s "`, and a guest
+/// asking for `"s"` learns `store-not-configured`.
+///
 /// ```
 /// let manifest = qqq_cap::manifest::Manifest::parse(
 ///     "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",

@@ -112,6 +112,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-kv"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "probe-log"
 version = "0.1.0"
 dependencies = [

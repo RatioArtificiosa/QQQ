@@ -364,7 +364,13 @@ fn io_interfaces() -> Vec<HostInterface> {
         iface(
             "qqq:kv@1.0.0",
             &[KvRead, KvWrite],
-            false,
+            // Implemented: `host_kv::register` binds `store` with
+            // deploy-resolved allowlist and direction, in-memory backend
+            // with TTL eviction, sorted listings, and WIT-error mapping
+            // (`HOST-032`). The `implemented` flags are claims the
+            // pinning test below pins, so flipping one without the host
+            // code fails the build.
+            true,
             "Namespaced key-value access with TTL",
         ),
         iface(
@@ -701,6 +707,7 @@ mod tests {
             vec![
                 "qqq:clock@1.0.0",
                 "qqq:env@1.0.0",
+                "qqq:kv@1.0.0",
                 "qqq:log@1.0.0",
                 "qqq:secrets@1.0.0",
                 "qqq:trace@1.0.0"

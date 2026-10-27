@@ -38,7 +38,8 @@ interface store {
   ///
   /// `ttl-seconds` of `none` means no expiry. An explicit `none` rather than
   /// `0`-means-forever, because a zero TTL read as "expire immediately" is a
-  /// classic and silent bug.
+  /// classic and silent bug. Conversely `some(0)` expires immediately: the
+  /// deadline is inclusive, so zero means already past.
   @since(version = 1.0.0)
   set: func(store: string, key: string, value: list<u8>, ttl-seconds: option<u64>) -> result<_, kv-error>;
 
@@ -57,7 +58,9 @@ interface store {
   ///
   /// Sorted for the same reason directory listing is: unordered iteration is a
   /// source of nondeterminism that would break bit-identical replay
-  /// (Proposal §10.5).
+  /// (Proposal §10.5). The host caps the listing at its per-call maximum;
+  /// a `limit` above that returns the cap, so callers needing full
+  /// enumeration page with `prefix`.
   @since(version = 1.0.0)
   keys: func(store: string, prefix: string, limit: u32) -> result<list<string>, kv-error>;
 

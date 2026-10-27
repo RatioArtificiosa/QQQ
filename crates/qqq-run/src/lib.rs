@@ -53,6 +53,8 @@ pub mod guest_bridge;
 /// composed into the shape `qqq-serve` wants.
 pub mod guest_handler;
 pub mod install;
+/// Resolve `qqq:kv` configuration at the deploy layer — `HOST-032`.
+pub mod kv;
 pub mod live;
 pub mod manifest_loader;
 pub mod mcp;

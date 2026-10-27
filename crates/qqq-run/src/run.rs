@@ -1095,6 +1095,9 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
     inst_opts.env = crate::env::resolve_env_map(&loaded.manifest, &|name| {
         std::env::var_os(name).map(|v| v.as_os_str().as_encoded_bytes().to_vec())
     });
+    // The manifest's store list becomes the guest-visible kv allowlist,
+    // resolved once here; the backend is fresh per run, like the instance.
+    inst_opts.kv = crate::kv::view_for_manifest(&loaded.manifest);
     if let Some(log) = &replay_sink {
         inst_opts.record_to(std::sync::Arc::clone(log));
     }

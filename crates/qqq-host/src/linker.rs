@@ -217,6 +217,14 @@ pub struct StoreData {
     /// execution it describes.
     pub trace: crate::host_trace::TraceState,
 
+    /// This instance's key-value view — `HOST-032`.
+    ///
+    /// Deploy-resolved config plus the shared backend: every request of one
+    /// deployment reads and writes the same map, which is what makes the
+    /// store a store rather than a per-request scratch buffer. Cloned per
+    /// request (both halves are `Arc`s), never re-resolved per call.
+    pub kv: crate::host_kv::KvView,
+
     /// This request's hold on its tenant's shared output budget, if any.
     ///
     /// `None` is the standalone per-instance budget every existing caller
@@ -376,6 +384,10 @@ impl Default for StoreData {
             // nothing to drain.
             logs: Vec::new(),
             trace: crate::host_trace::TraceState::new(),
+            // No stores and a fresh empty backend: an instance built
+            // without the manifest's kv stanza serves nothing, which is
+            // the safe reading of "no stores declared".
+            kv: crate::host_kv::KvView::default(),
             tenant_output: None,
             // An empty environment and no wall clock: the deny-by-default answer
             // for a store that was not built from a manifest. The `expect` is
@@ -467,6 +479,10 @@ impl StoreData {
             // nothing to drain.
             logs: Vec::new(),
             trace: crate::host_trace::TraceState::new(),
+            // No stores and a fresh empty backend: an instance built
+            // without the manifest's kv stanza serves nothing, which is
+            // the safe reading of "no stores declared".
+            kv: crate::host_kv::KvView::default(),
             tenant_output,
             // Derived from the grants so a store built this way permits exactly
             // what the grant set says -- no more, and no less.
@@ -593,6 +609,10 @@ impl StoreData {
             // nothing to drain.
             logs: Vec::new(),
             trace: crate::host_trace::TraceState::new(),
+            // No stores and a fresh empty backend: an instance built
+            // without the manifest's kv stanza serves nothing, which is
+            // the safe reading of "no stores declared".
+            kv: crate::host_kv::KvView::default(),
             tenant_output: None,
             wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
@@ -681,6 +701,25 @@ impl StoreData {
     #[must_use]
     pub fn with_env(mut self, env: std::collections::BTreeMap<String, Option<Vec<u8>>>) -> Self {
         self.env = env;
+        self
+    }
+
+    /// Set this instance's key-value view directly — `HOST-032`.
+    ///
+    /// What tests use: the deploy layer resolves the manifest's store list
+    /// once and shares one backend across the deployment, and a test that
+    /// sets the same view exercises the identical enforcement the guest
+    /// sees in production.
+    ///
+    /// ```
+    /// let view = qqq_host::host_kv::KvView::default();
+    /// let data = qqq_host::linker::StoreData::new(qqq_cap::resolve::GrantSet::empty())
+    ///     .with_kv(view);
+    /// assert!(data.kv.config.stores.is_empty());
+    /// ```
+    #[must_use]
+    pub fn with_kv(mut self, kv: crate::host_kv::KvView) -> Self {
+        self.kv = kv;
         self
     }
 
@@ -1424,6 +1463,9 @@ pub fn build_linker<'a>(
             "qqq:trace@1.0.0" => {
                 crate::host_trace::register(&mut linker, grants)?;
             }
+            "qqq:kv@1.0.0" => {
+                crate::host_kv::register(&mut linker, grants)?;
+            }
             // `qqq:http` is the interface a guest both **imports** and **exports**
             // (see `host_http`'s module docs for why the import exists even when the
             // guest never calls `send`). Registering it here is what turns a granted
@@ -1439,12 +1481,13 @@ pub fn build_linker<'a>(
             "qqq:http@1.0.0" => {
                 let _bound = crate::host_http::register(&mut linker, grants)?;
             }
-            // QQQ-STUB(CON-009): `qqq:fs`, `qqq:sql`, `qqq:kv`,
+            // QQQ-STUB(CON-009): `qqq:fs`, `qqq:sql`,
             // `qqq:queue` and `qqq:dns` have no registered interface yet.
             // `qqq:clock`, `qqq:crypto`, `qqq:http`, `qqq:secrets`,
-            // `qqq:env`, `qqq:log` and `qqq:trace` have arms (`HOST-028`
-            // owns the secrets binding, `HOST-029` env, `HOST-030` log,
-            // `HOST-031` trace; `HOST-032`..`HOST-036` own the other five).
+            // `qqq:env`, `qqq:log`, `qqq:trace` and `qqq:kv` have arms
+            // (`HOST-028` owns the secrets binding, `HOST-029` env,
+            // `HOST-030` log, `HOST-031` trace, `HOST-032` kv;
+            // `HOST-033`..`HOST-036` own the other four).
             // Recording the gap keeps a
             // partially-implemented milestone honest: a component that imports
             // the others gets a clear diagnostic naming the capability, not

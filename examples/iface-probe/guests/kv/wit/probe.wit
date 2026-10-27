@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Probe world: kv only, so the component instantiates as soon as the host
+// binds `qqq:kv`.
+package qqq:iface-probe-kv@1.0.0;
+
+/// One scenario per interface, returning a summary the host asserts on.
+interface probe-api {
+  probe-kv: func() -> string;
+}
+
+world probe {
+  import qqq:kv/store@1.0.0;
+
+  export probe-api;
+  export qqq:http/incoming-handler@1.0.0;
+}

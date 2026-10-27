@@ -221,6 +221,12 @@ pub struct GuestApp {
     /// Exactly the manifest's allowlist with values resolved once: empty
     /// unless `serve` sets it, cloned on replacement like the secrets.
     env: std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    /// This app's key-value view — `HOST-032`.
+    ///
+    /// Deploy-resolved config plus the shared backend: empty config and a
+    /// fresh backend unless `serve` sets them, cloned on replacement like
+    /// the secrets — a rotation must neither drop stored data nor fork it.
+    kv: qqq_host::host_kv::KvView,
     /// The epoch ticker period for this app's engine lineage — `F-17`.
     ///
     /// Derived once from the limits via the helper, shared by the ticker
@@ -429,6 +435,7 @@ impl GuestApp {
             det_clock: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             secrets: qqq_host::host_secrets::SecretStore::new(),
             env: std::collections::BTreeMap::new(),
+            kv: qqq_host::host_kv::KvView::default(),
             epoch_tick: tick,
         })
     }
@@ -452,6 +459,15 @@ impl GuestApp {
     /// serving, cloned on replacement.
     pub(crate) fn set_env(&mut self, env: std::collections::BTreeMap<String, Option<Vec<u8>>>) {
         self.env = env;
+    }
+
+    /// Set the key-value view new instances serve `qqq:kv` from — `HOST-032`.
+    ///
+    /// Crate-visible for the same reason: resolved once by `serve` from the
+    /// manifest's store list (sharing one backend across the deployment),
+    /// installed before serving, cloned on replacement.
+    pub(crate) fn set_kv(&mut self, kv: qqq_host::host_kv::KvView) {
+        self.kv = kv;
     }
 
     /// Run guest instances deterministically — `F-20`.
@@ -524,6 +540,10 @@ impl GuestApp {
         // And the environment with them: a rotation that dropped the map
         // would serve `not-allowed` for variables the manifest still lists.
         next.env = self.env.clone();
+        // And the key-value view with them: a rotation that dropped the
+        // backend would lose every stored value, and one that forked it
+        // would split one store into two mutually invisible halves.
+        next.kv = self.kv.clone();
         // And the admission counter with it: a rotation that reset the
         // virtual clock would replay already-seen ticks, and one that kept
         // counting on a rotated copy would fork it.
@@ -937,6 +957,10 @@ impl GuestApp {
         // allowlist, so each request's instance enforces exactly what the
         // manifest lists and nothing the process happens to hold.
         options.env = self.env.clone();
+        // And the key-value view: the config is the store allowlist and
+        // the backend is the deployment's shared map, so a value one
+        // request stores is visible to the next.
+        options.kv = self.kv.clone();
         let instance = Instance::create_with(
             &self.engine,
             &self.prepared,
@@ -2184,6 +2208,50 @@ mod tests {
         Some(std::fs::read(&artifact).expect("probe component reads"))
     }
 
+    /// The kv probe component, built by the real toolchain on first use —
+    /// same shape as [`secrets_probe_component`], kept beside the test that
+    /// uses it so the serve-path helpers stay one lookup apart.
+    fn kv_probe_component() -> Option<Vec<u8>> {
+        use std::sync::OnceLock;
+        static BUILT: OnceLock<bool> = OnceLock::new();
+        let workspace =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
+        let artifact = workspace.join("target/wasm32-wasip2/release/probe_kv.wasm");
+        if !artifact.is_file() {
+            let target_present = *BUILT.get_or_init(|| {
+                let has_target = std::process::Command::new("rustc")
+                    .args(["--print", "target-list"])
+                    .output()
+                    .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2"));
+                if !has_target {
+                    println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
+                    return false;
+                }
+                let output = std::process::Command::new("cargo")
+                    .args([
+                        "build",
+                        "--release",
+                        "--target",
+                        "wasm32-wasip2",
+                        "--locked",
+                    ])
+                    .current_dir(&workspace)
+                    .output()
+                    .expect("cargo runs");
+                assert!(
+                    output.status.success(),
+                    "probe kv guest build failed with the toolchain present: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                true
+            });
+            if !target_present {
+                return None;
+            }
+        }
+        Some(std::fs::read(&artifact).expect("probe component reads"))
+    }
+
     #[test]
     fn env_flows_from_manifest_to_guest_answer() {
         fn env_probe_component() -> Option<Vec<u8>> {
@@ -2545,6 +2613,94 @@ mod tests {
                 "the served summary must report {expected}: {body}"
             );
         }
+    }
+
+    /// **Kv travels the serve path against the deployment's shared backend.**
+    ///
+    /// Builds the app the way `serve` does (grants from a manifest, config
+    /// resolved once, one backend installed via the setter), then drives a
+    /// real request through `handle_request`. The probe guest runs the same
+    /// scenario the `iface_kv` e2e covers, and the body carries the summary.
+    ///
+    /// The serve-specific claims need the app's own backend, which this test
+    /// can read because it lives in the same crate: after the request, the
+    /// keys the guest stored are present in the shared map (the
+    /// request-to-backend flow), and a second request observes them (no
+    /// per-request fork — the property per-instance state could never
+    /// provide).
+    #[test]
+    fn kv_flows_from_manifest_to_shared_backend() {
+        let Some(bytes) = kv_probe_component() else {
+            return;
+        };
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+             [capabilities.kv]\nstores = [\"s\"]\nwrite = true\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("probe manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("engine config"))
+            .expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        let mut app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)
+            .expect("probe app builds");
+        app.set_kv(qqq_host::host_kv::KvView::new(
+            std::sync::Arc::new(qqq_host::host_kv::KvConfig::new(vec!["s".to_owned()], true)),
+            std::sync::Arc::new(std::sync::Mutex::new(qqq_host::host_kv::KvBackend::new())),
+        ));
+        let response = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the probe request serves");
+        let body = String::from_utf8(response.body.clone()).expect("the summary is UTF-8");
+        for expected in [
+            "set=ok",
+            "get=ok:hello",
+            "get-missing=ok:none",
+            "exists=true",
+            "keys=ok:a,b",
+            "get-many=ok:2",
+            "delete=ok",
+            "stores=s",
+            "unlisted=err:store-not-configured",
+            "big-value=err:entry-too-large",
+        ] {
+            assert!(
+                body.contains(expected),
+                "the served summary must report {expected}: {body}"
+            );
+        }
+        // The request's writes landed in the deployment's backend, not in a
+        // per-request scratch buffer: `a` and `b` survive the request (only
+        // `k` is deleted by the scenario itself).
+        {
+            let mut backend = app.kv.backend.lock().expect("backend locks");
+            assert_eq!(
+                backend.get("s", "a", u64::MAX),
+                Some(b"1".to_vec()),
+                "the served request's writes persist in the shared backend"
+            );
+            assert_eq!(backend.get("s", "b", u64::MAX), Some(b"2".to_vec()));
+        }
+        // And a second request observes the same map: the scenario rewrites
+        // its keys, and still reports the full summary — a forked backend
+        // would show no difference here, but the direct read above pins the
+        // sharing and this pins that sharing does not break serving.
+        let second = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the second probe request serves");
+        let second_body = String::from_utf8(second.body.clone()).expect("the summary is UTF-8");
+        assert!(
+            second_body.contains("keys=ok:a,b"),
+            "the second request serves the same summary: {second_body}"
+        );
     }
 
     fn head(method: qqq_serve::Method, target: &str) -> qqq_serve::RequestHead {

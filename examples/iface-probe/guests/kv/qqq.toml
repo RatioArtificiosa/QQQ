@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+
+// Probe guest that exercises `qqq:kv/store` and reports a summary the
+// host asserts on. Writes before it reads, so the summary proves values
+// cross the boundary in both directions through one shared backend.
+
+[package]
+name = "probe-kv"
+version = "0.1.0"
+
+[build]
+language = "rust"
+target = "wasm32-wasip2"
+profile = "release"
+
+[capabilities.kv]
+stores = ["s"]
+write = true
+
+[capabilities.http]
+server = true

@@ -407,6 +407,13 @@ pub struct InstanceOptions {
     /// `prepare` copies it into the store the same way it carries every
     /// other option.
     pub env: std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    /// This instance's key-value view — `HOST-032`.
+    ///
+    /// Empty config and a fresh backend unless set: the default is the safe
+    /// reading of "no stores declared". Runners set it from the manifest's
+    /// store list (sharing one backend across the deployment); `prepare`
+    /// copies it into the store the same way it carries every other option.
+    pub kv: crate::host_kv::KvView,
 }
 
 impl InstanceOptions {
@@ -1321,6 +1328,10 @@ impl ReadyStore {
         // And the resolved environment with them: membership in this map is
         // the allowlist, populated from nothing but the manifest.
         data.env = opts.env.clone();
+        // And the key-value view with them: the config is the allowlist and
+        // the backend is the deployment's shared map, both cloned per
+        // request (the `Arc`s make the clone cheap and the sharing real).
+        data.kv = opts.kv.clone();
         // The egress policy travels with the store like every other option:
         // a runner sets `opts.egress` from the manifest and prepare carries
         // it in, so production instances enforce declared destinations

@@ -1148,6 +1148,11 @@ fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltD
     app.set_env(crate::env::resolve_env_map(&loaded.manifest, &|name| {
         std::env::var_os(name).map(|v| v.as_os_str().as_encoded_bytes().to_vec())
     }));
+    // The manifest's store list becomes the guest-visible kv allowlist,
+    // resolved once here; the backend is shared across every request this
+    // deployment serves, so a value one request stores is visible to the
+    // next.
+    app.set_kv(crate::kv::view_for_manifest(&loaded.manifest));
 
     // A metrics path that collides with a declared route would silently shadow one of them, and
     // neither failure is visible from outside -- so it is refused here, where the operator can act.

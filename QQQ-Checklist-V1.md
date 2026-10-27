@@ -25,7 +25,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `MKT` | Market research, positioning, competitive analysis | 16 | Founder |
 | `POS` | Product positioning and messaging | 6 | Founder |
 | `ARCH` | Architecture decisions and crate topology | 16 | Systems lead |
-| `HOST` | `qqq-host` execution engine | 27 | Systems engineer |
+| `HOST` | `qqq-host` execution engine | 36 | Systems engineer |
 | `CAP` | Capability resolution pipeline | 24 | Security engineer |
 | `SEC` | Security engineering, audits, hardening | 30 | Security engineer |
 | `CON` | Contracts: WIT interfaces, manifest schema, versioning | 20 | Architect |
@@ -54,7 +54,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 631 items.**
+**Total: 640 items.**
 
 ### Status legend
 
@@ -2003,6 +2003,26 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: `check_imports` admits the six baseline packages with no grant (`is_wasi02_baseline`; `wasi:http` stays missing, as do bare/unversioned/0.3/1.0/non-`wasi:` names); `qqqai run` executes a real `wasm32-wasip2` guest (orders-api) with an empty manifest and refuses only `qqq:http/http` naming `http.server`; deterministic serve advances the virtual clock per admitted request (independent review: pass, no findings).
   → Measured: 43 `run::` unit tests (incl. 4 new red-first), 101 CLI e2e (incl. 3 new red-first, one fault-injected to the pre-fix QQQ-6003), 654 `qqq-host` lib incl. baseline instantiation proof, 9 `live_components` incl. corrupt-cache fallback; 10,000 reference-app deterministic trials, 0 diverged; `cargo xtask ci` GATE GREEN 146.
   → Supersedes RT-WASI-006's refusal pin: no grant is added by this change — pre-flight now matches the unconditional linker, authority stays in the grant-derived context.
+- [x] **HOST-028** Bind `qqq:secrets/secret-use` in the per-instance linker with the existing `host_secrets` module: `env:`-reference material resolution in the deploy layer, grant-gated operations, and `verify` record splitting; granted runs, ungranted fails at instantiation, unavailable and wrong-operation fail closed by WIT name. Owns the `§O-782`-class pre-flight gap for secrets (unmapped import refused by name).
+  → §6.3 Capability-based security
+  → Done: `HostSecretCrypto` (Ed25519/HMAC-SHA256/AES-256-GCM via pinned deps, `hmac 0.12`/`aes-gcm 0.11`/`rusqlite` for later slices, `cargo deny` green), `host_secrets::register` (grant-gated instance, per-op crypto-grant intersection, two-input rule with both-nonempty refused, WIT-error mapping), `StoreData::secrets` + `InstanceOptions::secrets` + `prepare` plumbing, `qqq-run::secrets::resolve_secret_store` (deploy-time `env:` resolution, missing variable fails `SecretUnresolvable`), run + serve wiring (`inst_opts.secrets`, `GuestApp::set_secrets` cloned on replacement), `capability_for_import` via the registry table (no code change — data-driven), `implemented` flipped with the pinning test updated in the same commit; probe guest `examples/iface-probe/guests/secrets` (wit-bindgen 0.62, real canonical ABI) with host e2e, serve-path e2e, unit, deploy, stanza, and WIT-drift tests. Evidence: `cargo test -p qqq-host --lib host_secrets` 32/32, `--test iface_secrets` 5/5, `qqq-run --lib secrets` 5/5 + serve-path 1/1, `qqq-abi` 18/18, stanza pins green; 2026-10-27.
+  → Measured: link tests red-first (ungranted names the import, granted resolves); crypto tamper/short-key cases fail closed (verify-malformed → false, decrypt-tampered → `unavailable`); guest scenario asserts every WIT error name through the real ABI; `check_gate_parity`-style drift test pins probe WIT copies byte-identical to `wit/`.
+- [ ] **HOST-029** Bind `qqq:env/environment` in the per-instance linker: manifest-allowlist reads only, no inherit; `not-allowed` (ungranted or unlisted) vs `unset` vs `invalid-utf8` distinguished by name; `allowed-names` lists the manifest set.
+  → §6.3 Capability-based security
+- [ ] **HOST-030** Bind `qqq:log/logging` in the per-instance linker: host-attributed tenant/trace identity, secret redaction outside guest reach, per-record size bound; `emit`, `emit-many`, and `enabled` against the operator log sink.
+  → §10.3 Logging and audit
+- [ ] **HOST-031** Bind `qqq:trace/tracing` in the per-instance linker: host-owned spans with enforced parentage, bounded attributes, W3C traceparent propagation; sampling decided by the host; spans exported through the operator channel (OTLP export stays OBS-012).
+  → §10.4 Distributed tracing
+- [ ] **HOST-032** Bind `qqq:kv/store` in the per-instance linker: namespaced in-memory stores with TTL expiry, per-entry and quota bounds, sorted `keys`; read-only grants refuse writes by name; `stores` lists the manifest set.
+  → §6.3 Capability-based security
+- [ ] **HOST-033** Bind `qqq:queue/messaging` in the per-instance linker: bounded in-memory publish/subscribe with acknowledgement, lease expiry with redelivery, order-preserving `resolve-many` semantics; directions granted separately.
+  → §6.3 Capability-based security
+- [ ] **HOST-034** Bind `qqq:fs/filesystem` in the per-instance linker: preopened directory handles (no ambient paths), relative-name traversal refusal, mode enforcement (read-only/append-only/read-write), quotas, sorted entries; symlinks never escape the preopen.
+  → §6.2 Filesystem, §7.5 Hardening
+- [ ] **HOST-035** Bind `qqq:dns/resolver` in the per-instance linker: manifest-allowlist resolution only, order-preserving `resolve-many`, bounded timeout; `name-not-allowed` distinct from `not-found`.
+  → §6.3 Capability-based security
+- [ ] **HOST-036** Bind `qqq:sql/database` and `qqq:sql/transaction` in the per-instance linker against a process-local SQLite backend: typed prepare/query/execute with argument checks, row caps, read-only enforcement, commit-or-rollback transactions; non-`sqlite` drivers refuse as unusable databases by name.
+  → §6.3 Capability-based security
 
 ---
 
@@ -5906,7 +5926,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 | Phase | Milestone | Items |
 |---|---|---|
 | P0 Foundation | M0 | 79 |
-| P1 Heartbeat | M1 | 63 |
+| P1 Heartbeat | M1 | 72 |
 | P2 Capability engine | M2 | 54 |
 | P3 HTTP | M3 | 40 |
 | P4 DX v0 | M4 | 64 |
@@ -5916,7 +5936,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 | P8 Perf/determinism/obs | continuous | 62 |
 | P9 V1 release | M10, M11 | 75 |
 | P10 Beyond V1 | post-1.0 | 54 |
-| **Total** | | **631** |
+| **Total** | | **640** |
 
 **Coverage rule:** every section of `QQQ-Proposal-V1.md` carrying implementation work has at least one item above. The only Proposal sections with no items are §0.1–§0.2, §1.3, §3.3, §13.1 and the appendices, which are narrative, justification or registers rather than buildable work.
 

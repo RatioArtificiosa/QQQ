@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = ["guests/*"]
+
+[workspace.dependencies]
+wit-bindgen = { version = "0.62", features = ["macros"] }

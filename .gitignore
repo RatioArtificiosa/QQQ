@@ -114,6 +114,13 @@ examples/orders-api/target/
 # pin, and `target/` is the output of applying it.
 examples/qqq-test/target/
 
+# The interface-probe guests' build output — `HOST-028`..`HOST-036`.
+#
+# Same rule, fourth instance: `examples/iface-probe` is a guest workspace (not a
+# host member), so the anchored `/target/` rule does not reach it. Its
+# `Cargo.lock` is committed deliberately, as the other guests' are.
+examples/iface-probe/target/
+
 # The mutating corpus harness's exclusive lock (`tools/self_test_xrefs.py`).
 #
 # Ignored because it is a **transient claim on a running process**, not project

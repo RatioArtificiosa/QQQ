@@ -318,7 +318,12 @@ fn ambient_interfaces() -> Vec<HostInterface> {
         iface(
             "qqq:secrets@1.0.0",
             &[SecretUse],
-            false,
+            // Implemented: `host_secrets::register` binds `secret-use` with
+            // `env:`-reference material, grant-gated operations, and WIT-error
+            // mapping (`HOST-028`). The `implemented` flags are claims the
+            // `implemented_flags_match_reality` test pins, so flipping this
+            // without the host code fails the build.
+            true,
             "Use a secret without ever reading it",
         ),
     ]
@@ -684,7 +689,7 @@ mod tests {
             .collect();
         assert_eq!(
             implemented,
-            vec!["qqq:clock@1.0.0"],
+            vec!["qqq:clock@1.0.0", "qqq:secrets@1.0.0"],
             "the set of implemented interfaces changed; update this test in the \
              same commit that lands (or removes) an implementation"
         );

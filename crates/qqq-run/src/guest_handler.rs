@@ -207,6 +207,14 @@ pub struct GuestApp {
     /// like every other shared resource, so a hot swap neither resets nor
     /// double-counts the clock.
     det_clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The secret store this app's instances serve `qqq:secrets` from.
+    ///
+    /// Set post-construction by `serve` after resolving the manifest's
+    /// references against the process environment (once, at startup — never
+    /// per request). Empty by default, so an app built without the manifest
+    /// serves no secrets. Cloned on `replacement`: a rotation must neither
+    /// drop material nor resolve it twice.
+    secrets: qqq_host::host_secrets::SecretStore,
     /// The epoch ticker period for this app's engine lineage — `F-17`.
     ///
     /// Derived once from the limits via the helper, shared by the ticker
@@ -413,8 +421,21 @@ impl GuestApp {
             completion_rate: 0.0,
             deterministic: false,
             det_clock: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            secrets: qqq_host::host_secrets::SecretStore::new(),
             epoch_tick: tick,
         })
+    }
+
+    /// Serve `qqq:secrets` from resolved material — `HOST-028`.
+    ///
+    /// Crate-visible rather than public: only `serve` sets this, after
+    /// resolving the manifest's references against the process environment,
+    /// and an external caller with a setter would be a second path to secret
+    /// material that bypasses deploy-time resolution. Must be called before
+    /// serving; instances created afterwards read it. Cloned on `replacement`
+    /// like every other shared resource.
+    pub(crate) fn set_secrets(&mut self, secrets: qqq_host::host_secrets::SecretStore) {
+        self.secrets = secrets;
     }
 
     /// Run guest instances deterministically — `F-20`.
@@ -480,6 +501,10 @@ impl GuestApp {
         // The clock mode rolls with it too: a deterministic server that
         // served real-time randomness after a rotation would be neither.
         next.deterministic = self.deterministic;
+        // The secret store rolls with it too: a rotation that dropped material
+        // would serve `unavailable` for secrets the manifest still grants, and
+        // re-resolving per rotation would read the environment per deploy.
+        next.secrets = self.secrets.clone();
         // And the admission counter with it: a rotation that reset the
         // virtual clock would replay already-seen ticks, and one that kept
         // counting on a rotated copy would fork it.
@@ -884,6 +909,11 @@ impl GuestApp {
         }
         options.audit = Some(handle);
         options.tenant_output = Some(tenant_output);
+        // The resolved secrets travel with every request's options: the store
+        // behind each instance serves `qqq:secrets` from the material `serve`
+        // resolved once at startup. Cloned per request so each instance's
+        // authority travels with the instance.
+        options.secrets = self.secrets.clone();
         let instance = Instance::create_with(
             &self.engine,
             &self.prepared,
@@ -2070,6 +2100,104 @@ mod tests {
         let (a, b) = (reading(&first), reading(&second));
         assert_ne!(a, b, "two requests must not read the same frozen tick");
         assert!(b > a, "ticks advance in admission order: {a} then {b}");
+    }
+
+    /// **Secrets travel the serve path: manifest → resolved material → guest.**
+    ///
+    /// Builds the app the way `serve` does (grants from a manifest, material
+    /// resolved once, installed via the setter), then drives a real request
+    /// through `handle_request`. The probe guest runs its scenario and the
+    /// body carries the summary — so this proves the deploy resolution, the
+    /// options threading, the link, and the call, not just the store.
+    fn secrets_probe_component() -> Option<Vec<u8>> {
+        use std::sync::OnceLock;
+        static BUILT: OnceLock<bool> = OnceLock::new();
+        let workspace =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
+        let artifact = workspace.join("target/wasm32-wasip2/release/probe_secrets.wasm");
+        if !artifact.is_file() {
+            let ok = *BUILT.get_or_init(|| {
+                let has_target = std::process::Command::new("rustc")
+                    .args(["--print", "target-list"])
+                    .output()
+                    .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2"));
+                if !has_target {
+                    println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
+                    return false;
+                }
+                std::process::Command::new("cargo")
+                    .args([
+                        "build",
+                        "--release",
+                        "--target",
+                        "wasm32-wasip2",
+                        "--locked",
+                    ])
+                    .current_dir(&workspace)
+                    .output()
+                    .is_ok_and(|o| o.status.success())
+            });
+            if !ok {
+                println!("SKIP: probe guest build failed");
+                return None;
+            }
+        }
+        Some(std::fs::read(&artifact).expect("probe component reads"))
+    }
+
+    #[test]
+    fn secrets_flow_from_manifest_to_guest_answer() {
+        let Some(bytes) = secrets_probe_component() else {
+            return;
+        };
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+             [capabilities.secret]\nsecrets = [\"env:K\"]\n\
+             [capabilities.crypto]\nhmac = [\"sha256\"]\naead = [\"aes-256-gcm\"]\nsign = [\"ed25519\"]\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("probe manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("engine config"))
+            .expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        let mut app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)
+            .expect("probe app builds");
+        let store = qqq_host::host_secrets::SecretStore::with_grants(
+            vec!["K".to_owned()],
+            vec![qqq_host::host_secrets::SecretMaterial::new(
+                "K",
+                [9u8; 32].to_vec(),
+                qqq_host::host_secrets::PermittedOp::all().to_vec(),
+            )],
+        );
+        app.set_secrets(store);
+        let response = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the probe request serves");
+        let body = String::from_utf8(response.body.clone()).expect("the summary is UTF-8");
+        for expected in [
+            "exists-k=true",
+            "sign=ok:64",
+            "verify=ok:01",
+            "hmac=ok:32",
+            "decrypt=ok:hello",
+            "tamper=err:unavailable",
+            "public-key=ok:32",
+            "unknown=err:not-granted",
+        ] {
+            assert!(
+                body.contains(expected),
+                "the served summary must report {expected}: {body}"
+            );
+        }
     }
 
     fn head(method: qqq_serve::Method, target: &str) -> qqq_serve::RequestHead {

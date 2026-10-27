@@ -219,7 +219,9 @@ pub fn fix_stanza_for(c: Capability) -> String {
         // `secret.use` is granted through the dedicated
         // `[capabilities.secret]` table (CAP-023); the legacy nested
         // `crypto.secrets` spelling still grants, pinned below.
-        "secret" => "add to qqq.toml:\n\n    [capabilities.secret]\n    secrets = [\"env:NAME\"]  # for secret.use".to_owned(),
+        // Operations additionally need their crypto grant (`HOST-028`):
+        // naming the key is not using the primitive.
+        "secret" => "add to qqq.toml:\n\n    [capabilities.secret]\n    secrets = [\"env:NAME\"]  # for secret.use\n    # plus the primitive's grant: hmac = [\"sha256\"], sign = [\"ed25519\"] or aead = [\"aes-256-gcm\"] in [capabilities.crypto]".to_owned(),
         _ => format!(
             "no qqq.toml spelling grants `{}` yet — this namespace has no modelled table; check the CAP range in QQQ-Checklist-V1.md for the modelling tracker",
             c.name()

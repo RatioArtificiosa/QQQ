@@ -14,11 +14,12 @@ bind, and they are listed at the end as absences rather than omitted — a reade
 ## What the host actually binds
 
 `wit/` declares <!-- qqq:claim wit-packages -->15<!-- /qqq:claim --> packages. `qqq-host`'s linker
-registers <!-- qqq:claim host-bound-modules -->6<!-- /qqq:claim --> modules: the **WASI baseline**,
-the **versioned 0.3 clock**, **three** capability modules, and `qqq:test/assertions` -- which a test runner links and nothing
-grants, because an assertion interface is not a capability. The count is six and the *kinds* are
-three, which is why the sentence no longer says "plus three capability modules": that was true at
-four and stopped being true at five.
+registers <!-- qqq:claim host-bound-modules -->7<!-- /qqq:claim --> modules: the **WASI baseline**,
+the **versioned 0.3 clock**, **four** capability modules, and `qqq:test/assertions` -- which a test runner links and nothing
+grants, because an assertion interface is not a capability. The count tracks the
+linker: when a new `host_*::register` arm lands, this number, the `rg` listing
+below, and the "everything else" list move together — `check_doc_claims`
+refuses a drift in either direction.
 
 ```bash
 rg 'host_[a-z0-9_]+::register\(' crates/qqq-host/src/linker.rs
@@ -28,10 +29,11 @@ rg 'host_[a-z0-9_]+::register\(' crates/qqq-host/src/linker.rs
 #   host_clock::register
 #   host_crypto::register
 #   host_http::register
+#   host_secrets::register   <- secret-use, env-resolved material; see HOST-028
 ```
 
 Everything else — `qqq:sql`, `qqq:kv`, `qqq:fs`, `qqq:queue`, `qqq:env`, `qqq:ai`, `qqq:dns`,
-`qqq:trace`, `qqq:secrets` — is **declared and not bound**. A guest that imports one of them fails
+`qqq:trace` — is **declared and not bound**. A guest that imports one of them fails
 at **instantiation**, because the linker is built from the grant set alone and an unbounded import is
 *absent* rather than denied.
 

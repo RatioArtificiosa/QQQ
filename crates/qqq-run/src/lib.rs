@@ -65,6 +65,8 @@ pub mod run;
 /// name via `#[path]` so the directory listing still reads clearly.
 #[path = "new.rs"]
 pub mod scaffold;
+/// Resolve `qqq:secrets` material at the deploy layer — `HOST-028`.
+pub mod secrets;
 /// `qqqai serve` — the production server (`CLI-011`).
 pub mod serve;
 /// Building a router from a manifest: the join between `qqq-cap` and `qqq-serve`.

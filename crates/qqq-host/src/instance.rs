@@ -392,6 +392,13 @@ pub struct InstanceOptions {
     /// (`TenantEgress::from_manifest`); `prepare` copies it into the
     /// store the same way it carries every other option below.
     pub egress: qqq_cap::egress::TenantEgress,
+    /// This instance's secret store — `HOST-028`.
+    ///
+    /// Empty unless set: the default is the safe reading of "no material
+    /// resolved". Runners set it from the manifest plus the deployment
+    /// environment; `prepare` copies it into the store the same way it
+    /// carries every other option.
+    pub secrets: crate::host_secrets::SecretStore,
 }
 
 impl InstanceOptions {
@@ -1300,6 +1307,9 @@ impl ReadyStore {
         // each request to its admission tick so time visibly passes between
         // requests. Inert in real-time mode and zero by default.
         data.ambient.set_ticks(opts.deterministic_initial_ticks);
+        // The resolved secrets travel the same way: an instance built
+        // without the manifest has no material to serve.
+        data.secrets = opts.secrets.clone();
         // The egress policy travels with the store like every other option:
         // a runner sets `opts.egress` from the manifest and prepare carries
         // it in, so production instances enforce declared destinations

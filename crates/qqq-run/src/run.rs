@@ -1082,6 +1082,13 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
         egress: qqq_cap::egress::TenantEgress::from_manifest(&loaded.manifest),
         ..qqq_host::InstanceOptions::default()
     };
+    // The manifest's secret references become material: without this line
+    // every `secret.use` in `qqqai run` would meet an empty store and fail
+    // `unavailable`. Resolution reads the process environment once, here —
+    // never per call — and a missing variable fails the run naming it.
+    inst_opts.secrets = crate::secrets::resolve_secret_store(&loaded.manifest, &|name| {
+        std::env::var_os(name).map(|v| v.as_os_str().as_encoded_bytes().to_vec())
+    })?;
     if let Some(log) = &replay_sink {
         inst_opts.record_to(std::sync::Arc::clone(log));
     }

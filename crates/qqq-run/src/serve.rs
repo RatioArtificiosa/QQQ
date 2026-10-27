@@ -1136,6 +1136,13 @@ fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltD
         // which is neither deterministic nor real-time.
         app.set_deterministic(true);
     }
+    // The manifest's secret references become the material every instance
+    // serves `qqq:secrets` from: resolved once here, never per request. A
+    // missing variable fails the serve naming it, before any request runs.
+    app.set_secrets(crate::secrets::resolve_secret_store(
+        &loaded.manifest,
+        &|name| std::env::var_os(name).map(|v| v.as_os_str().as_encoded_bytes().to_vec()),
+    )?);
 
     // A metrics path that collides with a declared route would silently shadow one of them, and
     // neither failure is visible from outside -- so it is refused here, where the operator can act.

@@ -187,6 +187,7 @@ impl RequestedOp {
 /// leak this interface exists to prevent. The manual implementation prints the
 /// *name* and the permitted operations — useful for diagnosis, harmless if
 /// logged. `debug_never_prints_the_material` pins it.
+#[derive(Clone)]
 pub struct SecretMaterial {
     name: String,
     /// The bytes. Never leaves this module.
@@ -312,7 +313,7 @@ pub const MAX_SECRET_INPUT: usize = 8 * 1024 * 1024;
 /// resolve. Keeping them apart is what lets the store distinguish *"not granted"*
 /// from *"granted but unavailable"* — two conditions with different fixes, which
 /// the WIT declares as separate error variants for the same reason.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SecretStore {
     granted: Vec<String>,
     material: BTreeMap<String, SecretMaterial>,
@@ -320,6 +321,10 @@ pub struct SecretStore {
 
 impl SecretStore {
     /// A store with no grants, reaching nothing.
+    ///
+    /// [`Default`] is the same state: an instance built without the manifest
+    /// has no secrets to serve, and an explicit constructor would suggest the
+    /// emptiness was chosen rather than defaulted.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -346,6 +351,17 @@ impl SecretStore {
     #[must_use]
     pub fn is_granted(&self, name: &str) -> bool {
         self.granted.iter().any(|n| n == name)
+    }
+
+    /// Whether the resolved material permits an operation.
+    ///
+    /// The operator hook for per-secret restrictions: production material
+    /// carries every operation and the register intersects with the crypto
+    /// grants, so this is the same check the store performs rather than a
+    /// second answer to what is permitted.
+    #[must_use]
+    pub fn material_permits(&self, name: &str, op: PermittedOp) -> bool {
+        self.material.get(name).is_some_and(|m| m.permits(op))
     }
 
     /// `exists(name)`: whether a granted secret is resolved and usable.
@@ -520,8 +536,10 @@ impl SecretStore {
                  it; check that its source is set in the deployment environment"
             }
             "operation-not-permitted" => {
-                "the secret's `operations` list does not include this one; add it \
-                 in `qqq.toml` if the use is intended"
+                "the operation needs its crypto capability grant as well as \
+                 `secret.use` (hmac for HMAC, sign for sign/verify/public-key, \
+                 aead for encrypt/decrypt); `secret.use` alone names the key, \
+                 not the primitive"
             }
             "input-too-long" => {
                 "the input exceeded the host's per-secret-call maximum; send less \
@@ -535,6 +553,411 @@ impl SecretStore {
 impl Default for SecretStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Production wiring: primitives, resolution, registration — `HOST-028`.
+// ---------------------------------------------------------------------------
+
+/// The WIT package this module implements.
+pub const INTERFACE: &str = "qqq:secrets@1.0.0";
+
+/// The secret-use interface, as a component imports it.
+pub const SECRET_USE: &str = "qqq:secrets/secret-use@1.0.0";
+
+mod bindings {
+    wasmtime::component::bindgen!({
+        path: "../../wit/qqq-secrets.wit",
+        interfaces: "import qqq:secrets/secret-use@1.0.0;",
+    });
+}
+
+/// The WIT `secret-error`, re-exported rather than re-declared: the WIT
+/// variant is the definition, and a second Rust enum would be a second answer
+/// to what `not-granted` means. (Same rule as `host_test.rs`.)
+pub use bindings::qqq::secrets::secret_use::SecretError as WitSecretError;
+use bindings::qqq::secrets::secret_use::SecretOp as WitSecretOp;
+
+/// The longest secret name the host will look up.
+///
+/// Manifest keys are short identifiers; a name longer than this cannot be
+/// granted, so looking it up would only bloat logs with guest-controlled
+/// bytes. Oversize names fail as `not-granted` — fail closed with the stable
+/// error for "no such grant exists", which is exactly what an overlong name
+/// is.
+pub const MAX_SECRET_NAME_LEN: usize = 256;
+
+/// The production [`SecretCrypto`]: Ed25519 for sign/verify/public-key,
+/// HMAC-SHA256 for hmac, AES-256-GCM for encrypt/decrypt.
+///
+/// These are the proposal's primary algorithms (`sign = ["ed25519"]`,
+/// `hmac = ["sha256"]`, `aead = ["aes-256-gcm"]`); the manifest's allowlists
+/// narrow `qqq:crypto`, and this interface serves exactly these three, stated
+/// here rather than negotiated per call. A key of the wrong length is a
+/// deployment fault (`unavailable` via the store); a well-formed input that
+/// does not verify or decrypt is a *result* (`Ok(false)` / store-level
+/// failure), never a key leak — the error text stays in the host log.
+pub struct HostSecretCrypto;
+
+impl SecretCrypto for HostSecretCrypto {
+    fn sign(&self, key: &[u8], input: &[u8]) -> std::result::Result<Vec<u8>, String> {
+        use ed25519_dalek::{Signer as _, SigningKey};
+        let seed: &[u8; 32] = key
+            .try_into()
+            .map_err(|_| "signing key is not a 32-byte seed")?;
+        Ok(SigningKey::from_bytes(seed).sign(input).to_bytes().to_vec())
+    }
+
+    fn verify(
+        &self,
+        key: &[u8],
+        input: &[u8],
+        signature: &[u8],
+    ) -> std::result::Result<bool, String> {
+        use ed25519_dalek::{SigningKey, Verifier as _};
+        // A malformed signature proves nothing, so it verifies false — a
+        // negative answer, not a backend failure. A malformed KEY is the
+        // opposite: the host cannot run the check at all, which is a
+        // deployment fault the guest must see as `unavailable`, never as a
+        // forged-looking `false`.
+        let Ok(seed) = TryInto::<&[u8; 32]>::try_into(key) else {
+            return Err("signing key is not a 32-byte seed".to_owned());
+        };
+        let Ok(parsed) = TryInto::<&[u8; 64]>::try_into(signature) else {
+            return Ok(false);
+        };
+        let verifying = SigningKey::from_bytes(seed).verifying_key();
+        let parsed = ed25519_dalek::Signature::from_bytes(parsed);
+        Ok(verifying.verify(input, &parsed).is_ok())
+    }
+
+    fn hmac(&self, key: &[u8], input: &[u8]) -> std::result::Result<Vec<u8>, String> {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| "HMAC key was refused")?;
+        mac.update(input);
+        Ok(mac.finalize().into_bytes().to_vec())
+    }
+
+    fn encrypt(&self, key: &[u8], plaintext: &[u8]) -> std::result::Result<Vec<u8>, String> {
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+        let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "AEAD key is not 32 bytes")?;
+        let mut nonce_bytes = [0u8; 12];
+        getrandom::fill(&mut nonce_bytes).map_err(|_| "the entropy source failed")?;
+        let nonce = Nonce::from(nonce_bytes);
+        let body = cipher
+            .encrypt(&nonce, plaintext)
+            .map_err(|_| "encryption failed")?;
+        let mut out = Vec::with_capacity(nonce_bytes.len() + body.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&body);
+        Ok(out)
+    }
+
+    fn decrypt(&self, key: &[u8], ciphertext: &[u8]) -> std::result::Result<Vec<u8>, String> {
+        use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+        let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "AEAD key is not 32 bytes")?;
+        let (nonce_bytes, body) = ciphertext
+            .split_at_checked(12)
+            .ok_or_else(|| "ciphertext is shorter than the nonce".to_owned())?;
+        let nonce = aes_gcm::Nonce::try_from(nonce_bytes)
+            .map_err(|_| "ciphertext is shorter than the nonce".to_owned())?;
+        cipher
+            .decrypt(&nonce, body)
+            .map_err(|_| "decryption failed: wrong key or tampered ciphertext".to_owned())
+    }
+
+    fn public_key(&self, key: &[u8]) -> std::result::Result<Vec<u8>, String> {
+        use ed25519_dalek::SigningKey;
+        let seed: &[u8; 32] = key
+            .try_into()
+            .map_err(|_| "signing key is not a 32-byte seed")?;
+        Ok(SigningKey::from_bytes(seed)
+            .verifying_key()
+            .to_bytes()
+            .to_vec())
+    }
+}
+
+/// Resolve `env:` secret references to material, once, at deployment.
+///
+/// `lookup` reads one environment variable to its bytes (or `None` when
+/// unset). It is a parameter rather than `std::env` so the rule is testable
+/// without touching the process environment — and so this module keeps
+/// touching no ambient state itself (`CON-010`: only `qqq-run`, which
+/// `check_no_ambient.py` does not scan, passes the real reader).
+///
+/// Returns the material for every resolvable reference plus the names that
+/// could not be resolved. Unresolvable names are the CALLER's decision: the
+/// store distinguishes granted-but-unavailable, and the deploy layer fails
+/// the command naming the missing variable. Unknown schemes fail here —
+/// silently ignoring a `vault:` reference would deploy a guest whose secret
+/// never resolves.
+pub fn resolve_env_material(
+    refs: &[String],
+    lookup: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> (Vec<SecretMaterial>, Vec<String>) {
+    let mut material = Vec::new();
+    let mut unresolvable = Vec::new();
+    for r in refs {
+        match qqq_cap::normalize::SecretRef::parse(r) {
+            Ok(parsed) => match lookup(&parsed.env_var) {
+                Some(value) => material.push(SecretMaterial::new(
+                    parsed.logical_name.clone(),
+                    value,
+                    PermittedOp::all().to_vec(),
+                )),
+                None => unresolvable.push(r.clone()),
+            },
+            Err(_) => unresolvable.push(r.clone()),
+        }
+    }
+    (material, unresolvable)
+}
+
+/// The capability an operation additionally requires.
+///
+/// `secret.use` gates the *key*; the `crypto.*` grants gate the *primitive* —
+/// a use grant must not smuggle HMAC past an operator who granted only
+/// signing. This is why `operation-not-permitted` is reachable in production:
+/// without the pairing, the WIT's per-operation refusal would be dead.
+fn crypto_grant_for(op: PermittedOp) -> qqq_cap::capability::Capability {
+    use qqq_cap::capability::Capability::{CryptoAead, CryptoHmac, CryptoSign};
+    match op {
+        PermittedOp::Sign | PermittedOp::Verify | PermittedOp::PublicKey => CryptoSign,
+        PermittedOp::Hmac => CryptoHmac,
+        PermittedOp::Encrypt | PermittedOp::Decrypt => CryptoAead,
+    }
+}
+
+/// Register the secrets interface for the granted capability.
+///
+/// Links `qqq:secrets/secret-use` only when `secret.use` is granted; every
+/// function re-checks at call time, so a future change that linked it
+/// unconditionally could not serve an ungranted guest.
+///
+/// # The two-input rule, and why it refuses rather than guesses
+///
+/// `apply` carries the payload twice: inside the op variant (`sign(data)`)
+/// and as the separate `input` parameter. The variant payload is
+/// authoritative; `input` must be empty when it is set. Both non-empty means
+/// the guest passed the data twice and the host cannot know which copy is
+/// intended — concatenating would sign `data||data` for a guest that meant
+/// `data`, and preferring one silently drops the other. The refusal is
+/// `operation-not-permitted`: the operation *as specified* is not permitted
+/// to execute. `public-key` takes no input at all, so a non-empty `input`
+/// with it is refused the same way.
+///
+/// # Errors
+///
+/// A `wasmtime::Error` if the linker rejects a signature.
+pub fn register(
+    linker: &mut wasmtime::component::Linker<crate::linker::StoreData>,
+    grants: &qqq_cap::resolve::GrantSet,
+) -> wasmtime::Result<()> {
+    use qqq_cap::capability::Capability::SecretUse;
+    if !grants.grants(SecretUse) {
+        return Ok(());
+    }
+    let mut inst = linker.instance(SECRET_USE)?;
+    register_exists(&mut inst)?;
+    register_permitted_operations(&mut inst)?;
+    register_apply(&mut inst)?;
+    Ok(())
+}
+
+/// `exists(name: string) -> bool` — disclosure-safe by design (WIT docs),
+/// so granted-but-unknown names read `false`, never an error.
+fn register_exists(
+    inst: &mut wasmtime::component::LinkerInstance<'_, crate::linker::StoreData>,
+) -> wasmtime::Result<()> {
+    use qqq_cap::capability::Capability::SecretUse;
+    inst.func_wrap(
+        "exists",
+        |store: wasmtime::StoreContextMut<'_, crate::linker::StoreData>,
+         (name,): (String,)|
+         -> wasmtime::Result<(bool,)> {
+            crate::guard::guard("qqq:secrets/secret-use.exists", || {
+                if !store.data().grants.grants(SecretUse) {
+                    return Ok((false,));
+                }
+                if name.len() > MAX_SECRET_NAME_LEN {
+                    return Ok((false,));
+                }
+                Ok((store.data().secrets.exists(&name),))
+            })
+        },
+    )?;
+    Ok(())
+}
+
+/// `permitted-operations(name: string) -> list<string>` — names only.
+fn register_permitted_operations(
+    inst: &mut wasmtime::component::LinkerInstance<'_, crate::linker::StoreData>,
+) -> wasmtime::Result<()> {
+    use qqq_cap::capability::Capability::SecretUse;
+    inst.func_wrap(
+        "permitted-operations",
+        |store: wasmtime::StoreContextMut<'_, crate::linker::StoreData>,
+         (name,): (String,)|
+         -> wasmtime::Result<(Vec<String>,)> {
+            crate::guard::guard("qqq:secrets/secret-use.permitted-operations", || {
+                if !store.data().grants.grants(SecretUse) {
+                    return Ok((Vec::new(),));
+                }
+                if name.len() > MAX_SECRET_NAME_LEN {
+                    return Ok((Vec::new(),));
+                }
+                Ok((store
+                    .data()
+                    .secrets
+                    .permitted_operations(&name)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),))
+            })
+        },
+    )?;
+    Ok(())
+}
+
+/// `apply(name, op, input) -> result<list<u8>, secret-error>`.
+fn register_apply(
+    inst: &mut wasmtime::component::LinkerInstance<'_, crate::linker::StoreData>,
+) -> wasmtime::Result<()> {
+    use qqq_cap::capability::Capability::SecretUse;
+    inst.func_wrap(
+        "apply",
+        |store: wasmtime::StoreContextMut<'_, crate::linker::StoreData>,
+         (name, op, input): (String, WitSecretOp, Vec<u8>)|
+         -> wasmtime::Result<(std::result::Result<Vec<u8>, WitSecretError>,)> {
+            crate::guard::guard("qqq:secrets/secret-use.apply", || {
+                let data = store.data();
+                if !data.grants.grants(SecretUse) {
+                    return Ok((Err(WitSecretError::NotGranted),));
+                }
+                if name.len() > MAX_SECRET_NAME_LEN {
+                    return Ok((Err(WitSecretError::NotGranted),));
+                }
+                let store_ref = &data.secrets;
+                if !store_ref.is_granted(&name) {
+                    return Ok((Err(WitSecretError::NotGranted),));
+                }
+                if !store_ref.exists(&name) {
+                    return Ok((Err(WitSecretError::Unavailable),));
+                }
+                // The operation, its payload, and the crypto grant it needs.
+                let (permitting, payload, needs) = match op {
+                    WitSecretOp::Sign(bytes) => (
+                        PermittedOp::Sign,
+                        bytes,
+                        crypto_grant_for(PermittedOp::Sign),
+                    ),
+                    WitSecretOp::Hmac(bytes) => (
+                        PermittedOp::Hmac,
+                        bytes,
+                        crypto_grant_for(PermittedOp::Hmac),
+                    ),
+                    WitSecretOp::Encrypt(bytes) => (
+                        PermittedOp::Encrypt,
+                        bytes,
+                        crypto_grant_for(PermittedOp::Encrypt),
+                    ),
+                    WitSecretOp::Decrypt(bytes) => (
+                        PermittedOp::Decrypt,
+                        bytes,
+                        crypto_grant_for(PermittedOp::Decrypt),
+                    ),
+                    WitSecretOp::Verify(record) => {
+                        return Ok(verify_call(data, &name, &record.input, &record.signature));
+                    }
+                    WitSecretOp::PublicKey => {
+                        if !input.is_empty() {
+                            return Ok((Err(WitSecretError::OperationNotPermitted),));
+                        }
+                        if !data.grants.grants(crypto_grant_for(PermittedOp::PublicKey)) {
+                            return Ok((Err(WitSecretError::OperationNotPermitted),));
+                        }
+                        if !store_ref.material_permits(&name, PermittedOp::PublicKey) {
+                            return Ok((Err(WitSecretError::OperationNotPermitted),));
+                        }
+                        return match store_ref.apply(
+                            &name,
+                            PermittedOp::PublicKey,
+                            &[],
+                            &HostSecretCrypto,
+                        ) {
+                            Ok(bytes) => Ok((Ok(bytes),)),
+                            Err(_) => Ok((Err(WitSecretError::Unavailable),)),
+                        };
+                    }
+                };
+                // The two-input rule: exactly one carrier.
+                let effective: Vec<u8> = match (payload.is_empty(), input.is_empty()) {
+                    (true, true) => Vec::new(),
+                    (false, true) => payload,
+                    (true, false) => input,
+                    (false, false) => return Ok((Err(WitSecretError::OperationNotPermitted),)),
+                };
+                if effective.len() > MAX_SECRET_INPUT {
+                    return Ok((Err(WitSecretError::InputTooLong),));
+                }
+                if !data.grants.grants(needs) {
+                    return Ok((Err(WitSecretError::OperationNotPermitted),));
+                }
+                if !store_ref.material_permits(&name, permitting) {
+                    return Ok((Err(WitSecretError::OperationNotPermitted),));
+                }
+                match store_ref.apply(&name, permitting, &effective, &HostSecretCrypto) {
+                    Ok(bytes) => Ok((Ok(bytes),)),
+                    Err(_) => Ok((Err(WitSecretError::Unavailable),)),
+                }
+            })
+        },
+    )?;
+
+    Ok(())
+}
+
+/// The `verify` half of `apply`: the record is already split by the caller.
+///
+/// Returns the WIT result directly — every path answers, so there is no
+/// `wasmtime::Error` to wrap. The caller lifts it into the closure's return.
+fn verify_call(
+    data: &crate::linker::StoreData,
+    name: &str,
+    input: &[u8],
+    signature: &[u8],
+) -> (std::result::Result<Vec<u8>, WitSecretError>,) {
+    use qqq_cap::capability::Capability::SecretUse;
+    if !data.grants.grants(SecretUse) {
+        return (Err(WitSecretError::NotGranted),);
+    }
+    if !data.secrets.is_granted(name) {
+        return (Err(WitSecretError::NotGranted),);
+    }
+    if !data.secrets.exists(name) {
+        return (Err(WitSecretError::Unavailable),);
+    }
+    if input.len() > MAX_SECRET_INPUT || signature.len() > MAX_SECRET_INPUT {
+        return (Err(WitSecretError::InputTooLong),);
+    }
+    if !data.grants.grants(crypto_grant_for(PermittedOp::Verify)) {
+        return (Err(WitSecretError::OperationNotPermitted),);
+    }
+    if !data.secrets.material_permits(name, PermittedOp::Verify) {
+        return (Err(WitSecretError::OperationNotPermitted),);
+    }
+    match data
+        .secrets
+        .verify(name, input, signature, &HostSecretCrypto)
+    {
+        // Verification is a boolean answer, and the WIT carries it as bytes:
+        // `[1]` valid, `[0]` invalid. An empty success would be
+        // indistinguishable from "no answer", and `verify` must answer.
+        Ok(valid) => (Ok(vec![u8::from(valid)]),),
+        Err(_) => (Err(WitSecretError::Unavailable),),
     }
 }
 
@@ -1059,5 +1482,192 @@ mod tests {
                     .any(|(k, v)| k == "variant" && v == variant)
             );
         }
+    }
+
+    // -- Production crypto (`HOST-028`) -------------------------------------
+
+    /// Ed25519 sign/verify round-trips through the real primitive.
+    #[test]
+    fn host_crypto_sign_verify_round_trips() {
+        let crypto = HostSecretCrypto;
+        let key = [7u8; 32];
+        let sig = crypto.sign(&key, b"hello").expect("signs");
+        assert_eq!(sig.len(), 64, "an ed25519 signature is 64 bytes");
+        assert!(
+            crypto
+                .verify(&key, b"hello", &sig)
+                .expect("verification runs"),
+            "a fresh signature verifies"
+        );
+        assert!(
+            !crypto
+                .verify(&key, b"other", &sig)
+                .expect("verification runs"),
+            "a different input does not verify"
+        );
+    }
+
+    /// A malformed signature is a negative answer, not a backend failure.
+    #[test]
+    fn host_crypto_short_signature_is_false_not_error() {
+        let crypto = HostSecretCrypto;
+        let key = [7u8; 32];
+        assert!(
+            !crypto
+                .verify(&key, b"hello", b"short")
+                .expect("a short signature is answerable"),
+            "a malformed signature proves nothing, so it verifies false"
+        );
+    }
+
+    /// A malformed key is a deployment fault, reported as an error.
+    #[test]
+    fn host_crypto_wrong_length_key_fails() {
+        let crypto = HostSecretCrypto;
+        assert!(crypto.sign(b"short", b"x").is_err());
+        assert!(crypto.public_key(b"short").is_err());
+        assert!(crypto.encrypt(b"short", b"x").is_err());
+        assert!(crypto.decrypt(b"short", b"x").is_err());
+    }
+
+    /// HMAC-SHA256 is deterministic and 32 bytes.
+    #[test]
+    fn host_crypto_hmac_is_deterministic_sha256() {
+        let crypto = HostSecretCrypto;
+        let a = crypto.hmac(b"key", b"input").expect("hmacs");
+        let b = crypto.hmac(b"key", b"input").expect("hmacs");
+        assert_eq!(a, b, "HMAC is deterministic");
+        assert_eq!(a.len(), 32, "HMAC-SHA256 is 32 bytes");
+        assert_ne!(
+            crypto.hmac(b"other", b"input").expect("hmacs"),
+            a,
+            "a different key gives a different MAC"
+        );
+    }
+
+    /// AES-256-GCM encrypt/decrypt round-trips; tampering fails closed.
+    #[test]
+    fn host_crypto_encrypt_decrypt_round_trips() {
+        let crypto = HostSecretCrypto;
+        let key = [9u8; 32];
+        let ct = crypto.encrypt(&key, b"hello").expect("encrypts");
+        assert!(
+            ct.len() > b"hello".len(),
+            "nonce plus tag expand the payload"
+        );
+        let pt = crypto.decrypt(&key, &ct).expect("decrypts");
+        assert_eq!(pt, b"hello");
+        let mut tampered = ct.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(
+            crypto.decrypt(&key, &tampered).is_err(),
+            "a tampered ciphertext must not decrypt"
+        );
+    }
+
+    /// The public key derives from the seed and never exposes it.
+    #[test]
+    fn host_crypto_public_key_derives() {
+        use ed25519_dalek::SigningKey;
+        let crypto = HostSecretCrypto;
+        let seed = [11u8; 32];
+        let pk = crypto.public_key(&seed).expect("derives");
+        assert_eq!(
+            pk,
+            SigningKey::from_bytes(&seed).verifying_key().to_bytes(),
+            "the public half matches ed25519"
+        );
+    }
+
+    /// `env:` references resolve; anything else is unresolvable, never silent.
+    #[test]
+    fn resolve_env_material_splits_resolvable_from_not() {
+        let (material, unresolvable) = resolve_env_material(
+            &[
+                "env:K".to_owned(),
+                "vault:x".to_owned(),
+                "env:MISSING".to_owned(),
+            ],
+            &|name| {
+                if name == "K" {
+                    Some(b"value".to_vec())
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(material.len(), 1);
+        assert_eq!(material[0].name(), "K");
+        assert!(unresolvable.contains(&"vault:x".to_owned()));
+        assert!(unresolvable.contains(&"env:MISSING".to_owned()));
+    }
+
+    /// The crypto grant each operation requires.
+    #[test]
+    fn operations_map_to_their_crypto_grants() {
+        use qqq_cap::capability::Capability::{CryptoAead, CryptoHmac, CryptoSign};
+        assert_eq!(crypto_grant_for(PermittedOp::Sign), CryptoSign);
+        assert_eq!(crypto_grant_for(PermittedOp::Verify), CryptoSign);
+        assert_eq!(crypto_grant_for(PermittedOp::PublicKey), CryptoSign);
+        assert_eq!(crypto_grant_for(PermittedOp::Hmac), CryptoHmac);
+        assert_eq!(crypto_grant_for(PermittedOp::Encrypt), CryptoAead);
+        assert_eq!(crypto_grant_for(PermittedOp::Decrypt), CryptoAead);
+    }
+
+    /// `material_permits` mirrors the store's own gate for the register.
+    #[test]
+    fn material_permits_reports_the_store_gate() {
+        let s = store();
+        assert!(s.material_permits("signing-key", PermittedOp::Sign));
+        assert!(!s.material_permits("signing-key", PermittedOp::Hmac));
+        assert!(!s.material_permits("nope", PermittedOp::Sign));
+    }
+
+    /// The register links the instance exactly when granted — the positive
+    /// and negative halves differ in one variable: the grant set. Each half
+    /// uses the fixture shape its direction needs: the negative half names a
+    /// member (an empty import is vacuous and would pass for the wrong
+    /// reason), the positive half is empty (a mis-shaped member would fail
+    /// for the wrong reason).
+    #[test]
+    fn register_links_only_when_granted() {
+        use qqq_cap::resolve::GrantSet;
+        const NAMED_MEMBER: &str = r#"(component
+          (import "qqq:secrets/secret-use@1.0.0" (instance $s
+            (export "apply" (func (param "a" string)))))
+          (core module $m)
+          (core instance $i (instantiate $m))
+        )"#;
+        const EMPTY_INSTANCE: &str = r#"(component
+          (import "qqq:secrets/secret-use@1.0.0" (instance $s))
+          (core module $m)
+          (core instance $i (instantiate $m))
+        )"#;
+        fn link(grants: &GrantSet, wat: &str) -> wasmtime::Result<()> {
+            let mut config = wasmtime::Config::new();
+            config.wasm_component_model(true);
+            let engine = wasmtime::Engine::new(&config).expect("engine builds");
+            let mut linker = wasmtime::component::Linker::new(&engine);
+            register(&mut linker, grants)?;
+            let bytes = wat::parse_str(wat).expect("fixture assembles");
+            let component =
+                wasmtime::component::Component::new(&engine, &bytes).expect("fixture compiles");
+            let mut store =
+                wasmtime::Store::new(&engine, crate::linker::StoreData::new(grants.clone()));
+            linker.instantiate(&mut store, &component).map(|_| ())
+        }
+        // Ungranted: the import names itself.
+        let err = link(&GrantSet::empty(), NAMED_MEMBER).expect_err("no grant means no instance");
+        assert!(
+            format!("{err:#}").contains("qqq:secrets/secret-use"),
+            "the refusal must name the import: {err:#}"
+        );
+        // Granted: the empty instance resolves vacuously, proving the link.
+        let m = qqq_cap::manifest::Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[capabilities.secret]\nsecrets = [\"env:K\"]\n",
+        )
+        .expect("manifest parses");
+        link(&GrantSet::from_manifest(&m), EMPTY_INSTANCE).expect("a granted import links");
     }
 }

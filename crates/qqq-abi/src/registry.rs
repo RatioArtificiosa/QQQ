@@ -377,7 +377,11 @@ fn io_interfaces() -> Vec<HostInterface> {
         iface(
             "qqq:env@1.0.0",
             &[EnvRead],
-            false,
+            // Implemented: `host_env::register` binds `environment` with
+            // manifest-allowlist reads only (`HOST-029`). The `implemented`
+            // flags are claims the `implemented_flags_match_reality` test
+            // pins, so flipping one without the host code fails the build.
+            true,
             "Individually named environment variables",
         ),
         iface(
@@ -689,7 +693,7 @@ mod tests {
             .collect();
         assert_eq!(
             implemented,
-            vec!["qqq:clock@1.0.0", "qqq:secrets@1.0.0"],
+            vec!["qqq:clock@1.0.0", "qqq:env@1.0.0", "qqq:secrets@1.0.0"],
             "the set of implemented interfaces changed; update this test in the \
              same commit that lands (or removes) an implementation"
         );

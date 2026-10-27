@@ -215,6 +215,12 @@ pub struct GuestApp {
     /// serves no secrets. Cloned on `replacement`: a rotation must neither
     /// drop material nor resolve it twice.
     secrets: qqq_host::host_secrets::SecretStore,
+
+    /// This app's guest-visible environment variables — `HOST-029`.
+    ///
+    /// Exactly the manifest's allowlist with values resolved once: empty
+    /// unless `serve` sets it, cloned on replacement like the secrets.
+    env: std::collections::BTreeMap<String, Option<Vec<u8>>>,
     /// The epoch ticker period for this app's engine lineage — `F-17`.
     ///
     /// Derived once from the limits via the helper, shared by the ticker
@@ -422,6 +428,7 @@ impl GuestApp {
             deterministic: false,
             det_clock: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             secrets: qqq_host::host_secrets::SecretStore::new(),
+            env: std::collections::BTreeMap::new(),
             epoch_tick: tick,
         })
     }
@@ -436,6 +443,15 @@ impl GuestApp {
     /// like every other shared resource.
     pub(crate) fn set_secrets(&mut self, secrets: qqq_host::host_secrets::SecretStore) {
         self.secrets = secrets;
+    }
+
+    /// Set the environment map new instances serve `qqq:env` from.
+    ///
+    /// Crate-visible for the same reason: resolved once by `serve` from the
+    /// manifest's allowlist plus the process environment, installed before
+    /// serving, cloned on replacement.
+    pub(crate) fn set_env(&mut self, env: std::collections::BTreeMap<String, Option<Vec<u8>>>) {
+        self.env = env;
     }
 
     /// Run guest instances deterministically — `F-20`.
@@ -505,6 +521,9 @@ impl GuestApp {
         // would serve `unavailable` for secrets the manifest still grants, and
         // re-resolving per rotation would read the environment per deploy.
         next.secrets = self.secrets.clone();
+        // And the environment with them: a rotation that dropped the map
+        // would serve `not-allowed` for variables the manifest still lists.
+        next.env = self.env.clone();
         // And the admission counter with it: a rotation that reset the
         // virtual clock would replay already-seen ticks, and one that kept
         // counting on a rotated copy would fork it.
@@ -914,6 +933,10 @@ impl GuestApp {
         // resolved once at startup. Cloned per request so each instance's
         // authority travels with the instance.
         options.secrets = self.secrets.clone();
+        // And the resolved environment: membership in this map is the
+        // allowlist, so each request's instance enforces exactly what the
+        // manifest lists and nothing the process happens to hold.
+        options.env = self.env.clone();
         let instance = Instance::create_with(
             &self.engine,
             &self.prepared,
@@ -2143,6 +2166,90 @@ mod tests {
             }
         }
         Some(std::fs::read(&artifact).expect("probe component reads"))
+    }
+
+    #[test]
+    fn env_flows_from_manifest_to_guest_answer() {
+        fn env_probe_component() -> Option<Vec<u8>> {
+            use std::sync::OnceLock;
+            static BUILT: OnceLock<bool> = OnceLock::new();
+            let workspace =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
+            let artifact = workspace.join("target/wasm32-wasip2/release/probe_env.wasm");
+            if !artifact.is_file() {
+                let ok = *BUILT.get_or_init(|| {
+                    let has_target = std::process::Command::new("rustc")
+                        .args(["--print", "target-list"])
+                        .output()
+                        .is_ok_and(|o| {
+                            String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2")
+                        });
+                    if !has_target {
+                        println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
+                        return false;
+                    }
+                    std::process::Command::new("cargo")
+                        .args([
+                            "build",
+                            "--release",
+                            "--target",
+                            "wasm32-wasip2",
+                            "--locked",
+                        ])
+                        .current_dir(&workspace)
+                        .output()
+                        .is_ok_and(|o| o.status.success())
+                });
+                if !ok {
+                    println!("SKIP: probe guest build failed");
+                    return None;
+                }
+            }
+            Some(std::fs::read(&artifact).expect("probe component reads"))
+        }
+
+        let Some(bytes) = env_probe_component() else {
+            return;
+        };
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+             [capabilities.env]\nallow = [\"REGION\", \"MISSING\"]\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("probe manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("engine config"))
+            .expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        let mut app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)
+            .expect("probe app builds");
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("REGION".to_owned(), Some(b"us-east-1".to_vec()));
+        env.insert("MISSING".to_owned(), None);
+        app.set_env(env);
+        let response = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the probe request serves");
+        let body = String::from_utf8(response.body.clone()).expect("the summary is UTF-8");
+        for expected in [
+            "get-region=ok:us-east-1",
+            "get-missing=err:unset",
+            "get-unlisted=err:not-allowed",
+            "get-or-missing=ok:fallback",
+            "allowed=MISSING,REGION",
+        ] {
+            assert!(
+                body.contains(expected),
+                "the served summary must report {expected}: {body}"
+            );
+        }
     }
 
     #[test]

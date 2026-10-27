@@ -1089,6 +1089,12 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
     inst_opts.secrets = crate::secrets::resolve_secret_store(&loaded.manifest, &|name| {
         std::env::var_os(name).map(|v| v.as_os_str().as_encoded_bytes().to_vec())
     })?;
+    // The manifest's allowlist becomes the guest-visible environment: values
+    // resolved once here (unset names stay absent, which the guest observes
+    // as `unset`), never per call.
+    inst_opts.env = crate::env::resolve_env_map(&loaded.manifest, &|name| {
+        std::env::var_os(name).map(|v| v.as_os_str().as_encoded_bytes().to_vec())
+    });
     if let Some(log) = &replay_sink {
         inst_opts.record_to(std::sync::Arc::clone(log));
     }

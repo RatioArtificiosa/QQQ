@@ -102,6 +102,7 @@ pub mod guest_output;
 pub mod handles;
 pub mod host_clock;
 pub mod host_crypto;
+pub mod host_env;
 mod host_http;
 pub mod host_secrets;
 /// The `qqq:test/assertions` host — Checklist `TEST-007`, `TEST-008`.

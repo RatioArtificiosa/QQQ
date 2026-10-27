@@ -995,14 +995,14 @@ merging; this draft is not a release or a claim that persistent agents are compl
 
 | Scope | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| All checklist items | 310 | 3 | 317 | 10 | 0 | 0 | 640 | 48.4% |
+| All checklist items | 311 | 3 | 316 | 10 | 0 | 0 | 640 | 48.6% |
 
 ### By phase
 
 | Phase | Milestone(s) | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | P0 | M0 | 50 | 0 | 29 | 0 | 0 | 0 | 79 | 63.3% |
-| P1 | M1 | 59 | 0 | 13 | 0 | 0 | 0 | 72 | 81.9% |
+| P1 | M1 | 60 | 0 | 12 | 0 | 0 | 0 | 72 | 83.3% |
 | P2 | M2 | 51 | 0 | 0 | 3 | 0 | 0 | 54 | 94.4% |
 | P3 | M3 | 35 | 0 | 5 | 0 | 0 | 0 | 40 | 87.5% |
 | P4 | M4 | 32 | 0 | 32 | 0 | 0 | 0 | 64 | 50.0% |
@@ -1024,7 +1024,7 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P0 | PLAN | 7 | 0 | 13 | 0 | 0 | 0 | 20 | 35.0% |
 | P1 | ARCH | 12 | 0 | 4 | 0 | 0 | 0 | 16 | 75.0% |
 | P1 | CON | 20 | 0 | 0 | 0 | 0 | 0 | 20 | 100.0% |
-| P1 | HOST | 27 | 0 | 9 | 0 | 0 | 0 | 36 | 75.0% |
+| P1 | HOST | 28 | 0 | 8 | 0 | 0 | 0 | 36 | 77.8% |
 | P2 | CAP | 24 | 0 | 0 | 0 | 0 | 0 | 24 | 100.0% |
 | P2 | SEC | 27 | 0 | 0 | 3 | 0 | 0 | 30 | 90.0% |
 | P3 | ABI | 16 | 0 | 2 | 0 | 0 | 0 | 18 | 88.9% |
@@ -3626,11 +3626,12 @@ bind, and they are listed at the end as absences rather than omitted — a reade
 ### What the host actually binds
 
 `wit/` declares <!-- qqq:claim wit-packages -->15<!-- /qqq:claim --> packages. `qqq-host`'s linker
-registers <!-- qqq:claim host-bound-modules -->6<!-- /qqq:claim --> modules: the **WASI baseline**,
-the **versioned 0.3 clock**, **three** capability modules, and `qqq:test/assertions` -- which a test runner links and nothing
-grants, because an assertion interface is not a capability. The count is six and the *kinds* are
-three, which is why the sentence no longer says "plus three capability modules": that was true at
-four and stopped being true at five.
+registers <!-- qqq:claim host-bound-modules -->7<!-- /qqq:claim --> modules: the **WASI baseline**,
+the **versioned 0.3 clock**, **four** capability modules, and `qqq:test/assertions` -- which a test runner links and nothing
+grants, because an assertion interface is not a capability. The count tracks the
+linker: when a new `host_*::register` arm lands, this number, the `rg` listing
+below, and the "everything else" list move together — `check_doc_claims`
+refuses a drift in either direction.
 
 ```bash
 rg 'host_[a-z0-9_]+::register\(' crates/qqq-host/src/linker.rs
@@ -3640,10 +3641,11 @@ rg 'host_[a-z0-9_]+::register\(' crates/qqq-host/src/linker.rs
 ##   host_clock::register
 ##   host_crypto::register
 ##   host_http::register
+##   host_secrets::register   <- secret-use, env-resolved material; see HOST-028
 ```
 
 Everything else — `qqq:sql`, `qqq:kv`, `qqq:fs`, `qqq:queue`, `qqq:env`, `qqq:ai`, `qqq:dns`,
-`qqq:trace`, `qqq:secrets` — is **declared and not bound**. A guest that imports one of them fails
+`qqq:trace` — is **declared and not bound**. A guest that imports one of them fails
 at **instantiation**, because the linker is built from the grant set alone and an unbounded import is
 *absent* rather than denied.
 

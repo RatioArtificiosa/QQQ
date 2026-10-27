@@ -191,6 +191,17 @@ pub struct StoreData {
     /// this store decides what each call may *do*.
     pub secrets: crate::host_secrets::SecretStore,
 
+    /// This instance's environment variables — `HOST-029`.
+    ///
+    /// Exactly the manifest's `[capabilities.env] allow` names: `Some` bytes
+    /// for resolved values, `None` for listed-but-unset names, and no entry
+    /// at all for unlisted names. Populated from nothing but the manifest,
+    /// so a lookup miss is `not-allowed` (unlisted) while a `None` value is
+    /// `unset` — collapsing the two would let a guest enumerate the
+    /// allowlist by probing, which the single `not-allowed` error for
+    /// "ungranted or unlisted" exists to prevent.
+    pub env: std::collections::BTreeMap<String, Option<Vec<u8>>>,
+
     /// This request's hold on its tenant's shared output budget, if any.
     ///
     /// `None` is the standalone per-instance budget every existing caller
@@ -342,6 +353,10 @@ impl Default for StoreData {
             // No material: an instance built without resolved secrets has none
             // to serve. See the field's own doc for why empty is safe.
             secrets: crate::host_secrets::SecretStore::new(),
+            // No variables: an instance built without the manifest's
+            // allowlist serves none. See the field's own doc for why
+            // membership is the allowlist.
+            env: std::collections::BTreeMap::new(),
             tenant_output: None,
             // An empty environment and no wall clock: the deny-by-default answer
             // for a store that was not built from a manifest. The `expect` is
@@ -425,6 +440,10 @@ impl StoreData {
             // No material: an instance built without resolved secrets has none
             // to serve. See the field's own doc for why empty is safe.
             secrets: crate::host_secrets::SecretStore::new(),
+            // No variables: an instance built without the manifest's
+            // allowlist serves none. See the field's own doc for why
+            // membership is the allowlist.
+            env: std::collections::BTreeMap::new(),
             tenant_output,
             // Derived from the grants so a store built this way permits exactly
             // what the grant set says -- no more, and no less.
@@ -543,6 +562,10 @@ impl StoreData {
             // No material: an instance built without resolved secrets has none
             // to serve. See the field's own doc for why empty is safe.
             secrets: crate::host_secrets::SecretStore::new(),
+            // No variables: an instance built without the manifest's
+            // allowlist serves none. See the field's own doc for why
+            // membership is the allowlist.
+            env: std::collections::BTreeMap::new(),
             tenant_output: None,
             wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
@@ -605,6 +628,18 @@ impl StoreData {
     #[must_use]
     pub fn with_secrets(mut self, secrets: crate::host_secrets::SecretStore) -> Self {
         self.secrets = secrets;
+        self
+    }
+
+    /// Set this instance's environment variables directly — `HOST-029`.
+    ///
+    /// What tests use: the deploy layer resolves the manifest's allowlist
+    /// against the process environment and sets the same value, so a test
+    /// that sets the map under examination exercises the identical
+    /// enforcement the guest sees in production.
+    #[must_use]
+    pub fn with_env(mut self, env: std::collections::BTreeMap<String, Option<Vec<u8>>>) -> Self {
+        self.env = env;
         self
     }
 
@@ -1339,6 +1374,9 @@ pub fn build_linker<'a>(
             "qqq:secrets@1.0.0" => {
                 crate::host_secrets::register(&mut linker, grants)?;
             }
+            "qqq:env@1.0.0" => {
+                crate::host_env::register(&mut linker, grants)?;
+            }
             // `qqq:http` is the interface a guest both **imports** and **exports**
             // (see `host_http`'s module docs for why the import exists even when the
             // guest never calls `send`). Registering it here is what turns a granted
@@ -1355,14 +1393,14 @@ pub fn build_linker<'a>(
                 let _bound = crate::host_http::register(&mut linker, grants)?;
             }
             // QQQ-STUB(CON-009): `qqq:fs`, `qqq:sql`, `qqq:kv`,
-            // `qqq:queue`, `qqq:dns`, `qqq:env`, `qqq:log` and `qqq:trace`
+            // `qqq:queue`, `qqq:dns`, `qqq:log` and `qqq:trace`
             // have no registered interface yet. `qqq:clock`, `qqq:crypto`,
-            // `qqq:http` and `qqq:secrets` have arms (`HOST-028` owns the
-            // secrets binding; `HOST-029`..`HOST-036` own the other eight).
-            // Recording the gap keeps a
-            // partially-implemented milestone honest: a component that imports
-            // the others gets a clear diagnostic naming the capability, not
-            // Wasmtime's "unknown import".
+            // `qqq:http`, `qqq:secrets` and `qqq:env` have arms (`HOST-028`
+            // owns the secrets binding, `HOST-029` the env binding;
+            // `HOST-030`..`HOST-036` own the other seven). Recording the
+            // gap keeps a partially-implemented milestone honest: a component
+            // that imports the others gets a clear diagnostic naming the
+            // capability, not Wasmtime's "unknown import".
             //
             // Two notes on the reference, because getting it wrong twice is
             // itself worth recording (Observations §O-020d):

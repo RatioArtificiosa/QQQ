@@ -399,6 +399,14 @@ pub struct InstanceOptions {
     /// environment; `prepare` copies it into the store the same way it
     /// carries every other option.
     pub secrets: crate::host_secrets::SecretStore,
+    /// This instance's environment variables — `HOST-029`.
+    ///
+    /// Empty unless set: the default is the safe reading of "no variables
+    /// declared". Runners set it from the manifest's allowlist plus the
+    /// deployment environment (listed-but-unset names map to `None`);
+    /// `prepare` copies it into the store the same way it carries every
+    /// other option.
+    pub env: std::collections::BTreeMap<String, Option<Vec<u8>>>,
 }
 
 impl InstanceOptions {
@@ -1310,6 +1318,9 @@ impl ReadyStore {
         // The resolved secrets travel the same way: an instance built
         // without the manifest has no material to serve.
         data.secrets = opts.secrets.clone();
+        // And the resolved environment with them: membership in this map is
+        // the allowlist, populated from nothing but the manifest.
+        data.env = opts.env.clone();
         // The egress policy travels with the store like every other option:
         // a runner sets `opts.egress` from the manifest and prepare carries
         // it in, so production instances enforce declared destinations

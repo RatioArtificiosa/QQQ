@@ -39,6 +39,8 @@ pub mod build;
 pub mod commands;
 pub mod deps;
 pub mod dev;
+/// Resolve `qqq:env` values at the deploy layer — `HOST-029`.
+pub mod env;
 pub mod flaky;
 pub mod generations;
 /// The bridge from a served request to a guest call: `qqq-serve` + `qqq-abi` +

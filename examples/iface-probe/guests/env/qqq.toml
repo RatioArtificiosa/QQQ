@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# qqq.toml — the env probe guest. Minimal: instantiated directly by host
+# tests and served by GuestApp tests, never deployed alone.
+
+[package]
+name = "probe-env"
+version = "0.1.0"
+
+[build]
+language = "rust"
+target = "wasm32-wasip2"
+profile = "release"
+
+[capabilities.env]
+allow = ["REGION", "MISSING", "BINARY"]
+
+[capabilities.http]
+server = true

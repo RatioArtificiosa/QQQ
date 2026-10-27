@@ -1143,6 +1143,11 @@ fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltD
         &loaded.manifest,
         &|name| std::env::var_os(name).map(|v| v.as_os_str().as_encoded_bytes().to_vec()),
     )?);
+    // The manifest's allowlist becomes the guest-visible environment,
+    // resolved once here; unset names stay absent for the guest to observe.
+    app.set_env(crate::env::resolve_env_map(&loaded.manifest, &|name| {
+        std::env::var_os(name).map(|v| v.as_os_str().as_encoded_bytes().to_vec())
+    }));
 
     // A metrics path that collides with a declared route would silently shadow one of them, and
     // neither failure is visible from outside -- so it is refused here, where the operator can act.

@@ -112,6 +112,16 @@ pub(crate) const MAX_LOG_ATTRIBUTES: usize = 64;
 /// WIT error is the backpressure signal.
 pub(crate) const MAX_LOG_RECORDS: usize = 4096;
 
+/// The most bytes of stored log data one instance may buffer.
+///
+/// The per-record bound alone does not bound the buffer: 4096 records at
+/// 64 KiB each would be hundreds of megabytes of host heap no budget is
+/// charged for. Four mebibytes is a quarter of the smallest instance memory
+/// (16 MiB), so a guest that fills it has spent a visible share of its
+/// budget getting there — and the failure is `record-too-large`, the same
+/// backpressure signal as every other bound here.
+pub(crate) const MAX_LOG_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+
 /// One guest log record, host-attributed.
 ///
 /// ```
@@ -198,15 +208,47 @@ impl LogHost for crate::linker::StoreData {
         message: String,
         attributes: Vec<Attribute>,
     ) -> std::result::Result<(), WitLogError> {
-        emit_record(self, level_index(level), message, attributes)
+        emit_record(self, level_index(level), &message, &attributes)
     }
 
     fn emit_many(
         &mut self,
         records: Vec<(Level, String, Vec<Attribute>)>,
     ) -> std::result::Result<(), WitLogError> {
-        for (level, message, attributes) in records {
-            emit_record(self, level_index(level), message, attributes)?;
+        // Atomic: every record validates before any is stored, so a batch
+        // that fails on its last record leaves no prefix behind. A caller
+        // that retries the batch would otherwise duplicate the prefix, and
+        // an operator reading the buffer could not tell which records came
+        // from a batch that reported failure.
+        if !self.grants.grants(LogWrite) {
+            return Err(WitLogError::NotGranted);
+        }
+        let mut validated = Vec::with_capacity(records.len());
+        let mut levels = Vec::with_capacity(records.len());
+        for (level, message, attributes) in &records {
+            levels.push(level_index(*level));
+            validated.push(validate_record(self, message, attributes)?);
+        }
+        let additional: usize = validated.iter().map(|v| v.size).sum();
+        if self.logs.len() + validated.len() > MAX_LOG_RECORDS
+            || buffered_bytes(&self.logs) + additional > MAX_LOG_TOTAL_BYTES
+        {
+            return Err(WitLogError::RecordTooLarge);
+        }
+        let tenant = self
+            .tenant
+            .as_ref()
+            .map_or("unscoped".to_owned(), ToString::to_string);
+        let trace_id = self.trace.active.map(|(id, _)| id);
+        for (validated, level) in validated.into_iter().zip(levels) {
+            self.logs.push(crate::host_log::LogRecord {
+                tenant: tenant.clone(),
+                trace_id,
+                level,
+                message: validated.message,
+                attributes: validated.attributes,
+                redacted: validated.redacted,
+            });
         }
         Ok(())
     }
@@ -229,6 +271,16 @@ use bindings::qqq::log::logging::{Host as LogHost, Level};
 /// Pure so the format is testable without a store: the run and serve paths
 /// print exactly this. Fields are space-separated `k=v`; values with spaces
 /// are quoted. The trace id renders as 32 hex chars when present.
+/// Structured export (OTLP/JSON with `span_id`, `component`, `manifest_rev`
+/// and `code`) is `OBS-012` future work; this is the terminal rendering
+/// (`OBS-018`), not the export format.
+///
+/// Keys are quoted too, and control characters are escaped: attribute names
+/// are guest-controlled, and a raw newline in a key or message would forge
+/// a second operator line starting with attacker-chosen text. The boundary
+/// already refuses whitespace-bearing names; the quoting is defense in depth
+/// for records built inside the crate (the trace mirror) rather than a
+/// second check on the same path.
 ///
 /// ```
 /// let record = qqq_host::host_log::LogRecord {
@@ -263,6 +315,25 @@ use bindings::qqq::log::logging::{Host as LogHost, Level};
 /// assert!(line.contains("\"hello world\""));
 /// assert!(line.contains("trace="));
 /// ```
+///
+/// Control characters never produce a raw line break:
+///
+/// ```
+/// let record = qqq_host::host_log::LogRecord {
+///     tenant: "t".to_owned(),
+///     trace_id: None,
+///     level: 2,
+///     message: "a\nb".to_owned(),
+///     attributes: vec![(
+///         "k".to_owned(),
+///         qqq_host::host_log::AttributeValue::Boolean(true),
+///     )],
+///     redacted: false,
+/// };
+/// let line = qqq_host::host_log::format_record(&record);
+/// assert!(!line.contains('\n'), "one record is one line: {line}");
+/// assert!(line.contains("msg=\"a\\nb\""), "{line}");
+/// ```
 #[must_use]
 pub fn format_record(record: &LogRecord) -> String {
     use std::fmt::Write as _;
@@ -282,7 +353,7 @@ pub fn format_record(record: &LogRecord) -> String {
             AttributeValue::Float(f) => format!("{f:?}"),
             AttributeValue::Boolean(b) => b.to_string(),
         };
-        let _ = write!(out, " {k}={rendered}");
+        let _ = write!(out, " {}={rendered}", quote(k));
     }
     if let Some(id) = record.trace_id {
         let _ = write!(out, " trace={}", hex_bytes(&id));
@@ -294,8 +365,27 @@ pub fn format_record(record: &LogRecord) -> String {
 }
 
 fn quote(s: &str) -> String {
-    if s.bytes().any(|b| b.is_ascii_whitespace() || b == b'"') {
-        format!("\"{}\"", s.replace('"', "\\\""))
+    use std::fmt::Write as _;
+    if s.bytes()
+        .any(|b| b.is_ascii_whitespace() || b == b'"' || b == b'\\' || b.is_ascii_control())
+    {
+        let mut escaped = String::with_capacity(s.len() + 2);
+        escaped.push('"');
+        for c in s.chars() {
+            match c {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                c if c.is_control() => {
+                    let _ = write!(escaped, "\\u{{{:x}}}", c as u32);
+                }
+                c => escaped.push(c),
+            }
+        }
+        escaped.push('"');
+        escaped
     } else {
         s.to_owned()
     }
@@ -322,13 +412,64 @@ fn level_index(level: Level) -> u8 {
         Level::Error => 4,
     }
 }
-/// Append one record to this instance's log buffer, redacting secret values.
-fn emit_record(
-    data: &mut crate::linker::StoreData,
-    level: u8,
+/// Approximate stored bytes of one record: message plus names plus text
+/// values. Integers, floats and booleans render to a few bytes; counting
+/// eight each keeps the estimate above the rendering without pretending it
+/// is exact — the bound is backpressure, not accounting.
+pub(crate) fn record_bytes(message: &str, attributes: &[(String, AttributeValue)]) -> usize {
+    let mut total = message.len();
+    for (name, value) in attributes {
+        total += name.len();
+        match value {
+            AttributeValue::Text(text) => total += text.len(),
+            _ => total += 8,
+        }
+    }
+    total
+}
+
+/// Currently buffered stored bytes across the instance's records.
+pub(crate) fn buffered_bytes(logs: &[LogRecord]) -> usize {
+    logs.iter()
+        .map(|record| record_bytes(&record.message, &record.attributes))
+        .sum()
+}
+
+/// Whether an attribute name is safe to store and render.
+///
+/// Empty names render as `=value`, and whitespace, quotes or `=` in a name
+/// would forge structure in the rendered line. The renderer quotes and
+/// escapes as defense in depth, but the boundary refuses rather than
+/// repairs: a guest that meant a different name must learn it failed.
+///
+/// Crate-visible: the trace mirror enforces the same rule on span
+/// attributes, so both `qqq:` surfaces refuse the same names.
+pub(crate) fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b == b'"' || b == b'=' || b == b'\\')
+}
+
+/// A record that passed every bound, with redaction applied.
+struct ValidatedRecord {
     message: String,
-    attributes: Vec<Attribute>,
-) -> std::result::Result<(), WitLogError> {
+    attributes: Vec<(String, AttributeValue)>,
+    redacted: bool,
+    size: usize,
+}
+
+/// Check every bound on one record without storing anything.
+///
+/// Grant first (an ungranted call fails before its size is judged), then the
+/// per-field bounds, then names and redaction. Callers check the buffer
+/// bounds themselves so `emit_many` can validate the whole batch before
+/// storing any of it.
+fn validate_record(
+    data: &crate::linker::StoreData,
+    message: &str,
+    attributes: &[Attribute],
+) -> std::result::Result<ValidatedRecord, WitLogError> {
     if !data.grants.grants(LogWrite) {
         return Err(WitLogError::NotGranted);
     }
@@ -338,35 +479,57 @@ fn emit_record(
     if attributes.len() > MAX_LOG_ATTRIBUTES {
         return Err(WitLogError::RecordTooLarge);
     }
-    if data.logs.len() >= MAX_LOG_RECORDS {
-        return Err(WitLogError::RecordTooLarge);
-    }
     let mut redacted = false;
-    let mut attrs: Vec<(String, AttributeValue)> = Vec::with_capacity(attributes.len());
-    for a in attributes {
-        let bytes: &[u8] = match &a.value {
-            AttributeValue::Text(s) => s.as_bytes(),
+    let mut kept: Vec<(String, AttributeValue)> = Vec::with_capacity(attributes.len());
+    for attribute in attributes {
+        if !valid_name(&attribute.name) || attribute.name.len() > MAX_LOG_FIELD_BYTES {
+            return Err(WitLogError::RecordTooLarge);
+        }
+        let bytes: &[u8] = match &attribute.value {
+            AttributeValue::Text(text) => text.as_bytes(),
             _ => &[],
         };
         let value = if !bytes.is_empty() && data.secrets.is_secret_value(bytes) {
             redacted = true;
             AttributeValue::Text("[redacted:secret]".to_owned())
         } else {
-            a.value
+            attribute.value.clone()
         };
-        if let AttributeValue::Text(s) = &value
-            && s.len() > MAX_LOG_FIELD_BYTES
+        if let AttributeValue::Text(text) = &value
+            && text.len() > MAX_LOG_FIELD_BYTES
         {
             return Err(WitLogError::RecordTooLarge);
         }
-        attrs.push((a.name, value));
+        kept.push((attribute.name.clone(), value));
     }
-    let message = if !message.is_empty() && data.secrets.is_secret_value(message.as_bytes()) {
-        redacted = true;
-        "[redacted:secret]".to_owned()
-    } else {
-        message
-    };
+    let (message, redacted) =
+        if !message.is_empty() && data.secrets.is_secret_value(message.as_bytes()) {
+            (("[redacted:secret]".to_owned()), true)
+        } else {
+            (message.to_owned(), redacted)
+        };
+    let size = record_bytes(&message, &kept);
+    Ok(ValidatedRecord {
+        message,
+        attributes: kept,
+        redacted,
+        size,
+    })
+}
+
+/// Append one record to this instance's log buffer, redacting secret values.
+fn emit_record(
+    data: &mut crate::linker::StoreData,
+    level: u8,
+    message: &str,
+    attributes: &[Attribute],
+) -> std::result::Result<(), WitLogError> {
+    let validated = validate_record(data, message, attributes)?;
+    if data.logs.len() >= MAX_LOG_RECORDS
+        || buffered_bytes(&data.logs) + validated.size > MAX_LOG_TOTAL_BYTES
+    {
+        return Err(WitLogError::RecordTooLarge);
+    }
     let tenant = data
         .tenant
         .as_ref()
@@ -376,9 +539,9 @@ fn emit_record(
         tenant,
         trace_id,
         level,
-        message,
-        attributes: attrs,
-        redacted,
+        message: validated.message,
+        attributes: validated.attributes,
+        redacted: validated.redacted,
     });
     Ok(())
 }
@@ -422,8 +585,8 @@ mod tests {
         emit_record(
             &mut data,
             2,
-            "hello".to_owned(),
-            vec![attr("k", AttributeValue::Text("v".to_owned()))],
+            "hello",
+            &[attr("k", AttributeValue::Text("v".to_owned()))],
         )
         .expect("emits");
         assert_eq!(data.logs.len(), 1);
@@ -437,7 +600,7 @@ mod tests {
     #[test]
     fn emit_without_grant_is_not_granted() {
         let mut data = data_with_log(false);
-        let err = emit_record(&mut data, 2, "hello".to_owned(), vec![]).expect_err("no grant");
+        let err = emit_record(&mut data, 2, "hello", &[]).expect_err("no grant");
         assert!(matches!(err, WitLogError::NotGranted));
         assert!(data.logs.is_empty(), "a refused record is not stored");
     }
@@ -455,15 +618,15 @@ mod tests {
                 PermittedOp::all().to_vec(),
             )],
         );
-        emit_record(&mut data, 2, "super-secret".to_owned(), vec![]).expect("emits");
+        emit_record(&mut data, 2, "super-secret", &[]).expect("emits");
         let r = &data.logs[0];
         assert_eq!(r.message, "[redacted:secret]");
         assert!(r.redacted);
         emit_record(
             &mut data,
             2,
-            "not the secret".to_owned(),
-            vec![attr("k", AttributeValue::Text("super-secret".to_owned()))],
+            "not the secret",
+            &[attr("k", AttributeValue::Text("super-secret".to_owned()))],
         )
         .expect("emits");
         let r = &data.logs[1];
@@ -473,7 +636,7 @@ mod tests {
         );
         assert!(matches!(&r.attributes[0].1, AttributeValue::Text(v) if v == "[redacted:secret]"));
         assert!(r.redacted);
-        emit_record(&mut data, 2, "prefix-super-secret".to_owned(), vec![]).expect("emits");
+        emit_record(&mut data, 2, "prefix-super-secret", &[]).expect("emits");
         assert!(!data.logs[2].redacted, "no substring redaction");
     }
 
@@ -482,12 +645,12 @@ mod tests {
     fn oversize_records_fail_closed() {
         let mut data = data_with_log(true);
         let big = "x".repeat(MAX_LOG_FIELD_BYTES + 1);
-        let err = emit_record(&mut data, 2, big, vec![]).expect_err("too big");
+        let err = emit_record(&mut data, 2, &big, &[]).expect_err("too big");
         assert!(matches!(err, WitLogError::RecordTooLarge));
         let many: Vec<Attribute> = (0..=MAX_LOG_ATTRIBUTES)
             .map(|i| attr(&format!("k{i}"), AttributeValue::Boolean(true)))
             .collect();
-        let err = emit_record(&mut data, 2, "ok".to_owned(), many).expect_err("too many");
+        let err = emit_record(&mut data, 2, "ok", &many).expect_err("too many");
         assert!(matches!(err, WitLogError::RecordTooLarge));
         assert!(
             data.logs.is_empty(),
@@ -500,11 +663,115 @@ mod tests {
     fn full_buffer_is_backpressure_not_loss() {
         let mut data = data_with_log(true);
         for _ in 0..MAX_LOG_RECORDS {
-            emit_record(&mut data, 2, "x".to_owned(), vec![]).expect("fits");
+            emit_record(&mut data, 2, "x", &[]).expect("fits");
         }
-        let err = emit_record(&mut data, 2, "one more".to_owned(), vec![]).expect_err("full");
+        let err = emit_record(&mut data, 2, "one more", &[]).expect_err("full");
         assert!(matches!(err, WitLogError::RecordTooLarge));
         assert_eq!(data.logs.len(), MAX_LOG_RECORDS);
+    }
+
+    /// Attribute names are bounded: an unbounded name is guest-controlled
+    /// heap no budget is charged for.
+    #[test]
+    fn attribute_names_are_bounded() {
+        let mut data = data_with_log(true);
+        let big = "k".repeat(MAX_LOG_FIELD_BYTES + 1);
+        let err = emit_record(
+            &mut data,
+            2,
+            "ok",
+            &[attr(&big, AttributeValue::Boolean(true))],
+        )
+        .expect_err("name too long");
+        assert!(matches!(err, WitLogError::RecordTooLarge));
+        assert!(data.logs.is_empty(), "a refused record is not stored");
+    }
+
+    /// Names that would forge structure in the rendered line are refused at
+    /// the boundary rather than repaired: the renderer quotes as defense in
+    /// depth, but a guest that meant a different name must learn it failed.
+    #[test]
+    fn hostile_attribute_names_are_refused() {
+        let mut data = data_with_log(true);
+        for hostile in ["", "a b", "a=b", "a\"b", "a\\b", "a\nb"] {
+            let err = emit_record(
+                &mut data,
+                2,
+                "ok",
+                &[attr(hostile, AttributeValue::Boolean(true))],
+            )
+            .expect_err("hostile name refused");
+            assert!(
+                matches!(err, WitLogError::RecordTooLarge),
+                "{hostile:?} must fail closed"
+            );
+        }
+        assert!(data.logs.is_empty(), "no hostile name is stored");
+    }
+
+    /// `emit-many` is atomic: a batch that fails on its last record stores
+    /// nothing, so a retry cannot duplicate a prefix the caller was told
+    /// failed.
+    #[test]
+    fn emit_many_is_atomic() {
+        let mut data = data_with_log(true);
+        let big = "x".repeat(MAX_LOG_FIELD_BYTES + 1);
+        let err = LogHost::emit_many(
+            &mut data,
+            vec![
+                (Level::Info, "first".to_owned(), vec![]),
+                (Level::Info, big, vec![]),
+            ],
+        )
+        .expect_err("second record too big");
+        assert!(matches!(err, WitLogError::RecordTooLarge));
+        assert!(
+            data.logs.is_empty(),
+            "no prefix of a failed batch may persist"
+        );
+    }
+
+    /// Stored bytes are bounded, not just stored records: 64 KiB messages
+    /// backpressure long before the 4096-record count does.
+    #[test]
+    fn total_buffered_bytes_are_bounded() {
+        let mut data = data_with_log(true);
+        let message = "x".repeat(MAX_LOG_FIELD_BYTES);
+        let mut count = 0;
+        loop {
+            match LogHost::emit(&mut data, Level::Info, message.clone(), vec![]) {
+                Ok(()) => count += 1,
+                Err(WitLogError::RecordTooLarge) => break,
+                Err(other) => panic!("unexpected failure: {other:?}"),
+            }
+            assert!(count < 10_000, "the buffer must backpressure");
+        }
+        assert!(
+            data.logs.len() < MAX_LOG_RECORDS,
+            "the byte bound fires first: {} records",
+            data.logs.len()
+        );
+        assert!(
+            buffered_bytes(&data.logs) <= MAX_LOG_TOTAL_BYTES,
+            "the buffer never exceeds its byte bound"
+        );
+    }
+
+    /// One record renders as one line even when the guest sends control
+    /// characters: the renderer escapes them.
+    #[test]
+    fn format_keeps_one_record_on_one_line() {
+        let record = LogRecord {
+            tenant: "t".to_owned(),
+            trace_id: None,
+            level: 2,
+            message: "a\nb".to_owned(),
+            attributes: vec![("k".to_owned(), AttributeValue::Text("x\ty".to_owned()))],
+            redacted: false,
+        };
+        let line = format_record(&record);
+        assert!(!line.contains('\n'), "one record is one line: {line}");
+        assert!(!line.contains('\t'), "tabs are escaped: {line}");
     }
 
     /// The register links only when granted.

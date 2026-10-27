@@ -17,6 +17,18 @@
 //! (`OBS-012`) has a defined source to drain later rather than a format to
 //! invent.
 //!
+//! V1 samples everything: `current-traceparent` always carries the `-01`
+//! flag. Per-span sampling decisions stay host-owned by construction (the
+//! guest has no API that influences them), and a future selective sampler
+//! would change this one constant, not the call surface.
+//!
+//! The mirror is best-effort operator visibility, not a second store: when
+//! the log buffer is full the event is dropped rather than failing the
+//! trace call, because a full log buffer must not take down tracing with
+//! it. The trace state itself is unaffected — only its terminal rendering
+//! is lost, and the buffer's own backpressure error tells the guest the
+//! log path is saturated.
+//!
 //! ```
 //! let mut state = qqq_host::host_trace::TraceState::new();
 //! assert!(state.spans.is_empty());
@@ -265,6 +277,14 @@ impl HostSpan for crate::linker::StoreData {
         name: String,
         attributes: Vec<WitAttribute>,
     ) -> std::result::Result<(), WitTraceError> {
+        // Bounded up front: the mirror drops oversize messages silently
+        // (best-effort visibility), so an unbounded name that passed here
+        // would return `Ok` for an event nobody can read. The bound
+        // accounts for the `"event "` prefix the mirror adds, so a name
+        // that passes here always survives the mirror's own length check.
+        if name.len() > crate::host_log::MAX_LOG_FIELD_BYTES - "event ".len() {
+            return Err(WitTraceError::SpanTooLarge);
+        }
         let id = with_span(self, &handle, |span| (span.trace_id, span.span_id))?;
         let attrs = check_attributes(&attributes)?;
         mirror_to_log(self, id, "event", &name, attrs, false);
@@ -276,18 +296,30 @@ impl HostSpan for crate::linker::StoreData {
         handle: Resource<Span>,
         attributes: Vec<WitAttribute>,
     ) -> std::result::Result<(), WitTraceError> {
-        let checked = check_attributes(&attributes)?;
-        let span = self
-            .trace
-            .spans
-            .get_mut(&rep_index(&handle))
-            .ok_or(WitTraceError::SpanClosed)?;
-        for (k, v) in checked {
-            if span.attributes.len() >= MAX_TRACE_ATTRIBUTES && !span.attributes.contains_key(&k) {
-                return Err(WitTraceError::SpanTooLarge);
-            }
-            span.attributes.insert(k, v);
+        // Grant first, like every sibling: an ungranted call fails before
+        // its handle is judged (`ARCH-012`).
+        if !self.grants.grants(TraceWrite) {
+            return Err(WitTraceError::NotGranted);
         }
+        let checked = check_attributes(&attributes)?;
+        // Through `with_span`, like `event` and `set-error`: a child whose
+        // parent was dropped is severed, and writing to it must fail
+        // `span-closed` exactly as reading from it does.
+        with_span(
+            self,
+            &handle,
+            |span| -> std::result::Result<(), WitTraceError> {
+                for (key, value) in checked {
+                    if span.attributes.len() >= MAX_TRACE_ATTRIBUTES
+                        && !span.attributes.contains_key(&key)
+                    {
+                        return Err(WitTraceError::SpanTooLarge);
+                    }
+                    span.attributes.insert(key, value);
+                }
+                Ok(())
+            },
+        )??;
         Ok(())
     }
 
@@ -300,7 +332,9 @@ impl HostSpan for crate::linker::StoreData {
             span.failed = true;
             (span.trace_id, span.span_id)
         })?;
-        if message.len() > crate::host_log::MAX_LOG_FIELD_BYTES {
+        // Prefix-aware like `event`: the mirror renders `"error {message}"`,
+        // so the boundary bound leaves room for the prefix.
+        if message.len() > crate::host_log::MAX_LOG_FIELD_BYTES - "error ".len() {
             return Err(WitTraceError::SpanTooLarge);
         }
         mirror_to_log(self, id, "error", &message, Vec::new(), true);
@@ -458,20 +492,27 @@ fn check_attributes(
         return Err(WitTraceError::SpanTooLarge);
     }
     let mut out = Vec::with_capacity(attributes.len());
-    for a in attributes {
-        match &a.value {
-            WitTraceAttribute::Text(s) if s.len() > MAX_TRACE_VALUE_BYTES => {
+    for attribute in attributes {
+        // Same rule as the log boundary: names are guest-controlled heap
+        // and rendered structure, so they are bounded and shaped alike.
+        if !crate::host_log::valid_name(&attribute.name)
+            || attribute.name.len() > MAX_TRACE_VALUE_BYTES
+        {
+            return Err(WitTraceError::SpanTooLarge);
+        }
+        match &attribute.value {
+            WitTraceAttribute::Text(text) if text.len() > MAX_TRACE_VALUE_BYTES => {
                 return Err(WitTraceError::SpanTooLarge);
             }
             _ => {}
         }
         out.push((
-            a.name.clone(),
-            match a.value.clone() {
-                WitTraceAttribute::Text(s) => LogAttributeValue::Text(s),
-                WitTraceAttribute::Integer(n) => LogAttributeValue::Integer(n),
-                WitTraceAttribute::Float(f) => LogAttributeValue::Float(f),
-                WitTraceAttribute::Boolean(b) => LogAttributeValue::Boolean(b),
+            attribute.name.clone(),
+            match attribute.value.clone() {
+                WitTraceAttribute::Text(text) => LogAttributeValue::Text(text),
+                WitTraceAttribute::Integer(number) => LogAttributeValue::Integer(number),
+                WitTraceAttribute::Float(float) => LogAttributeValue::Float(float),
+                WitTraceAttribute::Boolean(boolean) => LogAttributeValue::Boolean(boolean),
             },
         ));
     }
@@ -497,6 +538,16 @@ fn format_traceparent(trace_id: &[u8; 16], span_id: [u8; 8]) -> String {
 /// Mirror an event or error into the instance's log buffer, tagged with the
 /// span's trace context. This is the operator-visible half of tracing until
 /// OTLP export lands (`OBS-012`): without it a trace would be write-only.
+///
+/// Best-effort by design: when the buffer is full or over its byte bound the
+/// mirror drops the event rather than failing the trace call. A saturated
+/// log buffer must not take down tracing with it, and the buffer's own
+/// backpressure error already tells the guest the log path is saturated.
+///
+/// Secret values are redacted exactly as in `host_log`: an event name or
+/// text attribute that equals a resolved secret value is stored as
+/// `[redacted:secret]` with the flag set, because the mirror lands in the
+/// same buffer — and the same stderr — as every other log record.
 #[allow(clippy::too_many_arguments)]
 fn mirror_to_log(
     data: &mut crate::linker::StoreData,
@@ -506,11 +557,18 @@ fn mirror_to_log(
     attributes: Vec<(String, LogAttributeValue)>,
     is_error: bool,
 ) {
-    use crate::host_log::{LogRecord, MAX_LOG_FIELD_BYTES, MAX_LOG_RECORDS};
+    use crate::host_log::{LogRecord, MAX_LOG_FIELD_BYTES, MAX_LOG_RECORDS, MAX_LOG_TOTAL_BYTES};
     if data.logs.len() >= MAX_LOG_RECORDS {
         return;
     }
-    let message = format!("{kind} {name}");
+    // Redact the name before prefixing it: the formatted message carries a
+    // `"{kind} "` prefix, so an exact-match check on the whole message
+    // could never fire for a bare secret value. The whole-message check
+    // stays as well, for the degenerate case of a secret that already
+    // carries the prefix.
+    let (name, mut redacted) = redact_text(data, name.to_owned());
+    let (message, message_secret) = redact_text(data, format!("{kind} {name}"));
+    redacted |= message_secret;
     if message.len() > MAX_LOG_FIELD_BYTES {
         return;
     }
@@ -519,8 +577,26 @@ fn mirror_to_log(
         .as_ref()
         .map_or("unscoped".to_owned(), ToString::to_string);
     let (trace_id, span_id) = id;
-    let mut attrs = attributes;
-    attrs.push((
+    let mut kept: Vec<(String, LogAttributeValue)> = Vec::with_capacity(attributes.len() + 1);
+    for (key, value) in attributes {
+        let (value, was_secret) = match value {
+            LogAttributeValue::Text(text) => {
+                let (text, was_secret) = redact_text(data, text);
+                (LogAttributeValue::Text(text), was_secret)
+            }
+            value => (value, false),
+        };
+        redacted |= was_secret;
+        kept.push((key, value));
+    }
+    // The `span_id` tag is host-added, so the guest's full house of
+    // `MAX_TRACE_ATTRIBUTES` attributes plus this tag would store a
+    // 65-attribute record the log boundary itself refuses. Best-effort
+    // again: drop the mirror rather than the guest's data or the bound.
+    if kept.len() >= crate::host_log::MAX_LOG_ATTRIBUTES {
+        return;
+    }
+    kept.push((
         "span_id".to_owned(),
         LogAttributeValue::Text(
             span_id
@@ -532,14 +608,29 @@ fn mirror_to_log(
                 }),
         ),
     ));
+    if crate::host_log::buffered_bytes(&data.logs) + crate::host_log::record_bytes(&message, &kept)
+        > MAX_LOG_TOTAL_BYTES
+    {
+        return;
+    }
     data.logs.push(LogRecord {
         tenant,
         trace_id: Some(trace_id),
         level: if is_error { 4 } else { 2 },
         message,
-        attributes: attrs,
-        redacted: false,
+        attributes: kept,
+        redacted,
     });
+}
+
+/// Redact one text exactly as the log boundary does: an exact match of a
+/// resolved secret value becomes `[redacted:secret]`.
+fn redact_text(data: &crate::linker::StoreData, text: String) -> (String, bool) {
+    if !text.is_empty() && data.secrets.is_secret_value(text.as_bytes()) {
+        ("[redacted:secret]".to_owned(), true)
+    } else {
+        (text, false)
+    }
 }
 
 // Test indexing (`F-18`): assertions index vectors built inline above.
@@ -651,6 +742,174 @@ mod tests {
         assert!(
             format!("{err:#}").contains("qqq:trace/tracing"),
             "the refusal must name the import: {err:#}"
+        );
+    }
+
+    /// `set-attributes` re-checks the grant like every sibling: an
+    /// ungranted call fails before its handle is judged.
+    #[test]
+    fn set_attributes_without_grant_is_not_granted() {
+        // Index 0 in a store that never minted a span: the grant check
+        // fires before the handle is looked at, so any handle proves it.
+        let mut data = ungranted_store();
+        let err = <StoreData as HostSpan>::set_attributes(
+            &mut data,
+            rep_from_index(0),
+            vec![WitAttribute {
+                name: "k".to_owned(),
+                value: WitTraceAttribute::Text("v".to_owned()),
+            }],
+        )
+        .expect_err("no grant");
+        assert!(matches!(err, WitTraceError::NotGranted));
+    }
+
+    /// `set-attributes` on a severed child fails like `event` does: the
+    /// parent walk, not just the handle, decides liveness.
+    #[test]
+    fn set_attributes_on_severed_child_is_closed() {
+        let mut data = granted_store();
+        let root = start_span_impl(&mut data, "root", None).expect("root starts");
+        let kid = start_span_impl(&mut data, "kid", Some(rep_index(&root))).expect("child starts");
+        let kid_id = rep_index(&kid);
+        <StoreData as HostSpan>::drop(&mut data, root).expect("parent drops");
+        let err = <StoreData as HostSpan>::set_attributes(
+            &mut data,
+            rep_from_index(kid_id),
+            vec![WitAttribute {
+                name: "k".to_owned(),
+                value: WitTraceAttribute::Text("v".to_owned()),
+            }],
+        )
+        .expect_err("severed child fails");
+        assert!(matches!(err, WitTraceError::SpanClosed));
+    }
+
+    /// Oversize event names fail instead of returning `Ok` for an event the
+    /// mirror silently drops.
+    #[test]
+    fn oversize_event_names_fail_closed() {
+        let mut data = granted_store();
+        let root = start_span_impl(&mut data, "root", None).expect("root starts");
+        let big = "e".repeat(crate::host_log::MAX_LOG_FIELD_BYTES + 1);
+        let before = data.logs.len();
+        let err = <StoreData as HostSpan>::event(&mut data, root, big, vec![])
+            .expect_err("name too long");
+        assert!(matches!(err, WitTraceError::SpanTooLarge));
+        assert_eq!(data.logs.len(), before, "no silent mirror drop");
+    }
+
+    /// The event-name bound leaves room for the mirror's `"event "` prefix:
+    /// the longest fitting name is stored, one byte more fails at the
+    /// boundary rather than vanishing in the mirror.
+    #[test]
+    fn event_name_boundary_accounts_for_prefix() {
+        let mut data = granted_store();
+        let root = start_span_impl(&mut data, "root", None).expect("root starts");
+        let max = crate::host_log::MAX_LOG_FIELD_BYTES - "event ".len();
+        let fitting = "e".repeat(max);
+        <StoreData as HostSpan>::event(
+            &mut data,
+            rep_from_index(rep_index(&root)),
+            fitting,
+            vec![],
+        )
+        .expect("the boundary name fits its rendering");
+        assert_eq!(data.logs.len(), 1);
+        let overflow = "e".repeat(max + 1);
+        let err = <StoreData as HostSpan>::event(
+            &mut data,
+            rep_from_index(rep_index(&root)),
+            overflow,
+            vec![],
+        )
+        .expect_err("one byte over fails");
+        assert!(matches!(err, WitTraceError::SpanTooLarge));
+        assert_eq!(data.logs.len(), 1, "the refused event mirrors nothing");
+    }
+
+    /// Hostile attribute names are refused at the trace boundary too.
+    #[test]
+    fn hostile_attribute_names_are_refused() {
+        let mut data = granted_store();
+        let root = start_span_impl(&mut data, "root", None).expect("root starts");
+        for hostile in ["", "a b", "a=b", "a\"b", "a\nb"] {
+            let err = <StoreData as HostSpan>::event(
+                &mut data,
+                rep_from_index(rep_index(&root)),
+                "ev".to_owned(),
+                vec![WitAttribute {
+                    name: hostile.to_owned(),
+                    value: WitTraceAttribute::Boolean(true),
+                }],
+            )
+            .expect_err("hostile name refused");
+            assert!(
+                matches!(err, WitTraceError::SpanTooLarge),
+                "{hostile:?} must fail closed"
+            );
+        }
+    }
+
+    /// A secret value in an event or error is mirrored redacted: the mirror
+    /// lands in the same buffer — and stderr — as every other log record.
+    #[test]
+    fn mirrored_events_redact_secrets() {
+        use crate::host_secrets::{PermittedOp, SecretMaterial, SecretStore};
+        let mut data = granted_store();
+        data.secrets = SecretStore::with_grants(
+            vec!["K".to_owned()],
+            vec![SecretMaterial::new(
+                "K",
+                b"trace-secret".to_vec(),
+                PermittedOp::all().to_vec(),
+            )],
+        );
+        let root = start_span_impl(&mut data, "root", None).expect("root starts");
+        <StoreData as HostSpan>::event(
+            &mut data,
+            rep_from_index(rep_index(&root)),
+            "trace-secret".to_owned(),
+            vec![WitAttribute {
+                name: "k".to_owned(),
+                value: WitTraceAttribute::Text("trace-secret".to_owned()),
+            }],
+        )
+        .expect("event records");
+        assert_eq!(data.logs.len(), 1);
+        let record = &data.logs[0];
+        assert_eq!(record.message, "event [redacted:secret]");
+        assert!(
+            matches!(&record.attributes[0].1, LogAttributeValue::Text(value) if value == "[redacted:secret]"),
+            "the mirrored attribute redacts too"
+        );
+        assert!(record.redacted, "the flag travels with the mirror");
+    }
+
+    /// The mirror's `span_id` tag never pushes a record past the log
+    /// boundary's own attribute cap: a 64-attribute event returns `Ok` (the
+    /// trace call succeeded) but mirrors nothing, rather than storing a
+    /// 65-attribute record the log boundary refuses.
+    #[test]
+    fn full_attribute_mirror_drops_best_effort() {
+        let mut data = granted_store();
+        let root = start_span_impl(&mut data, "root", None).expect("root starts");
+        let attrs: Vec<WitAttribute> = (0..crate::host_log::MAX_LOG_ATTRIBUTES)
+            .map(|i| WitAttribute {
+                name: format!("k{i}"),
+                value: WitTraceAttribute::Boolean(true),
+            })
+            .collect();
+        <StoreData as HostSpan>::event(
+            &mut data,
+            rep_from_index(rep_index(&root)),
+            "ev".to_owned(),
+            attrs,
+        )
+        .expect("the trace call succeeds");
+        assert!(
+            data.logs.is_empty(),
+            "best-effort: no 65-attribute row is stored"
         );
     }
 

@@ -2145,7 +2145,9 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
         let artifact = workspace.join("target/wasm32-wasip2/release/probe_secrets.wasm");
         if !artifact.is_file() {
-            let ok = *BUILT.get_or_init(|| {
+            // Built once per test process: concurrent tests share the
+            // single build rather than racing cargo against itself.
+            let target_present = *BUILT.get_or_init(|| {
                 let has_target = std::process::Command::new("rustc")
                     .args(["--print", "target-list"])
                     .output()
@@ -2154,7 +2156,10 @@ mod tests {
                     println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
                     return false;
                 }
-                std::process::Command::new("cargo")
+                // The toolchain is present (checked above), so a build
+                // failure is a real breakage: fail loudly rather than
+                // skipping green over a guest that no longer compiles.
+                let output = std::process::Command::new("cargo")
                     .args([
                         "build",
                         "--release",
@@ -2164,10 +2169,15 @@ mod tests {
                     ])
                     .current_dir(&workspace)
                     .output()
-                    .is_ok_and(|o| o.status.success())
+                    .expect("cargo runs");
+                assert!(
+                    output.status.success(),
+                    "probe secrets guest build failed with the toolchain present: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                true
             });
-            if !ok {
-                println!("SKIP: probe guest build failed");
+            if !target_present {
                 return None;
             }
         }
@@ -2183,7 +2193,9 @@ mod tests {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
             let artifact = workspace.join("target/wasm32-wasip2/release/probe_env.wasm");
             if !artifact.is_file() {
-                let ok = *BUILT.get_or_init(|| {
+                // Built once per test process: concurrent tests share the
+                // single build rather than racing cargo against itself.
+                let target_present = *BUILT.get_or_init(|| {
                     let has_target = std::process::Command::new("rustc")
                         .args(["--print", "target-list"])
                         .output()
@@ -2194,7 +2206,10 @@ mod tests {
                         println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
                         return false;
                     }
-                    std::process::Command::new("cargo")
+                    // The toolchain is present (checked above), so a build
+                    // failure is a real breakage: fail loudly rather than
+                    // skipping green over a guest that no longer compiles.
+                    let output = std::process::Command::new("cargo")
                         .args([
                             "build",
                             "--release",
@@ -2204,10 +2219,15 @@ mod tests {
                         ])
                         .current_dir(&workspace)
                         .output()
-                        .is_ok_and(|o| o.status.success())
+                        .expect("cargo runs");
+                    assert!(
+                        output.status.success(),
+                        "probe env guest build failed with the toolchain present: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    true
                 });
-                if !ok {
-                    println!("SKIP: probe guest build failed");
+                if !target_present {
                     return None;
                 }
             }
@@ -2332,7 +2352,9 @@ mod tests {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
             let artifact = workspace.join("target/wasm32-wasip2/release/probe_log.wasm");
             if !artifact.is_file() {
-                let ok = *BUILT.get_or_init(|| {
+                // Built once per test process: concurrent tests share the
+                // single build rather than racing cargo against itself.
+                let target_present = *BUILT.get_or_init(|| {
                     let has_target = std::process::Command::new("rustc")
                         .args(["--print", "target-list"])
                         .output()
@@ -2343,7 +2365,10 @@ mod tests {
                         println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
                         return false;
                     }
-                    std::process::Command::new("cargo")
+                    // The toolchain is present (checked above), so a build
+                    // failure is a real breakage: fail loudly rather than
+                    // skipping green over a guest that no longer compiles.
+                    let output = std::process::Command::new("cargo")
                         .args([
                             "build",
                             "--release",
@@ -2353,10 +2378,15 @@ mod tests {
                         ])
                         .current_dir(&workspace)
                         .output()
-                        .is_ok_and(|o| o.status.success())
+                        .expect("cargo runs");
+                    assert!(
+                        output.status.success(),
+                        "probe log guest build failed with the toolchain present: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    true
                 });
-                if !ok {
-                    println!("SKIP: probe guest build failed");
+                if !target_present {
                     return None;
                 }
             }
@@ -2434,7 +2464,9 @@ mod tests {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
             let artifact = workspace.join("target/wasm32-wasip2/release/probe_trace.wasm");
             if !artifact.is_file() {
-                let ok = *BUILT.get_or_init(|| {
+                // Built once per test process: concurrent tests share the
+                // single build rather than racing cargo against itself.
+                let target_present = *BUILT.get_or_init(|| {
                     let has_target = std::process::Command::new("rustc")
                         .args(["--print", "target-list"])
                         .output()
@@ -2445,7 +2477,10 @@ mod tests {
                         println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
                         return false;
                     }
-                    std::process::Command::new("cargo")
+                    // The toolchain is present (checked above), so a build
+                    // failure is a real breakage: fail loudly rather than
+                    // skipping green over a guest that no longer compiles.
+                    let output = std::process::Command::new("cargo")
                         .args([
                             "build",
                             "--release",
@@ -2455,10 +2490,15 @@ mod tests {
                         ])
                         .current_dir(&workspace)
                         .output()
-                        .is_ok_and(|o| o.status.success())
+                        .expect("cargo runs");
+                    assert!(
+                        output.status.success(),
+                        "probe trace guest build failed with the toolchain present: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    true
                 });
-                if !ok {
-                    println!("SKIP: probe guest build failed");
+                if !target_present {
                     return None;
                 }
             }

@@ -406,6 +406,18 @@ CURATED: list[tuple[str, str, str, str]] = [
         "machinery",
     ),
     (
+        "docs/dependency-decisions/zstd-cache.md",
+        "A worked dependency-security decision: vendoring a cache crate to resolve four zstd advisories.",
+        "both",
+        "machinery",
+    ),
+    (
+        "docs/runtime-handoff-2026-10-27.md",
+        "What changed on the runtime side in the 2026-10-27 round, what the registry owner must re-run, and what stays blocked on owners.",
+        "both",
+        "status",
+    ),
+    (
         "PRINCIPLES.md",
         "The non-negotiables the design is held to.",
         "human",

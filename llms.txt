@@ -13,7 +13,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 
 ## What is built, and what was learned building it
 
-- [QQQ-Checklist-V1.md](QQQ-Checklist-V1.md) — The 630 tracked items, each citing the Proposal section that governs it, with the evidence for each completed one. (large)
+- [QQQ-Checklist-V1.md](QQQ-Checklist-V1.md) — The 631 tracked items, each citing the Proposal section that governs it, with the evidence for each completed one. (large)
 - [QQQ-Observations-and-Memories.md](QQQ-Observations-and-Memories.md) — Decisions, observations, mistakes and corrections made while building. Read this to learn what was tried and rejected, and why. (large)
 - [docs/rfc/live-components-and-aot.md](docs/rfc/live-components-and-aot.md) — Draft live-component and AOT design: verified baseline, architecture, lifecycle and phased delivery. (13 KB)
 - [docs/live-components-checklist.md](docs/live-components-checklist.md) — Acceptance criteria and remaining work for live components and AOT; completion requires execution evidence. (9 KB)
@@ -22,6 +22,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [docs/milestone-dashboard.md](docs/milestone-dashboard.md) — Generated per-area, per-phase and milestone-gate progress from the tracked checklist backlog. (3 KB)
 - [docs/deprecations.md](docs/deprecations.md) — The deprecation ledger: every `@deprecated` WIT item with its removal version and replacement. (1 KB)
 - [docs/languages/evidence/matrix.md](docs/languages/evidence/matrix.md) — The generated parity matrix: each language against the HTTP probe vectors, with its gap owners and review dates. Generated from a CI job, so the numbers move with it. (816 B)
+- [docs/runtime-handoff-2026-10-27.md](docs/runtime-handoff-2026-10-27.md) — What changed on the runtime side in the 2026-10-27 round, what the registry owner must re-run, and what stays blocked on owners. (4 KB)
 
 ## The machine contracts (for an agent)
 
@@ -58,12 +59,13 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [docs/wasmtime-advisory-process.md](docs/wasmtime-advisory-process.md) — How a Wasmtime security advisory is handled. _(human)_ (11 KB)
 - [docs/wasmtime-upgrade-runbook.md](docs/wasmtime-upgrade-runbook.md) — How a scheduled Wasmtime upgrade is taken: the steps, their evidence, and the behaviours an upgrade can change without breaking the build. _(human)_ (8 KB)
 - [docs/unsafe-audit.md](docs/unsafe-audit.md) — The `unsafe` audit: what it covers and what it has found. _(human)_ (8 KB)
-- [docs/stability.md](docs/stability.md) — The stability tier of every crate and the change-promise for each published surface: WIT, the manifest, the lockfile and CLI JSON. (8 KB)
+- [docs/stability.md](docs/stability.md) — The stability tier of every crate and the change-promise for each published surface: WIT, the manifest, the lockfile and CLI JSON. (9 KB)
 - [SECURITY.md](SECURITY.md) — How to report a vulnerability, and what response to expect. _(human)_ (5 KB)
 - [docs/development-bridge.md](docs/development-bridge.md) — How the Linux verification bridge works, and the one-way rule it enforces on build output. _(human)_ (11 KB)
 - [docs/adr/README.md](docs/adr/README.md) — Architecture decision records: what was decided, and what was rejected. _(human)_ (4 KB)
 - [docs/advisories/README.md](docs/advisories/README.md) — How a dependency advisory is recorded and resolved. _(human)_ (4 KB)
 - [docs/advisories/INDEX.md](docs/advisories/INDEX.md) — The advisory register itself. _(agent)_ (1 KB)
+- [docs/dependency-decisions/zstd-cache.md](docs/dependency-decisions/zstd-cache.md) — A worked dependency-security decision: vendoring a cache crate to resolve four zstd advisories. (5 KB)
 - [PRINCIPLES.md](PRINCIPLES.md) — The non-negotiables the design is held to. _(human)_ (6 KB)
 
 ## Repository layout

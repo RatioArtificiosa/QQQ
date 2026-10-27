@@ -339,6 +339,9 @@ pub fn check_imports(
             // `wasi:` name — so the capability mapping decides, and the grant
             // decides with it.
             satisfied.push(import.clone());
+        } else if is_wasi02_baseline(import) {
+            // CON-020: served by the retained 0.2 linker with no grant.
+            satisfied.push(import.clone());
         } else {
             missing.push(import.clone());
         }
@@ -357,12 +360,51 @@ pub fn check_imports(
 /// 0.3 import past pre-flight (and `Instance::create` would refuse it one
 /// step later with a link error instead of this diagnostic), while the grant
 /// alone would admit nothing — grants name capabilities, not interfaces.
-/// Unserved names (including 0.2 WASI baseline names, which need no grant at
-/// all) stay missing here exactly as before: this gate changes nothing about
-/// the 0.2 path.
+/// Unserved names stay missing here. 0.2 WASI baseline names are admitted
+/// separately by [`is_wasi02_baseline`] with no grant involved; routing one
+/// through this grant check would demand a grant the runtime never checks.
 fn is_served_03_import(interface: &str, grants: &GrantSet) -> bool {
     is_wasi03_revision(interface)
         && capability_for_import(interface).is_some_and(|c| grants.grants(c))
+}
+
+/// Whether an import is served by the WASI 0.2 baseline with no grant.
+///
+/// Exactly the set `qqq_host::host_wasi::register` links via
+/// `wasmtime_wasi::p2::add_to_linker_sync`, minus `wasi:http`: HTTP has no
+/// baseline registration (no `wasmtime-wasi-http` dependency links those
+/// instances) and is mediated through `qqq:http` grants, so a 0.2 HTTP
+/// import must stay missing and name itself.
+///
+/// Everything else 0.2 instantiates against the baseline and fails closed at
+/// first use through the grant-derived context — no preopens, no network
+/// permission, clocks denied unless granted, stdin closed — which is why
+/// pre-flight admits the *name* here rather than demanding a grant the
+/// runtime never checks. Sockets resolve at link time and are refused at
+/// call time by wasmtime's default-deny network policy, which QQQ never
+/// opts out of (no `inherit_network` / `allow_*` call exists in `host_wasi`).
+#[must_use]
+fn is_wasi02_baseline(interface: &str) -> bool {
+    const BASELINE: &[&str] = &[
+        "wasi:cli",
+        "wasi:clocks",
+        "wasi:filesystem",
+        "wasi:io",
+        "wasi:random",
+        "wasi:sockets",
+    ];
+    let (package, version) = match interface.split_once('@') {
+        Some((package, version)) => (package, Some(version)),
+        None => (interface, None),
+    };
+    // A bare package names no instance the linker could serve: only a
+    // package/interface path can match a registration.
+    let (package, has_interface) = match package.split_once('/') {
+        Some((package, _)) => (package, true),
+        None => (package, false),
+    };
+    let version_ok = matches!(version, Some(v) if v.trim().starts_with("0.2."));
+    has_interface && version_ok && package.starts_with("wasi:") && BASELINE.contains(&package)
 }
 
 /// Reduce an interface or package name to `namespace:name`, dropping both the
@@ -451,9 +493,11 @@ pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
     // `wasm32-wasip2` `std` pulls in) is served by the *unconditional* WASI
     // baseline, not by any grant — resolving it here would demand a grant
     // the runtime never checks and break the reference application's
-    // grants-exactly-what-it-imports proof. An unserved 0.3 name falls
-    // through to `None` below, which the caller reports instead of guessing
-    // a capability that would not help.
+    // grants-exactly-what-it-imports proof. That proof still holds because
+    // the mapping stays `None` for 0.2 (CON-020 admits baseline names at
+    // pre-flight without a capability, it does not map them to one). An
+    // unserved 0.3 name falls through to `None` below, which the caller
+    // reports instead of guessing a capability that would not help.
     let wasi03: Vec<qqq_cap::Capability> = qqq_cap::Capability::all()
         .iter()
         .copied()
@@ -1661,14 +1705,15 @@ mod tests {
         );
     }
 
-    /// **CON-019** — pre-flight leaves 0.2 WASI baseline names untouched.
+    /// **CON-020** — pre-flight admits 0.2 WASI baseline names with no grant.
     ///
-    /// The 0.2 WASI clock is served by the unconditional baseline with no
-    /// grant involved; resolving it here would demand a grant the runtime
-    /// never checks. This pins the conservative direction: the 0.3 gate adds
-    /// exactly the served-and-granted names and changes nothing else.
+    /// Supersedes the CON-019 pin that kept them missing: the 0.2 clock is
+    /// served by the unconditional baseline with no grant involved, so
+    /// demanding a grant (or reporting the name missing) described a refusal
+    /// the runtime never performs. The 0.3 gate is untouched — this test uses
+    /// an empty grant set to prove no grant is involved at all.
     #[test]
-    fn check_imports_leaves_02_wasi_names_missing_as_before() {
+    fn check_imports_satisfies_02_wasi_baseline_names() {
         const GUEST_02_CLOCK_WAT: &str = r#"(component
           (import "wasi:clocks/monotonic-clock@0.2.9" (instance $clock
             (export "now" (func (result u64)))))
@@ -1680,19 +1725,111 @@ mod tests {
         let engine = wasmtime::Engine::new(&config).expect("engine builds");
         let bytes = wat::parse_str(GUEST_02_CLOCK_WAT).expect("fixture must assemble");
         let prepared = PreparedComponent::compile(&engine, &bytes).expect("fixture must compile");
-        let manifest = qqq_cap::manifest::Manifest::parse(
-            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[capabilities.clock]\nmonotonic = true\n",
-        )
-        .expect("fixture manifest parses");
-        let check = check_imports(&prepared, &engine, &GrantSet::from_manifest(&manifest));
+        let check = check_imports(&prepared, &engine, &GrantSet::empty());
+        assert!(
+            check.is_satisfied(),
+            "the 0.2 baseline needs no grant: {:?}",
+            check.missing
+        );
+    }
+
+    /// **CON-020** — pre-flight admits the 0.2 WASI baseline without a grant.
+    ///
+    /// Red-first: `check_imports` knows only `qqq:` packages, so a normal
+    /// `wasm32-wasip2` guest lands entirely in `missing` and `qqqai run`
+    /// refuses with QQQ-6003 before instantiation — even though the retained
+    /// 0.2 linker serves every one of these names (§O-782). The fix admits
+    /// exactly the baseline set; the grant-derived context still governs
+    /// what the names can *do*.
+    #[test]
+    fn check_imports_satisfies_wasi02_baseline_without_grants() {
+        const GUEST_02_BASELINE_WAT: &str = r#"(component
+          (import "wasi:clocks/monotonic-clock@0.2.9" (instance $clock
+            (export "now" (func (result u64)))))
+          (import "wasi:random/random@0.2.9" (instance $random
+            (export "get-random-bytes" (func (param "len" u64) (result (list u8))))))
+          (import "wasi:cli/environment@0.2.9" (instance $env
+            (export "get-environment" (func (result (list (tuple string string)))))))
+          (core module $m)
+          (core instance $i (instantiate $m))
+        )"#;
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        let engine = wasmtime::Engine::new(&config).expect("engine builds");
+        let bytes = wat::parse_str(GUEST_02_BASELINE_WAT).expect("fixture must assemble");
+        let prepared = PreparedComponent::compile(&engine, &bytes).expect("fixture must compile");
+        let check = check_imports(&prepared, &engine, &GrantSet::empty());
+        assert!(
+            check.is_satisfied(),
+            "baseline 0.2 imports need no grant: {:?}",
+            check.missing
+        );
+    }
+
+    /// **CON-020** — `wasi:http` 0.2 names stay missing: HTTP has no baseline
+    /// registration (no `wasmtime-wasi-http` dependency links those
+    /// instances) and is mediated through `qqq:http` grants. Admitting it
+    /// here would promise an instantiation the linker cannot deliver.
+    #[test]
+    fn check_imports_reports_wasi02_http_as_missing() {
+        const GUEST_02_HTTP_WAT: &str = r#"(component
+          (import "wasi:http/outgoing-handler@0.2.0" (instance $http
+            (export "handle" (func))))
+          (core module $m)
+          (core instance $i (instantiate $m))
+        )"#;
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        let engine = wasmtime::Engine::new(&config).expect("engine builds");
+        let bytes = wat::parse_str(GUEST_02_HTTP_WAT).expect("fixture must assemble");
+        let prepared = PreparedComponent::compile(&engine, &bytes).expect("fixture must compile");
+        let check = check_imports(&prepared, &engine, &GrantSet::empty());
         assert!(
             check
                 .missing
                 .iter()
-                .any(|i| i.contains("wasi:clocks/monotonic-clock@0.2.9")),
-            "0.2 baseline names stay missing exactly as before: {:?}",
+                .any(|i| i.contains("wasi:http/outgoing-handler@0.2.0")),
+            "unserved 0.2 HTTP must be reported missing by name: {:?}",
             check.missing
         );
+    }
+
+    /// **CON-020** — the baseline classifier covers exactly the served set.
+    ///
+    /// Unit-level pin so a future registration (or removal) forces this table
+    /// to move with it: the set must mirror what `host_wasi::register` links
+    /// via `wasmtime_wasi::p2::add_to_linker_sync`, nothing more.
+    #[test]
+    fn baseline_classifier_covers_exactly_the_served_packages() {
+        for package in [
+            "wasi:cli",
+            "wasi:clocks",
+            "wasi:filesystem",
+            "wasi:io",
+            "wasi:random",
+            "wasi:sockets",
+        ] {
+            assert!(
+                is_wasi02_baseline(&format!("{package}/x@0.2.9")),
+                "{package} is linked by the 0.2 baseline"
+            );
+        }
+        for name in [
+            "wasi:http/outgoing-handler@0.2.0",
+            "wasi:http/incoming-handler@0.2.0",
+            "wasi:keyvalue/store@0.2.0",
+            "wasi:config/store@0.2.0",
+            "wasi:clocks/monotonic-clock@0.3.2",
+            "wasi:cli/stdout@1.0.0",
+            "wasi:cli",
+            "wasi:cli@0.2.9",
+            "qqq:clock@1.0.0",
+        ] {
+            assert!(
+                !is_wasi02_baseline(name),
+                "{name} is not baseline and must not be admitted by it"
+            );
+        }
     }
 
     /// The two halves of `qqq:clock` resolve to **different** capabilities.

@@ -54,7 +54,7 @@
 //! | WASI surface | QQQ's answer |
 //! |---|---|
 //! | filesystem | **No preopens, and the preview-1 filesystem ABI is not compiled in.** An empty preopen table means no path exists to open, which is stronger than a deny-list and needs no maintenance. Files are reached through `qqq:fs`, which is capability-gated. |
-//! | sockets | **Not compiled in.** Networking is `qqq:http`/`qqq:dns`, where an egress allowlist applies. |
+//! | sockets | Linked but denied by default: wasmtime refuses every address unless the host enables network use, and QQQ never does. Networking is `qqq:http`/`qqq:dns`, where an egress allowlist applies. |
 //! | environment | The manifest's `[capabilities.env] allow`, resolved by the host. Never `inherit_env`. |
 //! | wall clock | Only when `[capabilities.clock] wall` is granted; otherwise a trapping clock. |
 //! | monotonic clock | Only when `clock.monotonic` is granted; otherwise a constant zero, so elapsed time is unobservable. |
@@ -306,10 +306,16 @@ fn context_impl(
 pub struct Registered {
     /// Whether the WASI context was added to the linker.
     pub wasi: bool,
-    /// Whether a filesystem interface was linked. Always `false` in QQQ, and a field
-    /// rather than a comment so a test can assert it.
+    /// Reserved. Always `false`: no QQQ surface grants filesystem *capability*
+    /// through this flag. The p2 `wasi:filesystem` types *are* linked (see the
+    /// baseline instantiation test below); enforcement lives in the
+    /// grant-derived context, which configures no preopens — so no path
+    /// exists to open. Files are reached through `qqq:fs`.
     pub filesystem: bool,
-    /// Whether a socket interface was linked. Always `false`, for the same reason.
+    /// Reserved. Always `false`, for the same reason: the p2 `wasi:sockets`
+    /// instances are linked but wasmtime denies every address by default and
+    /// QQQ never enables network use. Networking is `qqq:http`/`qqq:dns`,
+    /// where an egress allowlist applies.
     pub sockets: bool,
 }
 
@@ -389,9 +395,10 @@ mod tests {
         wasmtime::Engine::new(&config).expect("engine")
     }
 
-    fn linker() -> Linker<crate::linker::StoreData> {
-        Linker::new(&engine())
-    }
+    // NOTE: there is deliberately no `linker()` helper here. A helper that
+    // builds its own engine invites the cross-engine trap (components are
+    // engine-bound, so a second engine fails for identity rather than
+    // linkage); every test builds `Linker::new` on the engine it uses.
 
     #[test]
     fn a_context_is_built_from_an_empty_grant_set() {
@@ -584,28 +591,47 @@ mod tests {
         );
     }
 
+    /// A guest importing the baseline's sharp edges: a filesystem descriptor
+    /// and a TCP socket as resource types.
+    ///
+    /// Resource-type exports prove the instance is *linked*: unlike an empty
+    /// instance import (which resolves vacuously), a missing instance fails
+    /// instantiation naming the import. CON-020 pre-flight admits exactly
+    /// these names, so this is the link half of that promise.
+    const BASELINE_SHARP_EDGES_WAT: &str = r#"(component
+      (import "wasi:filesystem/types@0.2.9" (instance $fs
+        (export "descriptor" (type (sub resource)))))
+      (import "wasi:sockets/tcp@0.2.9" (instance $tcp
+        (export "tcp-socket" (type (sub resource)))))
+      (core module $m)
+      (core instance $i (instantiate $m))
+    )"#;
+
     #[test]
-    fn registering_against_a_real_linker_succeeds_and_links_no_filesystem_or_sockets() {
-        // A real `Linker` over a real engine: the failure this guards against
+    fn registering_against_a_real_linker_serves_the_baseline_without_grants() {
+        // A real `Linker` over a real engine: the failure this test guards against
         // (`unknown import` at instantiation) only happens against a genuine component
         // linker.
-        let mut l = linker();
+        let engine = engine();
+        let mut l = Linker::new(&engine);
         let registered = register(&mut l).expect("WASI registration must succeed");
         assert!(registered.wasi, "the flag reports the registration");
 
-        // The security claim, asserted rather than described. If a future change links
-        // the filesystem or socket interfaces, this fails and the change has to be
-        // argued for.
-        assert!(
-            !registered.filesystem,
-            "QQQ must never link WASI's filesystem: files are reached through `qqq:fs`, \
-             which the capability model governs"
-        );
-        assert!(
-            !registered.sockets,
-            "QQQ must never link WASI's sockets: networking is `qqq:http`/`qqq:dns`, \
-             where an egress allowlist applies"
-        );
+        // The link half of the CON-020 promise: the retained baseline linker
+        // serves `wasi:filesystem` and `wasi:sockets` instances with no grant
+        // involved, so pre-flight admitting those names describes what
+        // instantiation does rather than overriding it. Authority stays in
+        // the grant-derived context: no preopens, no network permission.
+        // One engine for component, linker, and store: components are
+        // engine-bound, and a second engine would fail for identity rather
+        // than linkage - the wrong reason, and a green test that proved
+        // nothing about the linker.
+        let bytes = wat::parse_str(BASELINE_SHARP_EDGES_WAT).expect("fixture must assemble");
+        let component =
+            wasmtime::component::Component::new(&engine, &bytes).expect("fixture compiles");
+        let mut store = wasmtime::Store::new(&engine, crate::linker::StoreData::default());
+        l.instantiate(&mut store, &component)
+            .expect("baseline instances must resolve with no grants");
     }
 
     #[test]

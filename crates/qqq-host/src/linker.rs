@@ -1267,10 +1267,13 @@ pub fn build_linker<'a>(
     //
     // The authority that matters is withheld by the **context**, which is derived
     // from the same grant set everything else reads (`StoreData::wasi`,
-    // `crate::host_wasi`): no preopens, no filesystem interface, no sockets, an
-    // environment allowlist rather than an inherit, and no wall clock unless
-    // `clock.wall` is granted. So this is not a hole in deny-by-default; it is where
-    // the deny is enforced.
+    // `crate::host_wasi`): no preopens (so no paths exist to open), no network
+    // permission (wasmtime denies every address by default and QQQ never
+    // enables it), an environment allowlist rather than an inherit, and no wall
+    // clock unless `clock.wall` is granted. The p2 instances *are* linked —
+    // that is what makes pre-flight admission honest — but linking is not
+    // authority. So this is not a hole in deny-by-default; it is where the
+    // deny is enforced.
     crate::host_wasi::register(&mut linker)?;
 
     // `qqq:test/assertions` -- the assertion interface a test runner drives -- `TEST-007`, `TEST-008`.

@@ -198,6 +198,15 @@ pub struct GuestApp {
     /// existing constructor — including the integration tests' — serves
     /// real-time randomness unless serve says otherwise.
     deterministic: bool,
+    /// The shared virtual-clock admission counter for deterministic serving.
+    ///
+    /// Each request that reaches instantiation in deterministic mode claims
+    /// the next tick, so later requests observe larger readings. Shared (not
+    /// per-instance) because instances are created per request: a
+    /// per-instance counter would read a constant. Cloned on `replacement`
+    /// like every other shared resource, so a hot swap neither resets nor
+    /// double-counts the clock.
+    det_clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The epoch ticker period for this app's engine lineage — `F-17`.
     ///
     /// Derived once from the limits via the helper, shared by the ticker
@@ -403,6 +412,7 @@ impl GuestApp {
             grant_digest,
             completion_rate: 0.0,
             deterministic: false,
+            det_clock: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             epoch_tick: tick,
         })
     }
@@ -470,6 +480,10 @@ impl GuestApp {
         // The clock mode rolls with it too: a deterministic server that
         // served real-time randomness after a rotation would be neither.
         next.deterministic = self.deterministic;
+        // And the admission counter with it: a rotation that reset the
+        // virtual clock would replay already-seen ticks, and one that kept
+        // counting on a rotated copy would fork it.
+        next.det_clock = std::sync::Arc::clone(&self.det_clock);
         // And the tick with it: a rotated app on a different period would
         // count ticks the ticker never emits.
         next.epoch_tick = self.epoch_tick;
@@ -853,6 +867,21 @@ impl GuestApp {
         // registry, never through this local.
         let tenant_output = self.tenant_outputs.acquire(tenant);
         let mut options = timed_options(self.limits, self.deterministic, self.epoch_tick);
+        // The production tick (`DET-002`/`DET-010`): in deterministic mode each
+        // request that reaches instantiation claims the next virtual tick, so
+        // later requests observe larger readings. No-op in real-time mode.
+        // The ordering guarantee is admission order, not arrival order (and
+        // not contiguity: a request that fails after claiming leaves a gap,
+        // like a rolled-back pool slot): concurrent requests race for the
+        // counter exactly as they race for the pool slot above, and a replay
+        // that needs the same readings must reproduce the same admission
+        // order and the same failures.
+        if self.deterministic {
+            options.deterministic_initial_ticks = self
+                .det_clock
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+        }
         options.audit = Some(handle);
         options.tenant_output = Some(tenant_output);
         let instance = Instance::create_with(
@@ -1921,6 +1950,128 @@ mod tests {
     }
 
     /// A request head, built the way `qqq-serve`'s parser builds one.
+    /// A guest that answers with the monotonic clock reading as 16 hex chars.
+    ///
+    /// The read happens in `handle`, so every served request observes the
+    /// clock once. The body carries the raw `now()` value (fixed-width hex,
+    /// no division: nibbles via shift+mask), so two requests that observe
+    /// different ticks produce different bodies — and the *values* order the
+    /// ticks, which is what makes this a determinism probe rather than a
+    /// liveness one.
+    ///
+    /// Deliberately the `qqq:clock` interface, not `wasi:clocks`: the WASI
+    /// 0.2 baseline clock is served by wasmtime's own implementation and
+    /// reads real time even in deterministic mode, so it cannot observe the
+    /// virtual tick counter. Only the capability-gated `qqq:clock` path goes
+    /// through `AmbientState` — which is exactly the boundary this test
+    /// exists to prove ticked.
+    const TICKS_HTTP_WAT: &str = r#"(component
+      (import "qqq:clock/monotonic-clock@1.0.0" (instance $clock
+        (export "now" (func (result u64)))))
+      (core module $m
+        (func $now (import "" "now") (result i64))
+        (memory (export "memory") 1)
+        (global $next (mut i32) (i32.const 1024))
+        (func (export "realloc") (param i32 i32 i32 i32) (result i32)
+          global.get $next
+          global.get $next i32.const 4096 i32.add global.set $next)
+        (func (export "handle") (param i32 i32 i32 i32 i32 i32 i32 i32) (result i32)
+          (local $v i64)
+          (local $i i32)
+          (local $n i32)
+          (local $c i32)
+          (local.set $v (call $now))
+          (local.set $i (i32.const 0))
+          (loop $l
+            (local.set $n (i32.wrap_i64 (i64.and (i64.shr_u (local.get $v) (i64.extend_i32_u (i32.mul (i32.sub (i32.const 15) (local.get $i)) (i32.const 4)))) (i64.const 15))))
+            (local.set $c (i32.add (local.get $n) (i32.const 48)))
+            (if (i32.ge_u (local.get $n) (i32.const 10)) (then (local.set $c (i32.add (local.get $n) (i32.const 87)))))
+            (i32.store8 (i32.add (i32.const 80) (local.get $i)) (local.get $c))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br_if $l (i32.lt_u (local.get $i) (i32.const 16))))
+          i32.const 0)
+        (data (i32.const 0) "\00\00\00\00\c8\00\00\00\00\00\00\00\00\00\00\00\50\00\00\00\10\00\00\00"))
+      (alias export $clock "now" (func $c-now))
+      (core func $lw (canon lower (func $c-now)))
+      (core instance $i (instantiate $m (with "" (instance (export "now" (func $lw))))))
+      (type $bytes (list u8))
+      (type $method (enum "get" "head" "post" "put" "delete" "connect" "options" "trace" "patch"))
+      (export $public-method "method" (type $method))
+      (type $header (record (field "name" string) (field "value" $bytes)))
+      (export $public-header "header" (type $header))
+      (type $headers (list $public-header))
+      (type $body (option $bytes))
+      (type $request (record (field "method" $public-method) (field "url" string)
+        (field "headers" $headers) (field "body" $body)))
+      (export $public-request "request" (type $request))
+      (type $response (record (field "status" u16) (field "headers" $headers) (field "body" $bytes)))
+      (export $public-response "response" (type $response))
+      (type $error (variant (case "host-not-allowed") (case "connection-failed")
+        (case "request-too-large") (case "response-too-large") (case "invalid-url")
+        (case "subrequest-limit-exceeded")))
+      (export $public-error "http-error" (type $error))
+      (type $result (result $public-response (error $public-error)))
+      (func $handle (param "req" $public-request) (result $result)
+        (canon lift (core func $i "handle") (memory (core memory $i "memory")) (realloc (core func $i "realloc"))))
+      (instance $api (export "handle" (func $handle)))
+      (export "qqq:http/incoming-handler@1.0.0" (instance $api))
+    )"#;
+
+    /// A deterministic app serving the tick-reading guest, with the monotonic
+    /// grant the non-zero clock requires (a denied clock reads constant zero
+    /// and would make equal bodies pass vacuously).
+    fn ticking_test_app() -> Option<GuestApp> {
+        let bytes = wat::parse_str(TICKS_HTTP_WAT).expect("tick fixture must assemble");
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"tick\"\nversion = \"0.1.0\"\n[capabilities.clock]\nmonotonic = true\n",
+        )
+        .expect("tick manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("engine config"))
+            .expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        let mut app =
+            GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1).ok()?;
+        app.set_deterministic(true);
+        Some(app)
+    }
+
+    /// **Deterministic serve advances the virtual clock once per admitted request.**
+    ///
+    /// Red-first: with no production tick caller, every request reads the
+    /// frozen zero tick and both bodies are identical. After the fix, each
+    /// request that reaches instantiation claims the next tick, so the second
+    /// body is larger than the first.
+    #[test]
+    fn deterministic_requests_observe_advancing_ticks() {
+        let reading = |response: &qqq_serve::Response| {
+            let text = std::str::from_utf8(&response.body).expect("hex body is UTF-8");
+            assert_eq!(
+                text.len(),
+                16,
+                "the body is one fixed-width reading: {text:?}"
+            );
+            u64::from_str_radix(text, 16).expect("hex body parses")
+        };
+        let app = ticking_test_app().expect("tick app builds");
+        let first = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("first request serves");
+        let second = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("second request serves");
+        let (a, b) = (reading(&first), reading(&second));
+        assert_ne!(a, b, "two requests must not read the same frozen tick");
+        assert!(b > a, "ticks advance in admission order: {a} then {b}");
+    }
+
     fn head(method: qqq_serve::Method, target: &str) -> qqq_serve::RequestHead {
         qqq_serve::RequestHead {
             method,

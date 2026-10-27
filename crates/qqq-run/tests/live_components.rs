@@ -224,6 +224,73 @@ fn native_output_is_real_and_cache_survives_engine_recreation() {
 }
 
 #[test]
+fn corrupted_cache_falls_back_to_recompile() {
+    let root = std::env::temp_dir().join(format!("qqq-corrupt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let cache_dir = root.join("cache");
+    // Populate the managed cache with a real compile through the vendored zstd path.
+    let mut config = EngineConfig::default().to_wasmtime_config().unwrap();
+    let cache = qqq_run::aot::configure(&mut config, Some(&cache_dir))
+        .unwrap()
+        .unwrap();
+    let engine = wasmtime::Engine::new(&config).unwrap();
+    wasmtime::component::Component::new(&engine, V1).unwrap();
+    assert!(
+        cache.cache_misses() > 0,
+        "the first compile must miss so the cache holds real entries"
+    );
+    drop(engine);
+    drop(config);
+    drop(cache);
+    // Corrupt every cache file in place. Entries that vanish between
+    // listing and read belong to the cache worker racing teardown; skip
+    // them rather than failing on a file that is already gone.
+    let mut corrupted = 0usize;
+    let mut stack = vec![cache_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let Ok(mut bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                if !bytes.is_empty() {
+                    bytes[0] ^= 0xff;
+                    if std::fs::write(&path, &bytes).is_ok() {
+                        corrupted += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(corrupted > 0, "the cache must contain files to corrupt");
+    // A fresh engine over the corrupted cache must still compile: fail closed, never load garbage.
+    // The miss count must grow — a compile that "succeeds" on a cache hit would prove nothing,
+    // because a hit means the corrupted bytes were never read.
+    let mut config = EngineConfig::default().to_wasmtime_config().unwrap();
+    let cache = qqq_run::aot::configure(&mut config, Some(&cache_dir))
+        .unwrap()
+        .unwrap();
+    let misses_before = cache.cache_misses();
+    let engine = wasmtime::Engine::new(&config).unwrap();
+    wasmtime::component::Component::new(&engine, V1).unwrap();
+    assert!(
+        cache.cache_misses() > misses_before,
+        "the corrupted entries must miss and recompile, not hit"
+    );
+    drop(engine);
+    drop(config);
+    drop(cache);
+    remove_dir_all_retrying(&root);
+}
+
+#[test]
 fn cache_child() {
     let Some(directory) = std::env::var_os("QQQ_TEST_CACHE") else {
         return;

@@ -118,7 +118,7 @@ A principle that cannot be tested is a slogan. Each one maps to concrete, checka
 | 2 | Manifest-derived linker construction; per-instance grants; hostile-guest suite; limits | `SEC-001` … `SEC-030` |
 | 3 | Published percentile budgets; performance regression CI; the benchmark methodology | `PERF-001` … `PERF-027` |
 | 4 | WIT as source of truth; generated bindings; a five-language conformance suite; published parity matrix | `LANG-001` … `LANG-040` |
-| 5 | Versioned interfaces; typed errors; CI checks for hidden global state | `CON-001` … `CON-018` |
+| 5 | Versioned interfaces; typed errors; CI checks for hidden global state | `CON-001` … `CON-019` (`CON-020` open) |
 | 6 | Generated docs; documentation-freshness CI; `llms.txt` | `DOC-001` … `DOC-021` |
 | 7 | Zero-capability scaffolding; the three documented power tiers | `DX-001` … `DX-020` |
 | 8 | Apache-2.0 runtime; published governance; deprecation policy; two-maintainer rule | `GOV-001` … `GOV-014`, `LIC-001` … `LIC-012` |

@@ -33,7 +33,7 @@ Every crate declares its tier on the comment block above its entry in the worksp
 | `qqq-abi` | `stable` | WIT package + the interface registry: which capability unlocks which interface |
 | `qqq-host` | `stable` | Wasmtime integration: engine config, component compilation, pooling, fuel, epochs, store data |
 | `qqq-io` | `stable` | Reactor abstraction over Tokio / io_uring |
-| `qqq-serve` | `stable` | The HTTP/dev server: routing, listener shards, HTTP/1.1, HTTP/2, HTTP/3 (QUIC) behind a flag |
+| `qqq-serve` | `stable` | The HTTP/dev server: routing, listener shards, HTTP/1.1 on the production listener; HTTP/2 framing/HPACK/streams implemented and h2spec-green but served only through the `hyper` path, not `qqqai serve`; no HTTP/3/QUIC or gRPC (open items `SRV-014`, `SRV-015`) |
 | `qqq-run` | `stable` | The CLI orchestration: `new`, `build`, `run`, `dev`, `test`, `inspect`, `mcp` |
 | `qqq-pkg` | `beta` | Registry client, solver, lockfile, content-addressed store |
 | `qqq-debug` | `beta` | DWARF → source mapping, trap diagnostics, time-travel replay |
@@ -141,7 +141,7 @@ A promise with no check is a wish. Each row above names a mechanism:
 |---|---|
 | Crate tiers | `tools/check_tiers.py` (this document's own source), `tools/check_topology.py` |
 | WIT | `tools/check_wit_style.py`, `tools/check_wit_reference.py`, <!-- qqq:claim wit-files -->17<!-- /qqq:claim --> `.wit` files validating |
-| Ledger | <!-- qqq:claim checklist-done -->304<!-- /qqq:claim --> of <!-- qqq:claim checklist-total -->630<!-- /qqq:claim --> checklist items done, <!-- qqq:claim checklist-open -->319<!-- /qqq:claim --> open (`check_doc_claims.py`) |
+| Ledger | <!-- qqq:claim checklist-done -->309<!-- /qqq:claim --> of <!-- qqq:claim checklist-total -->631<!-- /qqq:claim --> checklist items done, <!-- qqq:claim checklist-open -->309<!-- /qqq:claim --> open (`check_doc_claims.py`) |
 | Register | <!-- qqq:claim observation-headings -->647<!-- /qqq:claim --> distinct `§O` observations, highest `§O-`<!-- qqq:claim observation-highest -->789<!-- /qqq:claim --> |
 | Manifest | `schema/qqq-toml.schema.json`, `tools/gen_schemas.py --check` |
 | Lockfile | `schema/qqq-lock.schema.json`, the same check |

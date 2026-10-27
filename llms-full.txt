@@ -1,6 +1,6 @@
 # QQQ — full documentation
 
-24 of the 45 indexed documents are included **whole**, each preceded by its path in the repository so a statement here can be traced to its source. The other 21 are **declared omissions**, each carrying its reason in `CORPUS_EXCLUDED` in `tools/gen_llms_txt.py`: navigation, machine contracts, and facts about this repository rather than about QQQ, plus the three root documents, which are large enough to consume a context window before a reader reaches anything else. Fetch any of them by path.
+26 of the 47 indexed documents are included **whole**, each preceded by its path in the repository so a statement here can be traced to its source. The other 21 are **declared omissions**, each carrying its reason in `CORPUS_EXCLUDED` in `tools/gen_llms_txt.py`: navigation, machine contracts, and facts about this repository rather than about QQQ, plus the three root documents, which are large enough to consume a context window before a reader reaches anything else. Fetch any of them by path.
 
 ---
 
@@ -995,21 +995,21 @@ merging; this draft is not a release or a claim that persistent agents are compl
 
 | Scope | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| All checklist items | 304 | 3 | 319 | 4 | 0 | 0 | 630 | 48.3% |
+| All checklist items | 309 | 3 | 309 | 10 | 0 | 0 | 631 | 49.0% |
 
 ### By phase
 
 | Phase | Milestone(s) | Done | Partial | Open | Blocked | Withdrawn | Unknown | Total | Complete |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | P0 | M0 | 50 | 0 | 29 | 0 | 0 | 0 | 79 | 63.3% |
-| P1 | M1 | 57 | 0 | 5 | 0 | 0 | 0 | 62 | 91.9% |
-| P2 | M2 | 52 | 0 | 0 | 2 | 0 | 0 | 54 | 96.3% |
+| P1 | M1 | 58 | 0 | 5 | 0 | 0 | 0 | 63 | 92.1% |
+| P2 | M2 | 51 | 0 | 0 | 3 | 0 | 0 | 54 | 94.4% |
 | P3 | M3 | 35 | 0 | 5 | 0 | 0 | 0 | 40 | 87.5% |
 | P4 | M4 | 32 | 0 | 32 | 0 | 0 | 0 | 64 | 50.0% |
 | P5 | M5, M8 | 20 | 0 | 23 | 2 | 0 | 0 | 45 | 44.4% |
 | P6 | M6 | 1 | 0 | 35 | 0 | 0 | 0 | 36 | 2.8% |
 | P7 | M9 | 26 | 2 | 31 | 0 | 0 | 0 | 59 | 44.1% |
-| P8 | continuous | 23 | 0 | 39 | 0 | 0 | 0 | 62 | 37.1% |
+| P8 | continuous | 28 | 0 | 29 | 5 | 0 | 0 | 62 | 45.2% |
 | P9 | M10, M11 | 1 | 1 | 73 | 0 | 0 | 0 | 75 | 1.3% |
 | P10 | post-1.0 | 7 | 0 | 47 | 0 | 0 | 0 | 54 | 13.0% |
 
@@ -1023,10 +1023,10 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P0 | LIC | 7 | 0 | 5 | 0 | 0 | 0 | 12 | 58.3% |
 | P0 | PLAN | 7 | 0 | 13 | 0 | 0 | 0 | 20 | 35.0% |
 | P1 | ARCH | 12 | 0 | 4 | 0 | 0 | 0 | 16 | 75.0% |
-| P1 | CON | 19 | 0 | 0 | 0 | 0 | 0 | 19 | 100.0% |
+| P1 | CON | 20 | 0 | 0 | 0 | 0 | 0 | 20 | 100.0% |
 | P1 | HOST | 26 | 0 | 1 | 0 | 0 | 0 | 27 | 96.3% |
 | P2 | CAP | 24 | 0 | 0 | 0 | 0 | 0 | 24 | 100.0% |
-| P2 | SEC | 28 | 0 | 0 | 2 | 0 | 0 | 30 | 93.3% |
+| P2 | SEC | 27 | 0 | 0 | 3 | 0 | 0 | 30 | 90.0% |
 | P3 | ABI | 16 | 0 | 2 | 0 | 0 | 0 | 18 | 88.9% |
 | P3 | SRV | 19 | 0 | 3 | 0 | 0 | 0 | 22 | 86.4% |
 | P4 | CLI | 22 | 0 | 2 | 0 | 0 | 0 | 24 | 91.7% |
@@ -1038,7 +1038,7 @@ merging; this draft is not a release or a claim that persistent agents are compl
 | P7 | AGENT | 14 | 1 | 10 | 0 | 0 | 0 | 25 | 56.0% |
 | P7 | MIG | 0 | 0 | 14 | 0 | 0 | 0 | 14 | 0.0% |
 | P7 | TEST | 12 | 1 | 7 | 0 | 0 | 0 | 20 | 60.0% |
-| P8 | DET | 4 | 0 | 12 | 0 | 0 | 0 | 16 | 25.0% |
+| P8 | DET | 9 | 0 | 2 | 5 | 0 | 0 | 16 | 56.2% |
 | P8 | OBS | 11 | 0 | 7 | 0 | 0 | 0 | 18 | 61.1% |
 | P8 | PERF | 8 | 0 | 20 | 0 | 0 | 0 | 28 | 28.6% |
 | P9 | DOD | 0 | 1 | 23 | 0 | 0 | 0 | 24 | 0.0% |
@@ -4100,9 +4100,9 @@ the tree's state beside it**, measured at `390ee8f`:
 
 | # | source | control | state |
 |---|---|---|---|
-| 1 | Wall clock | `qqq:clock.wall` returns `determinism.fixed_clock`, advancing only by explicit host ticks | **partial** — `AmbientState` freezes it; `tick()` is called from tests only |
+| 1 | Wall clock | `qqq:clock.wall` returns `determinism.fixed_clock`, advancing only by explicit host ticks | **partial** — `AmbientState` freezes it; ticks come from tests and from deterministic `serve`, where each admitted request claims the next tick (admission order is the ordering guarantee) |
 | 2 | Monotonic clock | virtualised; advances deterministically with fuel or explicit ticks | **partial** — same mechanism, same limit |
-| 3 | Randomness | a seeded generator (`determinism.seed`) | **built** — `AmbientState::random_bytes`, `splitmix64` |
+| 3 | Randomness | a seeded generator (fixed public seed) | **built** — `AmbientState::random_bytes`, SHA-256 hash-DRBG (`F-20` replaced `splitmix64`) |
 | 4 | Async scheduling | a deterministic scheduler: same poll order, same interleavings, single-threaded executor | **absent** — `DET-004` |
 | 5 | Float behaviour | `cranelift_nan_canonicalization` on; relaxed-SIMD fusion disabled | **built** — `EngineConfig::deterministic` |
 | 6 | HashMap iteration order | banned in host interfaces; ordered maps only | **built** — no `HashMap` in `qqq-host`'s source |
@@ -4141,21 +4141,20 @@ claim that is not mechanical.
 | **config** | `--deterministic` on and off are different runs | the replay header carries `deterministic` as a fifth field |
 | **external I/O** | a real network or clock read outside the recorded set cannot be replayed | `--replay` fails rather than silently diverging |
 
-**And one discrepancy between this document's source and the implementation, recorded rather than
-smoothed over.** §10.5 calls the deterministic generator *"a seeded CSPRNG (ChaCha20 with
-`determinism.seed`)"*. The implementation is `splitmix64`, and its own comment says why:
-
-```rust
-// splitmix64: deterministic, architecture-independent, and good
-// enough for test reproducibility (it is explicitly NOT a CSPRNG,
-// and is never used outside deterministic mode).
-```
+**And one discrepancy between this document's source and the implementation, now resolved.** §10.5
+used to call the deterministic generator *"a seeded CSPRNG (ChaCha20 with `determinism.seed`)"*.
+`F-20` replaced the old `splitmix64` stream with a SHA-256 hash-DRBG over a fixed public seed
+(`ambient.rs::fill_deterministic`), whose own comment states the boundary: reproducible by
+construction and statistically strong, but explicitly **not secret** — and never used outside
+deterministic mode.
 
 **In normal mode the guest gets the OS source** (`getrandom::fill`), and a failure there is surfaced
 rather than substituted — *"because falling back to a weaker source would be worse than failing."*
-**So the weak generator is reachable only when determinism is on and the seed is public.** Either §10.5
-should say `splitmix64` and stop calling it a CSPRNG, or the implementation should change; the item that
-would decide it (`DET-003`) is open.
+**So the reproducible generator is reachable only when determinism is on and the seed is public.**
+§10.5 now names the hash-DRBG and no longer calls it a CSPRNG. What remains open is the naming
+question for `DET-003` ("seeded CSPRNG"): whether the hash-DRBG satisfies the item's intent
+(reproducible, statistically strong randomness) or the item demands a recorded-seed ChaCha20 —
+an owner decision, since only the owner can ratify what "CSPRNG" means for this line.
 
 ---
 
@@ -4179,8 +4178,9 @@ would decide it (`DET-003`) is open.
   guest-facing `random.get` uses the OS source unless determinism is on.
 - **Performance-sensitive production traffic.** Deterministic mode disables relaxed SIMD and canonicalises
   NaNs. **That is a deliberate cost**, and `DET-016` exists to publish it.
-- **Anything that must observe real time.** A guest that measures elapsed wall-clock time will read zero,
-  because the clock advances only on an explicit tick and **nothing in the production path calls `tick()`**.
+- **Anything that must observe real time.** A guest that measures elapsed wall-clock time reads the
+  virtual clock in deterministic mode: each admitted request advances it by one tick, so two runs agree
+  only for the same admission order (concurrent requests race for ticks as they race for pool slots).
   A component whose logic depends on real elapsed time cannot be both deterministic and correct.
 - **Cross-version reproduction.** See §2: an engine upgrade that changes codegen ends it.
 - **Reproducing across machines with different targets.** The target triple is in the header for a reason.
@@ -4214,7 +4214,7 @@ replays a shorter run is the one outcome the whole mechanism exists to prevent.
 | claim | command |
 |---|---|
 | the control states in §1 | `rg -n 'wasm_threads\|relaxed_simd\|nan_canonical' crates/qqq-host/src/config.rs` |
-| `splitmix64`, and its comment | `rg -n -A4 'if self.deterministic' crates/qqq-host/src/ambient.rs` |
+| the hash-DRBG and its not-secret contract | `rg -n 'fill_deterministic\|hash-DRBG\|NOT secret' crates/qqq-host/src/ambient.rs` |
 | no `HashMap` in the host | `rg -c 'HashMap' crates/qqq-host/src/` |
 | the AOT cache key's four inputs | `sed -n '354,398p' crates/qqq-host/src/config.rs` |
 | the replay log's types | `sed -n '1,120p' crates/qqq-host/src/replay.rs` |
@@ -5164,6 +5164,174 @@ Pre-1.0, only the latest release receives security fixes. After 1.0, the two mos
 
 ---
 
+<!-- source: docs/dependency-decisions/zstd-cache.md -->
+
+## Dependency decision: vendored `wasmtime-internal-cache` 48.0.7 (zstd 0.13 → 0.14)
+
+- **Date:** 2026-10-27
+- **Status:** implemented, `cargo deny check` green, cache path exercised
+- **Scope:** `E:\QQQ\vendor\wasmtime-internal-cache` + `[patch.crates-io]` in workspace `Cargo.toml`
+- **Checklist:** Phase 0 gate work (`cargo deny` red on four zstd advisories)
+
+### The problem
+
+`cargo deny check` failed on four advisories, all reached through
+`wasmtime-internal-cache 48.0.7` → `zstd 0.13.3` → `zstd-safe 7.3.0` →
+`zstd-sys 2.1.0`:
+
+| Advisory | Fixed by |
+|---|---|
+| RUSTSEC-2026-0391 (abandoned stream data leaks) | `zstd >= 0.14.3` |
+| RUSTSEC-2026-0398 (`Seekable::decompress` Vec length) | `zstd-safe >= 8.2.0` |
+| RUSTSEC-2026-0403 (legacy-frame uninit memory) | `zstd-safe >= 8.2.0` |
+| RUSTSEC-2026-0410 (wasm32 allocator shim) | `zstd-sys >= 2.1.2` |
+
+### Why not the easy paths
+
+1. **Compatible upgrade: impossible.** `wasmtime-internal-cache 48.0.7` requires
+   `zstd "0.13.0"`, which excludes 0.14.x by semver. 48.0.7 is the last 48.x
+   release (`cargo info wasmtime`), and `cargo update -p wasmtime-internal-cache`
+   resolves nothing newer. A Wasmtime 49/50 bump would violate the engine pin
+   the registry builds against and needs a coordinated decision, not a gate fix.
+2. **Registry `[patch]` to 0.14.3: rejected by Cargo.** A `[patch.crates-io]`
+   entry pointing at the same registry source errors out
+   ("patches must point to different sources"); a git-source patch to
+   `v0.14.3` resolves but is "not used in the crate graph" because the
+   `0.13.0` requirement excludes it. Both attempts are recorded here so nobody
+   retries them.
+3. **Bump only `zstd-sys`: insufficient.** It would fix RUSTSEC-2026-0410 alone;
+   RUSTSEC-2026-0398/0403 need `zstd-safe >= 8.2.0`, which `zstd 0.13.3`
+   cannot compile against.
+4. **Blanket `deny` ignore: refused.** No written reachability analysis existed,
+   and the goal forbids weakening the gate to get green.
+
+### What was done instead: vendor with a one-line requirement change
+
+`vendor/wasmtime-internal-cache` is a byte copy of the crates.io source for
+48.0.7 with exactly one functional edit. Provenance is verified, not assumed:
+re-extract the upstream source (`cargo vendor --versioned-dirs` into a scratch
+dir, or unpack the `.crate` file) and `diff -r` it against `vendor/` — the
+only content difference must be the `zstd` requirement line below plus the
+absent registry artifacts (`.cargo-ok`, root `Cargo.lock`, `.cargo-checksum.json`
+are registry bookkeeping, not upstream sources, and are not vendored):
+
+```diff
+- version = "0.13.0"
++ version = "0.14"
+```
+
+The workspace `[patch.crates-io]` points `wasmtime-internal-cache` at that
+path (same version, different source — the supported vendor flow). Cargo then
+resolves `zstd 0.14.3` / `zstd-safe 8.2.0` / `zstd-sys 2.1.2`, i.e. exactly the
+fixed versions. The vendored crate uses only `zstd::encode_all`,
+`zstd::decode_all`, and `zstd::DEFAULT_COMPRESSION_LEVEL`, all stable across
+the 0.13→0.14 boundary — verified by compile, not by reading changelogs.
+
+### Reachability notes (why this is low-risk, not no-risk)
+
+- The cache compresses artifacts the host itself compiled and decompresses
+  them from an operator-owned directory (`verify_ownership` refuses foreign
+  roots). An attacker needs cache-write access first, at which point the
+  game is already over — but the advisories are fixed by version, not by
+  this argument. The argument only explains why vendoring (rather than an
+  emergency engine migration) was proportionate.
+- RUSTSEC-2026-0410 targets the wasm32 allocator shim; no workspace target
+  is wasm32. Fixed by version anyway.
+
+### Verification (all committed or reproducible)
+
+- `cargo deny check`: advisories/bans/licenses/sources all ok.
+- `cargo check -p wasmtime-internal-cache`: green against zstd 0.14.3.
+- Cache path exercised, not just built:
+  - `live_components::native_output_is_real_and_cache_survives_engine_recreation`
+    (emit → reuse/hit → miss on changed bytes → `.cwasm` refused as source).
+  - **New** `live_components::corrupted_cache_falls_back_to_recompile`:
+    populates the managed cache, flips bytes in every cache file, and proves
+    a fresh engine still compiles instead of loading garbage.
+  - `qqq-run` lib `aot::*` unit tests (9 passed).
+  - Cache suite run 3× to rule out the teardown race found during development
+    (a vanishing cache file between listing and read; the test now skips
+    already-gone entries with the reason stated inline).
+
+### Maintenance and exit
+
+- **Re-vendor procedure:** copy the new upstream source over
+  `vendor/wasmtime-internal-cache`, re-apply the one-line zstd requirement,
+  keep `.cargo-checksum.json` from upstream, re-run `cargo deny check` and
+  the cache tests above. Any other diff against upstream must be justified
+  in this file.
+- **Exit condition:** delete `vendor/` and the `[patch]` block when a
+  Wasmtime release compatible with the engine pin requires `zstd >= 0.14`
+  natively. Watch each Wasmtime 48+ release for the zstd requirement.
+- **Do not** widen the vendor directory into a general patching habit: one
+  crate, one line, one reason, all three recorded here.
+
+---
+
+<!-- source: docs/runtime-handoff-2026-10-27.md -->
+
+## Handoff: QQQ runtime → registry owner (2026-10-27 work)
+
+This records the runtime-side work of 2026-10-27 and exactly what the
+registry side must re-verify. No registry files were touched; the registry
+owner runs the commands in §2 and reports green rather than taking it on
+faith.
+
+### 1. What changed and why it is safe to pull
+
+| Change | Files | Registry impact |
+|---|---|---|
+| Vendored `wasmtime-internal-cache` 48.0.7 with the zstd requirement 0.13 → 0.14 (resolves RUSTSEC-2026-0391/0398/0403/0410; `cargo deny` green) | `Cargo.toml` (`[patch.crates-io]`), `Cargo.lock`, `vendor/` | No API change (same crate version). The build resolves zstd 0.14.3 / zstd-safe 8.2.0 / zstd-sys 2.1.2. Re-run the suite; expect no changes. Decision record: `docs/dependency-decisions/zstd-cache.md`. |
+| CON-020: `qqqai run` pre-flight admits the WASI 0.2 baseline without a grant (fixes §O-782: every normal `wasm32-wasip2` guest was refused) | `crates/qqq-run/src/run.rs`, tests | No ABI change. `inspect` output unchanged (baseline names stay unmapped; no grant exists for them). Re-run contract vectors. |
+| Deterministic per-request tick for `serve --deterministic` | `crates/qqq-host` (`ambient.rs`, `instance.rs`), `crates/qqq-run/src/guest_handler.rs`, tests | New `InstanceOptions::deterministic_initial_ticks` (default 0) and per-app shared counter. Real-time paths untouched. Replay logs unchanged in shape. |
+| Doc corrections: §10.5 randomness row (hash-DRBG, not ChaCha20), determinism.md state rows, stability serve row (no H2-on-listener, no H3), PRINCIPLES CON range | `QQQ-Proposal-V1.md`, `docs/determinism.md`, `docs/stability.md`, `PRINCIPLES.md` | Prose only. Generated docs re-recorded (`llms.txt`, `llms-full.txt`, backlog, dashboard, corpus digests); all generator checks green. |
+| New checklist item CON-020 (631 items total) | `QQQ-Checklist-V1.md` + generated files | Counts only. |
+
+Frozen surfaces verified unchanged: 13 `qqq:` catalogue names, 24 capability
+names, 15 WIT packages, WASI 0.2 served / 0.3 narrow, `abi.host >=0.2,<0.4`,
+workspace 0.1.1, Wasmtime/wasmparser pins (lockfile delta is zstd only).
+`core-only` builds for `wasm32-unknown-unknown` (verified this round).
+
+### 2. Registry re-run request
+
+```
+cargo test -p qqq-registry
+python tools/check_specs.py --root specs --qqq-root E:/QQQ
+python scripts/build_wasm.py
+## plus: TypeScript checks, Vitest, Node bridge smoke
+```
+
+### 3. Blockers the runtime cannot close (owner/external)
+
+- **Security audits** SEC-024/025: engage firms, pay, receive reports, fix findings.
+- **Legal/governance/planning/hardware/market items**: see goal §5.13 table —
+  counsel filings, appointments, reference machines (PLAN-013 unlocks PERF/DOD
+  measurements), design partners, TinyGo upstream (LANG-023/024, quarterly check).
+- **Needs-owner-decision designs**: deterministic scheduler scope (DET-004),
+  network-timing record/replay (DET-011), compilation pinning ratification
+  (DET-013), "seeded CSPRNG" wording for DET-003 (hash-DRBG is reproducible
+  and statistically strong, but not secret), guest streaming ABI for WS/SSE,
+  hyper cutover for `serve`, shared-memory policy (ARCH-014/PERF-015/ABI-016
+  vs ratified `wasm_threads(false)`).
+- **Performance**: §9.2 numeric budgets are UNMEASURED on reference hardware.
+  Do not report local numbers as budget verdicts. DET-016 cost report needs
+  PLAN-013 machines.
+
+### 4. Evidence produced this round
+
+- `cargo deny check`: advisories/bans/licenses/sources ok.
+- `cargo fmt --all --check`, workspace clippy `-D warnings`, machete: green.
+- Full workspace suite: 3,530 passed, 0 failed (14 ignored, named in log).
+- `cargo xtask ci`: GATE GREEN, 146 steps, 0 failed on the final tree (full log kept with the goal evidence; evidence commit pending owner request).
+- 10,000 deterministic reference-app trials: 0 diverged (log + digests kept).
+- CON-020: red-first unit + CLI e2e (fault-injected QQQ-6003), green after;
+  independent review (Meta Muse proxy, subscription quota exhausted), 9
+  findings, all triaged/fixed.
+- Tick wiring: red-first e2e (frozen zero), green after; 3/3 stable runs;
+  second review: pass, no findings.
+
+---
+
 <!-- source: PRINCIPLES.md -->
 
 ## The Eight Non-Negotiables
@@ -5286,7 +5454,7 @@ A principle that cannot be tested is a slogan. Each one maps to concrete, checka
 | 2 | Manifest-derived linker construction; per-instance grants; hostile-guest suite; limits | `SEC-001` … `SEC-030` |
 | 3 | Published percentile budgets; performance regression CI; the benchmark methodology | `PERF-001` … `PERF-027` |
 | 4 | WIT as source of truth; generated bindings; a five-language conformance suite; published parity matrix | `LANG-001` … `LANG-040` |
-| 5 | Versioned interfaces; typed errors; CI checks for hidden global state | `CON-001` … `CON-018` |
+| 5 | Versioned interfaces; typed errors; CI checks for hidden global state | `CON-001` … `CON-019` (`CON-020` open) |
 | 6 | Generated docs; documentation-freshness CI; `llms.txt` | `DOC-001` … `DOC-021` |
 | 7 | Zero-capability scaffolding; the three documented power tiers | `DX-001` … `DX-020` |
 | 8 | Apache-2.0 runtime; published governance; deprecation policy; two-maintainer rule | `GOV-001` … `GOV-014`, `LIC-001` … `LIC-012` |

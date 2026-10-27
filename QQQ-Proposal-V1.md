@@ -1721,7 +1721,7 @@ Automatic spans for: inbound request, routing, instance acquire, guest entry, ea
 |---|---|
 | Wall clock | `qqq:clock.wall` returns `determinism.fixed_clock`, advancing only by explicit host ticks |
 | Monotonic clock | Virtualized; advances deterministically with fuel or explicit ticks |
-| Randomness | `qqq:crypto.random` is a seeded CSPRNG (ChaCha20 with `determinism.seed`) |
+| Randomness | `qqq:crypto.random` is a seeded hash-DRBG (SHA-256, fixed public seed; reproducible by design, explicitly not secret — statistical quality, not unpredictability) |
 | Async scheduling | A deterministic scheduler in deterministic mode: same poll order, same interleavings, single-threaded executor |
 | Float behavior | `cranelift_nan_canonicalization` on; relaxed-SIMD fusion disabled in deterministic mode |
 | HashMap iteration order | Banned in host interfaces exposed to guests; ordered maps only |

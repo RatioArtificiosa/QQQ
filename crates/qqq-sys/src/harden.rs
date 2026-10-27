@@ -1320,15 +1320,15 @@ mod imp {
     /// profile is written once, in portable terms, and each architecture gets its
     /// own numbers.
     fn syscall_number(name: &str) -> Option<i64> {
-        use std::collections::HashMap;
+        use std::collections::BTreeMap;
         use std::sync::OnceLock;
 
         // Built once from `libc`'s constants, which are the authoritative
         // architecture-specific values.
-        static TABLE: OnceLock<HashMap<&'static str, i64>> = OnceLock::new();
+        static TABLE: OnceLock<BTreeMap<&'static str, i64>> = OnceLock::new();
 
         let table = TABLE.get_or_init(|| {
-            let mut m = HashMap::new();
+            let mut m = BTreeMap::new();
             insert_portable_syscalls(&mut m);
             insert_optional_syscalls(&mut m);
             m
@@ -1358,7 +1358,7 @@ mod imp {
     /// as `useless_conversion`, while on a 32-bit target it would be required. The
     /// supported architectures here are all 64-bit, and the test below pins that
     /// assumption rather than leaving it implicit.
-    fn insert_portable_syscalls(m: &mut std::collections::HashMap<&'static str, i64>) {
+    fn insert_portable_syscalls(m: &mut std::collections::BTreeMap<&'static str, i64>) {
         insert_process_and_memory_syscalls(m);
         insert_io_and_poll_syscalls(m);
         insert_network_and_fs_syscalls(m);
@@ -1366,7 +1366,7 @@ mod imp {
 
     /// Process lifecycle, signals, memory, and the thread primitives a guest
     /// runtime cannot work without.
-    fn insert_process_and_memory_syscalls(m: &mut std::collections::HashMap<&'static str, i64>) {
+    fn insert_process_and_memory_syscalls(m: &mut std::collections::BTreeMap<&'static str, i64>) {
         macro_rules! syscalls {
             ($($name:literal => $const:expr),* $(,)?) => {
                 $( m.insert($name, $const); )*
@@ -1404,7 +1404,7 @@ mod imp {
     }
 
     /// Descriptor I/O, readiness polling, timers, and random bytes.
-    fn insert_io_and_poll_syscalls(m: &mut std::collections::HashMap<&'static str, i64>) {
+    fn insert_io_and_poll_syscalls(m: &mut std::collections::BTreeMap<&'static str, i64>) {
         macro_rules! syscalls {
             ($($name:literal => $const:expr),* $(,)?) => {
                 $( m.insert($name, $const); )*
@@ -1449,7 +1449,7 @@ mod imp {
     }
 
     /// Sockets and the filesystem.
-    fn insert_network_and_fs_syscalls(m: &mut std::collections::HashMap<&'static str, i64>) {
+    fn insert_network_and_fs_syscalls(m: &mut std::collections::BTreeMap<&'static str, i64>) {
         macro_rules! syscalls {
             ($($name:literal => $const:expr),* $(,)?) => {
                 $( m.insert($name, $const); )*
@@ -1510,7 +1510,7 @@ mod imp {
     /// Keeping these separate is deliberate: a reader can tell at a glance which
     /// names are guaranteed to resolve and which depend on the target.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn insert_optional_syscalls(m: &mut std::collections::HashMap<&'static str, i64>) {
+    fn insert_optional_syscalls(m: &mut std::collections::BTreeMap<&'static str, i64>) {
         macro_rules! syscalls {
             ($($name:literal => $const:expr),* $(,)?) => {
                 $( m.insert($name, $const); )*
@@ -1547,7 +1547,7 @@ mod imp {
     /// supported/unconditional split in one place instead of in a `cfg` inside a
     /// closure body.
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    fn insert_optional_syscalls(_m: &mut std::collections::HashMap<&'static str, i64>) {}
+    fn insert_optional_syscalls(_m: &mut std::collections::BTreeMap<&'static str, i64>) {}
 }
 
 // ---------------------------------------------------------------------------

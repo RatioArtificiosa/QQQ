@@ -502,7 +502,15 @@ struct TenantBudgetsInner {
     /// recovered map may be missing an entry whose insert raced the panic — `acquire` re-establishes it via
     /// `or_insert_with`, and the guard's `Drop` tolerates a missing entry by
     /// doing nothing, which is exactly the evicted-at-zero state.
-    state: std::sync::Mutex<std::collections::HashMap<String, TenantEntry>>,
+    ///
+    /// A `BTreeMap`, not a `HashMap`: iteration order must be deterministic
+    /// wherever a guest could observe it (`DET-006`), and the cheapest way to
+    /// guarantee that for every future reader of this map is to make the
+    /// unordered state unrepresentable. Tenant counts stay small (one entry
+    /// per live tenant, evicted at zero), so the `O(log n)` lookup costs
+    /// nothing measurable. `tools/check_ordered_maps.py` fails the gate on
+    /// any `HashMap` in shipped code.
+    state: std::sync::Mutex<std::collections::BTreeMap<String, TenantEntry>>,
     /// The operator-visible refusal meter, shared by every tenant budget here.
     ///
     /// Wired once per app at construction; entry budgets created after that
@@ -533,7 +541,7 @@ impl TenantOutputBudgets {
         Self {
             inner: Arc::new(TenantBudgetsInner {
                 limit,
-                state: std::sync::Mutex::new(std::collections::HashMap::new()),
+                state: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 meter: std::sync::Mutex::new(None),
             }),
         }

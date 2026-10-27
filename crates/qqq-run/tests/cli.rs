@@ -2062,6 +2062,28 @@ const NEEDS_UNKNOWN_03: &str = r#"(component
   (core instance $i (instantiate $m))
 )"#;
 
+/// A normal `wasm32-wasip2`-shaped guest: 0.2 baseline imports only.
+///
+/// The CON-020 fixture for the §O-782 repro: before the pre-flight fix this
+/// guest was refused with QQQ-6003 under an empty grant set even though the
+/// retained linker serves every name in it.
+const NEEDS_02_BASELINE: &str = r#"(component
+  (import "wasi:clocks/monotonic-clock@0.2.9" (instance $clock
+    (export "now" (func (result u64)))))
+  (import "wasi:random/random@0.2.9" (instance $random
+    (export "get-random-bytes" (func (param "len" u64) (result (list u8))))))
+  (core module $m)
+  (core instance $i (instantiate $m))
+)"#;
+
+/// A guest importing 0.2 HTTP, which the baseline linker does not serve.
+const NEEDS_02_HTTP: &str = r#"(component
+  (import "wasi:http/outgoing-handler@0.2.0" (instance $h
+    (export "handle" (func))))
+  (core module $m)
+  (core instance $i (instantiate $m))
+)"#;
+
 /// A component that reads the wall clock **at instantiation**, so a replay log has something in it.
 ///
 /// # Why this is not `NEEDS_WALL_CLOCK`
@@ -2232,17 +2254,26 @@ fn run_refuses_an_ungranted_import_and_names_the_right_capability() {
     );
 }
 
-/// RT-WASI-006 — refusing a WASI-baseline guest is intentional, not a regression.
+/// CON-020 — a full-baseline guest runs with an empty grant set.
 ///
-/// `orders-api` imports the 14-interface WASI 0.2 baseline and grants only
-/// `qqq:http/http`. `run` must refuse before instantiation with QQQ-6003
-/// naming every missing import — the same fail-closed pre-flight as the
-/// single-import case above, extended to the full baseline set. This pins
-/// the documented decision (RT-WASI-006: document, do not widen grants):
-/// if a future change grants the baseline implicitly or drops an import
-/// from the error, this test fails.
+/// Supersedes the RT-WASI-006 pin this fixture used to carry. That decision
+/// ("document, do not widen") feared granting the baseline implicitly; this
+/// change grants nothing — no `GrantSet` gains a member, the manifest stays
+/// empty. What changed is that pre-flight stopped refusing names the
+/// retained 0.2 linker serves. The grant-derived context still governs what
+/// the imports can *do* (no preopens, no network, gated clocks), so this is
+/// the removal of a redundant refusal, not the widening RT-WASI-006 feared.
+/// If a future change drops a baseline name from admission, this test fails.
+///
+/// Proof strength, stated honestly: the typed exports (`now`,
+/// `get-environment`, the five resource types) fail instantiation unless
+/// the linker serves those exact instances, so `ran in` proves linkage.
+/// The empty `cli` instances prove admission only; those names are covered
+/// by the registration calls in `wasmtime_wasi::p2` (verified against the
+/// pinned 48.0.7 sources during CON-020), not by a link check here.
 const NEEDS_WASI_BASELINE: &str = r#"(component
-  (import "wasi:cli/environment@0.2.9" (instance $e))
+  (import "wasi:cli/environment@0.2.9" (instance $e
+    (export "get-environment" (func (result (list (tuple string string)))))))
   (import "wasi:cli/exit@0.2.9" (instance $x))
   (import "wasi:cli/stdin@0.2.9" (instance $in))
   (import "wasi:cli/stdout@0.2.9" (instance $out))
@@ -2252,18 +2283,32 @@ const NEEDS_WASI_BASELINE: &str = r#"(component
   (import "wasi:cli/terminal-stdin@0.2.9" (instance $tsi))
   (import "wasi:cli/terminal-stdout@0.2.9" (instance $tso))
   (import "wasi:cli/terminal-stderr@0.2.9" (instance $tse))
-  (import "wasi:clocks/monotonic-clock@0.2.9" (instance $clock))
-  (import "wasi:io/error@0.2.9" (instance $ioe))
-  (import "wasi:io/poll@0.2.9" (instance $poll))
-  (import "wasi:io/streams@0.2.9" (instance $streams))
+  (import "wasi:clocks/monotonic-clock@0.2.9" (instance $clock
+    (export "now" (func (result u64)))))
+  (import "wasi:io/error@0.2.9" (instance $ioe
+    (export "error" (type (sub resource)))))
+  (import "wasi:io/poll@0.2.9" (instance $poll
+    (export "pollable" (type (sub resource)))))
+  (import "wasi:io/streams@0.2.9" (instance $streams
+    (export "output-stream" (type (sub resource)))))
+  (import "wasi:filesystem/types@0.2.9" (instance $fs
+    (export "descriptor" (type (sub resource)))))
+  (import "wasi:sockets/tcp@0.2.9" (instance $tcp
+    (export "tcp-socket" (type (sub resource)))))
+  (import "wasi:sockets/network@0.2.9" (instance $net
+    (export "network" (type (sub resource)))))
   (core module $m)
   (core instance $i (instantiate $m))
 )"#;
 
-/// The 14-interface baseline is refused by name, and every name appears.
+/// The 14-interface baseline runs with an empty grant set.
+///
+/// The §O-782 repro at full scale: `orders-api`-shaped guests import exactly
+/// this set. `ran in` proves admission and instantiation, not merely the
+/// absence of a refusal.
 #[test]
-fn run_refuses_the_wasi_baseline_by_name() {
-    let s = Sandbox::new("run-baseline-refused");
+fn run_full_wasi02_baseline_runs_without_grants() {
+    let s = Sandbox::new("run-baseline-admitted");
     s.write(
         "qqq.toml",
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
@@ -2273,30 +2318,7 @@ fn run_refuses_the_wasi_baseline_by_name() {
         return;
     };
 
-    let run = s.run(&["run", &wasm]);
-    run.assert_failed().assert_contains("QQQ-6003");
-    let out = run.all();
-    for iface in [
-        "wasi:cli/environment@0.2.9",
-        "wasi:cli/exit@0.2.9",
-        "wasi:cli/stdin@0.2.9",
-        "wasi:cli/stdout@0.2.9",
-        "wasi:cli/stderr@0.2.9",
-        "wasi:cli/terminal-input@0.2.9",
-        "wasi:cli/terminal-output@0.2.9",
-        "wasi:cli/terminal-stdin@0.2.9",
-        "wasi:cli/terminal-stdout@0.2.9",
-        "wasi:cli/terminal-stderr@0.2.9",
-        "wasi:clocks/monotonic-clock@0.2.9",
-        "wasi:io/error@0.2.9",
-        "wasi:io/poll@0.2.9",
-        "wasi:io/streams@0.2.9",
-    ] {
-        assert!(
-            out.contains(iface),
-            "the refusal must name every missing import, missing: {iface}\n{out}"
-        );
-    }
+    s.run(&["run", &wasm]).assert_ok().assert_contains("ran in");
 }
 
 /// The same component **runs** once the capability is granted.
@@ -2391,6 +2413,48 @@ fn run_unknown_03_import_fails_closed() {
         "no capability can satisfy an unserved import, so none must be implicated: {}",
         run.all()
     );
+}
+
+/// **CON-020** — a normal 0.2 guest runs with an empty grant set.
+///
+/// The §O-782 repro end to end: baseline WASI imports need no `qqq.toml`
+/// grant, so `run` must instantiate and report `ran in` rather than
+/// refusing with QQQ-6003.
+#[test]
+fn run_02_typed_baseline_imports_run_without_grants() {
+    let s = Sandbox::new("run-02-baseline");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    let Some(wasm) = encode(&s, "baseline02", NEEDS_02_BASELINE) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    s.run(&["run", &wasm]).assert_ok().assert_contains("ran in");
+}
+
+/// **CON-020** — a 0.2 HTTP import still fails closed naming the import.
+///
+/// The baseline linker serves no `wasi:http` instance (HTTP is mediated
+/// through `qqq:http`), so pre-flight must keep reporting the name rather
+/// than admitting a guest instantiation cannot satisfy.
+#[test]
+fn run_02_http_import_fails_closed() {
+    let s = Sandbox::new("run-02-http");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    let Some(wasm) = encode(&s, "http02", NEEDS_02_HTTP) else {
+        eprintln!("SKIPPED: no wasm-tools available - this test did not run");
+        return;
+    };
+
+    s.run(&["run", &wasm])
+        .assert_failed()
+        .assert_contains("wasi:http/outgoing-handler@0.2.0");
 }
 ///
 /// The narrowing-only invariant, asserted at the command line rather than only

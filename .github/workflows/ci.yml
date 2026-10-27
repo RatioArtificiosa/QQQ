@@ -903,6 +903,17 @@ jobs:
       - name: Prove the ambient-state check detects violations
         run: python tools/fault_inject_no_ambient.py
 
+      # §10.5 (DET-006): no `HashMap` in shipped code — per-process random
+      # iteration order would break bit-identical deterministic runs. The
+      # checker's own `--self-test` is its red proof (in-memory injections,
+      # no fixtures written), so both forms run here; the bridge gets both
+      # through `cargo xtask ci`.
+      - name: Validate ordered maps in shipped code (DET-006)
+        run: python tools/check_ordered_maps.py
+
+      - name: Prove the ordered-maps check detects violations
+        run: python tools/check_ordered_maps.py --self-test
+
       # §8.3: "CI fails if it drifts from the implementation." Three surfaces
       # have a machine-readable contract derived from Rust types -- `qqq.toml`,
       # `qqq.lock` and the CLI envelope -- and they are published under

@@ -74,13 +74,60 @@ ITEM = re.compile(r"^- \[([x~! ])\] \*\*([A-Z]+-\d+)\*\*")
 # ticked before `→ Done:` became the convention, and each was ticked at a commit that has evidence of its
 # own -- this list records that the *line* is absent, not that the *work* is.
 KNOWN_WITHOUT_DONE = frozenset(
-    """
-    FND-010 DOC-018 ARCH-010 HOST-009 HOST-020 CON-006 CON-011 SEC-003 SEC-009 SEC-012 SEC-015
-    SEC-016 SEC-017 SEC-018 SEC-019 SEC-020 SEC-027 SRV-001 SRV-002 SRV-003 SRV-004 SRV-005 SRV-006
-    SRV-009 SRV-020 DX-001 DX-002 DX-003 DX-009 DX-016 CLI-003 CLI-004 CLI-008 CLI-009 CLI-010 CLI-011
-    CLI-014 CLI-016 CLI-017 CLI-019 CLI-021 OBS-001 OBS-002 OBS-003 OBS-004 OBS-006 OBS-007 OBS-008
-    OBS-011 OBS-013 OBS-014 OBS-016 OQ-007
-    """.split()
+    [
+        "FND-010",
+        "DOC-018",
+        "ARCH-010",
+        "HOST-009",
+        "HOST-020",
+        "CON-006",
+        "CON-011",
+        "SEC-003",
+        "SEC-009",
+        "SEC-012",
+        "SEC-015",
+        "SEC-016",
+        "SEC-017",
+        "SEC-018",
+        "SEC-019",
+        "SEC-020",
+        "SRV-001",
+        "SRV-002",
+        "SRV-003",
+        "SRV-004",
+        "SRV-005",
+        "SRV-006",
+        "SRV-009",
+        "SRV-020",
+        "DX-001",
+        "DX-002",
+        "DX-003",
+        "DX-009",
+        "DX-016",
+        "CLI-003",
+        "CLI-004",
+        "CLI-008",
+        "CLI-009",
+        "CLI-010",
+        "CLI-011",
+        "CLI-014",
+        "CLI-016",
+        "CLI-017",
+        "CLI-019",
+        "CLI-021",
+        "OBS-001",
+        "OBS-002",
+        "OBS-003",
+        "OBS-004",
+        "OBS-006",
+        "OBS-007",
+        "OBS-008",
+        "OBS-011",
+        "OBS-013",
+        "OBS-014",
+        "OBS-016",
+        "OQ-007",
+    ]
 )
 
 
@@ -144,7 +191,9 @@ def has_reason(body: list[str]) -> bool:
 
 def audit(
     text: str,
-) -> tuple[list[tuple[str, str]], list[str], list[str], list[tuple[str, str]], str | None]:
+) -> tuple[
+    list[tuple[str, str]], list[str], list[str], list[tuple[str, str]], str | None
+]:
     """Return `(duplications, newly evidenceless, stale list entries, unexplained, fatal)`.
 
     Separated from `main` so the self-test drives the same code the check does, rather than a copy of it
@@ -166,7 +215,9 @@ def audit(
 
     dups = [(oid, d) for _, oid, body in parsed for d in duplicates(body)]
     present = {oid for _, oid, _ in parsed}
-    evidenceless = {oid for status, oid, body in parsed if status == "x" and not has_done(body)}
+    evidenceless = {
+        oid for status, oid, body in parsed if status == "x" and not has_done(body)
+    }
     # **Both directions, and only over what the file actually holds.** `new` is evidence-less and
     # unlisted; `stale` is listed and now has evidence.
     #
@@ -221,7 +272,9 @@ def main(argv: list[str]) -> int:
         )
 
     if stale:
-        print(f"\n{len(stale)} listed item(s) now carry evidence, so the list is stale\n")
+        print(
+            f"\n{len(stale)} listed item(s) now carry evidence, so the list is stale\n"
+        )
         for oid in stale[:10]:
             print(f"  {oid}")
         print(
@@ -230,7 +283,9 @@ def main(argv: list[str]) -> int:
         )
 
     if unexplained:
-        print(f"\n{len(unexplained)} item(s) carry a status that needs a reason and give none\n")
+        print(
+            f"\n{len(unexplained)} item(s) carry a status that needs a reason and give none\n"
+        )
         for oid, kind in unexplained[:10]:
             print(f"  {oid}  [{kind}]")
         print(
@@ -261,7 +316,13 @@ def self_test() -> int:
 
     def case(name: str, text: str, caught: bool) -> None:
         dups, new, stale, unexplained, fatal = audit(text)
-        got = bool(dups) or bool(new) or bool(stale) or bool(unexplained) or fatal is not None
+        got = (
+            bool(dups)
+            or bool(new)
+            or bool(stale)
+            or bool(unexplained)
+            or fatal is not None
+        )
         cases.append((name, got == caught))
 
     case("no item at all fails loudly rather than passing", "nothing here", True)

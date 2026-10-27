@@ -780,6 +780,106 @@ mod tests {
         assert!(norm.to_wasmtime_config().is_ok());
     }
 
+    /// **`DET-005`: deterministic mode canonicalizes NaN bit patterns.**
+    ///
+    /// `0.0 / 0.0` on bare x86-64 hardware yields the indefinite `QNaN`
+    /// `0xFFF8_0000_0000_0000` (negative, quiet); a guest observing raw
+    /// hardware bits disagrees with an aarch64 guest on the same arithmetic,
+    /// breaking the bit-identical replay guarantee in §10.5. The
+    /// deterministic preset sets `cranelift_nan_canonicalization(true)`, so
+    /// every NaN the guest can produce reads back as the canonical
+    /// `0x7FF8_0000_0000_0000` on every architecture. The assertion pins the
+    /// exact bits, not merely "is NaN": any NaN would pass and prove nothing
+    /// about cross-architecture agreement. Pre-fix this fails — with the flag
+    /// off the engine returns the hardware bits on x86-64.
+    #[test]
+    fn deterministic_mode_canonicalizes_nan_bits() {
+        const NAN_BITS: &str = r#"(component
+          (core module $m
+            (func (export "nan-bits") (result i64)
+              (i64.reinterpret_f64 (f64.div (f64.const 0) (f64.const 0)))))
+          (core instance $i (instantiate $m))
+          (func (export "nan-bits") (result u64)
+            (canon lift (core func $i "nan-bits"))))"#;
+        let engine = wasmtime::Engine::new(
+            &EngineConfig::deterministic()
+                .to_wasmtime_config()
+                .expect("deterministic config builds"),
+        )
+        .expect("deterministic engine builds");
+        let component =
+            wasmtime::component::Component::new(&engine, NAN_BITS).expect("fixture compiles");
+        let mut store = wasmtime::Store::new(&engine, ());
+        // The preset enables fuel metering and epoch interruption; a raw
+        // store starts with neither budget. Production sets both per request
+        // (`instance.rs`); the test mirrors that. The engine epoch never
+        // advances here (no ticker), so any positive deadline suffices.
+        store
+            .set_fuel(u64::MAX)
+            .expect("fuel sets on a fresh store");
+        store.set_epoch_deadline(1);
+        let linker = wasmtime::component::Linker::new(&engine);
+        let instance = linker
+            .instantiate(&mut store, &component)
+            .expect("the fixture needs no imports");
+        let func = instance
+            .get_typed_func::<(), (u64,)>(&mut store, "nan-bits")
+            .expect("the export is present");
+        let (bits,) = func.call(&mut store, ()).expect("the call succeeds");
+        assert_eq!(
+            bits, 0x7FF8_0000_0000_0000,
+            "deterministic NaN must read back canonical, got {bits:#018x}"
+        );
+    }
+
+    /// **`DET-005`: deterministic mode disables relaxed SIMD — the only fusion surface.**
+    ///
+    /// Core WebAssembly has no fused-multiply-add instruction; the operations
+    /// that permit reassociation the standard otherwise forbids are the
+    /// relaxed-SIMD `madd`/`nmadd` family, so `wasm_relaxed_simd(false)` IS
+    /// the "disable float fusion" half of this item — there is no other flag
+    /// to set. Pinned-source proof, not an assumption: in this engine the
+    /// only `fma` CLIF emission is the relaxed-SIMD lowering
+    /// (`wasmtime-internal-cranelift-48.0.7`, `func_environ.rs::fma_f32x4` /
+    /// `fma_f64x2`), and the mid-end has no fusion rule (`cranelift-codegen`
+    /// mentions `Fma` only as a match target, an ISA predicate, and a libcall
+    /// name) — so scalar `fmul`+`fadd` cannot fuse, and removing the
+    /// relaxed-SIMD path removes the only fusion surface. With the feature
+    /// off the module must fail validation; the same bytes compile on the
+    /// default engine, which proves the refusal is mode-specific rather than
+    /// a malformed fixture. Pre-fix (flag on) the
+    /// deterministic engine compiles it.
+    #[test]
+    fn deterministic_mode_refuses_relaxed_simd() {
+        const RELAXED: &str = r#"(component
+          (core module $m
+            (func (export "m") (param v128 v128 v128) (result v128)
+              (f32x4.relaxed_madd (local.get 0) (local.get 1) (local.get 2)))))"#;
+        let det = wasmtime::Engine::new(
+            &EngineConfig::deterministic()
+                .to_wasmtime_config()
+                .expect("deterministic config builds"),
+        )
+        .expect("deterministic engine builds");
+        let err = wasmtime::component::Component::new(&det, RELAXED)
+            .expect_err("relaxed SIMD must not validate in deterministic mode");
+        let text = format!("{err:#}").to_ascii_lowercase();
+        assert!(
+            text.contains("relaxed") || text.contains("simd"),
+            "the refusal must name its cause, not fail opaquely: {err:#}"
+        );
+        // Anti-vacuity: the fixture itself is valid — the default engine
+        // takes it, so only the deterministic flag is doing the refusing.
+        let norm = wasmtime::Engine::new(
+            &EngineConfig::default()
+                .to_wasmtime_config()
+                .expect("default config builds"),
+        )
+        .expect("default engine builds");
+        wasmtime::component::Component::new(&norm, RELAXED)
+            .expect("the default engine accepts relaxed SIMD");
+    }
+
     #[test]
     fn store_limits_derive_from_the_manifest() {
         let l = StoreLimits::from_manifest(&limits()).unwrap();

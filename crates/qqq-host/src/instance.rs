@@ -350,6 +350,13 @@ pub struct InstanceOptions {
     /// with `QQQ-6008` before any guest runs — a `debug_assert` would let release builds proceed with
     /// scheduling-dependent results while the flag promises determinism.
     pub deterministic: bool,
+    /// The virtual-clock tick count a new deterministic instance starts at.
+    ///
+    /// Production serving sets this from the shared admission counter, so
+    /// later requests observe larger readings. `run --deterministic` leaves
+    /// it zero: a single instance has no admissions to count, and replays
+    /// drive the recorded values instead. Inert in real-time mode.
+    pub deterministic_initial_ticks: u64,
     /// Record capability uses — `OBS-001`.
     pub audit: Option<crate::audit::AuditHandle>,
     /// Hold one request's share of its tenant's output budget — `PERF-OUT-001`.
@@ -1289,6 +1296,10 @@ impl ReadyStore {
         // the compiler and not the clock -- and every checker in this repository asks about text, so
         // nothing saw it. See the field's own doc for what this does and does not guarantee.
         data.ambient = crate::ambient::AmbientState::new(opts.deterministic);
+        // A fresh store always starts at tick zero; production serving moves
+        // each request to its admission tick so time visibly passes between
+        // requests. Inert in real-time mode and zero by default.
+        data.ambient.set_ticks(opts.deterministic_initial_ticks);
         // The egress policy travels with the store like every other option:
         // a runner sets `opts.egress` from the manifest and prepare carries
         // it in, so production instances enforce declared destinations

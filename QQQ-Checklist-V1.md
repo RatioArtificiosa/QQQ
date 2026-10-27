@@ -2,6 +2,7 @@
 
 > **Every item cites the exact Proposal section it implements. Every Proposal section cites its items.**
 > This file is executable, dependency-ordered, and machine-checkable.
+> IDs are stable, not sequential: a later item keeps the number assigned at creation (renumbering is forbidden), so numeric order is not promised — the phases and areas carry the dependency order.
 
 | Field | Value |
 |---|---|
@@ -27,7 +28,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `HOST` | `qqq-host` execution engine | 27 | Systems engineer |
 | `CAP` | Capability resolution pipeline | 24 | Security engineer |
 | `SEC` | Security engineering, audits, hardening | 30 | Security engineer |
-| `CON` | Contracts: WIT interfaces, manifest schema, versioning | 19 | Architect |
+| `CON` | Contracts: WIT interfaces, manifest schema, versioning | 20 | Architect |
 | `ABI` | WIT package authoring and binding generation | 18 | Runtime engineer |
 | `SRV` | HTTP/application server | 22 | Systems engineer |
 | `PKG` | Package manager and registry | 24 | Platform engineer |
@@ -53,7 +54,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 630 items.**
+**Total: 631 items.**
 
 ### Status legend
 
@@ -1027,6 +1028,12 @@ Items are grouped below by **phase**, because dependency order matters more than
     and three places a policy drifts, and multiplying the paperwork that prevents
     drift is a poor way to prevent it — at the cost of a larger blast radius,
     mitigated by the process being test-enforced rather than crate-enforced.
+  → [!] Grant blocked: the document is complete but the grant is not — no `unsafe`
+    may be added until the ledger's rows change: no second maintainer exists
+    (`GOV-008`, bus factor 1) and Miri is not configured. Owner: founder
+    (recruit second maintainer, configure Miri). Tripwire: `GOV-008` closes.
+    Re-measure: `crates/qqq-sys/SAFETY.md` §7 ledger plus the exception-path
+    test in `tools/audit_unsafe.py`.
   → §4.3 Crate topology
 - [x] **ARCH-010** Publish the crate stability tiers and the API-stability contract per tier.
   → §4.3 Crate topology
@@ -1531,8 +1538,7 @@ Items are grouped below by **phase**, because dependency order matters more than
     arithmetic is unit-tested directly, which is where that is decidable.
   → §6.1 `qqq-host` — the execution engine
 - [x] **HOST-024** Port the three verification-probe assertions (missing-import failure, instantiation cost, fuel trap) into the permanent test suite and delete the scratch crate.
-  → Done: the four probe assertions from `.scratch/witprobe` are ported to `crates/qqq-host/tests/engine.rs` with control cases: an unsatisfied import fails instantiation and names it, a component with no imports runs, fuel exhaustion traps while the host survives, and an epoch deadline interrupts a spinning guest. The scratch crate is deleted.
-  → Partial: the assertions are ported; `.scratch/witprobe` still exists and must be deleted.
+  → Done: the four probe assertions from `.scratch/witprobe` are ported to `crates/qqq-host/tests/engine.rs` with control cases: an unsatisfied import fails instantiation and names it, a component with no imports runs, fuel exhaustion traps while the host survives, and an epoch deadline interrupts a spinning guest. The scratch crate is deleted (verified absent; `FND-011` and `tools/audit_p0.py` assert the same).
   → §6.1 `qqq-host` — the execution engine
 - [x] **HOST-025** Implement the dual-ABI host: retain the 0.2 linker path and add a 0.3 path, with unknown imports failing closed on both, and instantiate a 0.2 guest and a 0.3 guest in the same build.
   → Done: `AbiVersion::detect` routes `@0.3.x` to new `build_linker_v03` (grant-gated 0.3 clock + `host_test`, no 0.2 baseline by design) while 0.2 keeps `build_linker` byte for byte; `crates/qqq-host/src/host_wasi03.rs` serves sync `now`/`get-resolution` from the real v0.3.2 WIT (tag `bdadbbb`, vendored with provenance) and traps `wait-until`/`wait-for` by name; `Unknown` builds no linker. ARCH-003/ARCH-012 tables extended 14→18 over the new module.
@@ -1992,6 +1998,11 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Measured: 6 Instance routing tests (0.3 routes+grants, ungranted/unknown/unrecognized-version fail closed, no-import + mixed-version routing pinned) + 3 check_imports tests + 3 CLI tests + 2 conformance runner cases + fixture pin — each fault-proven red (wrong-linker routing, Unknown-to-error, disabled pre-flight branch, muted assertion, hand-edited fixture); `conformance_exec` 4/4 incl. `--ignored`, py self-tests green, `cargo xtask ci` GATE GREEN 146, Copilot review cleared with 2 LOWs fixed and re-verified (§O-782 for the run-refuses-wasi discovery).
   → Done (RT-EVID-001 re-measure 2026-10-26): conformance_exec green on 6903ad5 (2 passed, 1 ignored — the ignored case compiles a guest and runs in the CI gate); `cargo xtask ci` GATE GREEN 146; CI 40291514878 success.
   → §2.4 NN-4 — Multi-Language by Design
+- [x] **CON-020** Admit the WASI 0.2 baseline in `qqqai run` pre-flight without a grant: a normal `wasm32-wasip2` guest runs with an empty grant set; `qqq:` imports still require grants, unserved names still fail closed by name. Owns the `§O-782` pre-flight discovery.
+  → §4.2 — retained 0.2 ABI path
+  → Done: `check_imports` admits the six baseline packages with no grant (`is_wasi02_baseline`; `wasi:http` stays missing, as do bare/unversioned/0.3/1.0/non-`wasi:` names); `qqqai run` executes a real `wasm32-wasip2` guest (orders-api) with an empty manifest and refuses only `qqq:http/http` naming `http.server`; deterministic serve advances the virtual clock per admitted request (independent review: pass, no findings).
+  → Measured: 43 `run::` unit tests (incl. 4 new red-first), 101 CLI e2e (incl. 3 new red-first, one fault-injected to the pre-fix QQQ-6003), 654 `qqq-host` lib incl. baseline instantiation proof, 9 `live_components` incl. corrupt-cache fallback; 10,000 reference-app deterministic trials, 0 diverged; `cargo xtask ci` GATE GREEN 146.
+  → Supersedes RT-WASI-006's refusal pin: no grant is added by this change — pre-flight now matches the unconditional linker, authority stays in the grant-derived context.
 
 ---
 
@@ -3036,6 +3047,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → CI now runs both the audit and its self-test, replacing an inline grep that
     exempted anything matching `#![cfg_attr` — a broader exemption than the thing
     it was guarding against — and that only ever ran in CI (`§O-055`'s failure).
+  → [!] Exception process: blocked on a second maintainer (GOV-008). The audit above is complete; granting the first exception is not currently possible. Tripwire: SAFETY.md ledger gains a second maintainer. Re-measure: `tools/audit_unsafe.py` exception-path test.
   → §4.3 Crate topology. New: `docs/unsafe-audit.md`, `tools/audit_unsafe.py`.
 - [x] **SEC-021** Track post-quantum hybrid TLS (X25519+ML-KEM) as an opt-in, with a standards-watch task.
   → Done: `SERVER_KX_GROUPS` in `qqq-serve::tls` names X25519MLKEM768 **first**, and
@@ -3095,8 +3107,8 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Verified live: `HARDEN_PROBE:refused`, Landlock **ABI V7**, `no_new_privs=true`.
   → The earlier "blocked" note was a fact about `nix`, not about the item (`§O-082`).
   → §7.5 Hardening beyond Wasm
-- [x] **SEC-027** Implement memory-protection-key support as an optional hardening feature.
-  → Done (detection) + `[!]` blocked (enforcement), and the distinction is measured:
+- [!] **SEC-027** Implement memory-protection-key support as an optional hardening feature. Owner: Systems engineer. Detection done (below); enforcement blocked on (1) `qqq-sys` admitting `unsafe` via the SAFETY.md exception process (needs second maintainer, GOV-008), (2) MPK crates that are not thin `unsafe` FFI wrappers, (3) pku-capable hardware to exercise it on.
+  → Done (detection) + blocked (enforcement), and the distinction is measured:
     `mpk_support()`, `landlock_available()` and `host_capabilities()` report what the
     host offers, cross-checked in a test against `/proc/cpuinfo` so a probe stuck on
     `false` (the safe-looking answer) cannot pass.
@@ -3106,6 +3118,7 @@ Items are grouped below by **phase**, because dependency order matters more than
     `SEC-019`/`SEC-026`'s shape with the search coming up empty.
   → Verified: this host has no `pku` flag, so enforcement could not be exercised here
     even if unblocked — which is exactly why detection is the deliverable.
+  → Tripwire: re-open when a second maintainer signs the SAFETY.md exception entry, non-FFI MPK bindings exist, and pku hardware is available. Re-measure: enforcement test on pku hardware plus `tools/audit_unsafe.py` exception entry.
   → §7.5 Hardening beyond Wasm
 - [x] **SEC-028** Produce and publish the SBOM for every release.
   → Done: CI generates CycloneDX 1.5 per crate with `cargo cyclonedx` (pinned
@@ -5247,14 +5260,21 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §10.5 Determinism — the feature nobody else has
 - [ ] **DET-002** Implement virtualized wall and monotonic clocks.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-003** Implement the seeded CSPRNG for deterministic randomness.
+- [!] **DET-003** Implement the seeded CSPRNG for deterministic randomness. Owner: Systems engineer. Blocked on an owner decision: the implementation is a hash-DRBG with a fixed public seed (`F-20`) — reproducible and statistically strong, but explicitly not secret, so it cannot be called a CSPRNG.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-004** Implement the deterministic single-threaded scheduler for deterministic mode.
+  → Tripwire: re-open when the owner ratifies either reading — (a) accept the hash-DRBG and rename this item to a deterministic DRBG, or (b) require a recorded-seed ChaCha20. Re-measure: `tools/det009_trials.py --self-test` plus the F-20 hash-DRBG unit tests.
+- [!] **DET-004** Implement the deterministic single-threaded scheduler for deterministic mode. Owner: Architect. Blocked on a scheduler design decision: concurrent requests interleave nondeterministically today, and async is refused in deterministic mode (QQQ-6008); a single-threaded scheduler would serialize production serving.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-005** Enable NaN canonicalization and disable float fusion in deterministic mode.
+  → Tripwire: re-open when the owner ratifies a scheduler design (serialize, admit per-request determinism only, or another semantic). Re-measure: a two-concurrent-requests determinism test plus the existing async-refusal test.
+- [x] **DET-005** Enable NaN canonicalization and disable float fusion in deterministic mode.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-006** Enforce ordered maps in all guest-visible interfaces.
+  → Done: the two flags were already set in `EngineConfig::deterministic()` (`cranelift_nan_canonicalization(true)`, `wasm_relaxed_simd(false)`); this item adds the behavioral proof that was missing — `deterministic_mode_canonicalizes_nan_bits` (guest `0.0/0.0` reads back exactly `0x7FF8_0000_0000_0000`) and `deterministic_mode_refuses_relaxed_simd` (same bytes compile on the default engine, fail validation on the deterministic one). Evidence: `crates/qqq-host/src/config.rs` tests; `cargo test -p qqq-host --lib config::tests::` 24/24 green; 2026-10-27.
+  → Measured: both tests fault-proven red — flag off yields hardware bits `0xFFF8_0000_0000_0000` (the cross-architecture divergence the flag prevents), flag on compiles the relaxed fixture the item forbids; restored byte-identical, suite re-green. Core Wasm has no FMA instruction, so the relaxed-SIMD `madd`/`nmadd` family is the only fusion surface and disabling it IS the second half — documented in the test.
+- [x] **DET-006** Enforce ordered maps in all guest-visible interfaces.
   → §10.5 Determinism — the feature nobody else has
+  → Done: per-use audit of every `HashMap` in the workspace (2026-10-27) — the only two in shipped code were keyed-only lookups with no observable iteration (tenant-budget registry in `guest_output.rs`, syscall-name table in `harden.rs`), and both are now `BTreeMap` so the unordered state is unrepresentable; everything else was test fakes/fixtures or doc prose. Enforcement: new `tools/check_ordered_maps.py` (string-aware comment stripper, zero-exemptions-for-maps `--self-test` 18/18) bans `HashMap`/`HashSet` outright plus `RandomState` with one named exemption, wired into `cargo xtask ci` (Par + Seq), `.github/workflows/ci.yml`, and the bridge via xtask; `check_gate_parity` green. Evidence: `cargo test -p qqq-sys` 24/24, `cargo test -p qqq-host --lib guest_output` 39/39; 2026-10-27.
+  → Measured: red-proven — an injected `HashMap::new()`, `HashSet::new()`, and non-exempt `RandomState::new()` each fail the checker (`UNORDERED-MAP RULE FAILED`), restored byte-identical (empty `git diff`) back to green; the tree carries its own prose controls (doc lines naming the types that must not fire).
+  → Triaged non-finding (independent review 2026-10-27): the one exempt `RandomState` — the per-process rate-limit seed in `qqq-serve/src/limits.rs` — is a deliberate anti-gaming property (stated on the field: no peer can aim at another tenant's bucket), and bucket windows are wall-clock time, so admission is load-dependent and outside the deterministic guarantee either way; a fixed seed would trade the property for nothing. Determinism covers guest execution and replay, not which tenant a shared table admits first.
 - [x] **DET-007** Implement the replay log format.
   → Done: the format (magic, version, header, hash-chained length-prefixed records, counters) landed with its parse/render round trips before this item; what remained was load hardening for attacker-supplied files — `from_text` refuses past `REPLAY_FILE_MAX_BYTES` (4 MiB, ~25k records max by construction) with `TooLarge`, and the `--replay` read path takes one byte past the limit via a named `read_replay_file` helper instead of an unbounded `read_to_string` (no check-then-read race). One bound, two enforcement points; a record-count cap would be dead under the byte cap and was declined with that reason.
   → Measured: `an_oversized_file_is_refused_before_parsing` (bulk→TooLarge, edge→Malformed), `an_oversized_replay_file_is_refused_without_loading` (bulk→exceeds, absent→readability) — red/fault-first green (gate neutered→red, restored byte-identical green); full replay suites green.
@@ -5276,10 +5296,13 @@ Each language has eight required items. The parity matrix makes any gap visible.
     "different"; `--self-test` (13 pure-logic cases) runs in both gates and
     `check_gate_parity.py` reports parity. **The subject is not the reference application** —
     `qqqai run` cannot instantiate one (`§O-424`).
-- [ ] **DET-010** Document determinism's honest limits (engine version, target triple, external I/O).
+- [x] **DET-010** Document determinism's honest limits (engine version, target triple, external I/O).
+  → Done: `docs/determinism.md` §2 states the four limits (artifact digest, engine version, target triple, config) plus external I/O, each with how to check it; §4 lists non-use-cases including real-time measurement.
+  → Measured: `tools/sync_docs.py --check` green (the doc is a tracked generated-docs input); `tools/check_doc_claims.py` green.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-011** Implement network-timing recording for replay.
+- [!] **DET-011** Implement network-timing recording for replay. Owner: Systems engineer. Blocked on a producer design: the replay format carries a `Network` variant but no producer writes it and no consumer reads it.
   → §10.5 Determinism — the feature nobody else has
+  → Tripwire: re-open when the producer design (which events record, per-request bound, redaction rule) lands. Re-measure: a network-record round-trip test plus `tools/det009_trials.py --self-test`.
 - [x] **DET-012** Implement deterministic-mode rejection of shared memory.
   → §10.5 Determinism — the feature nobody else has
   → Done: `EngineConfig::to_wasmtime_config` sets `wasm_threads(false)` in the
@@ -5292,14 +5315,20 @@ Each language has eight required items. The parity matrix makes any gap visible.
     flag fails exactly that test with 517 filtered (`det012-red.log`); restored
     byte-identical by SHA-256, config suite 19/19 green with recompilation
     observed (`det012-restore.log`).
-- [ ] **DET-013** Implement deterministic compilation pinning by artifact digest and compiler version.
+- [x] **DET-013** Implement deterministic compilation pinning by artifact digest and compiler version.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-014** Publish the determinism documentation with use cases and non-use-cases.
+  → Done: `aot_cache_key` hashes component digest, target triple, `ENGINE_VERSION`, and deterministic/debug flags with `\0` separators; `cache_key_is_stable_for_identical_inputs`, `cache_key_changes_with_every_input`, `cache_key_has_no_field_boundary_ambiguity`, plus preload key tests — green.
+  → Measured: `cargo test -p qqq-host --lib cache_key` 5 passed, 0 failed.
+- [x] **DET-014** Publish the determinism documentation with use cases and non-use-cases.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-015** Implement deterministic replay for the agent-sandbox reference architecture.
+  → Done: `docs/determinism.md` §3 lists the four use cases (reproducible debugging, property-based testing, reproducible benchmarks, auditable AI-agent actions); §4 lists the non-use-cases (security, production traffic, real-time measurement, cross-version/cross-target reproduction).
+  → Measured: `tools/sync_docs.py --check` green (doc is a tracked generated-docs input); `tools/check_doc_claims.py` green.
+- [!] **DET-015** Implement deterministic replay for the agent-sandbox reference architecture. Owner: Architect. Blocked on the agent-sandbox reference architecture existing as a buildable target: there is no sandbox harness to attach replay to.
   → §8.4 The "agent sandbox" reference architecture
-- [ ] **DET-016** Implement the deterministic-mode performance-cost report so users know what they pay.
+  → Tripwire: re-open when a sandbox reference implementation lands (see AGENT-025/MIG work). Re-measure: a recorded-then-replayed sandbox session with identical digests.
+- [!] **DET-016** Implement the deterministic-mode performance-cost report so users know what they pay. Owner: Performance engineer. Blocked on PLAN-013 reference hardware: a cost report measured on this developer machine would misrepresent budgets.
   → §10.5 Determinism — the feature nobody else has
+  → Tripwire: re-open when reference hardware is acquired or reserved. Re-measure: deterministic-vs-realtime latency/throughput/memory on the §9.1 reference workload, published with hardware disclosure.
 
 ### OBS — Observability
 
@@ -5877,7 +5906,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 | Phase | Milestone | Items |
 |---|---|---|
 | P0 Foundation | M0 | 79 |
-| P1 Heartbeat | M1 | 62 |
+| P1 Heartbeat | M1 | 63 |
 | P2 Capability engine | M2 | 54 |
 | P3 HTTP | M3 | 40 |
 | P4 DX v0 | M4 | 64 |
@@ -5887,7 +5916,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 | P8 Perf/determinism/obs | continuous | 62 |
 | P9 V1 release | M10, M11 | 75 |
 | P10 Beyond V1 | post-1.0 | 54 |
-| **Total** | | **630** |
+| **Total** | | **631** |
 
 **Coverage rule:** every section of `QQQ-Proposal-V1.md` carrying implementation work has at least one item above. The only Proposal sections with no items are §0.1–§0.2, §1.3, §3.3, §13.1 and the appendices, which are narrative, justification or registers rather than buildable work.
 

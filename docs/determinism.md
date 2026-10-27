@@ -19,9 +19,9 @@ the tree's state beside it**, measured at `390ee8f`:
 
 | # | source | control | state |
 |---|---|---|---|
-| 1 | Wall clock | `qqq:clock.wall` returns `determinism.fixed_clock`, advancing only by explicit host ticks | **partial** — `AmbientState` freezes it; `tick()` is called from tests only |
+| 1 | Wall clock | `qqq:clock.wall` returns `determinism.fixed_clock`, advancing only by explicit host ticks | **partial** — `AmbientState` freezes it; ticks come from tests and from deterministic `serve`, where each admitted request claims the next tick (admission order is the ordering guarantee) |
 | 2 | Monotonic clock | virtualised; advances deterministically with fuel or explicit ticks | **partial** — same mechanism, same limit |
-| 3 | Randomness | a seeded generator (`determinism.seed`) | **built** — `AmbientState::random_bytes`, `splitmix64` |
+| 3 | Randomness | a seeded generator (fixed public seed) | **built** — `AmbientState::random_bytes`, SHA-256 hash-DRBG (`F-20` replaced `splitmix64`) |
 | 4 | Async scheduling | a deterministic scheduler: same poll order, same interleavings, single-threaded executor | **absent** — `DET-004` |
 | 5 | Float behaviour | `cranelift_nan_canonicalization` on; relaxed-SIMD fusion disabled | **built** — `EngineConfig::deterministic` |
 | 6 | HashMap iteration order | banned in host interfaces; ordered maps only | **built** — no `HashMap` in `qqq-host`'s source |
@@ -60,21 +60,20 @@ claim that is not mechanical.
 | **config** | `--deterministic` on and off are different runs | the replay header carries `deterministic` as a fifth field |
 | **external I/O** | a real network or clock read outside the recorded set cannot be replayed | `--replay` fails rather than silently diverging |
 
-**And one discrepancy between this document's source and the implementation, recorded rather than
-smoothed over.** §10.5 calls the deterministic generator *"a seeded CSPRNG (ChaCha20 with
-`determinism.seed`)"*. The implementation is `splitmix64`, and its own comment says why:
-
-```rust
-// splitmix64: deterministic, architecture-independent, and good
-// enough for test reproducibility (it is explicitly NOT a CSPRNG,
-// and is never used outside deterministic mode).
-```
+**And one discrepancy between this document's source and the implementation, now resolved.** §10.5
+used to call the deterministic generator *"a seeded CSPRNG (ChaCha20 with `determinism.seed`)"*.
+`F-20` replaced the old `splitmix64` stream with a SHA-256 hash-DRBG over a fixed public seed
+(`ambient.rs::fill_deterministic`), whose own comment states the boundary: reproducible by
+construction and statistically strong, but explicitly **not secret** — and never used outside
+deterministic mode.
 
 **In normal mode the guest gets the OS source** (`getrandom::fill`), and a failure there is surfaced
 rather than substituted — *"because falling back to a weaker source would be worse than failing."*
-**So the weak generator is reachable only when determinism is on and the seed is public.** Either §10.5
-should say `splitmix64` and stop calling it a CSPRNG, or the implementation should change; the item that
-would decide it (`DET-003`) is open.
+**So the reproducible generator is reachable only when determinism is on and the seed is public.**
+§10.5 now names the hash-DRBG and no longer calls it a CSPRNG. What remains open is the naming
+question for `DET-003` ("seeded CSPRNG"): whether the hash-DRBG satisfies the item's intent
+(reproducible, statistically strong randomness) or the item demands a recorded-seed ChaCha20 —
+an owner decision, since only the owner can ratify what "CSPRNG" means for this line.
 
 ---
 
@@ -98,8 +97,9 @@ would decide it (`DET-003`) is open.
   guest-facing `random.get` uses the OS source unless determinism is on.
 - **Performance-sensitive production traffic.** Deterministic mode disables relaxed SIMD and canonicalises
   NaNs. **That is a deliberate cost**, and `DET-016` exists to publish it.
-- **Anything that must observe real time.** A guest that measures elapsed wall-clock time will read zero,
-  because the clock advances only on an explicit tick and **nothing in the production path calls `tick()`**.
+- **Anything that must observe real time.** A guest that measures elapsed wall-clock time reads the
+  virtual clock in deterministic mode: each admitted request advances it by one tick, so two runs agree
+  only for the same admission order (concurrent requests race for ticks as they race for pool slots).
   A component whose logic depends on real elapsed time cannot be both deterministic and correct.
 - **Cross-version reproduction.** See §2: an engine upgrade that changes codegen ends it.
 - **Reproducing across machines with different targets.** The target triple is in the header for a reason.
@@ -133,7 +133,7 @@ replays a shorter run is the one outcome the whole mechanism exists to prevent.
 | claim | command |
 |---|---|
 | the control states in §1 | `rg -n 'wasm_threads\|relaxed_simd\|nan_canonical' crates/qqq-host/src/config.rs` |
-| `splitmix64`, and its comment | `rg -n -A4 'if self.deterministic' crates/qqq-host/src/ambient.rs` |
+| the hash-DRBG and its not-secret contract | `rg -n 'fill_deterministic\|hash-DRBG\|NOT secret' crates/qqq-host/src/ambient.rs` |
 | no `HashMap` in the host | `rg -c 'HashMap' crates/qqq-host/src/` |
 | the AOT cache key's four inputs | `sed -n '354,398p' crates/qqq-host/src/config.rs` |
 | the replay log's types | `sed -n '1,120p' crates/qqq-host/src/replay.rs` |

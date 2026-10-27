@@ -682,6 +682,29 @@ impl AmbientState {
         }
     }
 
+    /// Set the virtual clock to an explicit tick count. No effect in
+    /// real-time mode.
+    ///
+    /// The production caller is deterministic serving: each request that
+    /// reaches instantiation starts from the shared admission counter, so
+    /// later requests observe larger readings. A fresh store starts at zero
+    /// (the `new` default); without this setter every request would read the
+    /// frozen zero tick, and two runs with the same admission order would
+    /// still agree — but no two requests in one run could ever disagree about
+    /// time passing. `SeqCst` because the count is published across threads
+    /// at admission, unlike the single-threaded increments `tick` performs.
+    ///
+    /// Crate-visible rather than public: it is wiring between instance
+    /// construction and the ambient state, not a contract a guest or an
+    /// embedding application calls. A public setter would invite external
+    /// code to move the clock, which is exactly the ambient authority the
+    /// capability model forbids.
+    pub(crate) fn set_ticks(&self, n: u64) {
+        if self.deterministic {
+            self.ticks.store(n, Ordering::SeqCst);
+        }
+    }
+
     /// Read the monotonic clock, in nanoseconds.
     ///
     /// # Why this is a separate method from [`Self::now_nanos`]

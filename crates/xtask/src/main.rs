@@ -424,6 +424,11 @@ const PY_STEPS: &[Step] = &[
     ),
     Step::py(
         Lane::Par,
+        "check_ordered_maps",
+        &["tools/check_ordered_maps.py"],
+    ),
+    Step::py(
+        Lane::Par,
         "check_panic_strategy",
         &["tools/check_panic_strategy.py"],
     ),
@@ -706,6 +711,11 @@ const PY_STEPS: &[Step] = &[
         Lane::Seq,
         "check_no_poison_expect",
         &["tools/check_no_poison_expect.py", "--self-test"],
+    ),
+    Step::py(
+        Lane::Seq,
+        "check_ordered_maps",
+        &["tools/check_ordered_maps.py", "--self-test"],
     ),
     Step::py(
         Lane::Seq,

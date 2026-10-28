@@ -285,22 +285,13 @@ fn ambient_interfaces() -> Vec<HostInterface> {
         iface(
             "qqq:crypto@1.0.0",
             &[CryptoRandom, CryptoHash, CryptoHmac, CryptoAead, CryptoSign],
-            // Partially implemented: `random` and `hashing` are real and bound
-            // (`qqq-host::host_crypto`, backed by `qqq-host::ambient`);
-            // `hmac`, `aead` and `signing` are not registered at all.
-            //
-            // The flag stays `false` until the whole interface is servable —
-            // claiming `true` for a partially-served interface would let a
-            // guest that needs AEAD pass admission and fail at first call,
-            // which is exactly the opaque failure this flag exists to prevent.
-            //
-            // Note the two levels at which this is enforced, and that they are
-            // deliberately redundant: this flag is what `qqqai inspect` reports
-            // *statically*, while `build_linker` is what actually refuses at
-            // instantiation. A component importing `qqq:crypto/hmac` fails
-            // there regardless of what this flag says, because no host function
-            // is registered for it.
-            false,
+            // Implemented: `host_crypto::register` binds `random`, `hashing`,
+            // `hmac`, `aead` and `signing` with per-call grant re-checks and
+            // manifest-allowlist enforcement, constant-time verification, and
+            // WIT-error mapping (`HOST-037`). The `implemented` flags are
+            // claims the pinning test below pins, so flipping one without the
+            // host code fails the build.
+            true,
             "Randomness, hashing, HMAC, AEAD and signatures, all explicitly named",
         ),
         iface(
@@ -485,11 +476,11 @@ pub fn required_interfaces(grants: &qqq_cap::resolve::GrantSet) -> Vec<HostInter
 /// assert!(unimplemented_capabilities(&GrantSet::empty()).is_empty());
 /// let m = Manifest::parse(
 ///     "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
-///      [capabilities.crypto]\nhash = [\"sha256\"]\n",
+///      [[capabilities.fs]]\npath = \"/tmp/in\"\nmode = \"read-only\"\n",
 /// )
 /// .unwrap();
 /// let missing = unimplemented_capabilities(&GrantSet::from_manifest(&m));
-/// assert!(missing.contains(&Capability::CryptoHash));
+/// assert!(missing.contains(&Capability::FsRead));
 /// ```
 #[must_use]
 pub fn unimplemented_capabilities(grants: &qqq_cap::resolve::GrantSet) -> Vec<Capability> {
@@ -692,14 +683,14 @@ mod tests {
         use qqq_cap::manifest::Manifest;
         let m = Manifest::parse(
             "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
-             [capabilities.crypto]\nhash = [\"sha256\"]\n",
+             [[capabilities.fs]]\npath = \"/tmp/in\"\nmode = \"read-only\"\n",
         )
         .unwrap();
         let g = qqq_cap::resolve::GrantSet::from_manifest(&m);
         let missing = unimplemented_capabilities(&g);
         assert!(
-            missing.contains(&Capability::CryptoHash),
-            "crypto.hash has no host implementation yet and must be reported: {missing:?}"
+            missing.contains(&Capability::FsRead),
+            "fs.read has no host implementation yet and must be reported: {missing:?}"
         );
     }
 
@@ -723,6 +714,7 @@ mod tests {
             implemented,
             vec![
                 "qqq:clock@1.0.0",
+                "qqq:crypto@1.0.0",
                 "qqq:dns@1.0.0",
                 "qqq:env@1.0.0",
                 "qqq:kv@1.0.0",
@@ -737,21 +729,24 @@ mod tests {
         );
     }
 
-    /// A **partially** implemented interface must still report `false`.
+    /// An **unimplemented** interface must report `false`, with the reason
+    /// recorded where the work is owned.
     ///
-    /// `qqq:crypto` serves `random` and `hash` today but not `hmac`, `aead` or
-    /// `sign`. Reporting it as implemented would let a component needing AEAD
-    /// pass admission and then fail at first call — the opaque failure the flag
-    /// exists to prevent.
+    /// `qqq:fs` declares `filesystem` but binds nothing: the WIT has no
+    /// constructor, so no guest can obtain a first handle (`HOST-034`,
+    /// blocked on an owner decision). Reporting it as implemented would let
+    /// a component pass admission and then fail at first call — the opaque
+    /// failure the flag exists to prevent.
     #[test]
     fn partial_implementations_do_not_claim_completeness() {
-        let crypto = interfaces()
+        let fs = interfaces()
             .into_iter()
-            .find(|i| i.name.starts_with("qqq:crypto"))
-            .expect("crypto interface must exist");
+            .find(|i| i.name.starts_with("qqq:fs"))
+            .expect("fs interface must exist");
         assert!(
-            !crypto.implemented,
-            "qqq:crypto serves only random+hash; it must not claim to be implemented"
+            !fs.implemented,
+            "qqq:fs binds nothing until its WIT gains a constructor; claiming \
+             it would pass admission and fail at first call"
         );
     }
 

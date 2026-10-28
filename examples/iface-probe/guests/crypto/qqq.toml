@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+
+// Probe guest that exercises `qqq:crypto/hmac`, `qqq:crypto/aead` and
+// `qqq:crypto/signing` and reports a summary the host asserts on.
+
+[package]
+name = "probe-crypto"
+version = "0.1.0"
+
+[build]
+language = "rust"
+target = "wasm32-wasip2"
+profile = "release"
+
+[capabilities.crypto]
+random = true
+hash = ["sha256"]
+hmac = ["sha256", "sha512"]
+aead = ["aes-256-gcm"]
+sign = ["ed25519"]
+# Deliberately unlisted: `blake3` (hmac) and `chacha20-poly1305` (aead).
+# The guest asserts their refusal by name (`hmac-blake3-unlisted`,
+# `chacha-unlisted`), which is the fail-closed half. The happy paths run in
+# host unit tests instead (`hmac_blake3_matches_the_reference_keyed_mode`,
+# `chacha20poly1305_matches_rfc8439_section_2_8_2`): the bindgen dispatch is
+# the same function for every variant, and the WIT-order pin tests lock the
+# discriminants, so a second guest would re-prove the same lowering.
+
+[capabilities.http]
+server = true

@@ -108,13 +108,16 @@ pub struct StoreData {
     /// The QQQ-level limits, for diagnostics and fuel accounting.
     limits: Option<crate::config::StoreLimits>,
 
-    /// Hash algorithms the manifest's `[capabilities.crypto] hash` list named.
+    /// This instance's crypto view — `HOST-037`.
     ///
-    /// Retained so the host can refuse an algorithm it is perfectly capable of
-    /// computing but was not granted. Without this the manifest's allowlist
-    /// would be advisory, and a guest could use any primitive the host happened
-    /// to link — which is ambient authority by another route.
-    pub allowed_hashes: Vec<crate::ambient::HashAlgorithm>,
+    /// Deploy-resolved allowlist: which hash algorithms, HMAC algorithms,
+    /// AEAD constructions and signing algorithms the manifest named. Retained
+    /// so the host can refuse an algorithm it is perfectly capable of computing
+    /// but was not granted. Without the allowlist this refusal would be
+    /// advisory, and a guest could use any primitive the host happened to link
+    /// — which is ambient authority by another route. Cloned per request (the
+    /// `Arc` makes the clone cheap); pure computation needs no shared backend.
+    pub crypto: crate::host_crypto::CryptoView,
 
     /// The ambient state: clock and RNG, deterministic or not.
     pub ambient: crate::ambient::AmbientState,
@@ -356,7 +359,7 @@ impl fmt::Debug for StoreData {
         f.debug_struct("StoreData")
             .field("grants", &self.grants)
             .field("limits", &self.limits)
-            .field("allowed_hashes", &self.allowed_hashes)
+            .field("crypto", &self.crypto.config)
             .field("ambient", &self.ambient)
             .field("has_wasi_ctx", &true)
             .field("tenant", &self.tenant)
@@ -390,7 +393,10 @@ impl Default for StoreData {
             test: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
-            allowed_hashes: Vec::new(),
+            // No algorithms: a store assembled without going through the
+            // manifest names none, so hashing, HMAC, AEAD and signing all
+            // refuse. See the field's own doc for why empty is safe.
+            crypto: crate::host_crypto::CryptoView::default(),
             ambient: crate::ambient::AmbientState::default(),
             // Zero, not "unlimited". A store assembled without going through
             // `from_manifest` or `set_limits` has no declared budget, and the
@@ -504,7 +510,10 @@ impl StoreData {
             test: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
-            allowed_hashes: Vec::new(),
+            // No algorithms: a store assembled without going through the
+            // manifest names none, so hashing, HMAC, AEAD and signing all
+            // refuse. See the field's own doc for why empty is safe.
+            crypto: crate::host_crypto::CryptoView::default(),
             ambient: crate::ambient::AmbientState::default(),
             subrequests: crate::quota::SubrequestBudget::new(0),
             handles: crate::quota::HandleQuota::new(0),
@@ -609,17 +618,9 @@ impl StoreData {
     ) -> Self {
         let grants = GrantSet::from_manifest(manifest);
 
-        let allowed_hashes = manifest
-            .capabilities
-            .crypto
-            .as_ref()
-            .map(|c| {
-                c.hash
-                    .iter()
-                    .filter_map(|h| crate::ambient::HashAlgorithm::parse(h))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let crypto = crate::host_crypto::CryptoView::new(std::sync::Arc::new(
+            crate::host_crypto::CryptoConfig::from_manifest(manifest),
+        ));
 
         // Built before the struct literal, for the reason `StoreData::new`
         // documents: the context borrows `grants`, and a borrow inside a literal that
@@ -642,7 +643,7 @@ impl StoreData {
             test: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
-            allowed_hashes,
+            crypto,
             ambient: crate::ambient::AmbientState::default(),
             // Derived from the manifest so `[limits]` is the single source of
             // truth. Deriving the ambient state from the manifest and the quotas
@@ -1622,7 +1623,8 @@ pub fn build_linker<'a>(
             // `qqq:kv`, `qqq:queue`, `qqq:dns` and `qqq:sql` have arms
             // (`HOST-028` owns the secrets binding, `HOST-029` env,
             // `HOST-030` log, `HOST-031` trace, `HOST-032` kv,
-            // `HOST-033` queue, `HOST-035` dns, `HOST-036` sql;
+            // `HOST-033` queue, `HOST-035` dns, `HOST-036` sql,
+            // `HOST-037` crypto hmac/aead/signing alongside random/hashing;
             // `HOST-034` fs owns the remaining one — `HOST-034` is blocked
             // on a WIT constructor, see its `[!]` item).
             // Recording the gap keeps a
@@ -1658,11 +1660,10 @@ pub fn build_linker<'a>(
             // recorded here rather than left for a reader to discover by
             // searching for callers.
             //
-            // Note that `qqq:crypto` is only *partially* implemented — `random`
-            // and `hashing` are real, `hmac`/`aead`/`signing` are absent on
-            // purpose. A component importing the latter therefore still gets
-            // this diagnostic, which is the correct outcome: `host_crypto`
-            // registers what exists and the rest stays visibly missing.
+            // Note that `qqq:crypto` is now fully implemented — `random` and
+            // `hashing` via `func_wrap`, `hmac`/`aead`/`signing` via the
+            // generated `bindgen!` traits (`HOST-037`). A granted-but-absent
+            // diagnostic now fires only for genuinely unbound interfaces.
             _ => {
                 for &c in &grants.capabilities() {
                     if interface_for(c) == Some(iface) {
@@ -2497,6 +2498,18 @@ mod tests {
             (
                 "[capabilities.crypto]\nrandom = true\n",
                 Capability::CryptoRandom,
+            ),
+            (
+                "[capabilities.crypto]\nhmac = [\"sha256\"]\n",
+                Capability::CryptoHmac,
+            ),
+            (
+                "[capabilities.crypto]\naead = [\"aes-256-gcm\"]\n",
+                Capability::CryptoAead,
+            ),
+            (
+                "[capabilities.crypto]\nsign = [\"ed25519\"]\n",
+                Capability::CryptoSign,
             ),
             ("[capabilities.clock]\nwall = true\n", Capability::ClockWall),
             (

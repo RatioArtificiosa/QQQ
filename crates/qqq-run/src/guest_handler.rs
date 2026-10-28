@@ -245,6 +245,13 @@ pub struct GuestApp {
     /// unless `serve` sets it, cloned on replacement like the key-value
     /// view. No backend to share — the files are the shared state.
     sql: qqq_host::host_sql::SqlView,
+    /// This app's crypto view — `HOST-037`.
+    ///
+    /// Deploy-resolved allowlist of hash algorithms, HMAC algorithms, AEAD
+    /// constructions, and signing algorithms: empty unless `serve` sets it,
+    /// cloned on replacement like every other view. Pure computation needs
+    /// no shared backend.
+    crypto: qqq_host::host_crypto::CryptoView,
     /// The epoch ticker period for this app's engine lineage — `F-17`.
     ///
     /// Derived once from the limits via the helper, shared by the ticker
@@ -457,6 +464,7 @@ impl GuestApp {
             queue: qqq_host::host_queue::QueueView::default(),
             dns: qqq_host::host_dns::DnsView::default(),
             sql: qqq_host::host_sql::SqlView::default(),
+            crypto: qqq_host::host_crypto::CryptoView::default(),
             epoch_tick: tick,
         })
     }
@@ -516,6 +524,15 @@ impl GuestApp {
     /// replacement.
     pub(crate) fn set_sql(&mut self, sql: qqq_host::host_sql::SqlView) {
         self.sql = sql;
+    }
+
+    /// Set the crypto view new instances serve `qqq:crypto` from — `HOST-037`.
+    ///
+    /// Crate-visible for the same reason: resolved once by `serve` from
+    /// the manifest's crypto stanza, installed before serving, cloned on
+    /// replacement.
+    pub(crate) fn set_crypto(&mut self, crypto: qqq_host::host_crypto::CryptoView) {
+        self.crypto = crypto;
     }
 
     /// Run guest instances deterministically — `F-20`.
@@ -605,6 +622,10 @@ impl GuestApp {
         // still lists. The files survive either way; the config is what
         // gates them.
         next.sql = self.sql.clone();
+        // And the crypto view with them: a rotation that dropped the
+        // allowlist would serve `algorithm-not-allowed` for algorithms the
+        // manifest still lists.
+        next.crypto = self.crypto.clone();
         // And the admission counter with it: a rotation that reset the
         // virtual clock would replay already-seen ticks, and one that kept
         // counting on a rotated copy would fork it.
@@ -1034,6 +1055,9 @@ impl GuestApp {
         // request opens the same files; the connections themselves are
         // per-request.
         options.sql = self.sql.clone();
+        // And the crypto view: the config is the algorithm allowlist, so
+        // every request enforces exactly what the manifest lists.
+        options.crypto = self.crypto.clone();
         let instance = Instance::create_with(
             &self.engine,
             &self.prepared,
@@ -3180,6 +3204,119 @@ mod tests {
         let second_body = String::from_utf8(second.body.clone()).expect("the summary is UTF-8");
         assert!(
             second_body.contains("txn-commit=ok"),
+            "the second request serves the same summary: {second_body}"
+        );
+    }
+
+    /// The crypto probe component, built by the real toolchain on first use —
+    /// same shape as the sql helper above.
+    fn crypto_probe_component() -> Option<Vec<u8>> {
+        use std::sync::OnceLock;
+        // Cached as bytes, rebuilt on every run: a stale artifact from an
+        // edited guest can never pass silently. Cargo itself no-ops when
+        // fresh.
+        static ARTIFACT: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+        ARTIFACT
+            .get_or_init(|| {
+                let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../examples/iface-probe");
+                let has_target = std::process::Command::new("rustc")
+                    .args(["--print", "target-list"])
+                    .output()
+                    .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2"));
+                if !has_target {
+                    println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
+                    return None;
+                }
+                let output = std::process::Command::new("cargo")
+                    .args([
+                        "build",
+                        "--release",
+                        "--target",
+                        "wasm32-wasip2",
+                        "--offline",
+                    ])
+                    .current_dir(&workspace)
+                    .output()
+                    .expect("cargo runs");
+                assert!(
+                    output.status.success(),
+                    "probe crypto guest build failed with the toolchain present: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let artifact = workspace.join("target/wasm32-wasip2/release/probe_crypto.wasm");
+                Some(std::fs::read(&artifact).expect("probe component reads"))
+            })
+            .clone()
+    }
+
+    /// Crypto answers travel the serve path against deploy-resolved config.
+    ///
+    /// Builds the app the way `serve` does (grants from a manifest, config
+    /// resolved once, one view installed via the setter), then drives real
+    /// requests through `handle_request`. The probe guest runs the same
+    /// scenario the `iface_crypto` e2e covers, and the body carries the
+    /// summary. Computation holds no per-request state, so both requests
+    /// serve the same summary by construction.
+    #[test]
+    fn crypto_flows_from_manifest_to_guest_answer() {
+        let Some(bytes) = crypto_probe_component() else {
+            return;
+        };
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+             [capabilities.crypto]\nrandom = true\n\
+             hash = [\"sha256\"]\n\
+             hmac = [\"sha256\", \"sha512\"]\n\
+             aead = [\"aes-256-gcm\"]\n\
+             sign = [\"ed25519\"]\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("probe manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("engine config"))
+            .expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        let mut app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)
+            .expect("probe app builds");
+        app.set_crypto(crate::crypto::view_for_manifest(&manifest));
+        let response = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the probe request serves");
+        let body = String::from_utf8(response.body.clone()).expect("the summary is UTF-8");
+        for expected in [
+            "hmac-sha256=ok",
+            "hmac-sha512=ok",
+            "hmac-blake3-unlisted=err:algorithm-not-allowed",
+            "hmac-verify=ok",
+            "aes-roundtrip=ok",
+            "aes-tamper=err:authentication-failed",
+            "chacha-unlisted=err:construction-not-allowed",
+            "ed25519-verify=ok",
+            "lengths=ok",
+        ] {
+            assert!(
+                body.contains(expected),
+                "the served summary must report {expected}: {body}"
+            );
+        }
+        assert!(
+            !body.contains("unexpected"),
+            "the served summary must never report a failure marker: {body}"
+        );
+        let second = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the second probe request serves");
+        let second_body = String::from_utf8(second.body.clone()).expect("the summary is UTF-8");
+        assert!(
+            second_body.contains("ed25519-verify=ok"),
             "the second request serves the same summary: {second_body}"
         );
     }

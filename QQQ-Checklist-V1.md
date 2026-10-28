@@ -25,7 +25,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `MKT` | Market research, positioning, competitive analysis | 16 | Founder |
 | `POS` | Product positioning and messaging | 6 | Founder |
 | `ARCH` | Architecture decisions and crate topology | 16 | Systems lead |
-| `HOST` | `qqq-host` execution engine | 36 | Systems engineer |
+| `HOST` | `qqq-host` execution engine | 37 | Systems engineer |
 | `CAP` | Capability resolution pipeline | 24 | Security engineer |
 | `SEC` | Security engineering, audits, hardening | 30 | Security engineer |
 | `CON` | Contracts: WIT interfaces, manifest schema, versioning | 20 | Architect |
@@ -54,7 +54,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 640 items.**
+**Total: 641 items.**
 
 ### Status legend
 
@@ -2037,7 +2037,11 @@ Items are grouped below by **phase**, because dependency order matters more than
 - [x] **HOST-036** Bind `qqq:sql/database` and `qqq:sql/transaction` in the per-instance linker against a process-local SQLite backend: typed prepare/query/execute with argument checks, row caps, read-only enforcement, commit-or-rollback transactions; non-`sqlite` drivers refuse as unusable databases by name.
   → §6.3 Capability-based security
   → Done: `host_sql::register` (grant-gated `add_to_linker`, per-call grant + config re-checks), `SqlConfig` deploy-resolved allowlist (sqlite-only; `host` names the file), per-request `SqlInstanceState` with per-database connections (busy timeout 5 s), stored-`(db, sql, read-only)` statements re-prepared per execution, eager `prepare` with engine-level read-only enforcement, `BEGIN IMMEDIATE` transactions with commit/rollback/drop-rolls-back, layered caps (statement 64 KiB, rows 1000/call, values 64 KiB, args 1024, result 4 MiB); `GuestApp::set_sql` shared across requests and cloned on `replacement`, per-request `SqlView` via `InstanceOptions`; probe guest `examples/iface-probe/guests/sql` (wit-bindgen, real canonical ABI) with host e2e and serve-path e2e. Evidence: `cargo test -p qqq-host --lib host_sql` 20/20, `--test iface_sql` 3/3, `qqq-run --lib sql` 3/3 + serve-path 1/1, `qqq-abi` pin updated; 2026-10-28.
-  → Measured: red-first (missing guest fails loudly; TOML backslash + boolean-round-trip defects caught pre-commit — Windows temp paths broke the fixture manifest, SQLite booleans read back as integers); granted run creates, inserts, selects, distinguishes unlisted from read-only by name, bounds oversize statements and row counts, commits while rolling back (drop rolls back); ungranted instantiation names `qqq:sql/database`; committed rows persist across instances via the files. Out of scope by design: one transaction per database per request (second `begin` fails), sqlite-only (other drivers resolve to nothing), no networked drivers.
+  → Measured: red-first (missing guest fails loudly; TOML backslash + boolean-round-trip defects caught pre-commit — Windows temp paths broke the fixture manifest, SQLite booleans read back as integers); granted run creates, inserts, selects, distinguishes unlisted from read-only by name, bounds oversize statements and row counts, commits while rolling back (drop rolls back); ungranted instantiation names `qqq:sql/database`; committed rows persist across instances via the files. Out of scope by design: one transaction per database per request (second `begin` fails), sqlite-only (other drivers resolve to nothing), no networked drivers. Post-tick review hardening (4 copilot + Meta Muse proxy rounds, 19 findings, zero open): read-only opens that never create, txn-scope isolation refusal, keep-handle-on-commit/rollback-failure, deferred begin for readers, handle caps with never-reuse ids, ATTACH/DETACH/VACUUM policy gate, autocommit assertion, arity checks. Final: `host_sql` 33/33 (+13), `qqq-abi` api-examples allowance held at 1932 with 10 new doctests.
+- [x] **HOST-037** Bind `qqq:crypto/hmac`, `qqq:crypto/aead`, and `qqq:crypto/signing` in the per-instance linker: allowlisted algorithms/constructions only, grant-gated operations, constant-time verify, typed WIT-error mapping; ungranted imports fail at instantiation, unlisted algorithms fail closed by name.
+  → §6.3 Capability-based security
+  → Done: `host_crypto::register` (grant-gated `add_to_linker` via `bindgen!`, per-call grant + config re-checks), `CryptoConfig` deploy-resolved allowlist (hmac `sha256`/`sha512`/`blake3` keyed mode, aead `aes-256-gcm`/`chacha20-poly1305`, sign `ed25519`; unknown names dropped, unlisted fail closed by name), ciphertext-is-plaintext-plus-tag with runtime shape check, `invalid-signature` returned for wrong-length signatures, empty-key `verify` refused for every algorithm, constant-time `verify_slice`/`blake3::Hash ==`; `GuestApp::set_crypto` shared across requests and cloned on `replacement`, per-request `CryptoView` via `InstanceOptions`; probe guest `examples/iface-probe/guests/crypto` (wit-bindgen, real canonical ABI) with host e2e and serve-path e2e. Evidence: `cargo test -p qqq-host --lib host_crypto` 44/44, `--test iface_crypto` 3/3, `cargo test -p qqq-run --lib crypto` 7/7 + serve-path `guest_handler::crypto_flows` 1/1, `cargo test -p qqq-abi` 25/25; 2026-10-28.
+  → Measured: red-first (missing guest fails loudly; hand-transcribed RFC vectors corrected against OpenSSL/reference oracles); granted run computes/verifies HMAC-SHA-256/512 + keyed BLAKE3, round-trips AES-256-GCM/ChaCha20-Poly1305, distinguishes tampered/truncated ciphertext by `authentication-failed`, derives/signs/verifies Ed25519; ungranted instantiation names `qqq:crypto/hmac`; unknown-only grants bind but deny every call; grant-present/view-empty denies at call time. Out of scope by design: no per-call byte ceiling for hmac/aead/signing (their WIT errors carry no `input-too-long`; adding one needs a coordinated registry handoff), `nonce-length`/`key-length` stay infallible public parameters, hand-written `random`/`hashing` trap while `bindgen!` interfaces return typed errors. Post-tick review hardening (copilot core review, 10 findings + 5 test gaps, zero open; proxy re-review, 9 findings — 6 fixed, 3 acknowledged with rationale): empty-key verify consistency, `invalid-signature` dead variant, trap-vs-return contract, AEAD shape runtime check, unreachable error maps, `Debug` full-config print, unknown-only grant pin, empty-view doc + pin, HMAC enum-order pin, AEAD output-length test, megabyte round-trip, keyed-BLAKE3 construction doc, `nonce/key-length` exhaustive match, serve-path unlisted-denial assertions. Final: `host_crypto` 44/44 (+6), `qqq-run` inspect honesty probe re-pointed at `fs` with crypto fully-implemented pin, `qqq-abi` api-examples allowance held at 1932 with 6 new doctests.
 
 ---
 
@@ -5941,7 +5945,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 | Phase | Milestone | Items |
 |---|---|---|
 | P0 Foundation | M0 | 79 |
-| P1 Heartbeat | M1 | 72 |
+| P1 Heartbeat | M1 | 73 |
 | P2 Capability engine | M2 | 54 |
 | P3 HTTP | M3 | 40 |
 | P4 DX v0 | M4 | 64 |
@@ -5951,7 +5955,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 | P8 Perf/determinism/obs | continuous | 62 |
 | P9 V1 release | M10, M11 | 75 |
 | P10 Beyond V1 | post-1.0 | 54 |
-| **Total** | | **640** |
+| **Total** | | **641** |
 
 **Coverage rule:** every section of `QQQ-Proposal-V1.md` carrying implementation work has at least one item above. The only Proposal sections with no items are §0.1–§0.2, §1.3, §3.3, §13.1 and the appendices, which are narrative, justification or registers rather than buildable work.
 

@@ -436,6 +436,13 @@ pub struct InstanceOptions {
     /// `prepare` copies it into the store the same way it carries every
     /// other option.
     pub sql: crate::host_sql::SqlView,
+    /// This instance's crypto view — `HOST-037`.
+    ///
+    /// Empty allowlists unless set: the default is the safe reading of "no
+    /// algorithms granted". Runners set it from the manifest's crypto
+    /// stanza; `prepare` copies it into the store the same way it carries
+    /// every other option.
+    pub crypto: crate::host_crypto::CryptoView,
 }
 
 impl InstanceOptions {
@@ -553,6 +560,18 @@ impl<'a> Instance<'a> {
     /// The linker is built **from `grants` alone** ([`build_linker`]), so an
     /// ungranted capability is absent rather than denied. There is no code path
     /// here that adds an import the grant set does not justify.
+    ///
+    /// # Empty views and granted capabilities (HOST-037/10)
+    ///
+    /// This constructor uses `InstanceOptions::default()`, whose crypto view
+    /// (and every other deploy-resolved view) is empty. A granted capability
+    /// therefore binds at the linker and then denies every call at the
+    /// allowlist: grant-present with view-empty fails closed by name rather
+    /// than succeeding. Production paths (`qqqai run`, `qqqai serve`, the
+    /// guest handler) always build through `create_with` with a
+    /// manifest-resolved view; this constructor exists for tests and for
+    /// callers with no manifest, and its empty-view semantics are pinned by
+    /// `grant_present_with_empty_view_denies_at_call_time`.
     ///
     /// # Errors
     ///
@@ -1363,6 +1382,9 @@ impl ReadyStore {
         // And the SQL view with them: the config is the database allowlist,
         // cloned per request; each request opens its own connections.
         data.sql = opts.sql.clone();
+        // And the crypto view with them: the config is the algorithm
+        // allowlist, cloned per request; computation holds no state.
+        data.crypto = opts.crypto.clone();
         // The egress policy travels with the store like every other option:
         // a runner sets `opts.egress` from the manifest and prepare carries
         // it in, so production instances enforce declared destinations

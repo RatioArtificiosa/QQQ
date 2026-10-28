@@ -1401,6 +1401,12 @@ mod tests {
                           [capabilities.crypto]\nhash = [\"sha256\"]\nrandom = true\n";
     const EXPOSED: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
                            [capabilities.http]\nclient = [\"api.example.com:443\"]\n";
+    /// `HOST-034` owns the one remaining gap: `qqq:fs` declares `filesystem`
+    /// but binds nothing — the WIT has no constructor, so no guest can obtain
+    /// a first handle. This fixture names that gap the way the registry's
+    /// `partial_implementations_do_not_claim_completeness` does.
+    const FS: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                      [[capabilities.fs]]\npath = \"/tmp/in\"\nmode = \"read-only\"\n";
 
     // -- why ---------------------------------------------------------------
 
@@ -2016,6 +2022,12 @@ mod tests {
         let names: Vec<&str> = out.interfaces.iter().map(|i| i.name.as_str()).collect();
         assert!(names.contains(&"qqq:crypto@1.0.0"), "got {names:?}");
         assert!(!names.contains(&"qqq:sql@1.0.0"), "sql was not granted");
+        // `HOST-037` flipped crypto to fully implemented; the inspect layer
+        // must report that rather than the stale partial verdict.
+        assert!(
+            out.interfaces.iter().all(|i| i.implemented),
+            "every granted interface here has a host behind it: {names:?}"
+        );
         assert_eq!(
             out.posture,
             Posture::Contained,
@@ -2023,19 +2035,22 @@ mod tests {
         );
     }
 
+    /// `qqq:crypto` is fully implemented (`HOST-037`), so the honesty
+    /// probe points at the one interface that still has no host behind it:
+    /// `qqq:fs` (`HOST-034`, blocked on a WIT constructor).
     #[test]
     fn inspect_marks_unimplemented_interfaces_honestly() {
-        let out = inspect(&loaded(CRYPTO)).unwrap();
-        let crypto = out
+        let out = inspect(&loaded(FS)).unwrap();
+        let fs = out
             .interfaces
             .iter()
-            .find(|i| i.name.starts_with("qqq:crypto"))
-            .expect("crypto interface");
+            .find(|i| i.name.starts_with("qqq:fs"))
+            .expect("fs interface");
         assert!(
-            !crypto.implemented,
-            "crypto is only partially implemented and must say so"
+            !fs.implemented,
+            "fs binds nothing until its WIT gains a constructor and must say so"
         );
-        assert!(!crypto.summary.is_empty());
+        assert!(!fs.summary.is_empty());
     }
 
     /// The gap must reach the **rendered** output, not only the struct.
@@ -2058,7 +2073,7 @@ mod tests {
     /// makes the two independent.
     #[test]
     fn inspect_renders_the_unimplemented_gap_for_a_human() {
-        let out = inspect(&loaded(CRYPTO)).unwrap();
+        let out = inspect(&loaded(FS)).unwrap();
         let text = out.summary();
         let lines: Vec<&str> = text.lines().collect();
 
@@ -2077,7 +2092,7 @@ mod tests {
             .expect("the Interfaces heading must be present");
         let interface_line = lines[heading + 1];
         assert!(
-            interface_line.contains("qqq:crypto"),
+            interface_line.contains("qqq:fs"),
             "the line after the heading is the interface:\n{interface_line}"
         );
         assert!(

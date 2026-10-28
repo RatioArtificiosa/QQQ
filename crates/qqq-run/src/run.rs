@@ -1136,6 +1136,10 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
     // The manifest's database list becomes the guest-visible SQL allowlist,
     // resolved once here; each request opens its own connections.
     inst_opts.sql = crate::sql::view_for_manifest(&loaded.manifest);
+    // The manifest's crypto stanza becomes the guest-visible allowlist of
+    // algorithms and constructions, resolved once here; computation holds
+    // no per-request state.
+    inst_opts.crypto = crate::crypto::view_for_manifest(&loaded.manifest);
     if let Some(log) = &replay_sink {
         inst_opts.record_to(std::sync::Arc::clone(log));
     }

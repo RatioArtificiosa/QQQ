@@ -1088,6 +1088,10 @@ fn install_shared_backends(
     // resolved once here; the files are shared across every request this
     // deployment serves, so a row one request writes is visible to the next.
     app.set_sql(crate::sql::view_for_manifest(manifest));
+    // The manifest's crypto stanza becomes the guest-visible allowlist of
+    // algorithms and constructions, resolved once here; computation is
+    // stateless, so sharing the view shares nothing but the config.
+    app.set_crypto(crate::crypto::view_for_manifest(manifest));
 }
 
 fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltDispatch> {

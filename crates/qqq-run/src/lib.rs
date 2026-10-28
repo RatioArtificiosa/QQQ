@@ -37,6 +37,8 @@ pub mod bench;
 pub mod bench_output;
 pub mod build;
 pub mod commands;
+/// Resolve `qqq:crypto` configuration at the deploy layer — `HOST-037`.
+pub mod crypto;
 pub mod deps;
 pub mod dev;
 /// Resolve `qqq:dns` configuration at the deploy layer — `HOST-035`.

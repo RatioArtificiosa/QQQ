@@ -147,6 +147,11 @@ blake3 = "1"
 getrandom = "0.4"
 hmac = "0.12"
 aes-gcm = "0.11.1"
+# ChaCha20-Poly1305 for `qqq:crypto/aead` (`HOST-037`): the WIT names both
+# constructions, and a partially-served interface must not claim to be
+# implemented, so the second construction needs a real backend too.
+# RustCrypto, MIT/Apache-2.0, inside deny.toml, verified by `cargo deny check`.
+chacha20poly1305 = "0.11"
 
 [dev-dependencies]
 serde_json = { workspace = true }

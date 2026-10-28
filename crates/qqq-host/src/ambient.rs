@@ -1008,7 +1008,7 @@ pub fn hash_data(
         .ok_or_else(|| HostCallError::AlgorithmNotAllowed(algorithm.to_owned()))?;
     // The allowlist is enforced by the host, so a guest cannot use an algorithm
     // the manifest did not name even though the host *could* compute it.
-    if !data.allowed_hashes.contains(&alg) {
+    if !data.crypto.config.hashes.contains(&alg) {
         return Err(HostCallError::AlgorithmNotAllowed(algorithm.to_owned()));
     }
     Ok(AmbientState::hash(alg, input))
@@ -1165,8 +1165,8 @@ mod tests {
     fn store_with(src: &str) -> StoreData {
         let m = Manifest::parse(src).expect("test manifest");
         // `from_manifest` rather than `new(grants)`: only the manifest names
-        // *which* algorithms are allowed. Using `new` here would leave
-        // `allowed_hashes` empty and every hash call would be refused — which
+        // *which* algorithms are allowed. Using `new` here would leave the
+        // crypto view empty and every hash call would be refused — which
         // is exactly the bug this helper's first version had.
         StoreData::from_manifest(&m)
     }

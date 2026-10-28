@@ -27,7 +27,10 @@
 //! whether SQLite considers the statement read-only, and `execute` refuses
 //! a writing statement unless the manifest granted `execute` on that
 //! database. Enforcement reads the database's own answer rather than
-//! pattern-matching the SQL text, which a comment could defeat.
+//! pattern-matching the SQL text, which a comment could defeat. The one
+//! deliberate exception is the `ATTACH`/`DETACH`/`VACUUM` policy gate:
+//! SQLite reports attachment as read-only, so no engine answer can catch
+//! the escape, and a leading-keyword check (comments skipped) refuses it.
 //!
 //! ```
 //! let config = qqq_host::host_sql::SqlConfig::new(vec![

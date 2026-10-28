@@ -388,7 +388,12 @@ fn io_interfaces() -> Vec<HostInterface> {
         iface(
             "qqq:dns@1.0.0",
             &[DnsResolve],
-            false,
+            // Implemented: `host_dns::register` binds `resolver` with
+            // deploy-resolved allowlist, pluggable resolver backend, and
+            // WIT-error mapping (`HOST-035`). The `implemented` flags are
+            // claims the pinning test below pins, so flipping one without
+            // the host code fails the build.
+            true,
             "Name resolution from an explicit allowlist",
         ),
         iface(
@@ -712,6 +717,7 @@ mod tests {
             implemented,
             vec![
                 "qqq:clock@1.0.0",
+                "qqq:dns@1.0.0",
                 "qqq:env@1.0.0",
                 "qqq:kv@1.0.0",
                 "qqq:log@1.0.0",

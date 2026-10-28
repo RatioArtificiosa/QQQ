@@ -172,7 +172,9 @@ pub fn stanza_for(table: &str, path: Option<&str>, mode: Option<&str>) -> Result
         }
         "dns" => {
             reject_flags(table, path, mode)?;
-            Ok("[capabilities.dns]\nresolve = []\n".to_owned())
+            // A non-blank placeholder: the manifest refuses an empty table,
+            // so the generated starting point must already parse.
+            Ok("[capabilities.dns]\nresolve = [\"example.com\"]\n".to_owned())
         }
         "http" => {
             reject_flags(table, path, mode)?;

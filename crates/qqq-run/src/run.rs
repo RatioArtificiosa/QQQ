@@ -1101,6 +1101,9 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
     // The manifest's queue list becomes the guest-visible queue allowlist,
     // resolved once here; the backend is fresh per run, like the instance.
     inst_opts.queue = crate::queue::view_for_manifest(&loaded.manifest);
+    // The manifest's name list becomes the guest-visible DNS allowlist,
+    // resolved once here; the resolver is shared, like every other view.
+    inst_opts.dns = crate::dns::view_for_manifest(&loaded.manifest);
     if let Some(log) = &replay_sink {
         inst_opts.record_to(std::sync::Arc::clone(log));
     }

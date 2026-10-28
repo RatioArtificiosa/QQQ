@@ -105,6 +105,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-dns"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "probe-env"
 version = "0.1.0"
 dependencies = [

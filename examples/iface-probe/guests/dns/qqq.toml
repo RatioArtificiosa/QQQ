@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+
+// Probe guest that exercises `qqq:dns/resolver` and reports a summary the
+// host asserts on. Every lookup below names an allowlisted name first, so
+// the summary proves the allowlist check happens before any resolution.
+
+[package]
+name = "probe-dns"
+version = "0.1.0"
+
+[build]
+language = "rust"
+target = "wasm32-wasip2"
+profile = "release"
+
+[capabilities.dns]
+resolve = ["api.example.com", "missing.example.com"]
+
+[capabilities.http]
+server = true

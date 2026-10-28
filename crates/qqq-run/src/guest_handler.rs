@@ -234,6 +234,11 @@ pub struct GuestApp {
     /// the key-value view — a rotation must neither drop queued work nor
     /// fork it.
     queue: qqq_host::host_queue::QueueView,
+    /// This app's DNS view — `HOST-035`.
+    ///
+    /// Deploy-resolved allowlist plus the resolver: empty allowlist unless
+    /// `serve` sets it, cloned on replacement like the key-value view.
+    dns: qqq_host::host_dns::DnsView,
     /// The epoch ticker period for this app's engine lineage — `F-17`.
     ///
     /// Derived once from the limits via the helper, shared by the ticker
@@ -444,6 +449,7 @@ impl GuestApp {
             env: std::collections::BTreeMap::new(),
             kv: qqq_host::host_kv::KvView::default(),
             queue: qqq_host::host_queue::QueueView::default(),
+            dns: qqq_host::host_dns::DnsView::default(),
             epoch_tick: tick,
         })
     }
@@ -485,6 +491,15 @@ impl GuestApp {
     /// installed before serving, cloned on replacement.
     pub(crate) fn set_queue(&mut self, queue: qqq_host::host_queue::QueueView) {
         self.queue = queue;
+    }
+
+    /// Set the DNS view new instances serve `qqq:dns` from — `HOST-035`.
+    ///
+    /// Crate-visible for the same reason: resolved once by `serve` from the
+    /// manifest's name list (sharing one resolver across the deployment),
+    /// installed before serving, cloned on replacement.
+    pub(crate) fn set_dns(&mut self, dns: qqq_host::host_dns::DnsView) {
+        self.dns = dns;
     }
 
     /// Run guest instances deterministically — `F-20`.
@@ -565,6 +580,10 @@ impl GuestApp {
         // backend would lose every queued message, and one that forked it
         // would split one queue into two mutually invisible halves.
         next.queue = self.queue.clone();
+        // And the DNS view with them: a rotation that dropped the
+        // allowlist would serve `name-not-allowed` for names the manifest
+        // still lists.
+        next.dns = self.dns.clone();
         // And the admission counter with it: a rotation that reset the
         // virtual clock would replay already-seen ticks, and one that kept
         // counting on a rotated copy would fork it.
@@ -986,6 +1005,10 @@ impl GuestApp {
         // backend is the deployment's shared queues, so a message one
         // request publishes is visible to the next request's receive.
         options.queue = self.queue.clone();
+        // And the DNS view: the config is the name allowlist and the
+        // resolver is shared, so every request resolves under the same
+        // authority.
+        options.dns = self.dns.clone();
         let instance = Instance::create_with(
             &self.engine,
             &self.prepared,
@@ -2870,6 +2893,140 @@ mod tests {
             );
             assert_eq!(backend.in_flight_count("q"), 0);
         }
+    }
+
+    /// The DNS probe component, built by the real toolchain on first use —
+    /// same shape as the kv helper above.
+    fn dns_probe_component() -> Option<Vec<u8>> {
+        use std::sync::OnceLock;
+        // Cached as bytes, rebuilt on every run: a stale artifact from an
+        // edited guest can never pass silently. Cargo itself no-ops when
+        // fresh.
+        static ARTIFACT: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+        ARTIFACT
+            .get_or_init(|| {
+                let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../examples/iface-probe");
+                let has_target = std::process::Command::new("rustc")
+                    .args(["--print", "target-list"])
+                    .output()
+                    .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2"));
+                if !has_target {
+                    println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
+                    return None;
+                }
+                let output = std::process::Command::new("cargo")
+                    .args([
+                        "build",
+                        "--release",
+                        "--target",
+                        "wasm32-wasip2",
+                        "--locked",
+                    ])
+                    .current_dir(&workspace)
+                    .output()
+                    .expect("cargo runs");
+                assert!(
+                    output.status.success(),
+                    "probe dns guest build failed with the toolchain present: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let artifact = workspace.join("target/wasm32-wasip2/release/probe_dns.wasm");
+                Some(std::fs::read(&artifact).expect("probe component reads"))
+            })
+            .clone()
+    }
+
+    /// DNS answers travel the serve path against the deploy-resolved allowlist.
+    ///
+    /// Builds the app the way `serve` does (grants from a manifest, config
+    /// resolved once, one view installed via the setter), then drives a real
+    /// request through `handle_request`. The probe guest runs the same
+    /// scenario the `iface_dns` e2e covers, and the body carries the summary.
+    ///
+    /// The resolver here is the static table, not the system resolver: the
+    /// point under test is the serve path (linkage, options threading, the
+    /// grant and allowlist checks on the real boundary), and that path is
+    /// identical whichever backend answers. The system resolver is covered
+    /// where it can be hermetic — `localhost` in the host unit tests.
+    /// A second request serves the same summary: the resolver holds no
+    /// per-request state to fork.
+    #[test]
+    fn dns_flows_from_manifest_to_guest_answer() {
+        let Some(bytes) = dns_probe_component() else {
+            return;
+        };
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+             [capabilities.dns]\nresolve = [\"api.example.com\", \"missing.example.com\"]\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("probe manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("engine config"))
+            .expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        let mut app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)
+            .expect("probe app builds");
+        let mut records: std::collections::BTreeMap<String, Vec<std::net::IpAddr>> =
+            std::collections::BTreeMap::new();
+        records.insert(
+            "api.example.com".to_owned(),
+            vec![
+                "192.0.2.10".parse().expect("fixture parses"),
+                "2001:db8::10".parse().expect("fixture parses"),
+            ],
+        );
+        app.set_dns(qqq_host::host_dns::DnsView::new(
+            std::sync::Arc::new(crate::dns::resolve_dns_config(&manifest)),
+            std::sync::Arc::new(qqq_host::host_dns::StaticResolver::new(records)),
+        ));
+        let response = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the probe request serves");
+        let body = String::from_utf8(response.body.clone()).expect("the summary is UTF-8");
+        for expected in [
+            "resolve=ok:2",
+            "resolve-v4-first=ok",
+            "resolve-missing=err:not-found",
+            "resolve-unlisted=err:name-not-allowed",
+            "resolve-many=ok:2",
+            "resolve-many-order=ok",
+            "allowed-names=ok",
+            "batch-too-big=err:resolver-failed",
+            "big-name=err:name-not-allowed",
+        ] {
+            assert!(
+                body.contains(expected),
+                "the served summary must report {expected}: {body}"
+            );
+        }
+        for unexpected in [
+            "unexpected",
+            "err:timeout",
+            "err:backend-failed",
+            "none-unexpected",
+        ] {
+            assert!(
+                !body.contains(unexpected),
+                "the served summary must never report {unexpected}: {body}"
+            );
+        }
+        let second = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the second probe request serves");
+        let second_body = String::from_utf8(second.body.clone()).expect("the summary is UTF-8");
+        assert!(
+            second_body.contains("resolve=ok:2"),
+            "the second request serves the same summary: {second_body}"
+        );
     }
 
     fn head(method: qqq_serve::Method, target: &str) -> qqq_serve::RequestHead {

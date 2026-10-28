@@ -421,6 +421,14 @@ pub struct InstanceOptions {
     /// queue list (sharing one backend across the deployment); `prepare`
     /// copies it into the store the same way it carries every other option.
     pub queue: crate::host_queue::QueueView,
+    /// This instance's DNS view — `HOST-035`.
+    ///
+    /// Empty allowlist and the system resolver unless set: the default is
+    /// the safe reading of "no names declared". Runners set it from the
+    /// manifest's resolve list (sharing one resolver across the
+    /// deployment); `prepare` copies it into the store the same way it
+    /// carries every other option.
+    pub dns: crate::host_dns::DnsView,
 }
 
 impl InstanceOptions {
@@ -1342,6 +1350,9 @@ impl ReadyStore {
         // And the queue view with them: same shape, same reason — a value
         // one request publishes is visible to the next request's receive.
         data.queue = opts.queue.clone();
+        // And the DNS view with them: the config is the allowlist and the
+        // resolver is shared, both cloned per request.
+        data.dns = opts.dns.clone();
         // The egress policy travels with the store like every other option:
         // a runner sets `opts.egress` from the manifest and prepare carries
         // it in, so production instances enforce declared destinations

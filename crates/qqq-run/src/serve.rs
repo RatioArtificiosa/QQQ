@@ -1061,11 +1061,11 @@ struct BuiltDispatch {
     deterministic: bool,
 }
 
-/// Install the deploy-resolved shared backends new instances serve from.
+/// Install the deploy-resolved shared views new instances serve from.
 ///
 /// Extracted from `build_dispatch` when the queue arm pushed it over the
 /// hundred-line limit: one call site, and the sharing it installs is one
-/// idea (per-request views over per-deployment backends), not two.
+/// idea (per-request views over per-deployment resolution), not three.
 fn install_shared_backends(
     app: &mut crate::guest_handler::GuestApp,
     manifest: &qqq_cap::manifest::Manifest,
@@ -1080,6 +1080,10 @@ fn install_shared_backends(
     // deployment serves, so a message one request publishes is visible to
     // the next request's receive.
     app.set_queue(crate::queue::view_for_manifest(manifest));
+    // The manifest's name list becomes the guest-visible DNS allowlist,
+    // resolved once here; the resolver is shared across every request this
+    // deployment serves.
+    app.set_dns(crate::dns::view_for_manifest(manifest));
 }
 
 fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltDispatch> {

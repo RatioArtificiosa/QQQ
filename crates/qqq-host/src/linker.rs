@@ -234,6 +234,14 @@ pub struct StoreData {
     /// re-resolved per call.
     pub queue: crate::host_queue::QueueView,
 
+    /// This instance's DNS view — `HOST-035`.
+    ///
+    /// Deploy-resolved allowlist plus the resolver: the config names what
+    /// the guest may ask about, and the resolver answers. Both halves are
+    /// `Arc`s and both are read-only after deploy, so sharing one across
+    /// every request of the deployment needs no locking.
+    pub dns: crate::host_dns::DnsView,
+
     /// This request's hold on its tenant's shared output budget, if any.
     ///
     /// `None` is the standalone per-instance budget every existing caller
@@ -401,6 +409,10 @@ impl Default for StoreData {
             // without the manifest's queue entries serves nothing, which is
             // the safe reading of "no queues declared".
             queue: crate::host_queue::QueueView::default(),
+            // No names and the system resolver: an instance built without
+            // the manifest's dns stanza resolves nothing, which is the
+            // safe reading of "no names declared".
+            dns: crate::host_dns::DnsView::default(),
             tenant_output: None,
             // An empty environment and no wall clock: the deny-by-default answer
             // for a store that was not built from a manifest. The `expect` is
@@ -500,6 +512,10 @@ impl StoreData {
             // without the manifest's queue entries serves nothing, which is
             // the safe reading of "no queues declared".
             queue: crate::host_queue::QueueView::default(),
+            // No names and the system resolver: an instance built without
+            // the manifest's dns stanza resolves nothing, which is the
+            // safe reading of "no names declared".
+            dns: crate::host_dns::DnsView::default(),
             tenant_output,
             // Derived from the grants so a store built this way permits exactly
             // what the grant set says -- no more, and no less.
@@ -634,6 +650,10 @@ impl StoreData {
             // without the manifest's queue entries serves nothing, which is
             // the safe reading of "no queues declared".
             queue: crate::host_queue::QueueView::default(),
+            // No names and the system resolver: an instance built without
+            // the manifest's dns stanza resolves nothing, which is the
+            // safe reading of "no names declared".
+            dns: crate::host_dns::DnsView::default(),
             tenant_output: None,
             wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
@@ -760,6 +780,25 @@ impl StoreData {
     #[must_use]
     pub fn with_queue(mut self, queue: crate::host_queue::QueueView) -> Self {
         self.queue = queue;
+        self
+    }
+
+    /// Set this instance's DNS view directly — `HOST-035`.
+    ///
+    /// What tests use: the deploy layer resolves the manifest's name list
+    /// once and shares one resolver across the deployment, and a test that
+    /// sets the same view exercises the identical enforcement the guest
+    /// sees in production.
+    ///
+    /// ```
+    /// let view = qqq_host::host_dns::DnsView::default();
+    /// let data = qqq_host::linker::StoreData::new(qqq_cap::resolve::GrantSet::empty())
+    ///     .with_dns(view);
+    /// assert!(data.dns.config.names.is_empty());
+    /// ```
+    #[must_use]
+    pub fn with_dns(mut self, dns: crate::host_dns::DnsView) -> Self {
+        self.dns = dns;
         self
     }
 
@@ -1509,6 +1548,9 @@ pub fn build_linker<'a>(
             "qqq:queue@1.0.0" => {
                 crate::host_queue::register(&mut linker, grants)?;
             }
+            "qqq:dns@1.0.0" => {
+                crate::host_dns::register(&mut linker, grants)?;
+            }
             // `qqq:http` is the interface a guest both **imports** and **exports**
             // (see `host_http`'s module docs for why the import exists even when the
             // guest never calls `send`). Registering it here is what turns a granted
@@ -1524,13 +1566,15 @@ pub fn build_linker<'a>(
             "qqq:http@1.0.0" => {
                 let _bound = crate::host_http::register(&mut linker, grants)?;
             }
-            // QQQ-STUB(CON-009): `qqq:fs`, `qqq:sql` and `qqq:dns` have no
+            // QQQ-STUB(CON-009): `qqq:fs` and `qqq:sql` have no
             // registered interface yet. `qqq:clock`, `qqq:crypto`,
             // `qqq:http`, `qqq:secrets`, `qqq:env`, `qqq:log`, `qqq:trace`,
-            // `qqq:kv` and `qqq:queue` have arms (`HOST-028` owns the
-            // secrets binding, `HOST-029` env, `HOST-030` log, `HOST-031`
-            // trace, `HOST-032` kv, `HOST-033` queue; `HOST-034`..`HOST-036`
-            // own the other three).
+            // `qqq:kv`, `qqq:queue` and `qqq:dns` have arms (`HOST-028` owns
+            // the secrets binding, `HOST-029` env, `HOST-030` log,
+            // `HOST-031` trace, `HOST-032` kv, `HOST-033` queue,
+            // `HOST-035` dns; `HOST-034` fs and `HOST-036` sql own the
+            // other two — `HOST-034` is blocked on a WIT constructor, see
+            // its `[!]` item).
             // Recording the gap keeps a
             // partially-implemented milestone honest: a component that imports
             // the others gets a clear diagnostic naming the capability, not

@@ -39,6 +39,8 @@ pub mod build;
 pub mod commands;
 pub mod deps;
 pub mod dev;
+/// Resolve `qqq:dns` configuration at the deploy layer — `HOST-035`.
+pub mod dns;
 /// Resolve `qqq:env` values at the deploy layer — `HOST-029`.
 pub mod env;
 pub mod flaky;

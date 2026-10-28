@@ -1388,6 +1388,7 @@ impl Manifest {
         // unknown fields (the struct's own deny already covers those).
         Self::validate_sql(&self.capabilities.sql)?;
         Self::validate_kv(self.capabilities.kv.as_ref())?;
+        Self::validate_dns(self.capabilities.dns.as_ref())?;
         Self::validate_queue(&self.capabilities.queue)?;
         Self::validate_ai(self.capabilities.ai.as_ref())?;
         Self::validate_secret(self.capabilities.secret.as_ref())?;
@@ -1464,6 +1465,27 @@ impl Manifest {
             return Err(ManifestError::InvalidField {
                 field: "capabilities.kv".to_owned(),
                 reason: "stores must name at least one non-blank store".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// A `[capabilities.dns]` table with no names is refused: an empty
+    /// declaration would grant a resolution of nothing. Whitespace-only
+    /// names refuse like empty ones, per the kv precedent.
+    ///
+    /// IP literals, ports, and URLs are deliberately *not* refused here:
+    /// a literal resolves locally without touching the network (no
+    /// exfiltration), and anything shaped like a URL simply fails closed
+    /// at lookup. Over-strict admission would invent dead configuration
+    /// where the runtime already answers honestly.
+    fn validate_dns(dns: Option<&DnsCapability>) -> Result<(), ManifestError> {
+        if let Some(dns) = dns
+            && (dns.resolve.is_empty() || dns.resolve.iter().any(|s| s.trim().is_empty()))
+        {
+            return Err(ManifestError::InvalidField {
+                field: "capabilities.dns".to_owned(),
+                reason: "resolve must name at least one non-blank name".to_owned(),
             });
         }
         Ok(())
@@ -2706,6 +2728,27 @@ allow_origins = ["https://app.example.com"]
         assert!(
             text.contains("capabilities.kv"),
             "refusal names the table: {text}"
+        );
+    }
+
+    /// A `dns` table with no names is refused: an empty declaration would
+    /// grant a resolution of nothing. Whitespace-only names refuse like
+    /// empty ones, per the kv precedent.
+    #[test]
+    fn dns_table_requires_nonempty_resolve() {
+        let src =
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.dns]\nresolve = []\n";
+        let err = Manifest::parse(src).expect_err("an empty dns table must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("capabilities.dns"),
+            "refusal names the table: {text}"
+        );
+        let blank = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[capabilities.dns]\nresolve = [\"   \"]\n";
+        let err = Manifest::parse(blank).expect_err("a blank dns entry must be refused");
+        assert!(
+            err.to_string().contains("capabilities.dns"),
+            "refusal names the table"
         );
     }
 

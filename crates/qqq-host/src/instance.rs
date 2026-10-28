@@ -429,6 +429,13 @@ pub struct InstanceOptions {
     /// deployment); `prepare` copies it into the store the same way it
     /// carries every other option.
     pub dns: crate::host_dns::DnsView,
+    /// This instance's SQL view — `HOST-036`.
+    ///
+    /// Empty config unless set: the default is the safe reading of "no
+    /// databases declared". Runners set it from the manifest's sql list;
+    /// `prepare` copies it into the store the same way it carries every
+    /// other option.
+    pub sql: crate::host_sql::SqlView,
 }
 
 impl InstanceOptions {
@@ -1353,6 +1360,9 @@ impl ReadyStore {
         // And the DNS view with them: the config is the allowlist and the
         // resolver is shared, both cloned per request.
         data.dns = opts.dns.clone();
+        // And the SQL view with them: the config is the database allowlist,
+        // cloned per request; each request opens its own connections.
+        data.sql = opts.sql.clone();
         // The egress policy travels with the store like every other option:
         // a runner sets `opts.egress` from the manifest and prepare carries
         // it in, so production instances enforce declared destinations
@@ -1591,6 +1601,13 @@ fn instantiation_error(
 /// running the same artifact: compilation happens once, and the *instances*
 /// remain separate. That is what makes density affordable without weakening
 /// isolation — instances never share linear memory.
+///
+/// ```
+/// let digest = qqq_host::instance::digest_of(b"abc");
+/// assert_eq!(digest.len(), 64);
+/// assert_eq!(digest, qqq_host::instance::digest_of(b"abc"));
+/// assert_ne!(digest, qqq_host::instance::digest_of(b"abd"));
+/// ```
 #[must_use]
 pub fn digest_of(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -1616,6 +1633,19 @@ pub fn digest_of(bytes: &[u8]) -> String {
 ///
 /// The chosen interval targets ~100 ticks per deadline, which bounds overshoot
 /// to roughly 1% of the budget while keeping wakeups negligible.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// assert_eq!(
+///     qqq_host::instance::epoch_tick_interval(10_000),
+///     Duration::from_millis(100)
+/// );
+/// assert_eq!(
+///     qqq_host::instance::epoch_tick_interval(0),
+///     Duration::from_millis(1)
+/// );
+/// ```
 #[must_use]
 pub fn epoch_tick_interval(deadline_ms: u64) -> Duration {
     // At least 1 ms, at most 100 ms: below 1 ms the wakeup cost dominates,

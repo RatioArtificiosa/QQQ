@@ -239,6 +239,12 @@ pub struct GuestApp {
     /// Deploy-resolved allowlist plus the resolver: empty allowlist unless
     /// `serve` sets it, cloned on replacement like the key-value view.
     dns: qqq_host::host_dns::DnsView,
+    /// This app's SQL view — `HOST-036`.
+    ///
+    /// Deploy-resolved config (allowlist, modes, file paths): empty config
+    /// unless `serve` sets it, cloned on replacement like the key-value
+    /// view. No backend to share — the files are the shared state.
+    sql: qqq_host::host_sql::SqlView,
     /// The epoch ticker period for this app's engine lineage — `F-17`.
     ///
     /// Derived once from the limits via the helper, shared by the ticker
@@ -450,6 +456,7 @@ impl GuestApp {
             kv: qqq_host::host_kv::KvView::default(),
             queue: qqq_host::host_queue::QueueView::default(),
             dns: qqq_host::host_dns::DnsView::default(),
+            sql: qqq_host::host_sql::SqlView::default(),
             epoch_tick: tick,
         })
     }
@@ -500,6 +507,15 @@ impl GuestApp {
     /// installed before serving, cloned on replacement.
     pub(crate) fn set_dns(&mut self, dns: qqq_host::host_dns::DnsView) {
         self.dns = dns;
+    }
+
+    /// Set the SQL view new instances serve `qqq:sql` from — `HOST-036`.
+    ///
+    /// Crate-visible for the same reason: resolved once by `serve` from
+    /// the manifest's database list, installed before serving, cloned on
+    /// replacement.
+    pub(crate) fn set_sql(&mut self, sql: qqq_host::host_sql::SqlView) {
+        self.sql = sql;
     }
 
     /// Run guest instances deterministically — `F-20`.
@@ -584,6 +600,11 @@ impl GuestApp {
         // allowlist would serve `name-not-allowed` for names the manifest
         // still lists.
         next.dns = self.dns.clone();
+        // And the SQL view with them: a rotation that dropped the config
+        // would serve `database-not-configured` for databases the manifest
+        // still lists. The files survive either way; the config is what
+        // gates them.
+        next.sql = self.sql.clone();
         // And the admission counter with it: a rotation that reset the
         // virtual clock would replay already-seen ticks, and one that kept
         // counting on a rotated copy would fork it.
@@ -1009,6 +1030,10 @@ impl GuestApp {
         // resolver is shared, so every request resolves under the same
         // authority.
         options.dns = self.dns.clone();
+        // And the SQL view: the config is the database allowlist, so every
+        // request opens the same files; the connections themselves are
+        // per-request.
+        options.sql = self.sql.clone();
         let instance = Instance::create_with(
             &self.engine,
             &self.prepared,
@@ -3025,6 +3050,136 @@ mod tests {
         let second_body = String::from_utf8(second.body.clone()).expect("the summary is UTF-8");
         assert!(
             second_body.contains("resolve=ok:2"),
+            "the second request serves the same summary: {second_body}"
+        );
+    }
+
+    /// The SQL probe component, built by the real toolchain on first use —
+    /// same shape as the dns helper above.
+    fn sql_probe_component() -> Option<Vec<u8>> {
+        use std::sync::OnceLock;
+        // Cached as bytes, rebuilt on every run: a stale artifact from an
+        // edited guest can never pass silently. Cargo itself no-ops when
+        // fresh.
+        static ARTIFACT: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+        ARTIFACT
+            .get_or_init(|| {
+                let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../examples/iface-probe");
+                let has_target = std::process::Command::new("rustc")
+                    .args(["--print", "target-list"])
+                    .output()
+                    .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2"));
+                if !has_target {
+                    println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
+                    return None;
+                }
+                let output = std::process::Command::new("cargo")
+                    .args([
+                        "build",
+                        "--release",
+                        "--target",
+                        "wasm32-wasip2",
+                        "--offline",
+                    ])
+                    .current_dir(&workspace)
+                    .output()
+                    .expect("cargo runs");
+                assert!(
+                    output.status.success(),
+                    "probe sql guest build failed with the toolchain present: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let artifact = workspace.join("target/wasm32-wasip2/release/probe_sql.wasm");
+                Some(std::fs::read(&artifact).expect("probe component reads"))
+            })
+            .clone()
+    }
+
+    /// SQL answers travel the serve path against deploy-resolved config.
+    ///
+    /// Builds the app the way `serve` does (grants from a manifest, config
+    /// resolved once, one view installed via the setter), then drives real
+    /// requests through `handle_request`. The probe guest runs the same
+    /// scenario the `iface_sql` e2e covers, and the body carries the summary.
+    /// The databases are files in a fresh temporary directory, so the test
+    /// owns them; a second request serves the same summary, proving the
+    /// files — not per-request state — carry the rows across requests.
+    #[test]
+    fn sql_flows_from_manifest_to_guest_answer() {
+        let Some(bytes) = sql_probe_component() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("qqq-serve-sql-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("sql serve dir creates");
+        // Read-only databases open read-only and never materialize: both
+        // files exist before the guest runs.
+        for name in ["orders.db", "ledger.db"] {
+            std::fs::File::create(dir.join(name)).expect("serve database file creates");
+        }
+        let manifest = qqq_cap::Manifest::parse(&format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+             [[capabilities.sql]]\nname = \"orders\"\ndriver = \"sqlite\"\n\
+             host = \"{}\"\nexecute = true\n\
+             [[capabilities.sql]]\nname = \"ledger\"\ndriver = \"sqlite\"\n\
+             host = \"{}\"\n\
+             [capabilities.http]\nserver = true\n",
+            dir.join("orders.db")
+                .display()
+                .to_string()
+                .replace('\\', "/"),
+            dir.join("ledger.db")
+                .display()
+                .to_string()
+                .replace('\\', "/"),
+        ))
+        .expect("probe manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("engine config"))
+            .expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        let mut app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)
+            .expect("probe app builds");
+        app.set_sql(crate::sql::view_for_manifest(&manifest));
+        let response = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the probe request serves");
+        let body = String::from_utf8(response.body.clone()).expect("the summary is UTF-8");
+        for expected in [
+            "insert=ok:1",
+            "select=ok:1",
+            "unlisted=err:database-not-configured",
+            "readonly=err:read-only-connection",
+            "oversize=err:prepare-failed",
+            "txn-commit=ok",
+            "txn-rollback=ok",
+            "databases=ok",
+        ] {
+            assert!(
+                body.contains(expected),
+                "the served summary must report {expected}: {body}"
+            );
+        }
+        for unexpected in ["unexpected", "err:not-granted", "err:pool-exhausted"] {
+            assert!(
+                !body.contains(unexpected),
+                "the served summary must never report {unexpected}: {body}"
+            );
+        }
+        let second = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the second probe request serves");
+        let second_body = String::from_utf8(second.body.clone()).expect("the summary is UTF-8");
+        assert!(
+            second_body.contains("txn-commit=ok"),
             "the second request serves the same summary: {second_body}"
         );
     }

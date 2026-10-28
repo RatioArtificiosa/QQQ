@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Probe world: sql only, so the component instantiates as soon as the
+// host binds `qqq:sql`.
+package qqq:iface-probe-sql@1.0.0;
+
+/// One scenario per interface, returning a summary the host asserts on.
+interface probe-api {
+  probe-sql: func() -> string;
+}
+
+world probe {
+  import qqq:sql/database@1.0.0;
+  import qqq:sql/transaction@1.0.0;
+
+  export probe-api;
+  export qqq:http/incoming-handler@1.0.0;
+}

@@ -35,10 +35,11 @@
 //!
 //! # What durable state needs, named rather than implied
 //!
-//! `§5.3`'s `[[capabilities.sql]]`: the host holds the credential and the pool, and the
-//! guest sees a connection rather than a password. `qqq:sql` has no host implementation,
-//! so the `db` row **cannot** measure a Postgres round trip yet — and a benchmark that
-//! measured a missing host feature would measure nothing.
+//! `§5.3`'s `[[capabilities.sql]]`: the host holds the database file and the
+//! guest sees a name rather than a credential. `qqq:sql` binds only the
+//! `sqlite` driver (`HOST-036`), so the `db` row **cannot** measure a
+//! Postgres round trip yet — and a benchmark that measured a missing host
+//! feature would measure nothing.
 //!
 //! Until it lands, the `db` route measures the ABI cost of a validated write — body
 //! parsing, bounds checks, refusal paths — which is a real and useful number, and the

@@ -358,7 +358,13 @@ fn io_interfaces() -> Vec<HostInterface> {
         iface(
             "qqq:sql@1.0.0",
             &[SqlQuery, SqlExecute],
-            false,
+            // Implemented: `host_sql::register` binds `database` and
+            // `transaction` with deploy-resolved allowlist, per-instance
+            // file-backed SQLite connections, and WIT-error mapping
+            // (`HOST-036`). The `implemented` flags are claims the pinning
+            // test below pins, so flipping one without the host code fails
+            // the build.
+            true,
             "Host-pooled SQL; the guest never sees credentials",
         ),
         iface(
@@ -723,6 +729,7 @@ mod tests {
                 "qqq:log@1.0.0",
                 "qqq:queue@1.0.0",
                 "qqq:secrets@1.0.0",
+                "qqq:sql@1.0.0",
                 "qqq:trace@1.0.0"
             ],
             "the set of implemented interfaces changed; update this test in the \

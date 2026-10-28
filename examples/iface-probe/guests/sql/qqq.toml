@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+
+// Probe guest that exercises `qqq:sql/database` and `qqq:sql/transaction`
+// and reports a summary the host asserts on.
+
+[package]
+name = "probe-sql"
+version = "0.1.0"
+
+[build]
+language = "rust"
+target = "wasm32-wasip2"
+profile = "release"
+
+[[capabilities.sql]]
+name = "orders"
+driver = "sqlite"
+host = "probe-sql.db"
+execute = true
+
+[[capabilities.sql]]
+name = "ledger"
+driver = "sqlite"
+host = "probe-ledger.db"
+
+[capabilities.http]
+server = true

@@ -95,6 +95,12 @@ pub struct RunOptions {
 /// # Errors
 ///
 /// `QQQ-2007` when the capability name is unknown, with a suggestion.
+///
+/// ```
+/// let (cap, scope) = qqq_run::run::parse_cap_flag("http.client").expect("known capability");
+/// assert_eq!(cap, qqq_cap::Capability::HttpClient);
+/// assert_eq!(scope, None);
+/// ```
 pub fn parse_cap_flag(spec: &str) -> Result<(qqq_cap::Capability, Option<String>)> {
     let (name, scope) = match spec.split_once(':') {
         Some((n, s)) => (n.trim(), Some(s.trim().to_owned())),
@@ -282,6 +288,15 @@ pub struct ImportCheck {
 
 impl ImportCheck {
     /// Whether every required import is satisfiable.
+    ///
+    /// ```
+    /// let check = qqq_run::run::ImportCheck {
+    ///     required: vec!["qqq:clock/monotonic@1.0.0".to_owned()],
+    ///     satisfied: vec!["qqq:clock/monotonic@1.0.0".to_owned()],
+    ///     missing: Vec::new(),
+    /// };
+    /// assert!(check.is_satisfied());
+    /// ```
     #[must_use]
     pub fn is_satisfied(&self) -> bool {
         self.missing.is_empty()
@@ -419,6 +434,11 @@ fn is_wasi02_baseline(interface: &str) -> bool {
 /// A name without a colon is returned unchanged: it is not something we
 /// recognise, and silently mangling it would turn an unknown import into a
 /// spurious match against another unknown import.
+///
+/// ```
+/// assert_eq!(qqq_run::run::package_of("qqq:clock@1.0.0"), "qqq:clock");
+/// assert_eq!(qqq_run::run::package_of("qqq:http/client@1.0.0"), "qqq:http");
+/// ```
 #[must_use]
 pub fn package_of(interface: &str) -> String {
     let without_version = interface.split('@').next().unwrap_or(interface).trim();
@@ -564,6 +584,15 @@ pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
 /// The ranking is deliberately coarse — three levels — because a finer one would
 /// invite the belief that the numbers are comparable across capabilities rather
 /// than merely ordered.
+///
+/// ```
+/// use qqq_cap::Capability::{SqlExecute, SqlQuery};
+///
+/// assert!(
+///     qqq_run::run::exposure_rank(SqlExecute) > qqq_run::run::exposure_rank(SqlQuery),
+///     "execute exposes more than query"
+/// );
+/// ```
 #[must_use]
 pub const fn exposure_rank(c: qqq_cap::Capability) -> u8 {
     use qqq_cap::Capability::{
@@ -1104,6 +1133,9 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
     // The manifest's name list becomes the guest-visible DNS allowlist,
     // resolved once here; the resolver is shared, like every other view.
     inst_opts.dns = crate::dns::view_for_manifest(&loaded.manifest);
+    // The manifest's database list becomes the guest-visible SQL allowlist,
+    // resolved once here; each request opens its own connections.
+    inst_opts.sql = crate::sql::view_for_manifest(&loaded.manifest);
     if let Some(log) = &replay_sink {
         inst_opts.record_to(std::sync::Arc::clone(log));
     }

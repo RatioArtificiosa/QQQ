@@ -14,8 +14,8 @@ bind, and they are listed at the end as absences rather than omitted — a reade
 ## What the host actually binds
 
 `wit/` declares <!-- qqq:claim wit-packages -->15<!-- /qqq:claim --> packages. `qqq-host`'s linker
-registers <!-- qqq:claim host-bound-modules -->13<!-- /qqq:claim --> modules: the **WASI baseline**,
-the **versioned 0.3 clock**, **ten** capability modules, and `qqq:test/assertions` -- which a test runner links and nothing
+registers <!-- qqq:claim host-bound-modules -->14<!-- /qqq:claim --> modules: the **WASI baseline**,
+the **versioned 0.3 clock**, **eleven** capability modules, and `qqq:test/assertions` -- which a test runner links and nothing
 grants, because an assertion interface is not a capability. The count tracks the
 linker: when a new `host_*::register` arm lands, this number, the `rg` listing
 below, and the "everything else" list move together — `check_doc_claims`
@@ -36,10 +36,11 @@ rg 'host_[a-z0-9_]+::register\(' crates/qqq-host/src/linker.rs
 #   host_kv::register        <- namespaced stores with TTL; see HOST-032
 #   host_queue::register     <- publish/subscribe with ack; see HOST-033
 #   host_dns::register       <- allowlisted names, pluggable resolver; see HOST-035
+#   host_sql::register       <- file-backed SQLite, typed statements; see HOST-036
 ```
 
-Everything else — `qqq:sql`, `qqq:fs` —
-is **declared and not bound**. A guest that imports one of them fails
+Everything else — `qqq:fs` —
+is **declared and not bound**. A guest that imports it fails
 at **instantiation**, because the linker is built from the grant set alone and an unbounded import is
 *absent* rather than denied.
 
@@ -220,15 +221,15 @@ so a grant nothing exercises cannot hide. See `crates/qqq-run/tests/lang005_refe
 
 ### Connect to Postgres
 
-**Absent.** `§11.3` names this recipe. `wit/qqq-sql.wit` declares `qqq:sql@1.0.0`, and **the host
-does not bind it**: `qqq-host` has no `host_sql` module, so `build_linker` never registers the
-interface. A guest that imports `qqq:sql` fails at **instantiation**, not at first call.
+**Absent.** `§11.3` names this recipe. `wit/qqq-sql.wit` declares `qqq:sql@1.0.0`, and the host
+binds only its `sqlite` driver (`HOST-036`): a `[[capabilities.sql]]` entry with any other
+`driver` resolves to nothing, so its databases fail `database-not-configured`.
 
-**What to do instead.** There is no QQQ path to Postgres today. A guest can reach a database over
-`qqq:http` as a **client** only if `[capabilities.http] client` names the host — but `qqq:http`'s
-client side is registered only when that grant exists, and the reference application deliberately
-leaves it out. Watch `LANG-0xx`-adjacent work on the `qqq:sql` host module; until it lands, this
-recipe has nothing to teach.
+**What to do instead.** Use SQLite through `qqq:sql` today: one `[[capabilities.sql]]` entry
+per database, `host` naming the file, `execute = true` to widen from query-only to writes.
+A guest can reach Postgres over `qqq:http` as a **client** only if `[capabilities.http]`
+client names the host — but `qqq:http`'s client side is registered only when that grant
+exists, and the reference application deliberately leaves it out.
 
 ### Rate limit
 

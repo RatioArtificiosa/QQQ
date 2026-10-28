@@ -190,6 +190,7 @@ impl DnsResolver for SystemResolver {
 /// ```
 /// use std::collections::BTreeMap;
 /// use std::net::IpAddr;
+/// use qqq_host::host_dns::DnsResolver;
 /// let mut records = BTreeMap::new();
 /// records.insert("api.example.com".to_owned(), vec!["192.0.2.10".parse::<IpAddr>().expect("literal parses")]);
 /// let resolver = qqq_host::host_dns::StaticResolver::new(records);

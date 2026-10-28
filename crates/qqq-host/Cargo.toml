@@ -74,6 +74,14 @@ tokio-rustls = "0.26.5"
 rustls = { workspace = true }
 rustls-native-certs = "0.8"
 rustls-pki-types = "1"
+# Process-local SQLite for `qqq:sql` (`HOST-036`): one file-backed database
+# per configured name, opened per instance. `bundled` compiles SQLite's
+# amalgamation with the same `cc` mechanism `ring` already uses, so no
+# system library (and no version skew with it) enters the build.
+# rusqlite and libsqlite3-sys are MIT; the amalgamation itself is public
+# domain (the SQLite blessing) — inside deny.toml's allowlist, verified
+# by `cargo deny check`.
+rusqlite = { version = "0.41", features = ["bundled"] }
 # Static component inspection (initial memory sums, load-time shape).
 # Same version Wasmtime resolves, so no duplicate crate enters the build.
 wasmparser = { workspace = true }

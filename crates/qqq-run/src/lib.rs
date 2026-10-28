@@ -79,6 +79,8 @@ pub mod secrets;
 pub mod serve;
 /// Building a router from a manifest: the join between `qqq-cap` and `qqq-serve`.
 pub mod serve_routes;
+/// Resolve `qqq:sql` configuration at the deploy layer — `HOST-036`.
+pub mod sql;
 /// One interface over the project's language toolchain: `qqqai fmt` and `qqqai lint`
 /// (`CLI-014`).
 pub mod style;

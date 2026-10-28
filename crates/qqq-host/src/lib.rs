@@ -109,6 +109,7 @@ pub mod host_kv;
 pub mod host_log;
 pub mod host_queue;
 pub mod host_secrets;
+pub mod host_sql;
 /// The `qqq:test/assertions` host — Checklist `TEST-007`, `TEST-008`.
 ///
 /// # Example

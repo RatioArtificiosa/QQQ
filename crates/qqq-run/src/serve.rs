@@ -1084,6 +1084,10 @@ fn install_shared_backends(
     // resolved once here; the resolver is shared across every request this
     // deployment serves.
     app.set_dns(crate::dns::view_for_manifest(manifest));
+    // The manifest's database list becomes the guest-visible SQL allowlist,
+    // resolved once here; the files are shared across every request this
+    // deployment serves, so a row one request writes is visible to the next.
+    app.set_sql(crate::sql::view_for_manifest(manifest));
 }
 
 fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltDispatch> {

@@ -147,6 +147,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-sql"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "probe-trace"
 version = "0.1.0"
 dependencies = [

@@ -67,7 +67,7 @@
 /// module added to the tree without being added here is caught by
 /// [`every_host_module_is_scanned`], so the rule cannot silently apply to three
 /// files out of four.
-pub const HOST_MODULES: [&str; 13] = [
+pub const HOST_MODULES: [&str; 14] = [
     "host_clock.rs",
     "host_crypto.rs",
     "host_dns.rs",
@@ -76,6 +76,7 @@ pub const HOST_MODULES: [&str; 13] = [
     "host_log.rs",
     "host_queue.rs",
     "host_secrets.rs",
+    "host_sql.rs",
     "host_trace.rs",
     // WASI. Registered by `add_to_linker_sync` rather than by `func_wrap`, so it
     // contributes no [`Registration`] and does not change
@@ -194,23 +195,24 @@ impl std::error::Error for Indeterminate {}
 /// Because `include_str!` is the compiler reading the file, so the content is
 /// baked into the crate and cannot change between a check and the code it is
 /// checking. It also means the scanner needs no I/O and can run anywhere.
-pub const HOST_SOURCES: [(&str, &str); 13] = [
+pub const HOST_SOURCES: [(&str, &str); 14] = [
     ("host_clock.rs", include_str!("host_clock.rs")),
     ("host_crypto.rs", include_str!("host_crypto.rs")),
     ("host_dns.rs", include_str!("host_dns.rs")),
     ("host_env.rs", include_str!("host_env.rs")),
     ("host_kv.rs", include_str!("host_kv.rs")),
-    // `host_log`, `host_trace`, `host_kv`, `host_queue` and `host_dns`
-    // bind through the generated `add_to_linker` rather than `func_wrap`
-    // (records, variants and resources need the canonical ABI's lifting),
-    // like `host_http` below — so they contribute no `Registration` and do
-    // not change `EXPECTED_REGISTRATIONS`. They are listed because the
-    // invariant this module enforces starts with "every host module is
-    // scanned" — an unlisted module would escape the rule whether or not
-    // it happens to contain registrations.
+    // `host_log`, `host_trace`, `host_kv`, `host_queue`, `host_dns` and
+    // `host_sql` bind through the generated `add_to_linker` rather than
+    // `func_wrap` (records, variants and resources need the canonical ABI's
+    // lifting), like `host_http` below — so they contribute no
+    // `Registration` and do not change `EXPECTED_REGISTRATIONS`. They are
+    // listed because the invariant this module enforces starts with "every
+    // host module is scanned" — an unlisted module would escape the rule
+    // whether or not it happens to contain registrations.
     ("host_log.rs", include_str!("host_log.rs")),
     ("host_queue.rs", include_str!("host_queue.rs")),
     ("host_secrets.rs", include_str!("host_secrets.rs")),
+    ("host_sql.rs", include_str!("host_sql.rs")),
     ("host_trace.rs", include_str!("host_trace.rs")),
     // Read so the "every host module is scanned" test can see it, even though it
     // registers no `func_wrap` of its own.

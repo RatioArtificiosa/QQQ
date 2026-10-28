@@ -242,6 +242,20 @@ pub struct StoreData {
     /// every request of the deployment needs no locking.
     pub dns: crate::host_dns::DnsView,
 
+    /// This instance's SQL view — `HOST-036`.
+    ///
+    /// Deploy-resolved config: the allowlist, modes, and file paths. Cloned
+    /// per request (the `Arc` makes the clone cheap); the files are the
+    /// shared state, so no backend needs sharing.
+    pub sql: crate::host_sql::SqlView,
+
+    /// This instance's SQL state — `HOST-036`.
+    ///
+    /// Connections, prepared statements, and open transactions for this
+    /// request. Fresh per instance, dropped with the store — a handle
+    /// cannot outlive the execution it describes.
+    pub sql_state: crate::host_sql::SqlInstanceState,
+
     /// This request's hold on its tenant's shared output budget, if any.
     ///
     /// `None` is the standalone per-instance budget every existing caller
@@ -413,6 +427,11 @@ impl Default for StoreData {
             // the manifest's dns stanza resolves nothing, which is the
             // safe reading of "no names declared".
             dns: crate::host_dns::DnsView::default(),
+            // No databases: an instance built without the manifest's sql
+            // entries opens nothing, which is the safe reading of "no
+            // databases declared".
+            sql: crate::host_sql::SqlView::default(),
+            sql_state: crate::host_sql::SqlInstanceState::default(),
             tenant_output: None,
             // An empty environment and no wall clock: the deny-by-default answer
             // for a store that was not built from a manifest. The `expect` is
@@ -516,6 +535,11 @@ impl StoreData {
             // the manifest's dns stanza resolves nothing, which is the
             // safe reading of "no names declared".
             dns: crate::host_dns::DnsView::default(),
+            // No databases: an instance built without the manifest's sql
+            // entries opens nothing, which is the safe reading of "no
+            // databases declared".
+            sql: crate::host_sql::SqlView::default(),
+            sql_state: crate::host_sql::SqlInstanceState::default(),
             tenant_output,
             // Derived from the grants so a store built this way permits exactly
             // what the grant set says -- no more, and no less.
@@ -654,6 +678,11 @@ impl StoreData {
             // the manifest's dns stanza resolves nothing, which is the
             // safe reading of "no names declared".
             dns: crate::host_dns::DnsView::default(),
+            // No databases: an instance built without the manifest's sql
+            // entries opens nothing, which is the safe reading of "no
+            // databases declared".
+            sql: crate::host_sql::SqlView::default(),
+            sql_state: crate::host_sql::SqlInstanceState::default(),
             tenant_output: None,
             wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
@@ -799,6 +828,24 @@ impl StoreData {
     #[must_use]
     pub fn with_dns(mut self, dns: crate::host_dns::DnsView) -> Self {
         self.dns = dns;
+        self
+    }
+
+    /// Set this instance's SQL view directly — `HOST-036`.
+    ///
+    /// What tests use: the deploy layer resolves the manifest's database
+    /// list once, and a test that sets the same view exercises the
+    /// identical enforcement the guest sees in production.
+    ///
+    /// ```
+    /// let view = qqq_host::host_sql::SqlView::default();
+    /// let data = qqq_host::linker::StoreData::new(qqq_cap::resolve::GrantSet::empty())
+    ///     .with_sql(view);
+    /// assert!(data.sql.config.databases.is_empty());
+    /// ```
+    #[must_use]
+    pub fn with_sql(mut self, sql: crate::host_sql::SqlView) -> Self {
+        self.sql = sql;
         self
     }
 
@@ -1551,6 +1598,9 @@ pub fn build_linker<'a>(
             "qqq:dns@1.0.0" => {
                 crate::host_dns::register(&mut linker, grants)?;
             }
+            "qqq:sql@1.0.0" => {
+                crate::host_sql::register(&mut linker, grants)?;
+            }
             // `qqq:http` is the interface a guest both **imports** and **exports**
             // (see `host_http`'s module docs for why the import exists even when the
             // guest never calls `send`). Registering it here is what turns a granted
@@ -1566,15 +1616,15 @@ pub fn build_linker<'a>(
             "qqq:http@1.0.0" => {
                 let _bound = crate::host_http::register(&mut linker, grants)?;
             }
-            // QQQ-STUB(CON-009): `qqq:fs` and `qqq:sql` have no
+            // QQQ-STUB(CON-009): `qqq:fs` has no
             // registered interface yet. `qqq:clock`, `qqq:crypto`,
             // `qqq:http`, `qqq:secrets`, `qqq:env`, `qqq:log`, `qqq:trace`,
-            // `qqq:kv`, `qqq:queue` and `qqq:dns` have arms (`HOST-028` owns
-            // the secrets binding, `HOST-029` env, `HOST-030` log,
-            // `HOST-031` trace, `HOST-032` kv, `HOST-033` queue,
-            // `HOST-035` dns; `HOST-034` fs and `HOST-036` sql own the
-            // other two — `HOST-034` is blocked on a WIT constructor, see
-            // its `[!]` item).
+            // `qqq:kv`, `qqq:queue`, `qqq:dns` and `qqq:sql` have arms
+            // (`HOST-028` owns the secrets binding, `HOST-029` env,
+            // `HOST-030` log, `HOST-031` trace, `HOST-032` kv,
+            // `HOST-033` queue, `HOST-035` dns, `HOST-036` sql;
+            // `HOST-034` fs owns the remaining one — `HOST-034` is blocked
+            // on a WIT constructor, see its `[!]` item).
             // Recording the gap keeps a
             // partially-implemented milestone honest: a component that imports
             // the others gets a clear diagnostic naming the capability, not
@@ -1603,7 +1653,7 @@ pub fn build_linker<'a>(
             //
             // `recheck` itself is called from its own three tests and from no
             // invocation path yet: the host interfaces that would call it —
-            // `qqq:fs`, `qqq:sql`, `qqq:http` and the rest — are the ones this
+            // `qqq:fs`, `qqq:http` and the rest — are the ones this
             // stub records as unbound. That is the honest state, and it is
             // recorded here rather than left for a reader to discover by
             // searching for callers.
@@ -1825,6 +1875,11 @@ fn build_linker_v03<'a>(
 /// Returns a `QQQ-6004` error naming the capability and the missing interface,
 /// so a developer sees *"`qqq:crypto@1.0.0` is granted but this build has no
 /// implementation"* rather than Wasmtime's generic "unknown import".
+///
+/// ```
+/// let err = qqq_host::linker::describe_gap(qqq_cap::Capability::FsRead);
+/// assert_eq!(err.id(), "QQQ-6004");
+/// ```
 #[must_use]
 pub fn describe_gap(capability: Capability) -> qqq_core::Error {
     let iface = interface_for(capability).unwrap_or("<unmapped>");
@@ -1858,6 +1913,20 @@ pub fn describe_gap(capability: Capability) -> qqq_core::Error {
 ///
 /// Returns `QQQ-4003` with the full resolution context when the capability is
 /// not granted, so the error names *what* was denied and *how* to fix it.
+///
+/// ```
+/// use qqq_cap::manifest::Manifest;
+/// use qqq_cap::resolve::GrantSet;
+///
+/// let manifest = Manifest::parse(
+///     "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+///      [capabilities.crypto]\nhash = [\"sha256\"]\n",
+/// )
+/// .expect("manifest parses");
+/// let data = qqq_host::linker::StoreData::new(GrantSet::from_manifest(&manifest));
+/// assert!(qqq_host::linker::recheck(&data, qqq_cap::Capability::CryptoHash).is_none());
+/// assert!(qqq_host::linker::recheck(&data, qqq_cap::Capability::SqlQuery).is_some());
+/// ```
 #[must_use]
 pub fn recheck(data: &StoreData, capability: Capability) -> Option<qqq_core::Error> {
     if data.grants.grants(capability) {
@@ -2433,6 +2502,14 @@ mod tests {
             (
                 "[capabilities.clock]\nmonotonic = true\n",
                 Capability::ClockMonotonic,
+            ),
+            (
+                "[[capabilities.sql]]\nname = \"orders\"\ndriver = \"sqlite\"\nhost = \":memory:\"\n",
+                Capability::SqlQuery,
+            ),
+            (
+                "[[capabilities.sql]]\nname = \"orders\"\ndriver = \"sqlite\"\nhost = \":memory:\"\nexecute = true\n",
+                Capability::SqlExecute,
             ),
         ] {
             let src = format!("[package]\nname = \"a\"\nversion = \"0.1.0\"\n{stanza}");

@@ -225,6 +225,15 @@ pub struct StoreData {
     /// request (both halves are `Arc`s), never re-resolved per call.
     pub kv: crate::host_kv::KvView,
 
+    /// This instance's queue view — `HOST-033`.
+    ///
+    /// Deploy-resolved config plus the shared backend: every request of one
+    /// deployment publishes to and receives from the same queues, which is
+    /// what makes the queue a queue rather than a per-request scratch
+    /// buffer. Cloned per request (both halves are `Arc`s), never
+    /// re-resolved per call.
+    pub queue: crate::host_queue::QueueView,
+
     /// This request's hold on its tenant's shared output budget, if any.
     ///
     /// `None` is the standalone per-instance budget every existing caller
@@ -388,6 +397,10 @@ impl Default for StoreData {
             // without the manifest's kv stanza serves nothing, which is
             // the safe reading of "no stores declared".
             kv: crate::host_kv::KvView::default(),
+            // No queues and a fresh empty backend: an instance built
+            // without the manifest's queue entries serves nothing, which is
+            // the safe reading of "no queues declared".
+            queue: crate::host_queue::QueueView::default(),
             tenant_output: None,
             // An empty environment and no wall clock: the deny-by-default answer
             // for a store that was not built from a manifest. The `expect` is
@@ -483,6 +496,10 @@ impl StoreData {
             // without the manifest's kv stanza serves nothing, which is
             // the safe reading of "no stores declared".
             kv: crate::host_kv::KvView::default(),
+            // No queues and a fresh empty backend: an instance built
+            // without the manifest's queue entries serves nothing, which is
+            // the safe reading of "no queues declared".
+            queue: crate::host_queue::QueueView::default(),
             tenant_output,
             // Derived from the grants so a store built this way permits exactly
             // what the grant set says -- no more, and no less.
@@ -613,6 +630,10 @@ impl StoreData {
             // without the manifest's kv stanza serves nothing, which is
             // the safe reading of "no stores declared".
             kv: crate::host_kv::KvView::default(),
+            // No queues and a fresh empty backend: an instance built
+            // without the manifest's queue entries serves nothing, which is
+            // the safe reading of "no queues declared".
+            queue: crate::host_queue::QueueView::default(),
             tenant_output: None,
             wasi,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
@@ -720,6 +741,25 @@ impl StoreData {
     #[must_use]
     pub fn with_kv(mut self, kv: crate::host_kv::KvView) -> Self {
         self.kv = kv;
+        self
+    }
+
+    /// Set this instance's queue view directly — `HOST-033`.
+    ///
+    /// What tests use: the deploy layer resolves the manifest's queue list
+    /// once and shares one backend across the deployment, and a test that
+    /// sets the same view exercises the identical enforcement the guest
+    /// sees in production.
+    ///
+    /// ```
+    /// let view = qqq_host::host_queue::QueueView::default();
+    /// let data = qqq_host::linker::StoreData::new(qqq_cap::resolve::GrantSet::empty())
+    ///     .with_queue(view);
+    /// assert!(data.queue.config.queues.is_empty());
+    /// ```
+    #[must_use]
+    pub fn with_queue(mut self, queue: crate::host_queue::QueueView) -> Self {
+        self.queue = queue;
         self
     }
 
@@ -1466,6 +1506,9 @@ pub fn build_linker<'a>(
             "qqq:kv@1.0.0" => {
                 crate::host_kv::register(&mut linker, grants)?;
             }
+            "qqq:queue@1.0.0" => {
+                crate::host_queue::register(&mut linker, grants)?;
+            }
             // `qqq:http` is the interface a guest both **imports** and **exports**
             // (see `host_http`'s module docs for why the import exists even when the
             // guest never calls `send`). Registering it here is what turns a granted
@@ -1481,13 +1524,13 @@ pub fn build_linker<'a>(
             "qqq:http@1.0.0" => {
                 let _bound = crate::host_http::register(&mut linker, grants)?;
             }
-            // QQQ-STUB(CON-009): `qqq:fs`, `qqq:sql`,
-            // `qqq:queue` and `qqq:dns` have no registered interface yet.
-            // `qqq:clock`, `qqq:crypto`, `qqq:http`, `qqq:secrets`,
-            // `qqq:env`, `qqq:log`, `qqq:trace` and `qqq:kv` have arms
-            // (`HOST-028` owns the secrets binding, `HOST-029` env,
-            // `HOST-030` log, `HOST-031` trace, `HOST-032` kv;
-            // `HOST-033`..`HOST-036` own the other four).
+            // QQQ-STUB(CON-009): `qqq:fs`, `qqq:sql` and `qqq:dns` have no
+            // registered interface yet. `qqq:clock`, `qqq:crypto`,
+            // `qqq:http`, `qqq:secrets`, `qqq:env`, `qqq:log`, `qqq:trace`,
+            // `qqq:kv` and `qqq:queue` have arms (`HOST-028` owns the
+            // secrets binding, `HOST-029` env, `HOST-030` log, `HOST-031`
+            // trace, `HOST-032` kv, `HOST-033` queue; `HOST-034`..`HOST-036`
+            // own the other three).
             // Recording the gap keeps a
             // partially-implemented milestone honest: a component that imports
             // the others gets a clear diagnostic naming the capability, not

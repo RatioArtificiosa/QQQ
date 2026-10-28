@@ -1098,6 +1098,9 @@ pub fn execute(loaded: &LoadedManifest, opts: &RunOptions) -> Result<RunOutput> 
     // The manifest's store list becomes the guest-visible kv allowlist,
     // resolved once here; the backend is fresh per run, like the instance.
     inst_opts.kv = crate::kv::view_for_manifest(&loaded.manifest);
+    // The manifest's queue list becomes the guest-visible queue allowlist,
+    // resolved once here; the backend is fresh per run, like the instance.
+    inst_opts.queue = crate::queue::view_for_manifest(&loaded.manifest);
     if let Some(log) = &replay_sink {
         inst_opts.record_to(std::sync::Arc::clone(log));
     }

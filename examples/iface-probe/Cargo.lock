@@ -126,6 +126,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-queue"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "probe-secrets"
 version = "0.1.0"
 dependencies = [

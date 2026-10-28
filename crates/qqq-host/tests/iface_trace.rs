@@ -20,21 +20,22 @@ use qqq_host::{Instance, LimitSet, PreparedComponent};
 
 fn probe_component() -> Option<Vec<u8>> {
     use std::sync::OnceLock;
-    static BUILT: OnceLock<bool> = OnceLock::new();
-    let workspace =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
-    let artifact = workspace.join("target/wasm32-wasip2/release/probe_trace.wasm");
-    if !artifact.is_file() {
-        // Built once per test process: concurrent tests share the single
-        // build rather than racing cargo against itself.
-        let target_present = *BUILT.get_or_init(|| {
+    // Built once per test process and cached as bytes: concurrent tests
+    // share one build, and every run rebuilds — a stale artifact from an
+    // edited guest can never pass silently, because no presence check
+    // short-circuits the build. Cargo itself no-ops when fresh.
+    static ARTIFACT: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    ARTIFACT
+        .get_or_init(|| {
+            let workspace =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
             let has_target = std::process::Command::new("rustc")
                 .args(["--print", "target-list"])
                 .output()
                 .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2"));
             if !has_target {
                 println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
-                return false;
+                return None;
             }
             // The toolchain is present (checked above), so a build failure
             // is a real breakage, not a missing prerequisite: fail loudly
@@ -56,13 +57,10 @@ fn probe_component() -> Option<Vec<u8>> {
                 "probe trace guest build failed with the toolchain present: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            true
-        });
-        if !target_present {
-            return None;
-        }
-    }
-    Some(std::fs::read(&artifact).expect("probe component reads"))
+            let artifact = workspace.join("target/wasm32-wasip2/release/probe_trace.wasm");
+            Some(std::fs::read(&artifact).expect("probe component reads"))
+        })
+        .clone()
 }
 
 fn engine() -> wasmtime::Engine {

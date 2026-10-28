@@ -227,6 +227,13 @@ pub struct GuestApp {
     /// fresh backend unless `serve` sets them, cloned on replacement like
     /// the secrets — a rotation must neither drop stored data nor fork it.
     kv: qqq_host::host_kv::KvView,
+    /// This app's queue view — `HOST-033`.
+    ///
+    /// Deploy-resolved config plus the shared backend: empty config and a
+    /// fresh backend unless `serve` sets them, cloned on replacement like
+    /// the key-value view — a rotation must neither drop queued work nor
+    /// fork it.
+    queue: qqq_host::host_queue::QueueView,
     /// The epoch ticker period for this app's engine lineage — `F-17`.
     ///
     /// Derived once from the limits via the helper, shared by the ticker
@@ -436,6 +443,7 @@ impl GuestApp {
             secrets: qqq_host::host_secrets::SecretStore::new(),
             env: std::collections::BTreeMap::new(),
             kv: qqq_host::host_kv::KvView::default(),
+            queue: qqq_host::host_queue::QueueView::default(),
             epoch_tick: tick,
         })
     }
@@ -468,6 +476,15 @@ impl GuestApp {
     /// installed before serving, cloned on replacement.
     pub(crate) fn set_kv(&mut self, kv: qqq_host::host_kv::KvView) {
         self.kv = kv;
+    }
+
+    /// Set the queue view new instances serve `qqq:queue` from — `HOST-033`.
+    ///
+    /// Crate-visible for the same reason: resolved once by `serve` from the
+    /// manifest's queue list (sharing one backend across the deployment),
+    /// installed before serving, cloned on replacement.
+    pub(crate) fn set_queue(&mut self, queue: qqq_host::host_queue::QueueView) {
+        self.queue = queue;
     }
 
     /// Run guest instances deterministically — `F-20`.
@@ -544,6 +561,10 @@ impl GuestApp {
         // backend would lose every stored value, and one that forked it
         // would split one store into two mutually invisible halves.
         next.kv = self.kv.clone();
+        // And the queue view with them: a rotation that dropped the
+        // backend would lose every queued message, and one that forked it
+        // would split one queue into two mutually invisible halves.
+        next.queue = self.queue.clone();
         // And the admission counter with it: a rotation that reset the
         // virtual clock would replay already-seen ticks, and one that kept
         // counting on a rotated copy would fork it.
@@ -961,6 +982,10 @@ impl GuestApp {
         // the backend is the deployment's shared map, so a value one
         // request stores is visible to the next.
         options.kv = self.kv.clone();
+        // And the queue view: the config is the queue allowlist and the
+        // backend is the deployment's shared queues, so a message one
+        // request publishes is visible to the next request's receive.
+        options.queue = self.queue.clone();
         let instance = Instance::create_with(
             &self.engine,
             &self.prepared,
@@ -2213,19 +2238,21 @@ mod tests {
     /// uses it so the serve-path helpers stay one lookup apart.
     fn kv_probe_component() -> Option<Vec<u8>> {
         use std::sync::OnceLock;
-        static BUILT: OnceLock<bool> = OnceLock::new();
-        let workspace =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/iface-probe");
-        let artifact = workspace.join("target/wasm32-wasip2/release/probe_kv.wasm");
-        if !artifact.is_file() {
-            let target_present = *BUILT.get_or_init(|| {
+        // Cached as bytes, rebuilt on every run: a stale artifact from an
+        // edited guest can never pass silently. Cargo itself no-ops when
+        // fresh.
+        static ARTIFACT: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+        ARTIFACT
+            .get_or_init(|| {
+                let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../examples/iface-probe");
                 let has_target = std::process::Command::new("rustc")
                     .args(["--print", "target-list"])
                     .output()
                     .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2"));
                 if !has_target {
                     println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
-                    return false;
+                    return None;
                 }
                 let output = std::process::Command::new("cargo")
                     .args([
@@ -2243,13 +2270,52 @@ mod tests {
                     "probe kv guest build failed with the toolchain present: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
-                true
-            });
-            if !target_present {
-                return None;
-            }
-        }
-        Some(std::fs::read(&artifact).expect("probe component reads"))
+                let artifact = workspace.join("target/wasm32-wasip2/release/probe_kv.wasm");
+                Some(std::fs::read(&artifact).expect("probe component reads"))
+            })
+            .clone()
+    }
+
+    /// The queue probe component, built by the real toolchain on first use —
+    /// same shape as the kv helper above.
+    fn queue_probe_component() -> Option<Vec<u8>> {
+        use std::sync::OnceLock;
+        // Cached as bytes, rebuilt on every run: a stale artifact from an
+        // edited guest can never pass silently. Cargo itself no-ops when
+        // fresh.
+        static ARTIFACT: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+        ARTIFACT
+            .get_or_init(|| {
+                let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../examples/iface-probe");
+                let has_target = std::process::Command::new("rustc")
+                    .args(["--print", "target-list"])
+                    .output()
+                    .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32-wasip2"));
+                if !has_target {
+                    println!("SKIP: no wasm32-wasip2 target; probe guest cannot build");
+                    return None;
+                }
+                let output = std::process::Command::new("cargo")
+                    .args([
+                        "build",
+                        "--release",
+                        "--target",
+                        "wasm32-wasip2",
+                        "--locked",
+                    ])
+                    .current_dir(&workspace)
+                    .output()
+                    .expect("cargo runs");
+                assert!(
+                    output.status.success(),
+                    "probe queue guest build failed with the toolchain present: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let artifact = workspace.join("target/wasm32-wasip2/release/probe_queue.wasm");
+                Some(std::fs::read(&artifact).expect("probe component reads"))
+            })
+            .clone()
     }
 
     #[test]
@@ -2652,10 +2718,7 @@ mod tests {
         };
         let mut app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)
             .expect("probe app builds");
-        app.set_kv(qqq_host::host_kv::KvView::new(
-            std::sync::Arc::new(qqq_host::host_kv::KvConfig::new(vec!["s".to_owned()], true)),
-            std::sync::Arc::new(std::sync::Mutex::new(qqq_host::host_kv::KvBackend::new())),
-        ));
+        app.set_kv(crate::kv::view_for_manifest(&manifest));
         let response = app
             .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
             .expect("the probe request serves");
@@ -2701,6 +2764,112 @@ mod tests {
             second_body.contains("keys=ok:a,b"),
             "the second request serves the same summary: {second_body}"
         );
+    }
+
+    /// Queue work travels the serve path against the deployment's shared
+    /// backend.
+    ///
+    /// Builds the app the way `serve` does (grants from a manifest, config
+    /// resolved once, one backend installed via the setter), then drives a
+    /// real request through `handle_request`. The probe guest runs the same
+    /// scenario the `iface_queue` e2e covers, and the body carries the
+    /// summary.
+    ///
+    /// The serve-specific proof is cross-request visibility: after the first
+    /// request the shared backend is empty (the scenario drains what it
+    /// publishes), so this test publishes one message directly into the
+    /// backend and shows the second request's scenario coexists with it —
+    /// the queue the guest sees is the deployment's queue, not a
+    /// per-request scratch buffer. Redelivery across requests is proven at
+    /// the backend boundary in `host_queue`'s own tests, where the clock is
+    /// drivable; the serve path proves the sharing.
+    #[test]
+    fn queue_flows_from_manifest_to_shared_backend() {
+        let Some(bytes) = queue_probe_component() else {
+            return;
+        };
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
+             [[capabilities.queue]]\nname = \"q\"\ndirection = \"publish\"\n\
+             [[capabilities.queue]]\nname = \"q\"\ndirection = \"subscribe\"\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("probe manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let engine = wasmtime::Engine::new(&cfg.to_wasmtime_config().expect("engine config"))
+            .expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes: 64 * 1024 * 1024,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        let mut app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)
+            .expect("probe app builds");
+        app.set_queue(crate::queue::view_for_manifest(&manifest));
+        let response = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the probe request serves");
+        let body = String::from_utf8(response.body.clone()).expect("the summary is UTF-8");
+        for expected in [
+            "publish=ok",
+            "publish-many=ok",
+            "receive=ok:1",
+            "ack=ok",
+            "receive-empty=ok:none",
+            "redeliver=ok:2",
+            "redeliver-ack=ok",
+            "queues=q",
+            "unlisted=err:queue-not-configured",
+            "big-message=err:message-too-large",
+        ] {
+            assert!(
+                body.contains(expected),
+                "the served summary must report {expected}: {body}"
+            );
+        }
+        for unexpected in ["unexpected", "none-unexpected", "err:backend-failed"] {
+            assert!(
+                !body.contains(unexpected),
+                "the served summary must never report {unexpected}: {body}"
+            );
+        }
+        // The scenario drains what it publishes: the shared backend is
+        // empty afterwards, so a message published directly into it is
+        // visible to the next request exactly once — guest to guest,
+        // through the deployment's queue rather than any per-request
+        // scratch state.
+        {
+            let mut backend = app.queue.backend.lock().expect("backend locks");
+            assert_eq!(backend.pending_count("q"), 0);
+            backend.publish("q", b"keep".to_vec(), 0).expect("fits");
+        }
+        let second = app
+            .handle_request(&head(qqq_serve::Method::Get, "/"), None, "test-tenant")
+            .expect("the second probe request serves");
+        let second_body = String::from_utf8(second.body.clone()).expect("the summary is UTF-8");
+        // The second run's scenario still reports its full summary — and in
+        // doing so it necessarily received the first request's leftover:
+        // its first receive takes the head of the queue, which is `keep`.
+        assert!(
+            second_body.contains("receive=ok:1"),
+            "the guest scenario still runs end to end: {second_body}"
+        );
+        {
+            let backend = app.queue.backend.lock().expect("backend locks");
+            // `keep` is gone: something received and acknowledged it, and
+            // the only receivers are the guests. The directly published
+            // message crossed from one request's backend write into a later
+            // request's guest read — the sharing this test exists to prove.
+            assert_eq!(
+                backend.pending_count("q"),
+                0,
+                "the leftover was received, not stranded"
+            );
+            assert_eq!(backend.in_flight_count("q"), 0);
+        }
     }
 
     fn head(method: qqq_serve::Method, target: &str) -> qqq_serve::RequestHead {

@@ -645,8 +645,11 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
         keys: Vec<String>,
     ) -> std::result::Result<Vec<Option<Vec<u8>>>, WitKvError> {
         check_read(self, &store)?;
+        // Count is quota, not entry size: 129 tiny keys fail `quota-exceeded`
+        // because no single key is too large, and blaming an entry would
+        // misdirect the guest. (Parallel to queue's batch cap.)
         if keys.len() > MAX_KV_BATCH_KEYS {
-            return Err(WitKvError::EntryTooLarge);
+            return Err(WitKvError::QuotaExceeded);
         }
         // Lengths validated before the lock: one oversize key must not
         // allocate its lookup, and the batch reads as one atomic snapshot —
@@ -1004,15 +1007,16 @@ mod tests {
         );
     }
 
-    /// Oversize batches fail before any read: one call cannot ask for an
-    /// unbounded allocation.
+    /// Oversize batches fail as quota, not as oversize entries: no single
+    /// key is too large, so blaming an entry would misdirect the guest at
+    /// 129 tiny keys. (Parallel to queue's batch cap.)
     #[test]
     fn oversize_batches_fail_closed() {
         let mut data = granted_store(true);
         let keys: Vec<String> = (0..=MAX_KV_BATCH_KEYS).map(|i| format!("k{i}")).collect();
         let err = bindings::qqq::kv::store::Host::get_many(&mut data, "s".to_owned(), keys)
             .expect_err("too many keys");
-        assert!(matches!(err, WitKvError::EntryTooLarge));
+        assert!(matches!(err, WitKvError::QuotaExceeded));
     }
 
     /// The register links only when a kv grant is present.
@@ -1025,7 +1029,7 @@ mod tests {
         )"#;
         const NAMED: &str = r#"(component
           (import "qqq:kv/store@1.0.0" (instance $k
-            (export "get" (func (param "a" string) (param "b" string)))))
+            (export "stores" (func (result (list string))))))
           (core module $m)
           (core instance $i (instantiate $m))
         )"#;
@@ -1046,6 +1050,10 @@ mod tests {
         )
         .expect("manifest parses");
         link(&GrantSet::from_manifest(&manifest), EMPTY).expect("a granted import links");
+        // And a granted import of a NAMED function links too: the empty
+        // shape above proves gating, and this proves the named shape the
+        // guest actually imports resolves under the same grant.
+        link(&GrantSet::from_manifest(&manifest), NAMED).expect("granted names link");
         let err = link(&GrantSet::empty(), NAMED).expect_err("no grant means no instance");
         assert!(
             format!("{err:#}").contains("qqq:kv/store"),

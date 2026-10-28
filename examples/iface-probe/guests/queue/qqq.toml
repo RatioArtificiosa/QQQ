@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+
+// Probe guest that exercises `qqq:queue/messaging` and reports a summary
+// the host asserts on. Receives before it publishes nothing: every receive
+// below follows its publish, so the summary proves messages cross the
+// boundary in both directions through one shared backend.
+
+[package]
+name = "probe-queue"
+version = "0.1.0"
+
+[build]
+language = "rust"
+target = "wasm32-wasip2"
+profile = "release"
+
+[[capabilities.queue]]
+name = "q"
+direction = "publish"
+
+[[capabilities.queue]]
+name = "q"
+direction = "subscribe"
+
+[capabilities.http]
+server = true

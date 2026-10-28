@@ -414,6 +414,13 @@ pub struct InstanceOptions {
     /// store list (sharing one backend across the deployment); `prepare`
     /// copies it into the store the same way it carries every other option.
     pub kv: crate::host_kv::KvView,
+    /// This instance's queue view — `HOST-033`.
+    ///
+    /// Empty config and a fresh backend unless set: the default is the safe
+    /// reading of "no queues declared". Runners set it from the manifest's
+    /// queue list (sharing one backend across the deployment); `prepare`
+    /// copies it into the store the same way it carries every other option.
+    pub queue: crate::host_queue::QueueView,
 }
 
 impl InstanceOptions {
@@ -1332,6 +1339,9 @@ impl ReadyStore {
         // the backend is the deployment's shared map, both cloned per
         // request (the `Arc`s make the clone cheap and the sharing real).
         data.kv = opts.kv.clone();
+        // And the queue view with them: same shape, same reason — a value
+        // one request publishes is visible to the next request's receive.
+        data.queue = opts.queue.clone();
         // The egress policy travels with the store like every other option:
         // a runner sets `opts.egress` from the manifest and prepare carries
         // it in, so production instances enforce declared destinations

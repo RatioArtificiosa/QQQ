@@ -376,7 +376,13 @@ fn io_interfaces() -> Vec<HostInterface> {
         iface(
             "qqq:queue@1.0.0",
             &[QueuePublish, QueueSubscribe],
-            false,
+            // Implemented: `host_queue::register` binds `messaging` with
+            // deploy-resolved per-direction allowlist, in-memory backend
+            // with lease expiry and redelivery, and WIT-error mapping
+            // (`HOST-033`). The `implemented` flags are claims the pinning
+            // test below pins, so flipping one without the host code fails
+            // the build.
+            true,
             "Publish and subscribe with acknowledgement",
         ),
         iface(
@@ -709,6 +715,7 @@ mod tests {
                 "qqq:env@1.0.0",
                 "qqq:kv@1.0.0",
                 "qqq:log@1.0.0",
+                "qqq:queue@1.0.0",
                 "qqq:secrets@1.0.0",
                 "qqq:trace@1.0.0"
             ],

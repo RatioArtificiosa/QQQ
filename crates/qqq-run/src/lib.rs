@@ -61,6 +61,8 @@ pub mod mcp;
 /// `qqqai openapi` — an OpenAPI 3.0 description of an app, from its manifest.
 pub mod openapi;
 pub mod output;
+/// Resolve `qqq:queue` configuration at the deploy layer — `HOST-033`.
+pub mod queue;
 pub mod run;
 /// `qqqai new` — the scaffold generator.
 ///

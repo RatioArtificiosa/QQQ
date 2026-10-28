@@ -1061,6 +1061,27 @@ struct BuiltDispatch {
     deterministic: bool,
 }
 
+/// Install the deploy-resolved shared backends new instances serve from.
+///
+/// Extracted from `build_dispatch` when the queue arm pushed it over the
+/// hundred-line limit: one call site, and the sharing it installs is one
+/// idea (per-request views over per-deployment backends), not two.
+fn install_shared_backends(
+    app: &mut crate::guest_handler::GuestApp,
+    manifest: &qqq_cap::manifest::Manifest,
+) {
+    // The manifest's store list becomes the guest-visible kv allowlist,
+    // resolved once here; the backend is shared across every request this
+    // deployment serves, so a value one request stores is visible to the
+    // next.
+    app.set_kv(crate::kv::view_for_manifest(manifest));
+    // The manifest's queue list becomes the guest-visible queue allowlist,
+    // resolved once here; the backend is shared across every request this
+    // deployment serves, so a message one request publishes is visible to
+    // the next request's receive.
+    app.set_queue(crate::queue::view_for_manifest(manifest));
+}
+
 fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltDispatch> {
     let Some(artifact) = find_artifact(
         project_dir(loaded),
@@ -1148,11 +1169,7 @@ fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltD
     app.set_env(crate::env::resolve_env_map(&loaded.manifest, &|name| {
         std::env::var_os(name).map(|v| v.as_os_str().as_encoded_bytes().to_vec())
     }));
-    // The manifest's store list becomes the guest-visible kv allowlist,
-    // resolved once here; the backend is shared across every request this
-    // deployment serves, so a value one request stores is visible to the
-    // next.
-    app.set_kv(crate::kv::view_for_manifest(&loaded.manifest));
+    install_shared_backends(&mut app, &loaded.manifest);
 
     // A metrics path that collides with a declared route would silently shadow one of them, and
     // neither failure is visible from outside -- so it is refused here, where the operator can act.

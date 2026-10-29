@@ -1,9 +1,8 @@
 Gate and red-proof evidence for the core-runtime closure handoff round
-(2026-10-29 work).
-
-Commit: <filled at commit time> "docs: record tenant-resolve/H2/WS-SSE as
-owner handoffs with red-first boundary pins" on main. Tree clean at both
-gate runs below; the red-proofs mutate one file each and restore it
+(2026-10-29 work): ARCH-017, SRV-023, SRV-024 recorded as owner
+handoffs with red-first boundary pins, handoff dossiers in
+docs/runtime-handoff-2026-10-29.md. Tree clean at the gate run
+below; the red-proofs mutate one file each and restore it
 byte-identical (verified by empty `git diff` after each restore).
 
 HOW TO REPRODUCE

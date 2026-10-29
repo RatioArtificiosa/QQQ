@@ -27,9 +27,10 @@ FILES
     Full gate on the evidence commit: GATE GREEN, 148 steps, zero
     failures, exit 0.
   xtask-ci-REG-green.log
-    Full gate on the REG-closure evidence tree (86ec3da, clean):
-    GATE GREEN, 150 steps, 0 failed. Final verification re-ran it at
-    CARGO_BUILD_JOBS=4 with the same verdict; this file is that run.
+    Full gate on the REG-closure evidence tree (clean):
+    GATE GREEN, 150 steps, 0 failed. Re-run on the current tree at
+    CARGO_BUILD_JOBS=4 with the same verdict after the llms-index fix;
+    this file is that latest run.
   verify-contract.log / verify-contract-summary.log
     Plan verification step 2: clean tree, frozen-surface diff (47+/0-,
     docs+tests only), core-only wasm build, pkg/abi suites, registry note.

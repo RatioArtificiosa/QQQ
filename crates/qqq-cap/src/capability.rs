@@ -595,6 +595,28 @@ mod tests {
         assert_eq!(Capability::SecretUse.kind(), CapabilityKind::Operation);
     }
 
+    /// REG-018: the kind taxonomy is closed at three until an ADR re-derives it.
+    ///
+    /// The `match` below deliberately has no wildcard arm: a fourth
+    /// `CapabilityKind` variant fails *compilation* here, and that failure is
+    /// the tripwire — the author must write the ADR §4.8.7 requires before the
+    /// gate goes green again, rather than discovering the rule in review.
+    #[test]
+    fn capability_kinds_are_exactly_three_until_an_adr_says_otherwise() {
+        for kind in [
+            CapabilityKind::Resource,
+            CapabilityKind::Operation,
+            CapabilityKind::Ambient,
+        ] {
+            let name = match kind {
+                CapabilityKind::Resource => "resource",
+                CapabilityKind::Operation => "operation",
+                CapabilityKind::Ambient => "ambient",
+            };
+            assert_eq!(name, kind.as_str());
+        }
+    }
+
     /// `crypto.random` and the clocks are ambient, not operations. If they were
     /// misclassified the resolution pipeline would treat them as scoped
     /// operations and the covert-channel warning would not fire.

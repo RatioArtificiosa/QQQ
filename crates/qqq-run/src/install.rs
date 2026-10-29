@@ -974,4 +974,93 @@ mod tests {
         assert!(text.contains("--locked"), "{text}");
         assert!(text.contains("qqqai install"), "{text}");
     }
+
+    /// REG-015: no install path spawns a subprocess or compiles anything.
+    ///
+    /// Installing a Q-Block must never execute publisher code: no
+    /// `postinstall`, no `build.rs`, no install-time toolchain. The install
+    /// path is `install.rs` + `deps.rs` (this crate) plus the store, lockfile,
+    /// version matching and signature verification it resolves through
+    /// (`qqq-pkg`: `store`, `lock`, `semver`, `signature`). This test reads
+    /// those files and fails on any child-process spawn primitive, so adding
+    /// one breaks the build instead of landing silently.
+    ///
+    /// `std::process::id()` is allowed: reading the caller's own pid for a
+    /// temp-dir name forks nothing. What is forbidden is *spawning*, in any
+    /// spelling: a full `process::` path, a bare `Command::new` (after an
+    /// unaliased import), or an aliased import (`as Cmd`) of anything with
+    /// `process` or `Command` in its path.
+    ///
+    /// The scan covers shipped code only — everything before the test module.
+    /// The cut is pinned, not assumed: the remainder must contain this test's
+    /// own name, so a `#[cfg(test)]` helper added above the test module moves
+    /// the cut loudly instead of silently shrinking the scan. The test itself
+    /// names the forbidden patterns (as this paragraph does), so scanning the
+    /// test module would fail on the guard itself: a self-defeating check is
+    /// one that gets deleted rather than obeyed.
+    #[test]
+    fn install_path_spawns_no_subprocess() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let files = [
+            "src/install.rs",
+            "src/deps.rs",
+            "../qqq-pkg/src/store.rs",
+            "../qqq-pkg/src/lock.rs",
+            "../qqq-pkg/src/semver.rs",
+            "../qqq-pkg/src/signature.rs",
+        ];
+        for rel in files {
+            let path = root.join(rel);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("install-path source must be readable: {path:?}: {e}"));
+            // The cut is pinned, not assumed: everything before the first
+            // full `#[cfg(test)]` attribute line is shipped code, and there
+            // must be exactly one such line — the test module at the end. A
+            // second attribute line (a helper added above the module) would
+            // silently shrink the scan, so it fails here instead. (Mentions
+            // of the attribute inside comments do not count: the match is on
+            // the whole trimmed line.)
+            let mut shipped_lines = Vec::new();
+            let mut cuts = 0;
+            for line in text.lines() {
+                if line.trim() == "#[cfg(test)]" {
+                    cuts += 1;
+                    continue;
+                }
+                if cuts == 0 {
+                    shipped_lines.push(line);
+                }
+            }
+            assert!(
+                cuts == 1,
+                "expected exactly one #[cfg(test)] attribute line in {rel}; the scan cut moved"
+            );
+            let shipped = shipped_lines.join("\n");
+            for (n, line) in shipped.lines().enumerate() {
+                let t = line.trim();
+                if t.starts_with("//") || t.starts_with("///") || t.starts_with('*') {
+                    continue;
+                }
+                assert!(
+                    !t.contains("Command::new("),
+                    "install path must not spawn subprocesses: {rel}:{} contains `Command::new(` outside its tests",
+                    n + 1
+                );
+                if t.contains("process::") {
+                    assert!(
+                        t.contains("process::id"),
+                        "install path must not touch process handles except its own pid: {rel}:{}: {t}",
+                        n + 1
+                    );
+                }
+                if t.starts_with("use ") && t.contains(" as ") {
+                    assert!(
+                        !t.contains("process") && !t.contains("Command"),
+                        "install path must not alias a process primitive: {rel}:{}: {t}",
+                        n + 1
+                    );
+                }
+            }
+        }
+    }
 }

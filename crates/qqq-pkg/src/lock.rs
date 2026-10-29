@@ -30,6 +30,17 @@
 //! that contains it is circular, so the hash is computed over the package list
 //! and then written. The reader recomputes and compares — which is what makes a
 //! hand-edited lockfile detectable rather than silently trusted.
+//!
+//! # Forward compatibility: there is none within a version
+//!
+//! A new field is a version bump, not a minor addition. Every deserialized struct
+//! in this module carries `#[serde(deny_unknown_fields)]`, and `parse` refuses
+//! `version != LOCK_VERSION` — so a lockfile from a newer writer is refused
+//! rather than partially understood. The reason is the same one behind the
+//! covering hash: silently ignoring a field that carries authority information
+//! would be exactly the failure the `caps` field exists to prevent. A reader
+//! that tolerated unknown fields could install a package whose authority it
+//! cannot see. (`REG-011`.)
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1501,6 +1512,20 @@ mod tests {
         let text =
             "[lock]\nversion = 1\n\n[metadata.build]\nlanguage = \"rust\"\nlangauge = \"ts\"\n";
         let err = Lockfile::parse(text).expect_err("must refuse");
+        assert!(matches!(err, LockfileError::Syntax(_)), "{err:?}");
+    }
+
+    /// A package with an unknown field is refused: a newer writer's new
+    /// field must force a version bump, not slide past an old reader.
+    /// This is the forward-compatibility half of `REG-011` (the version half
+    /// is `an_unsupported_version_is_refused_rather_than_ignored`).
+    #[test]
+    fn an_unknown_package_field_is_refused() {
+        let text = format!(
+            "version = {LOCK_VERSION}\n\n\
+             [[package]]\nname = \"x\"\nversion = \"1.0.0\"\nbogus = true\n"
+        );
+        let err = Lockfile::parse(&text).expect_err("must refuse");
         assert!(matches!(err, LockfileError::Syntax(_)), "{err:?}");
     }
 

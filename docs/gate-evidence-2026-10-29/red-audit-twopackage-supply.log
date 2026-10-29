@@ -1,0 +1,22 @@
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+    Finished `test` profile [optimized + debuginfo] target(s) in 11.77s
+     Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
+
+running 1 test
+test audit::tests::a_two_package_lockfile_reports_both_packages_including_sarif ... FAILED
+
+failures:
+
+---- audit::tests::a_two_package_lockfile_reports_both_packages_including_sarif stdout ----
+
+thread 'audit::tests::a_two_package_lockfile_reports_both_packages_including_sarif' (295900) panicked at crates\qqq-run\src\audit.rs:1141:9:
+supply chain must name both declaring packages: 1 dependency(ies) declare authority: a@1.0.0 [dns.resolve]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    audit::tests::a_two_package_lockfile_reports_both_packages_including_sarif
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 665 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p qqq-run --lib`

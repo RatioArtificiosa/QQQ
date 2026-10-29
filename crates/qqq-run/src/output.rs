@@ -1220,6 +1220,68 @@ mod tests {
         assert_eq!(CommandName::parse(""), None);
     }
 
+    /// The CLI surface is exactly these 29 commands — in particular there is
+    /// no `publish`, `source` or `info` verb (`REG-014`, `REG-016`, `REG-019`).
+    ///
+    /// `resolve` is absent from this list deliberately, and its absence is
+    /// not a gap: Proposal §4.8.6's `resolve` happens *inside* `install`
+    /// (`install.rs`: with no registry, resolution is answering which manifest
+    /// dependencies the lockfile already pins). A standalone `qqqai resolve`
+    /// would be a second spelling of half of `install`, so the closed set
+    /// holds here by pointing at it rather than by duplicating it.
+    ///
+    /// Proposal §4.8.6 closes the verb set at four registry verbs; the CLI is
+    /// where a fifth verb would land, so a new command fails here by name and
+    /// forces the §4.8.6 argument to be re-made, not silently extended. The
+    /// list duplicates `all()` deliberately: `all()` is what ships, this is
+    /// what pins it, and the two failing together on the same edit is the
+    /// point (`§O-044`'s lesson, applied to the command surface).
+    #[test]
+    fn the_command_surface_is_exactly_these_29() {
+        let spellings: Vec<&str> = CommandName::all().iter().map(|c| c.as_str()).collect();
+        assert_eq!(
+            spellings,
+            vec![
+                "new",
+                "init",
+                "add",
+                "add-cap",
+                "remove",
+                "install",
+                "update",
+                "build",
+                "run",
+                "dev",
+                "serve",
+                "test",
+                "bench",
+                "fmt",
+                "lint",
+                "inspect",
+                "openapi",
+                "audit",
+                "verify",
+                "caps",
+                "why",
+                "trace",
+                "doctor",
+                "audit-log",
+                "mcp",
+                "schema",
+                "migrate",
+                "--version",
+                "--help",
+            ],
+            "the command surface changed; re-make the §4.8.6 argument for the new verb"
+        );
+        for absent in ["publish", "source", "info"] {
+            assert!(
+                !spellings.contains(&absent),
+                "`{absent}` is not a qqqai verb — `resolve` is the deliberate exception (it happens inside `install`); its checklist item owns the decision to add it"
+            );
+        }
+    }
+
     #[test]
     fn format_selection_prefers_json_lines() {
         assert_eq!(Format::from_flags(false, false), Format::Human);

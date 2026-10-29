@@ -527,6 +527,11 @@ const PY_STEPS: &[Step] = &[
     ),
     Step::py(
         Lane::Par,
+        "gen_capability_catalogue",
+        &["tools/gen_capability_catalogue.py", "--check"],
+    ),
+    Step::py(
+        Lane::Par,
         "gen_llms_txt",
         &["tools/gen_llms_txt.py", "--check"],
     ),
@@ -841,6 +846,11 @@ const PY_STEPS: &[Step] = &[
         Lane::Seq,
         "gen_backlog",
         &["tools/gen_backlog.py", "--self-test"],
+    ),
+    Step::py(
+        Lane::Seq,
+        "gen_capability_catalogue",
+        &["tools/gen_capability_catalogue.py", "--self-test"],
     ),
     Step::py(
         Lane::Seq,

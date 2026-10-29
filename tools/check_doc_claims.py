@@ -54,14 +54,13 @@ named resolver is unambiguous, and a document that has no markers is *unchecked*
 from __future__ import annotations
 
 import argparse
+import collections
 import importlib.util
 import json
-import collections
 import re
 import subprocess
 import sys
 from pathlib import Path
-
 
 # This tool's own stdout must be able to encode what it prints. On a Windows console the stream
 # inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
@@ -134,6 +133,101 @@ def wit_totals() -> dict[str, int]:
     return _WIT_TOTALS
 
 
+def _qblock_declared_namespaces() -> int | None:
+    """Distinct `qqq:<ns>` package roots declared in `wit/*.wit`.
+
+    # What this counts, and why it is not `wit-packages`
+
+    `wit-packages` counts files with a package record; this counts distinct
+    roots (`qqq:clock@1.0.0` -> `qqq:clock`). The two coincide today -- one
+    package per file, one namespace per package -- and the day they diverge
+    (a file with two packages, two packages sharing a root) is the day a
+    document needs to say which fact it means. That is the whole point of
+    naming the resolver rather than the value.
+    """
+    gen = _load_wit_generator()
+    roots = set()
+    for path in sorted((ROOT / "wit").glob("*.wit")):
+        record = gen.parse_wit(path)
+        pkg = record.get("package")
+        if not pkg:
+            return None
+        roots.add(str(pkg).split("@")[0])
+    return len(roots) or None
+
+
+def _qblock_bindable_namespaces() -> int | None:
+    """Typed `[capabilities.*]` stanza fields of `pub struct Capabilities`.
+
+    # What this counts, and what it deliberately excludes
+
+    The count is the stanza fields between `pub struct Capabilities {` and the
+    flattened `other` catch-all in `crates/qqq-cap/src/manifest.rs`. `other`
+    accepts forward-compatible unknown tables but grants nothing, so counting
+    it would claim bindability the host cannot serve. The Rust side pins the
+    same set from the capability names
+    (`bindable_namespaces_are_thirteen_in_both_definitions`); this resolver is
+    the document-facing half of that agreement.
+    """
+    try:
+        text = (ROOT / "crates" / "qqq-cap" / "src" / "manifest.rs").read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return None
+    lines = text.splitlines()
+    try:
+        start = next(
+            i for i, l in enumerate(lines) if l.strip() == "pub struct Capabilities {"
+        )
+    except StopIteration:
+        return None
+    fields = set()
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if stripped.startswith("pub other:"):
+            break
+        m = re.match(r"pub ([a-z][a-z0-9_]*)\s*:", stripped)
+        if m:
+            fields.add(m.group(1))
+    return len(fields) or None
+
+
+def _qblock_bound_capabilities() -> int | None:
+    """Capabilities unlocked by `implemented: true` registry interfaces.
+
+    # What this counts, precisely
+
+    For every `iface("qqq:<ns>@<ver>", &[Caps...], true|false, ...)` entry in
+    `crates/qqq-abi/src/registry.rs`, the capabilities listed when the flag is
+    `true`. That is the set the host will actually serve at instantiation --
+    the runtime half of `unimplemented_capabilities`, derived textually so a
+    document can state it without importing the registry. A flipped flag with
+    no host code moves this number and breaks both this claim and the
+    `bound_interfaces_are_ten_pinned_by_name` test, which is the agreement
+    working as intended.
+    """
+    try:
+        text = (ROOT / "crates" / "qqq-abi" / "src" / "registry.rs").read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return None
+    total = 0
+    seen = 0
+    for block in re.findall(r"(?ms)^\s*iface\(\s*^(.*?)^\s*\),", text):
+        flag = re.search(r"(?m)^\s*(true|false),\s*$", block)
+        caps = re.search(r"&\[(.*?)\]", block, re.DOTALL)
+        if not flag or not caps:
+            return None
+        seen += 1
+        if flag.group(1) == "true":
+            total += len([c for c in caps.group(1).split(",") if c.strip()])
+    if seen == 0:
+        return None
+    return total
+
+
 def _workspace_tests() -> int | None:
     p = subprocess.run(
         ["cargo", "test", "--workspace"],
@@ -198,10 +292,7 @@ def _suite_cases(kind: str | None = None) -> int | None:
     # than the whole. A finding from `§O-380`, and the totals are asserted against it below.
     if kind is None:
         return len(cases)
-    counted = [
-        c for c in cases
-        if (c.get("kind") or "definition") == kind
-    ]
+    counted = [c for c in cases if (c.get("kind") or "definition") == kind]
     return len(counted) or None
 
 
@@ -240,8 +331,16 @@ def _host_bound_modules() -> int | None:
 def _checklist() -> dict[str, int]:
     """The ledger's counts, parsed from the document that owns them."""
     text = (ROOT / "QQQ-Checklist-V1.md").read_text(encoding="utf-8")
-    c = collections.Counter(re.findall(r"^- \[(.)\] \*\*[A-Z]+-\d{3}\*\*", text, re.M))
-    return {"done": c["x"], "open": c[" "], "total": sum(c.values())}
+    c = collections.Counter(
+        re.findall(r"^- \[(.)\] \*\*[A-Z]+-\d{3}\*\*", text, re.MULTILINE)
+    )
+    return {
+        "done": c["x"],
+        "open": c[" "],
+        "total": sum(c.values()),
+        "blocked": c["!"],
+        "partial": c["~"],
+    }
 
 
 def _observation() -> dict[str, int]:
@@ -275,7 +374,11 @@ def _observation() -> dict[str, int]:
     sigil_heading = r"(?m)^## \u00a7O-(\d+[a-z]*)"
     bold = r"(?m)^\*\*\u00a7O-(\d+[a-z]*)"
     bare = r"(?m)^### O-(\d+[a-z]*)"
-    full = re.findall(sigil_heading, body) + re.findall(bold, body) + re.findall(bare, body)
+    full = (
+        re.findall(sigil_heading, body)
+        + re.findall(bold, body)
+        + re.findall(bare, body)
+    )
     nums = [int(re.match(r"\d+", n).group(0)) for n in full]
     return {"headings": len(full), "highest": max(nums) if nums else 0}
 
@@ -293,16 +396,24 @@ RESOLVERS = {
     "conformance-cases": lambda: _suite_cases(),
     "conformance-definition-cases": lambda: _suite_cases("definition"),
     "conformance-execution-cases": lambda: _suite_cases("execution"),
+    # The Q-Block levels of Proposal §4.8.5 -- declared, bindable, bound.
+    "qblock-declared-namespaces": _qblock_declared_namespaces,
+    "qblock-bindable-namespaces": _qblock_bindable_namespaces,
+    "qblock-bound-capabilities": _qblock_bound_capabilities,
     # What the host binds, which is not what `wit/` declares -- see `_host_bound_modules`.
     # The ledger's own arithmetic. `check_checklist_counts.py` validates the LIST; these let a
     # document state the count without owning it (`§O-277`).
     "checklist-done": lambda: _checklist()["done"],
     "checklist-open": lambda: _checklist()["open"],
     "checklist-total": lambda: _checklist()["total"],
+    "checklist-blocked": lambda: _checklist()["blocked"],
+    "checklist-partial": lambda: _checklist()["partial"],
     # The decision record's size and its high-water mark.
     "observation-headings": lambda: _observation()["headings"],
     "observation-highest": lambda: _observation()["highest"],
-    "crate-directories": lambda: len([p for p in (ROOT / "crates").iterdir() if p.is_dir()]),
+    "crate-directories": lambda: len(
+        [p for p in (ROOT / "crates").iterdir() if p.is_dir()]
+    ),
     "host-bound-modules": _host_bound_modules,
 }
 
@@ -349,7 +460,9 @@ def run_check(args) -> int:
                 continue
             checked += 1
             if actual != declared:
-                stale.append(f"{rel}:{line_no}  `{resolver}` says {declared}, the tree has {actual}")
+                stale.append(
+                    f"{rel}:{line_no}  `{resolver}` says {declared}, the tree has {actual}"
+                )
 
     print(f"documents scanned: {len(docs)}")
     print(f"resolvers seen:    {', '.join(sorted(cache)) or '(none)'}")
@@ -360,7 +473,9 @@ def run_check(args) -> int:
     if args.list:
         print()
         for doc in docs:
-            for resolver, declared, line_no in claims_in(doc.read_text(encoding="utf-8")):
+            for resolver, declared, line_no in claims_in(
+                doc.read_text(encoding="utf-8")
+            ):
                 print(f"  {doc.relative_to(ROOT)}:{line_no}  {resolver} = {declared}")
 
     print()
@@ -371,7 +486,9 @@ def run_check(args) -> int:
 
     if unknown or stale:
         print()
-        print(f"DOC CLAIMS FAILED -- {len(stale)} stale, {len(unknown)} unknown resolver(s)")
+        print(
+            f"DOC CLAIMS FAILED -- {len(stale)} stale, {len(unknown)} unknown resolver(s)"
+        )
         return 1
 
     if checked == 0:
@@ -379,7 +496,9 @@ def run_check(args) -> int:
         # different state from *wrong*. Saying so is the honest report, and `--list` shows the
         # resolvers available for anyone who wants to add one.
         print("DOC CLAIMS OK -- no document declares a checkable count")
-        print("Add `<!-- qqq:claim workspace-tests -->N<!-- /qqq:claim -->` to make one checkable.")
+        print(
+            "Add `<!-- qqq:claim workspace-tests -->N<!-- /qqq:claim -->` to make one checkable."
+        )
         return 0
 
     print(f"DOC CLAIMS OK -- {checked} claim(s) match the tree")
@@ -419,6 +538,23 @@ def self_test(args) -> int:
 
     # The real resolvers must answer, or every claim would be "unknown".
     expect("crate-files resolves", isinstance(resolve("crate-files"), int), True)
+    # The Q-Block level resolvers answer with the tree's counts, so a claim
+    # on §4.8.5 can never be "unknown" while the tree parses.
+    expect(
+        "qblock-declared-namespaces resolves to 15",
+        resolve("qblock-declared-namespaces"),
+        15,
+    )
+    expect(
+        "qblock-bindable-namespaces resolves to 13",
+        resolve("qblock-bindable-namespaces"),
+        13,
+    )
+    expect(
+        "qblock-bound-capabilities resolves to 18",
+        resolve("qblock-bound-capabilities"),
+        18,
+    )
 
     # The corpus must be non-empty.
     expect("documents found", len(documents()) > 0, True)
@@ -433,7 +569,9 @@ def self_test(args) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--self-test", action="store_true", help="prove the checks are live")
+    ap.add_argument(
+        "--self-test", action="store_true", help="prove the checks are live"
+    )
     ap.add_argument("--list", action="store_true", help="list every declared claim")
     args = ap.parse_args()
     return self_test(args) if args.self_test else run_check(args)

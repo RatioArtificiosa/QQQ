@@ -547,6 +547,15 @@ jobs:
       - name: Prove the backlog check catches drift and vacuity
         run: python tools/gen_backlog.py --self-test
 
+      # `REG-013`: the capability catalogue is generated from the three Q-Block
+      # sources (names/kinds, implemented flags, stanza fields), not
+      # hand-maintained beside them. `--check` fails when the committed TSV
+      # drifts; `--self-test` proves the parsers refuse breakage.
+      - name: Verify the capability catalogue matches the tree
+        run: python tools/gen_capability_catalogue.py --check
+      - name: Prove the catalogue parsers detect breakage
+        run: python tools/gen_capability_catalogue.py --self-test
+
       # `PLAN-002`: the tracked dashboard is a presentation of the canonical backlog, not a
       # second hand-maintained progress ledger. Its self-test proves aggregate drift, unknown
       # statuses, duplicate ids and external milestone blockers remain observable.
@@ -707,6 +716,14 @@ jobs:
 
       - name: Prove the panic-guard check detects an unguarded host function
         run: python tools/fault_inject_guard.py
+
+      # `REG-004`/`REG-012`: the Q-Block level tests read the tree, so this
+      # harness breaks one level per injection (a 23rd interface, a renamed
+      # namespace, a flipped flag, a broken §4.8.5 row, a phantom module) and
+      # asserts each makes its own test go red — then verifies the restore
+      # byte-identical.
+      - name: Prove the Q-Block level checks detect a broken level
+        run: python tools/fault_inject_qblock.py
 
       # `ARCH-002`, `ARCH-004` and `ARCH-008` are statements about the
       # *workspace* -- that no crate depends upward, that every crate except the

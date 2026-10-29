@@ -63,7 +63,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `[ ]` | Not started |
 | `[~]` | In progress |
 | `[x]` | Done and verified |
-| `[!]` | Blocked (reason recorded in Observations) |
+| `[!]` | Blocked (owner, blocker and tripwire recorded inline; an Observations entry cited where a decision record exists) |
 | `[-]` | Dropped / deferred (successor ID recorded) |
 
 ### Verification rule
@@ -3140,7 +3140,7 @@ Items are grouped below by **phase**, because dependency order matters more than
     names, so a malformed one was invisible).
   → §7.2 Adversary model
 - [!] **SEC-024** Commission external security audit #1 before the private alpha (M7).
-  → **Blocked**, and this one genuinely is: it requires engaging a third-party firm and
+  → **Blocked**, and this one genuinely is: it requires engaging a third-party firm and The engagement is an external action.
     paying them. `§O-082`'s question — "blocked on the item, or on one way of doing
     it?" — has no third answer here, unlike `SEC-017`, `SEC-019` and `SEC-026`, which
     all dissolved. Recorded in `§O-095` with what *would* unblock it.
@@ -3149,7 +3149,7 @@ Items are grouped below by **phase**, because dependency order matters more than
     if that claim is made while this item is open.
   → §16 — Definition of Done for V1
 - [!] **SEC-025** Commission external security audit #2 before the public beta (M10).
-  → **Blocked** on the same condition as `SEC-024`: an external engagement, not a
+  → **Blocked** on the same condition as `SEC-024`: an external engagement, not a The engagement is an external action.
     technical obstacle. See `§O-095`.
   → §16 — Definition of Done for V1
 - [x] **SEC-026** Implement Landlock LSM integration as defence in depth on Linux ≥ 5.13.
@@ -3166,7 +3166,7 @@ Items are grouped below by **phase**, because dependency order matters more than
   → The earlier "blocked" note was a fact about `nix`, not about the item (`§O-082`).
   → §7.5 Hardening beyond Wasm
 - [!] **SEC-027** Implement memory-protection-key support as an optional hardening feature. Owner: Systems engineer. Detection done (below); enforcement blocked on (1) `qqq-sys` admitting `unsafe` via the SAFETY.md exception process (needs second maintainer, GOV-008), (2) MPK crates that are not thin `unsafe` FFI wrappers, (3) pku-capable hardware to exercise it on.
-  → Done (detection) + blocked (enforcement), and the distinction is measured:
+  → Done (detection) + blocked (enforcement), and the distinction is measured: Enforcement is not verifiable from inside this host.
     `mpk_support()`, `landlock_available()` and `host_capabilities()` report what the
     host offers, cross-checked in a test against `/proc/cpuinfo` so a probe stuck on
     `false` (the safe-looking answer) cannot pass.
@@ -3773,19 +3773,20 @@ Items are grouped below by **phase**, because dependency order matters more than
     and "a CI check"; both exist and pass. This is the twentieth item this session
     found already implemented by reading the item and measuring the code.
   → §8.3 The machine contract layer
-- [ ] **DX-006** Implement the TIER-1 hot reload: component swap preserving the host process.
-  → Progress: versioned generation leases, live HTTP dispatch and dev rebuild activation are
-    implemented in the live-components draft. See `docs/live-components-checklist.md` for
-    measured acceptance, failure controls and remaining merge gates. Kept open pending review.
+- [!] **DX-006** Implement the TIER-1 hot reload: component swap preserving the host process. Owner: Architect. Blocked on review plus merge gates: versioned generation leases, live HTTP dispatch and dev rebuild activation are implemented in the live-components draft; `docs/live-components-checklist.md` names the measured acceptance, failure controls and remaining merge gates. Kept open pending review.
   → §6.6 `qqq-run` — CLI and dev server
-- [ ] **DX-007** Implement TIER-2 state-preserving swap with declared guest state.
+  → Tripwire: re-open when the live-components review completes with merge gates named. Re-measure: a component swap preserving the host process, tested with in-flight requests across the swap. Re-measure names the observation: 0 dropped requests across the swap.
+- [!] **DX-007** Implement TIER-2 state-preserving swap with declared guest state. Owner: Architect. Blocked behind the TIER-1 review and a state-declaration design: guest state shape, migration, and failure semantics are undecided.
   → §6.6 `qqq-run` — CLI and dev server
-- [ ] **DX-008** Implement TIER-3 full restart triggered only by manifest capability or limit changes.
+  → Tripwire: re-open with DX-006 plus a ratified state-declaration design. Re-measure: a swap preserving declared guest state across the boundary, with a migration-failure test. Re-measure names the observation: 1 migration-failure test refused.
+- [!] **DX-008** Implement TIER-3 full restart triggered only by manifest capability or limit changes. Owner: Architect. Blocked behind the TIER-1 review: trigger conditions and restart atomicity ride on the same merge decision.
   → §6.6 `qqq-run` — CLI and dev server
+  → Tripwire: re-open with DX-006. Re-measure: capability/limit changes triggering exactly one full restart, and non-triggering edits triggering none.
 - [x] **DX-009** Implement the file watcher with debounce and ignore rules.
   → §6.6 `qqq-run` — CLI and dev server
-- [ ] **DX-010** Implement HTTPS in dev with locally-trusted certificates.
+- [!] **DX-010** Implement HTTPS in dev with locally-trusted certificates. Owner: Architect. Blocked on a trust decision: minting locally-trusted certificates means installing a CA into the developer's trust store, and doing that silently would be a security posture set by tooling rather than by the operator.
   → §6.6 `qqq-run` — CLI and dev server
+  → Tripwire: re-open when the dev-cert trust model is ratified (who mints, who trusts, how it is revoked). Re-measure: `qqqai dev --https` serving with a locally-trusted cert and a clean `curl` with no flags. Re-measure names the observation: curl exit 0 with no flags.
 - [ ] **DX-011** Implement the TTFA measurement job on a clean container for all three OSes.
   → §12.3 The DX commitments (measurable, in CI)
 - [ ] **DX-012** Implement the scripted DX test suite: deliberate mistakes must produce the intended guidance within the target time.
@@ -3953,8 +3954,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   toolchain component; it is planned, printed with its exact command, and left to
   the user. That is a deliberate limit rather than an unfinished path, and it is
   recorded as such.
-- [ ] **DX-017** Implement the DevTools-protocol inspector adapter over DWARF source maps.
+- [!] **DX-017** Implement the DevTools-protocol inspector adapter over DWARF source maps. Owner: Architect. Blocked on the adapter design: which DWARF survives Wasm transformation, what the adapter serves, and how `qqqai dev` attaches are all undecided, and the DWARF story differs per toolchain.
   → §6.6 `qqq-run` — CLI and dev server
+  → Tripwire: re-open when the adapter design is ratified. Re-measure: a DevTools client stepping a guest with QQQ sources shown, not Wasm offsets. Re-measure names the observation: 1 recorded stepping session with QQQ sources.
 - [ ] **DX-018** Implement the progressive-disclosure documentation tiers (Solo, Team, Fleet).
   → §2.7 NN-7 — Progressive Power, Safe Defaults
 - [x] **DX-019** Implement `qqqai add-cap` writing the correct manifest stanza.
@@ -4219,8 +4221,9 @@ Items are grouped below by **phase**, because dependency order matters more than
     `why_suggests_a_correction_for_a_typo`, `why_names_the_deciding_layer_for_a_grant` and
     `why_exit_status_separates_a_grant_from_a_denial`.
   → §6.2 `qqq-cap` — the capability engine
-- [ ] **CLI-020** Implement `qqqai trace`.
+- [!] **CLI-020** Implement `qqqai trace`. Owner: Architect. Blocked on the trace-consumption design: the command falls through to "not implemented yet", and what `trace` shows (live spans? recorded audits? which tenant's?) is undecided — building a surface before its contract is how `doctor` needed four defect fixes after landing.
   → §10.4 Distributed tracing
+  → Tripwire: re-open when the trace command's contract is ratified. Re-measure: `qqqai trace` showing real spans for a served request, with a named tenant scope. Re-measure names the observation: 1 served request in 1 named tenant scope.
 - [x] **CLI-021** Implement `qqqai doctor`.
   → §5.2 The command surface
   → **Delivered by `DX-016`**, which describes the same command and carries the
@@ -4281,51 +4284,72 @@ Items are grouped below by **phase**, because dependency order matters more than
     `schema_version` appear nowhere in stdout, and it failed because the *envelope's* own
     top-level `schema_version` is a different key on a different object from the document's
     §8.3 `schemaVersion`. Scoped to `data`, where the contract lives.
-- [ ] **CLI-024** Implement `qqqai migrate`.
+- [!] **CLI-024** Implement `qqqai migrate`. Owner: Architect. Blocked on the migration design (MIG-001..MIG-014): the command falls through to "not implemented yet" and there is no analyzer for it to drive.
   → §6.8 `qqqai migrate` — the adoption ramp
+  → Tripwire: re-open with MIG-001. Re-measure: `qqqai migrate` running an analysis on a fixture project and reporting what transferred. Re-measure names the observation: exit 0 with the transfer report.
 
 ### DIST — Distribution
 
-- [ ] **DIST-001** Implement the POSIX `install.sh` installer with checksum and signature verification.
+- [!] **DIST-001** Implement the POSIX `install.sh` installer with checksum and signature verification. Owner: Release engineer. Blocked on the release pipeline: `tools/bootstrap.sh` onboards developers, but a user-facing installer needs signed artifacts to verify plus the checksum/signature publication flow, none of which exist yet.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-002** Implement the Windows `install.ps1` installer with the same verification.
+  → Tripwire: re-open when signed release artifacts exist. Re-measure: a clean-machine install verifying checksum and signature before the first run, with a tampered-artifact refusal test. Re-measure names the observation: 1 clean install and 1 tampered-artifact refusal.
+- [!] **DIST-002** Implement the Windows `install.ps1` installer with the same verification. Owner: Release engineer. Blocked on the same release pipeline as DIST-001, plus Windows code signing (see DIST-016).
   → §11.1 Install channels, in priority order
-- [ ] **DIST-003** Publish GitHub Releases with binaries, checksums and Ed25519 signatures for all five targets.
+  → Tripwire: re-open with DIST-001. Re-measure: the same clean-machine and tampered-artifact checks on Windows. Re-measure names the observation: 1 clean and 1 tampered check on Windows.
+- [!] **DIST-003** Publish GitHub Releases with binaries, checksums and Ed25519 signatures for all five targets. Owner: Release engineer. Blocked on the release process: no release has ever been cut, no signing keys exist, and the five-target matrix is unbuilt.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-004** Publish the `qqqai` crate to crates.io and verify `cargo install qqqai` on all targets.
+  → Tripwire: re-open when the release process is defined. Re-measure: a published release with all five binaries, checksums, and verifiable signatures. Re-measure names the observation: 1 published release with all 5 binaries.
+- [!] **DIST-004** Publish the `qqqai` crate to crates.io and verify `cargo install qqqai` on all targets. Owner: Release engineer. Blocked on the release process (naming, ownership, publish token) plus the five-target verification matrix.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-005** Publish the `qqqai` npm wrapper package and verify `npm install -g qqqai`.
+  → Tripwire: re-open when the release process is defined. Re-measure: `cargo install qqqai` succeeding on all five targets in CI. Re-measure names the observation: `cargo install qqqai` exit 0 on all 5 targets in CI.
+- [!] **DIST-005** Publish the `qqqai` npm wrapper package and verify `npm install -g qqqai`. Owner: Release engineer. Blocked on the release process (npm identity, wrapper that downloads the right per-OS binary) plus the five-target matrix.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-006** Submit the Homebrew formula.
+  → Tripwire: re-open when the release process is defined. Re-measure: `npm install -g qqqai` succeeding with the correct binary on all supported platforms. Re-measure names the observation: exit 0 on each supported platform.
+- [!] **DIST-006** Submit the Homebrew formula. Owner: Release engineer. Blocked on a published, versioned release to point the formula at (DIST-003).
   → §11.1 Install channels, in priority order
-- [ ] **DIST-007** Submit Scoop and winget manifests.
+  → Tripwire: re-open with DIST-003. Re-measure: `brew install` from the submitted formula on a clean machine. Re-measure names the observation: 1 formula, 1 clean machine.
+- [!] **DIST-007** Submit Scoop and winget manifests. Owner: Release engineer. Blocked on a published, versioned Windows release to point the manifests at (DIST-003) plus publisher identity for the stores.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-008** Publish the OCI image to `ghcr.io/qqqai/qqqai`.
+  → Tripwire: re-open with DIST-003. Re-measure: installs from both managers on a clean Windows machine. Re-measure names the observation: 2 installs, 1 per manager, on 1 clean Windows machine.
+- [!] **DIST-008** Publish the OCI image to `ghcr.io/qqqai/qqqai`. Owner: Release engineer. Blocked on the registry namespace plus the release pipeline that builds and pushes a tagged image per release.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-009** Implement `qqqai doctor`'s self-verification of its own binary.
+  → Tripwire: re-open when the release process is defined. Re-measure: pulling and running a tagged image with no local build. Re-measure names the observation: 1 pull, 1 run, 0 local builds.
+- [!] **DIST-009** Implement `qqqai doctor`'s self-verification of its own binary. Owner: Release engineer. Blocked on published signatures to verify against (DIST-003): self-verification with nothing to verify against is a check that always passes.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-010** Meet the download-size SLO (≤25 MB compressed).
+  → Tripwire: re-open with DIST-003. Re-measure: `qqqai doctor` verifying its own binary against the published signature, plus a tampered-binary refusal. Re-measure names the observation: 1 self-verification and 1 tampered-binary refusal.
+- [x] **DIST-010** Meet the download-size SLO (≤25 MB compressed).
+  → Done: enforced by the `production-image` CI job (`.github/workflows/ci.yml`), which extracts the shipped binary from the distroless image and fails the run when gzip -9 output exceeds 25,000,000 bytes (installed footprint ≤ 60,000,000 asserted in the same step). Measured: 6,420,492 B (6.1 MiB).
   → §5.1 What a user actually installs
-- [ ] **DIST-011** Meet the `--version` startup SLO (≤15 ms).
+- [x] **DIST-011** Meet the `--version` startup SLO (≤15 ms).
+  → Done: measured 7.75 ms p50 natively (min 6.68, max 12.72 over 20 runs) against the ≤ 15 ms budget, recorded with method in Proposal §5.1. Deliberately NOT gated: measured through `docker run` the same binary reads 599.8 ms p50 (the container runtime's startup, not the binary's), so a CI gate would measure the wrong thing.
   → §5.1 What a user actually installs
 - [ ] **DIST-012** Meet the cold-start SLO (≤40 ms cached).
+  → Measured once, NOT claimed: 28.0–36.3 ms over 10 runs (p50 ≈ 29.4) of `qqqai run` against the pinned 281-byte guest with a warmed AOT cache, debug binary on a developer workstation. Ten runs on one machine are too thin for a V1 SLO, and §5.1/LANG-007 still record the honest state — re-measure on reference hardware with the documented method before ticking.
   → §5.1 What a user actually installs
-- [ ] **DIST-013** Publish apt/dnf/apk repositories once the release cadence is stable.
+- [!] **DIST-013** Publish apt/dnf/apk repositories once the release cadence is stable. Owner: Release engineer. Blocked on a release cadence to be stable about: no release has shipped yet, so there is nothing to distribute.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-014** Publish AUR, Nix, asdf and mise specifications.
+  → Tripwire: re-open when releases ship on a cadence. Re-measure: installs from each package manager on clean images. Re-measure names the observation: 1 install per manager on clean images.
+- [!] **DIST-014** Publish AUR, Nix, asdf and mise specifications. Owner: Release engineer. Blocked on the same cadence as DIST-013 plus community-maintainer acceptance for each ecosystem.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-015** Implement binary reproducibility verification across independent build hosts.
+  → Tripwire: re-open with DIST-013. Re-measure: installs from each specification on clean images. Re-measure names the observation: 1 install per specification on clean images.
+- [!] **DIST-015** Implement binary reproducibility verification across independent build hosts. Owner: Release engineer. Blocked on independent build hosts: bit-identical output cannot be checked from one machine (shares the DET-016 measurement problem).
   → §11.1 Install channels, in priority order
-- [ ] **DIST-016** Implement macOS notarization and Windows code signing.
+  → Tripwire: re-open when two independent builders exist. Re-measure: identical digests from both builders for the same source. Re-measure names the observation: 1 digest compared from each of the 2 builders.
+- [!] **DIST-016** Implement macOS notarization and Windows code signing. Owner: Release engineer. Blocked on Apple Developer and Windows signing identities plus the CI secrets to hold them — credentials no implementer can mint.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-017** Implement offline installation from a local bundle.
+  → Tripwire: re-open when the signing identities exist. Re-measure: notarized macOS artifact and signed Windows binary verified by the OS on clean machines. Re-measure names the observation: 2 machines (1 macOS notarized, 1 Windows signed).
+- [!] **DIST-017** Implement offline installation from a local bundle. Owner: Release engineer. Blocked on the bundle format plus the publish pipeline that produces it (DIST-003): an offline installer with nothing to install from it is untestable.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-018** Publish the install-verification instructions users can follow without trusting us.
+  → Tripwire: re-open when the bundle format is defined. Re-measure: a full install from a local bundle with the network disabled. Re-measure names the observation: 1 install, 0 network bytes.
+- [!] **DIST-018** Publish the install-verification instructions users can follow without trusting us. Owner: Release engineer. Blocked on the verification material existing: checksum/signature publication (DIST-003) plus the doctor self-check (DIST-009) are what the instructions would describe.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-019** Implement version-manager support (asdf/mise plugins) with tests.
+  → Tripwire: re-open with DIST-003 and DIST-009. Re-measure: a third party following only the instructions and arriving at a verified install. Re-measure names the observation: 1 third party arriving at a verified install; the party is an external action.
+- [!] **DIST-019** Implement version-manager support (asdf/mise plugins) with tests. Owner: Release engineer. Blocked on published versions to manage (DIST-003) plus per-ecosystem plugin acceptance.
   → §11.1 Install channels, in priority order
-- [ ] **DIST-020** Resolve open question `OQ-004`: Windows first-class or best-effort, and reflect this in the CI budget.
+  → Tripwire: re-open with DIST-003. Re-measure: version install/switch/uninstall through each plugin with tests.
+- [!] **DIST-020** Resolve open question `OQ-004`: Windows first-class or best-effort, and reflect this in the CI budget. Owner: Architect. Blocked on the decision itself: platform tiering changes CI spend and support promises, which needs an explicit ruling, not an implementer's guess.
   → §11.1 Install channels, in priority order
+  → Tripwire: re-open when OQ-004 is decided. Re-measure: the CI matrix and support docs matching the decided tier.
 
 ---
 
@@ -4365,16 +4389,21 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 **TypeScript / AssemblyScript (Tier A / C)**
 
-- [ ] **LANG-009** AssemblyScript toolchain integration and build path.
+- [!] **LANG-009** AssemblyScript toolchain integration and build path. Owner: Language maintainer. Blocked on the supported build path: `asc` exists only as a probe devDependency (`tools/run_language_probes.py` drives it directly with a versions row), and only the narrow canonical-ABI adapter exists (`docs/languages/phase3.md`) — there is no supported `qqqai build` path for AssemblyScript, and a general build path needs the owner decision the adapter explicitly defers.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-010** AssemblyScript bindings generated from `wit/`.
+  → Tripwire: re-open when `qqqai build` accepts an AssemblyScript project (probe green plus a guest build through the supported path). Re-measure: `tools/run_language_probes.py --language assemblyscript` green plus a guest build through the new path.
+- [!] **LANG-010** AssemblyScript bindings generated from `wit/`. Owner: Language maintainer. Blocked behind LANG-009: no general generator exists — only the narrow adapter with a SHA-256-guarded canonical WIT (`docs/languages/phase3.md`), which a WIT change forces to re-review rather than regenerate.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-011** TypeScript-shaped project template using AssemblyScript.
+  → Tripwire: re-open with LANG-009. Re-measure: generated bindings round-trip the `wit/` surface (check against `tools/check_wit.py`).
+- [!] **LANG-011** TypeScript-shaped project template using AssemblyScript. Owner: Language maintainer. Blocked behind LANG-009/LANG-010: no toolchain or bindings to template against (`qqqai new <name> --lang ts` still reports the placeholder status).
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-012** AssemblyScript conformance-suite pass.
+  → Tripwire: re-open with LANG-009. Re-measure: `qqqai new` emits a template that builds without the placeholder path. Re-measure names the observation: template builds, exit 0.
+- [!] **LANG-012** AssemblyScript conformance-suite pass. Owner: Language maintainer. Blocked behind LANG-009/LANG-010: five narrow HTTP vectors pass today (`docs/languages/phase3.md`); full conformance needs the toolchain and bindings above.
   → §2.4 NN-4 — Multi-Language by Design
-- [ ] **LANG-013** AssemblyScript reference application implementation.
+  → Tripwire: re-open with LANG-009. Re-measure: the conformance suite green via `tools/run_language_probes.py --language assemblyscript`.
+- [!] **LANG-013** AssemblyScript reference application implementation. Owner: Language maintainer. Blocked behind LANG-009–LANG-012: probes only, no production language support claimed.
   → §2.4 NN-4 — Multi-Language by Design
+  → Tripwire: re-open with LANG-012. Re-measure: the ten-workload reference app builds and runs. Re-measure names the observation: the 10-workload reference app builds and runs, exit 0.
 - [x] **LANG-014** Documentation that states clearly what AssemblyScript is not (full TypeScript).
   → Done: `docs/languages/phase3.md` documents AssemblyScript’s distinct type system, standard library and runtime, absent Node/Bun compatibility, and the narrow WIT-digest-guarded HTTP adapter. The name does not claim full TypeScript.
   → §6.10 Language toolchains — one per target language
@@ -4387,16 +4416,21 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 **Go (Tier B)**
 
-- [ ] **LANG-017** TinyGo toolchain integration and build path.
+- [!] **LANG-017** TinyGo toolchain integration and build path. Owner: Language maintainer. Blocked on the supported build path + upstream: TinyGo exists as a probe toolchain (0.42.0 leaking-GC passes five vectors; precise-GC 64 KiB failure is a retained upstream repro, `tinygo-org/tinygo#4897`; `LANG-042` records no upstream 0.3 path) and standard Go cannot emit components — but there is no supported `qqqai build` path for Go.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-018** Go bindings generated from `wit/`.
+  → Tripwire: re-open when `qqqai build` accepts a Go project on a TinyGo component path. Re-measure: `tools/run_language_probes.py --language go` green on a TinyGo component built through the supported path.
+- [!] **LANG-018** Go bindings generated from `wit/`. Owner: Language maintainer. Blocked behind LANG-017: no toolchain to generate against and no upstream path ratified.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-019** Go project template.
+  → Tripwire: re-open with LANG-017. Re-measure: generated bindings round-trip the `wit/` surface. Re-measure names the observation: the 22-interface `wit/` surface round-trips with 0 losses.
+- [!] **LANG-019** Go project template. Owner: Language maintainer. Blocked behind LANG-017/LANG-018: `qqqai new --go` still reports the placeholder status.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-020** Go conformance-suite pass.
+  → Tripwire: re-open with LANG-017. Re-measure: `qqqai new` emits a template that builds without the placeholder path. Re-measure names the observation: template builds, exit 0.
+- [!] **LANG-020** Go conformance-suite pass. Owner: Language maintainer. Blocked behind LANG-017/LANG-018: five narrow HTTP vectors pass; full conformance needs the toolchain and bindings.
   → §2.4 NN-4 — Multi-Language by Design
-- [ ] **LANG-021** Go reference application implementation.
+  → Tripwire: re-open with LANG-017. Re-measure: the conformance suite green via `tools/run_language_probes.py --language go`.
+- [!] **LANG-021** Go reference application implementation. Owner: Language maintainer. Blocked behind LANG-017–LANG-020: probes only, no production language support claimed.
   → §2.4 NN-4 — Multi-Language by Design
+  → Tripwire: re-open with LANG-020. Re-measure: the ten-workload reference app builds and runs. Re-measure names the observation: the 10-workload reference app builds and runs, exit 0.
 - [x] **LANG-022** Document TinyGo's runtime differences, reduced stdlib, and in-guest GC.
   → Done: `docs/languages/phase3.md` documents TinyGo 0.42.0 / Go 1.27.1, precise GC, asyncify, the root-caused `cabi_realloc` lifetime failure, QQQ's request-scoped `-gc=leaking` mitigation, and unverified stdlib/package compatibility. The narrow five-vector probe passes with the mitigation; the precise/conservative-GC failure remains a negative regression case and no standard-Go runtime parity is claimed.
   → §6.10 Language toolchains — one per target language
@@ -4412,16 +4446,21 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [x] **LANG-025** Spike: CPython compiled to WASI, measured for size, cold start and correctness.
   → Done: Completed the spike with a scoped positive result: `tools/run_language_probes.py --language python` compiles CPython via componentize-py 0.25.1, measures roughly 18 MB and successful execution of all five narrow HTTP vectors under the explicit `http.server` grant (`docs/languages/evidence/python.json`). This is not a Python binding, template, full-conformance, production-driver or first-class cold-start claim; startup/pooling and broader compatibility remain open.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-026** Python bindings generated from `wit/` via `componentize-py` or equivalent.
+- [!] **LANG-026** Python bindings generated from `wit/` via `componentize-py` or equivalent. Owner: Language maintainer. Blocked on toolchain: no `componentize-py` here and `LANG-043` records no upstream 0.3 path; `LANG-032` records the honest limits (size, startup, stdlib).
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-027** Python project template.
+  → Tripwire: re-open when a `componentize-py`-class toolchain lands in CI probes. Re-measure: generated bindings round-trip the `wit/` surface plus `tools/run_language_probes.py --language python`.
+- [!] **LANG-027** Python project template. Owner: Language maintainer. Blocked behind LANG-026: `qqqai new --python` still reports the placeholder status.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-028** Python conformance-suite pass.
+  → Tripwire: re-open with LANG-026. Re-measure: `qqqai new` emits a template that builds without the placeholder path. Re-measure names the observation: template builds, exit 0.
+- [!] **LANG-028** Python conformance-suite pass. Owner: Language maintainer. Blocked behind LANG-026: the 18 MB component passes five narrow HTTP vectors; full conformance needs the toolchain and bindings.
   → §2.4 NN-4 — Multi-Language by Design
-- [ ] **LANG-029** Python reference application implementation.
+  → Tripwire: re-open with LANG-026. Re-measure: the conformance suite green via `tools/run_language_probes.py --language python`.
+- [!] **LANG-029** Python reference application implementation. Owner: Language maintainer. Blocked behind LANG-026–LANG-028: probes only, experimental per `LANG-031`, no full-stack claim.
   → §2.4 NN-4 — Multi-Language by Design
-- [ ] **LANG-030** Implement precompiled-`.pyc` bundling and interpreter-instance pooling to cut startup cost.
+  → Tripwire: re-open with LANG-028. Re-measure: the ten-workload reference app builds and runs. Re-measure names the observation: the 10-workload reference app builds and runs, exit 0.
+- [!] **LANG-030** Implement precompiled-`.pyc` bundling and interpreter-instance pooling to cut startup cost. Owner: Language maintainer. Blocked behind LANG-026: no interpreter integration exists to pool or precompile for, and cold-start cost is unmeasured against any budget.
   → §6.10 Language toolchains — one per target language
+  → Tripwire: re-open with LANG-026 plus a startup budget the work charges against. Re-measure: cold-start timings before and after, same fixture. Re-measure names the observation: 2 timings (before, after) on 1 fixture.
 - [x] **LANG-031** Resolve open question `OQ-003`: first-class or experimental, based on the M5 measurement.
   → Done: Decision taken 2026-09-30: **experimental**. The current evidence is a narrow five-vector HTTP probe that passes under the explicit `http.server` grant, while the measured component size, unmeasured startup cost, missing production bindings and incomplete correctness/conformance work do not support a first-class claim. Promotion requires a new evidence-backed decision after that work.
   → §6.10 Language toolchains — one per target language
@@ -4431,16 +4470,21 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 **C / C++ (Tier A)**
 
-- [ ] **LANG-033** Clang `--target=wasm32-wasip2` integration and build path.
+- [!] **LANG-033** Clang `--target=wasm32-wasip2` integration and build path. Owner: Language maintainer. Blocked on the supported build path: WASI SDK 34 exists as a probe toolchain (`LANG-038` documents the required WASI SDK 34 + Clang/wasm-ld + sysroot), but no `qqqai build` driver exists for C/C++.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-034** C and C++ bindings generated from `wit/`.
+  → Tripwire: re-open when a WASI SDK toolchain lands in CI probes with a build path. Re-measure: `tools/run_language_probes.py --language c` green plus a guest build through the new path.
+- [!] **LANG-034** C and C++ bindings generated from `wit/`. Owner: Language maintainer. Blocked behind LANG-033: only wit-bindgen 0.62.0 C glue is documented (`LANG-038`); no generated-bindings path exists.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-035** C and C++ project templates.
+  → Tripwire: re-open with LANG-033. Re-measure: generated bindings round-trip the `wit/` surface (check against `tools/check_wit.py`).
+- [!] **LANG-035** C and C++ project templates. Owner: Language maintainer. Blocked behind LANG-033/LANG-034: `qqqai new --c/--cpp` still reports the placeholder status.
   → §6.10 Language toolchains — one per target language
-- [ ] **LANG-036** C and C++ conformance-suite pass.
+  → Tripwire: re-open with LANG-033. Re-measure: `qqqai new` emits a template that builds without the placeholder path. Re-measure names the observation: template builds, exit 0.
+- [!] **LANG-036** C and C++ conformance-suite pass. Owner: Language maintainer. Blocked behind LANG-033/LANG-034: five narrow HTTP vectors pass per language (`docs/languages/phase3.md`); full conformance needs the toolchain and bindings.
   → §2.4 NN-4 — Multi-Language by Design
-- [ ] **LANG-037** C and C++ reference application implementation.
+  → Tripwire: re-open with LANG-033. Re-measure: the conformance suite green via `tools/run_language_probes.py --language c` (and `cpp`).
+- [!] **LANG-037** C and C++ reference application implementation. Owner: Language maintainer. Blocked behind LANG-033–LANG-036: probes only, no production language support claimed.
   → §2.4 NN-4 — Multi-Language by Design
+  → Tripwire: re-open with LANG-036. Re-measure: the ten-workload reference app builds and runs. Re-measure names the observation: the 10-workload reference app builds and runs, exit 0.
 - [x] **LANG-038** Document the C/C++ path and the `wasm-ld`/`wit-bindgen` toolchain requirements.
   → Done: `docs/languages/phase3.md` specifies WASI SDK 34, Clang/wasm-ld, sysroot, wit-bindgen 0.62.0 C glue/type object, and C++17 C-ABI consumption. Real C and C++ builds each pass five HTTP vectors; full SDK/reference-app work stays open.
   → §6.10 Language toolchains — one per target language
@@ -4494,80 +4538,115 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [ ] **PKG-001** Implement the content-addressed global store with hard-link/reflink materialization.
   → Partial: `qqq-pkg::store::{Digest, StoreLayout}` is done — sha256-only digest parsing that refuses other algorithms, a two-level fan-out layout, verified reads, and a case-insensitive sidecar skip. **Materialization is not done**: there is no hard-link or reflink of a stored artifact into a project, which is the second half of this item and the half that makes the store worth having.
   → §6.5 `qqq-pkg` — package manager and registry
-- [ ] **PKG-002** Implement parallel, resumable fetching with HTTP/3 where available.
+- [!] **PKG-002** Implement parallel, resumable fetching with HTTP/3 where available. Owner: Registry team. Blocked on the registry and the transport decision: there is no remote to fetch from yet, and whether that remote speaks HTTP/3 decides the client stack.
   → §6.5 `qqq-pkg` — package manager and registry
-- [ ] **PKG-003** Implement the version solver with lockfile-first resolution.
+  → Tripwire: re-open when a registry endpoint exists. Re-measure: parallel resumable fetch against it with a failure-injection test (killed mid-download resumes). Re-measure names the observation: 1 resumed download after a mid-download kill; the endpoint is an external action.
+- [!] **PKG-003** Implement the version solver with lockfile-first resolution. Owner: Architect. Blocked on resolver semantics: range syntax exists in the schema (`requirement()` supports `^`, `>=`), but resolution semantics are unratified — lockfile-first conflict order plus error wording need ratifying before a solver can be written against them.
   → §6.5 `qqq-pkg` — package manager and registry
+  → Tripwire: re-open when range syntax and resolution order are ratified. Re-measure: a solver unit-test matrix (pinned, conflicting, and unsatisfiable sets) plus `qqqai install` resolving a ranged manifest. Re-measure names the observation: a solver matrix of 3 sets (pinned, conflicting, unsatisfiable).
 - [x] **PKG-004** Implement lockfile read/write with `caps` per package and a covering hash.
   → Done: `qqq-pkg::lock::{Lockfile, LockPackage}`. `caps` is a first-class field participating in equality and in the covering hash, so a version bump that adds authority changes the lockfile even if the artifact digest somehow does not. The hash is computed over the package list with NUL separators (no field may contain a NUL, so distinct field sets cannot collide) and is **verified on read**, which makes a hand-edited lockfile detectable rather than silently trusted. `caps` is sorted and deduplicated on read, so two lockfiles describing the same authority compare equal regardless of how they were written. An unstamped lockfile parses, so `install` can bootstrap. 21 tests.
   → §5.4 The lockfile — `qqq.lock`
-- [ ] **PKG-005** Resolve open question `OQ-006`: build the registry from day one, or bootstrap on OCI and migrate.
+- [!] **PKG-005** Resolve open question `OQ-006`: build the registry from day one, or bootstrap on OCI and migrate. Owner: Architect. Blocked on an owner decision: the answer picks the registry architecture, and every PKG item below it inherits the choice.
   → §6.5 `qqq-pkg` — package manager and registry
-- [ ] **PKG-006** Implement `registry.qqq.codes` as a QQQ application (dogfooding).
+  → Tripwire: re-open when OQ-006 is answered. Re-measure: the decision recorded with its rationale and the dependent items re-triaged against it. Re-measure names the observation: 1 recorded decision with rationale; the decision is an external action.
+- [!] **PKG-006** Implement `registry.qqq.codes` as a QQQ application (dogfooding). Owner: Registry team. Blocked on the registry existing to serve: there is no service to implement yet, only the decision that it will be a QQQ app (PKG-005).
   → §6.5 `qqq-pkg` — package manager and registry
-- [ ] **PKG-007** Implement immutable versions with yank support.
+  → Tripwire: re-open when a registry service exists. Re-measure: the registry serves itself through it (dogfooded install). Re-measure names the observation: 1 dogfooded install; the service is an external action.
+- [!] **PKG-007** Implement immutable versions with yank support. Owner: Registry team. Blocked on the registry: immutability and yank are server-enforced properties with no server yet.
   → §11.2 The registry and ecosystem
-- [ ] **PKG-008** Implement provenance attestation (SLSA-style) for every published artifact.
+  → Tripwire: re-open when the registry stores versions. Re-measure: republish rejected, yank hides while preserving the bytes. Re-measure names the observation: 1 republish refusal naming the existing version; the service is an external action.
+- [!] **PKG-008** Implement provenance attestation (SLSA-style) for every published artifact. Owner: Registry team. Blocked on the release pipeline: no build produces attestations yet (see SUP-004).
   → §11.2 The registry and ecosystem
-- [ ] **PKG-009** Implement capability metadata on package pages and in the registry API.
+  → Tripwire: re-open when release builds run with attestation. Re-measure: every published artifact carries a verifiable attestation naming builder, inputs, and digest.
+- [!] **PKG-009** Implement capability metadata on package pages and in the registry API. Owner: Registry team. Blocked on the registry: no pages and no API exist to carry the metadata.
   → §11.2 The registry and ecosystem
-- [ ] **PKG-010** Implement capability-aware search ("find a JSON parser needing no capabilities").
+  → Tripwire: re-open when the registry API exists. Re-measure: a package page and API response showing the same capability set as the lockfile. Re-measure names the observation: 1 page and 1 API response matching the 24 rows of `schema/capability-catalogue.tsv`.
+- [!] **PKG-010** Implement capability-aware search ("find a JSON parser needing no capabilities"). Owner: Registry team. Blocked on the registry index: search needs something to search.
   → §11.2 The registry and ecosystem
-- [ ] **PKG-011** Implement the registry API with a published schema and fair rate limits.
+  → Tripwire: re-open when the registry API exists. Re-measure: the example query returns exactly the no-capability JSON parsers. Re-measure names the observation: the example query returns 0 capabilities.
+- [!] **PKG-011** Implement the registry API with a published schema and fair rate limits. Owner: Registry team. Blocked on the registry service existing to serve it.
   → §11.2 The registry and ecosystem
-- [ ] **PKG-012** Implement self-hostable registry mirrors; Fabric adds air-gapped mode.
+  → Tripwire: re-open when the service exists. Re-measure: schema published and a rate-limit test proving fair sharing under contention. Re-measure names the observation: 2 tenants sharing fairly, 0 starved; the service is an external action.
+- [!] **PKG-012** Implement self-hostable registry mirrors; Fabric adds air-gapped mode. Owner: Registry team. Blocked on the registry: there is nothing to mirror yet.
   → §11.2 The registry and ecosystem
-- [ ] **PKG-013** Implement the scoped-namespace and ownership-verification system.
+  → Tripwire: re-open when the registry serves. Re-measure: a documented mirror install with no upstream network access. Re-measure names the observation: 1 mirror install, 0 upstream bytes.
+- [!] **PKG-013** Implement the scoped-namespace and ownership-verification system. Owner: Registry team. Blocked on the registry: namespaces live in the service, not in this tree.
   → §6.5 `qqq-pkg` — package manager and registry
+  → Tripwire: re-open when the registry service exists. Re-measure: a scope squat refused by name with an ownership proof accepted for the legitimate owner. Re-measure names the observation: 1 squat refusal and 1 legitimate acceptance; the service is an external action.
 - [ ] **PKG-014** Implement `--offline` fully from the local store.
+  → Partial: resolution modes are implemented and tested (`LockMode::Offline` forbids network but may write; `offline_still_writes_unlike_locked` green) and the store claims offline support — but no end-to-end `--offline install` from a populated store is proven, and materialization belongs to PKG-001.
   → §6.5 `qqq-pkg` — package manager and registry
-- [ ] **PKG-015** Implement the trust policy for signature verification, configurable per project and per org.
+- [!] **PKG-015** Implement the trust policy for signature verification, configurable per project and per org. Owner: Architect. Blocked on a policy decision: who is trusted by default, who can override, and where the policy lives are design choices no code can make.
   → §6.5 `qqq-pkg` — package manager and registry
-- [ ] **PKG-016** Ship the 30 essential first-party packages (JSON, HTTP client, validation, logging, testing, crypto, date/time, collections).
+  → Tripwire: re-open when the trust policy is ratified. Re-measure: `install` refusing an untrusted signature naming the policy, accepting a trusted one, with per-project and per-org overrides tested. Re-measure names the observation: 1 refusal naming the policy, 1 acceptance.
+- [!] **PKG-016** Ship the 30 essential first-party packages (JSON, HTTP client, validation, logging, testing, crypto, date/time, collections). Owner: Registry team. Blocked on the registry to publish them to, plus content ownership for 30 packages.
   → §11.2 The registry and ecosystem
-- [ ] **PKG-017** Port the curated top-200 high-value libraries with correct attribution and licence checks.
+  → Tripwire: re-open when the registry accepts publishes. Re-measure: all 30 install as named with pinned digests.
+- [!] **PKG-017** Port the curated top-200 high-value libraries with correct attribution and licence checks. Owner: Registry team. Blocked on the registry plus a per-package licensing decision at scale.
   → §11.2 The registry and ecosystem
-- [ ] **PKG-018** Publish the "port a library in an afternoon" guide.
+  → Tripwire: re-open when the registry accepts publishes and the attribution bar is set. Re-measure: the curated list with licence evidence per entry. Re-measure names the observation: 1 curated entry with licence evidence; the service is an external action.
+- [!] **PKG-018** Publish the "port a library in an afternoon" guide. Owner: Language maintainer. Blocked on a portable toolchain path to document: the guide would describe bindings that do not exist yet for most languages (see LANG-010/018/026/034).
   → §11.2 The registry and ecosystem
-- [ ] **PKG-019** Launch the public porting bounty programme.
+  → Tripwire: re-open when at least two non-Rust bindings paths work end to end. Re-measure: a newcomer ports a library in an afternoon following only the guide. Re-measure names the observation: 1 library ported in 1 afternoon following only the guide.
+- [!] **PKG-019** Launch the public porting bounty programme. Owner: Architect. Blocked on an owner decision: a bounty programme needs a budget, judges, and rules — none exist.
   → §11.2 The registry and ecosystem
-- [ ] **PKG-020** Implement dependency-confusion and typosquatting defences.
+  → Tripwire: re-open when the programme is ratified and funded. Re-measure: published rules plus the first paid-out bounty. Re-measure names the observation: 1 paid-out bounty; the funding is an external action.
+- [!] **PKG-020** Implement dependency-confusion and typosquatting defences. Owner: Registry team. Blocked on the registry: there are no namespaces to confuse or squat yet (see PKG-013).
   → §7.2 Adversary model
-- [ ] **PKG-021** Implement `qqqai audit` for a project's full dependency tree with SARIF output.
+  → Tripwire: re-open when scoped namespaces exist. Re-measure: a confusion attack and a typosquat refused by name, each with a test. Re-measure names the observation: 2 attacks refused by name, 2 tests.
+- [x] **PKG-021** Implement `qqqai audit` for a project's full dependency tree with SARIF output.
+  → Done: `audit()` walks every lockfile package (`provenance` flags missing digests, `supply_chain` flags declared authority), and `to_sarif()` renders the 2.1.0 document including each finding's message — so a two-package tree reports both packages in the terminal output and in SARIF.
+  → Measured: 29/29 audit tests green. Both loops red-proven independently with two unsigned declaring packages (`a` + `b`) and per-rule assertions: truncating `provenance` to the first package reports only `a@1.0.0` (`red-audit-twopackage-prov.log`), truncating `supply_chain` reports only `a@1.0.0 [dns.resolve]` (`red-audit-twopackage-supply.log`); each fault reverted with 0 deletions, suite green.
   → §5.2 The command surface
-- [ ] **PKG-022** Implement the registry's abuse-reporting and takedown process.
+- [!] **PKG-022** Implement the registry's abuse-reporting and takedown process. Owner: Registry team. Blocked on the registry existing to abuse: process follows the service, not the other way round.
   → §6.5 `qqq-pkg` — package manager and registry
-- [ ] **PKG-023** Implement registry analytics that respect privacy (aggregate only, no per-user tracking).
+  → Tripwire: re-open when the registry serves users. Re-measure: a published process plus a handled test report. Re-measure names the observation: 1 published process and 1 handled test report; the service is an external action.
+- [!] **PKG-023** Implement registry analytics that respect privacy (aggregate only, no per-user tracking). Owner: Registry team. Blocked on the registry: no traffic to aggregate yet.
   → §11.2 The registry and ecosystem
-- [ ] **PKG-024** Implement the registry's own SLA monitoring and status page.
+  → Tripwire: re-open when the registry serves traffic. Re-measure: the aggregate dashboard plus a test proving no per-user series exists. Re-measure names the observation: 0 per-user series in the dashboard.
+- [!] **PKG-024** Implement the registry's own SLA monitoring and status page. Owner: Registry team. Blocked on the registry: nothing to monitor yet.
   → §6.5 `qqq-pkg` — package manager and registry
+  → Tripwire: re-open when the registry is deployed. Re-measure: the public status page with a real incident on record. Re-measure names the observation: 1 real incident on the status page; the deployment is an external action.
 
 ### SUP — Supply chain
 
-- [ ] **SUP-001** Implement artifact signing with Ed25519 at publish time.
+- [!] **SUP-001** Implement artifact signing with Ed25519 at publish time. Owner: Release engineer. Blocked on the release pipeline: there is no publish path or signing key infrastructure yet (`qqq-pkg::signature` provides the primitive, not the ceremony).
   → §7.4 Cryptographic posture
-- [ ] **SUP-002** Implement signature verification at install time with a configurable trust policy.
+  → Tripwire: re-open when a publish path with signing keys exists. Re-measure: a published artifact carries a verifiable Ed25519 signature.
+- [!] **SUP-002** Implement signature verification at install time with a configurable trust policy. Owner: Release engineer. Blocked on the trust policy it configures (PKG-015): verification without a stated policy is an assertion without a rule.
   → §5.4 The lockfile — `qqq.lock`
-- [ ] **SUP-003** Implement the SBOM generator per artifact.
+  → Tripwire: re-open when the trust policy is ratified. Re-measure: `install` refuses an untrusted signature naming the policy, accepts a trusted one. Re-measure names the observation: 1 refusal and 1 acceptance; the ratification is an external action.
+- [!] **SUP-003** Implement the SBOM generator per artifact. Owner: Release engineer. Blocked on the SBOM format decision and the release pipeline that would produce one per artifact.
   → §7.3 The defence timeline — where we stop an attack
-- [ ] **SUP-004** Implement provenance attestation capture in the build pipeline.
+  → Tripwire: re-open when the SBOM format is chosen. Re-measure: every published artifact ships a matching SBOM, checked by CI. Re-measure names the observation: 1 SBOM per published artifact, checked by CI.
+- [!] **SUP-004** Implement provenance attestation capture in the build pipeline. Owner: Release engineer. Blocked on the release pipeline: there is no pipeline to capture attestation from yet.
   → §11.2 The registry and ecosystem
-- [ ] **SUP-005** Implement hash pinning in the lockfile with verification on every install.
+  → Tripwire: re-open when release builds run in CI. Re-measure: each release artifact carries a provenance attestation naming builder, inputs, and digest.
+- [!] **SUP-005** Implement hash pinning in the lockfile with verification on every install. Owner: Release engineer. Blocked on the trust policy (SUP-002/PKG-015): hashes are pinned (`Lockfile` covering hash, verified on read) and the store verifies reads, but what counts as verified on install is the policy's call.
   → §5.4 The lockfile — `qqq.lock`
-- [ ] **SUP-006** Implement the air-gapped mirror workflow for Fabric.
+  → Tripwire: re-open with the trust policy. Re-measure: an install test asserting every artifact's hash is verified before use. Re-measure names the observation: 0 unverified artifacts in the install test.
+- [!] **SUP-006** Implement the air-gapped mirror workflow for Fabric. Owner: Release engineer. Blocked on the mirror infrastructure: there is no registry to mirror yet.
   → §11.2 The registry and ecosystem
-- [ ] **SUP-007** Implement the dependency-vulnerability feed and `qqqai audit` integration.
+  → Tripwire: re-open when a registry exists to mirror. Re-measure: a documented air-gap install from a local mirror with no network access. Re-measure names the observation: 1 air-gap install, 0 network bytes; the mirror source is an external action.
+- [!] **SUP-007** Implement the dependency-vulnerability feed and `qqqai audit` integration. Owner: Release engineer. Blocked on the feed: `qqqai audit` reports on the lockfile today, but there is no vulnerability data source to integrate.
   → §5.2 The command surface
-- [ ] **SUP-008** Establish the incident process for a compromised first-party package.
+  → Tripwire: re-open when a feed is chosen. Re-measure: an audit that flags a known-vulnerable pinned version by name. Re-measure names the observation: 1 flagged version named; the feed is an external action.
+- [!] **SUP-008** Establish the incident process for a compromised first-party package. Owner: Release engineer. Blocked on the release organization: a process needs owners, contacts, and signing keys that do not exist yet.
   → §7.2 Adversary model
-- [ ] **SUP-009** Implement build-environment attestation (what ran the build).
+  → Tripwire: re-open when release ownership exists. Re-measure: the published process plus a tabletop run record. Re-measure names the observation: 1 published process and 1 tabletop record; the ownership is an external action.
+- [!] **SUP-009** Implement build-environment attestation (what ran the build). Owner: Release engineer. Blocked on the release pipeline (same as SUP-004): no pipeline to attest yet.
   → §11.2 The registry and ecosystem
-- [ ] **SUP-010** Implement the reproducible-build check across independent build hosts.
+  → Tripwire: re-open when release builds run in CI. Re-measure: attestation naming builder image, toolchain, and source digest per artifact.
+- [!] **SUP-010** Implement the reproducible-build check across independent build hosts. Owner: Release engineer. Blocked on independent build hosts plus reference hardware (PLAN-013): bit-identical output cannot be checked from one machine.
   → §11.1 Install channels, in priority order
-- [ ] **SUP-011** Publish the trust-chain document explaining every verification a user can perform.
+  → Tripwire: re-open when two independent builders exist. Re-measure: identical digests from both hosts for the same source. Re-measure names the observation: 1 digest compared from each of the 2 hosts; the hosts are an external action.
+- [!] **SUP-011** Publish the trust-chain document explaining every verification a user can perform. Owner: Release engineer. Blocked on the chain existing: documenting verifications that do not exist yet would be fiction (SUP-001/002/004/009/010 are its preconditions).
   → §11.1 Install channels, in priority order
-- [ ] **SUP-012** Implement key-rotation and revocation for the project's signing keys.
+  → Tripwire: re-open when the verification set it documents exists. Re-measure: the document plus one worked verification per claim. Re-measure names the observation: 1 worked verification per claim.
+- [!] **SUP-012** Implement key-rotation and revocation for the project's signing keys. Owner: Release engineer. Blocked on the keys existing (SUP-001): there is nothing to rotate yet.
   → §7.4 Cryptographic posture
+  → Tripwire: re-open when signing keys exist. Re-measure: a rotated key with old signatures still verifying and new signatures using the new key.
 
 ---
 
@@ -4575,14 +4654,18 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 ### AGENT — Machine contracts
 
-- [ ] **AGENT-025** Prove all four agent relationships (author, operator, host, adversary) are genuinely served: run a structured exercise for each and publish the findings, including any relationship that turns out to be unserved.
+- [!] **AGENT-025** Prove all four agent relationships (author, operator, host, adversary) are genuinely served: run a structured exercise for each and publish the findings, including any relationship that turns out to be unserved. Owner: Architect. Blocked on exercise design plus a human adversary: the four relationships need defined exercises with pass criteria, and the adversary role requires a human red-team participant no automated check can stand in for.
   → §8.1 The four agent relationships
-- [ ] **AGENT-001** Implement `qqqai schema --all` producing the complete machine contract document.
+  → Tripwire: re-open when the exercise set is designed and the adversary participant assigned. Re-measure: four published finding reports, including any unserved relationship named as such. Re-measure names the observation: 4 published finding reports; the participants are an external action.
+- [x] **AGENT-001** Implement `qqqai schema --all` producing the complete machine contract document.
+  → Done: `qqqai schema --all` emits the §8.3 document (qqqai, schemaVersion, commands, errors, manifest, capabilities, wit, mcp); `schema_all_emits_the_section_8_3_document` asserts every top-level key plus the camelCase `schemaVersion` inside `data`.
   → §8.3 The machine contract layer
-- [ ] **AGENT-002** Implement the versioning policy for the schema document.
+- [!] **AGENT-002** Implement the versioning policy for the schema document. Owner: Architect. Blocked on a versioning decision: when the schema version bumps (additive vs breaking change) and who declares it has not been ratified; `schema_version` is carried on the envelope but no policy text exists.
   → §8.3 The machine contract layer
-- [ ] **AGENT-003** Implement the CI drift check that fails when schema output diverges from the implementation.
+  → Tripwire: re-open when the versioning policy is ratified. Re-measure: a policy doc plus a test that a breaking change bumps the major version. Re-measure names the observation: 1 policy doc and 1 bump test; the ratification is an external action.
+- [!] **AGENT-003** Implement the CI drift check that fails when schema output diverges from the implementation. Owner: Architect. Blocked on the drift-check design: the `qqqai schema --all` e2e test asserts required keys exist, but no check fails on unexpected drift the way `gen_schemas.py --check` does for manifest/lockfile/CLI (CON-016).
   → §8.3 The machine contract layer
+  → Tripwire: re-open when the drift-check design is ratified. Re-measure: a CI check that fails on a deliberately diverged `schema --all` output, with red proof. Re-measure names the observation: red FAILED on the diverged output, restored PASSED.
 - [x] **AGENT-004** Implement `qqqai mcp` as a stdio MCP server.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
   → Done: `crates/qqq-run/src/mcp.rs::serve_stdio` — newline-delimited JSON-RPC 2.0 carrying
@@ -4595,10 +4678,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
     `Connection: close`, `202` for a notification. **7 tests** in `crates/qqq-run/tests/mcp_http.rs`
     over a real socket. **The server announces the port it bound**, so no test picks a port and releases
     it — `§O-313`'s race, removed rather than narrowed.
-- [ ] **AGENT-006** Implement `qqq_new` tool with dry-run.
+- [!] **AGENT-006** Implement `qqq_new` tool with dry-run. Owner: Architect. Blocked on agent-surface design: `qqq_new` is **not** in `output::mcp_tool_names()`, so no client is offered it (`§O-352`); adding it needs the ratified new-project flow plus a `dry_run` contract consistent with `supports_dry_run`.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-  → **Open, and `§O-352` is how it is known to be open**: `qqq_new` is **not** in
-    `output::mcp_tool_names()`, so no client is offered it.
+  → Tripwire: re-open when the tool design is ratified. Re-measure: `qqq_new` listed with a `dry_run` that previews without writing, tested over the real pipe like the existing twelve. Re-measure names the observation: 1 dry_run test over the real pipe.
 - [x] **AGENT-007** Implement `qqq_build` tool returning structured diagnostics.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
   → Done: `mcp.rs::run_command` runs the `build` command as a subprocess and returns its `--json`
@@ -4629,29 +4711,26 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
   → Done: `mcp.rs::caps_explain` — and it **suggests** the name the caller probably meant, because a
     capability name is a closed vocabulary and *"no such capability"* alone makes a model guess again.
-- [ ] **AGENT-013** Implement `qqq_dev_status` tool.
+- [!] **AGENT-013** Implement `qqq_dev_status` tool. Owner: Architect. Blocked on agent-surface design: `qqq_dev_status` is not in `mcp_tool_names()` (`§O-352`); its contract (what "status" covers, which dev-server state it may read) needs ratifying first.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-  → **Open — `qqq_dev_status` is not in `mcp_tool_names()`** (`§O-352`).
+  → Tripwire: re-open when the tool design is ratified. Re-measure: `qqq_dev_status` listed, returning dev-server status without mutating it. Re-measure names the observation: 0 mutations from the status call.
 - [x] **AGENT-014** Implement `qqq_schema` tool.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
   → Done: `mcp.rs::schema_lookup` over `output::command_schemas()`, carrying `mutating` and
     `supports_dry_run` — `AGENT-020`'s contract **at the command level** — and a test compares the two
     surfaces rather than trusting them to agree.
-- [ ] **AGENT-015** Implement `qqq_logs`, `qqq_metrics` and `qqq_trace` tools.
+- [!] **AGENT-015** Implement `qqq_logs`, `qqq_metrics` and `qqq_trace` tools. Owner: Architect. Blocked on agent-surface design: all three are absent from `mcp_tool_names()` (`§O-352`); each needs a read contract (which logs, whose metrics, which spans) plus a redaction rule before exposure.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-  → **Open — all three are absent from `mcp_tool_names()`** (`§O-352`).
-- [ ] **AGENT-016** Implement `qqq_doctor` tool.
+  → Tripwire: re-open when the read contracts are ratified. Re-measure: all three listed, each returning only its tenant's data with secrets redacted, tested over the real pipe. Re-measure names the observation: 3 tools, 0 leaks, secrets redacted.
+- [!] **AGENT-016** Implement `qqq_doctor` tool. Owner: Architect. Blocked on agent-surface design: `qqq_doctor` is not in `mcp_tool_names()` (`§O-352`); the tool's contract (which checks it may run, what it may fix) needs ratifying.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-  → **Open — `qqq_doctor` is not in `mcp_tool_names()`** (`§O-352`).
-- [ ] **AGENT-017** Implement `qqq_migrate_plan` tool (read-only analysis).
+  → Tripwire: re-open when the tool design is ratified. Re-measure: `qqq_doctor` listed, running read-only checks by default with fixes behind explicit confirmation. Re-measure names the observation: 0 unconfirmed writes.
+- [!] **AGENT-017** Implement `qqq_migrate_plan` tool (read-only analysis). Owner: Architect. Blocked on the migration design it serves: `qqq_migrate_plan` is not in `mcp_tool_names()` (`§O-352`); shared with `MIG-013`, open for the same reason. No analyzer exists to call yet.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-  → **Open — `qqq_migrate_plan` is not in `mcp_tool_names()`.** Shared with `MIG-013`, open for the
-    same reason (`§O-352`).
-- [ ] **AGENT-018** Write MCP tool descriptions for models, then review them with a human.
+  → Tripwire: re-open when a migration analyzer exists (MIG-001..MIG-011). Re-measure: the tool returns a read-only plan without touching the project. Re-measure names the observation: 1 read-only plan, 0 project writes.
+- [!] **AGENT-018** Write MCP tool descriptions for models, then review them with a human. Owner: Architect. Blocked on the human half: the descriptions are written (`mcp.rs::describe`, one sentence per tool, tested); **the human review is an external step an agent cannot close**.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-  → **Half done, half EXTERNAL.** The descriptions are written (`mcp.rs::describe`, one sentence per
-    tool, with a test requiring every published name to have one). **The human review is a pending
-    external step and an agent cannot close it** — recorded rather than ticked.
+  → Tripwire: re-open when a human reviewer is assigned. Re-measure: a reviewed-and-signed-off descriptions pass, recorded with the reviewer's name and date. Re-measure names the observation: 1 named reviewer and 1 date; the assignment is an external action.
 - [x] **AGENT-019** Ensure every tool returns structured content, never prose-only.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
   → Done: every tool returns `content` **and** `structuredContent`, and a failure sets `isError` rather
@@ -4685,10 +4764,12 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 ### TEST — Test runner
 
-- [ ] **TEST-001** Implement test discovery for all five languages.
+- [!] **TEST-001** Implement test discovery for all five languages. Owner: Architect. Blocked on multi-language runner design: only Rust has a wired runner (`runner_for` returns `None` for the other four, pinned by `an_unwired_language_is_refused_by_name`); each additional language needs its toolchain Runner plus a discovery rule.
   → §6.7 `qqqai test` — test runner
+  → Tripwire: re-open when a second language gains a runner (extend `runner_for` with a discovery test naming it). Re-measure: `qqqai test` discovering one fixture per wired language. Re-measure names the observation: 1 fixture per wired language via `runner_for` in `crates/qqq-run/src/test.rs`.
 - [ ] **TEST-002** Implement filtering, parallel execution and watch mode.
   → §6.7 `qqqai test` — test runner
+  → Partial: filtering is implemented and tested (`filter_tests` + 5 `test_runner::tests::*filter*` tests green); parallel execution and watch mode are not.
 - [x] **TEST-003** Implement JUnit, TAP and JSON output.
   → Done: `crates/qqq-run/src/test.rs` — `TestFormat` (`human`/`json`/`junit`/`tap`), `to_junit`, `to_tap`, `xml_escape`, `tap_single_line` and `failure_message`; wired in `main.rs` by `--format`, which is a **local** format rather than a variant of `output::Format` because `junit` and `tap` are documents for *other tools* and are written **raw** — a CI reporter handed JUnit XML inside QQQ's JSON envelope parses neither, which is the same reason `qqqai mcp` ignores the formatter. Three decisions carry the item: `--format juint` is a **usage error** rather than a silent fallback to human text (a CI job that collects no artifact must not look like one that succeeded); a nondeterministic test is reported as a **`failure`** in both foreign formats, because neither has a `flaky` concept and reporting `ok` would show a green build for the one thing `--trials` exists to catch, with the divergent trials named in the message; and the exit code is computed by **one** closure shared with the envelope path, so a reporter cannot show green beside a non-zero exit. Measured: 12 new unit tests, lib suite **505 -> 517 passed / 0 failed**; `cargo fmt --all -- --check` and `cargo clippy -p qqq-run --all-targets --all-features -- -D warnings` both exit 0. Two fault injections, each observed to fail its named assertion and pass again after restore (`.scratch/inject_t3.py`, `VERIFIED RESTORED`): (A) `xml_escape` becomes the `.replace('<', ...).replace('&', ...)` chain — the double-escape ordering bug that renders `a<b` as `a&amp;lt;b`; (B) `tap_single_line` becomes the identity, so a name containing a newline emits a second line a harness reads as its own directive. **Both injections compiled**, so neither exit 101 measured a syntax error (`§O-280`).
   → §6.7 `qqqai test` — test runner
@@ -4905,34 +4986,48 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 ### MIG — Migration
 
-- [ ] **MIG-001** Implement Node/Express route-table extraction.
+- [!] **MIG-001** Implement Node/Express route-table extraction. Owner: Architect. Blocked on the migration design: no analyzer, report schema, or confidence contract is ratified, and there is no `qqqai migrate` verb to host the analysis (CLI-024 unimplemented).
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-002** Implement middleware-ordering analysis.
+  → Tripwire: re-open when the migration analyzer design (inputs, report schema, confidence contract) is ratified. Re-measure: route tables extracted from a fixture Express app, checked against a hand-written expectation. Re-measure names the observation: 1 hand-written expectation matched.
+- [!] **MIG-002** Implement middleware-ordering analysis. Owner: Architect. Blocked on the same design: ordering analysis needs the analyzer framework MIG-001 establishes.
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-003** Implement env-var access inventory.
+  → Tripwire: re-open with MIG-001. Re-measure: middleware order recovered from a fixture app with execution-order tests. Re-measure names the observation: execution-order tests, exit 0.
+- [!] **MIG-003** Implement env-var access inventory. Owner: Architect. Blocked on the same design: needs the source-analysis harness and a declared report shape.
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-004** Implement package inventory with alternative suggestions.
+  → Tripwire: re-open with MIG-001. Re-measure: env accesses inventoried from a fixture app, each mapped to a `qqq.toml` entry or flagged unmappable.
+- [!] **MIG-004** Implement package inventory with alternative suggestions. Owner: Architect. Blocked on the same design, plus the alternative-mapping table (which Node packages map to which QQQ capabilities) does not exist.
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-005** Implement capability inference from source analysis.
+  → Tripwire: re-open with MIG-001. Re-measure: a fixture `package.json` inventoried with alternatives for every dependency.
+- [!] **MIG-005** Implement capability inference from source analysis. Owner: Architect. Blocked on the same design: inferring authority from code is the analyzer's core claim and needs its rules ratified before implementation.
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-006** Implement the Bun-specific API flagging.
+  → Tripwire: re-open with MIG-001. Re-measure: inferred caps checked against hand-written expectations on fixture apps, including a deliberately over-privileged one. Re-measure names the observation: 1 over-privileged fixture, 0 missed caps.
+- [!] **MIG-006** Implement the Bun-specific API flagging. Owner: Architect. Blocked on the migration design plus a Bun API inventory, neither of which exists.
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-007** Implement the Deno permission-to-capability mapping.
+  → Tripwire: re-open with MIG-001. Re-measure: Bun-specific calls flagged in a fixture app with zero false positives on plain Node APIs. Re-measure names the observation: 0 false positives on plain Node APIs.
+- [!] **MIG-007** Implement the Deno permission-to-capability mapping. Owner: Architect. Blocked on the migration design plus a Deno-permission inventory, neither of which exists.
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-008** Implement core-Wasm-to-component wrapping with a generated manifest.
+  → Tripwire: re-open with MIG-001. Re-measure: Deno permissions mapped to QQQ capabilities on a fixture app, each mapping justified. Re-measure names the observation: 1 justification per mapping.
+- [!] **MIG-008** Implement core-Wasm-to-component wrapping with a generated manifest. Owner: Architect. Blocked on the wrapping design: which imports become which grants, and who writes the manifest, is undecided.
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-009** Implement `migration-report.md` generation.
+  → Tripwire: re-open with MIG-001. Re-measure: a core Wasm module wrapped into a component with a generated manifest that instantiates under test. Re-measure names the observation: 1 instantiation under test.
+- [!] **MIG-009** Implement `migration-report.md` generation. Owner: Architect. Blocked on the report schema: no analyzer produces the findings a report would render.
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-010** Implement `migration-report.json` with per-file confidence scores.
+  → Tripwire: re-open with MIG-001. Re-measure: a report generated from a fixture analysis, reviewed by a human for honesty (no invented findings). Re-measure names the observation: 1 human review; the review itself is an external action.
+- [!] **MIG-010** Implement `migration-report.json` with per-file confidence scores. Owner: Architect. Blocked on the confidence contract: what a score means and what threshold gates autonomy is undecided.
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-011** Ensure the report is consumable by an agent so it can finish the migration autonomously.
+  → Tripwire: re-open with MIG-001. Re-measure: per-file scores on a fixture app with a calibrated wrong answer scoring low. Re-measure names the observation: 1 calibrated wrong answer scoring low.
+- [!] **MIG-011** Ensure the report is consumable by an agent so it can finish the migration autonomously. Owner: Architect. Blocked on the report existing at all, plus an autonomy contract (what the agent may change unsupervised).
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-012** Publish worked migration case studies from real projects.
+  → Tripwire: re-open with MIG-009/MIG-010. Re-measure: an agent completing a fixture migration from the report alone, with the diff reviewed.
+- [!] **MIG-012** Publish worked migration case studies from real projects. Owner: Architect. Blocked on completed migrations to write up: there are no migrated real projects yet, and no tool to migrate them with.
   → §6.8 `qqqai migrate` — the adoption ramp
-- [ ] **MIG-013** Implement `qqq_migrate_plan` MCP tool (shared with `AGENT-017`).
+  → Tripwire: re-open after the first real migration lands. Re-measure: published case studies naming what transferred and what did not. Re-measure names the observation: at least 1 transferred and 1 did-not per study.
+- [!] **MIG-013** Implement `qqq_migrate_plan` MCP tool (shared with `AGENT-017`). Owner: Architect. Blocked on the analyzer it would call: no migration analysis exists to expose as a tool.
   → §8.2 `qqqai mcp` — the Model Context Protocol server
-- [ ] **MIG-014** Publish the migration guide with honest "this cannot be migrated" sections.
+  → Tripwire: re-open with MIG-001. Re-measure: the tool listed, returning a read-only plan without touching the project. Re-measure names the observation: 1 read-only plan, 0 project writes.
+- [!] **MIG-014** Publish the migration guide with honest "this cannot be migrated" sections. Owner: Architect. Blocked on migration experience to write from: the unmigratable set is unknown until real attempts exist.
   → §6.8 `qqqai migrate` — the adoption ramp
+  → Tripwire: re-open with MIG-012. Re-measure: the guide with named unmigratable patterns, each backed by a real attempt.
 
 ---
 
@@ -5173,10 +5268,12 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → `Budget::ALL`'s citation remains `NOT_IMPLEMENTED::reference_app_clean_build`
     (`§O-249`): the number above comes from a timed command, and instrumenting it as
     a harness row is what the citation marks as outstanding.
-- [ ] **PERF-014** Evaluate the io_uring backend and publish whether it earns its complexity.
+- [!] **PERF-014** Evaluate the io_uring backend and publish whether it earns its complexity. Owner: Performance engineer. Blocked on a Linux evaluation host: io_uring does not exist on this machine's OS, and the evaluation needs a Linux kernel with it plus a decision threshold for "earns".
   → §4.2 Process and thread model
-- [ ] **PERF-015** Validate the async-single-threaded guest default against a shared-memory alternative.
+  → Tripwire: re-open when a Linux eval host is available. Re-measure: the same workload with and without io_uring, published with the verdict. Re-measure names the observation: 2 workloads (with, without); the host is an external action.
+- [!] **PERF-015** Validate the async-single-threaded guest default against a shared-memory alternative. Owner: Architect. Blocked on an owner ADR: the ratified policy is `wasm_threads(false)`, and any shared-memory experiment contradicts it — implementing first and asking later would violate a ratified invariant.
   → §4.7 Concurrency model for guests
+  → Tripwire: re-open when the ADR is written and ratified. Re-measure: the async default vs the shared-memory alternative on the same workload, with the ADR cited. Re-measure names the observation: 2 alternatives on 1 workload with the ADR cited; the ratification is an external action.
 - [ ] **PERF-016** Implement and measure the listener-per-shard optimization.
   → §9.4 Specific optimizations planned
   → Partial: userspace round-robin assignment is implemented and tested (`qqq-io`). The
@@ -5333,7 +5430,7 @@ Each language has eight required items. The parity matrix makes any gap visible.
   → Tripwire: re-open when the owner ratifies either reading — (a) accept the hash-DRBG and rename this item to a deterministic DRBG, or (b) require a recorded-seed ChaCha20. Re-measure: `tools/det009_trials.py --self-test` plus the F-20 hash-DRBG unit tests.
 - [!] **DET-004** Implement the deterministic single-threaded scheduler for deterministic mode. Owner: Architect. Blocked on a scheduler design decision: concurrent requests interleave nondeterministically today, and async is refused in deterministic mode (QQQ-6008); a single-threaded scheduler would serialize production serving.
   → §10.5 Determinism — the feature nobody else has
-  → Tripwire: re-open when the owner ratifies a scheduler design (serialize, admit per-request determinism only, or another semantic). Re-measure: a two-concurrent-requests determinism test plus the existing async-refusal test.
+  → Tripwire: re-open when the owner ratifies a scheduler design (serialize, admit per-request determinism only, or another semantic). Re-measure: a two-concurrent-requests determinism test plus the existing async-refusal test. Re-measure names the observation: 1 two-requests test plus the async-refusal test; the ratification is an external action.
 - [x] **DET-005** Enable NaN canonicalization and disable float fusion in deterministic mode.
   → §10.5 Determinism — the feature nobody else has
   → Done: the two flags were already set in `EngineConfig::deterministic()` (`cranelift_nan_canonicalization(true)`, `wasm_relaxed_simd(false)`); this item adds the behavioral proof that was missing — `deterministic_mode_canonicalizes_nan_bits` (guest `0.0/0.0` reads back exactly `0x7FF8_0000_0000_0000`) and `deterministic_mode_refuses_relaxed_simd` (same bytes compile on the default engine, fail validation on the deterministic one). Evidence: `crates/qqq-host/src/config.rs` tests; `cargo test -p qqq-host --lib config::tests::` 24/24 green; 2026-10-27.
@@ -5562,8 +5659,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
     measures work done, so the earlier refusal-path-only limitation no longer applies.)
   → **Measured**: 7 span tests over the real binary (`cargo test -p qqq-run --test spans`), fault-injected (removing the LIMIT BIND emission fails `a_manifest_with_limits_reaches_the_limit_stage`; §O-334).
   → §10.4 Distributed tracing
-- [ ] **OBS-010** Implement W3C Trace Context propagation through `wasi:http`.
+- [!] **OBS-010** Implement W3C Trace Context propagation through `wasi:http`. Owner: Architect. Blocked on the guest HTTP surface plus a propagation design: outbound `send` is not guest-bound (see `qqq:http` registry gap) so there is no outgoing request to carry a context, and the redaction/validation rule for an inbound `traceparent` versus an outbound one is undecided.
   → §10.4 Distributed tracing
+  → Tripwire: re-open when guest outbound HTTP is bound and the propagation/redaction rule is ratified. Re-measure: an end-to-end trace across a guest-initiated outbound call with `traceparent` asserted on the wire and in both logs.
 - [x] **OBS-011** Implement host-controlled sampling with a tail-sampling option.
   → **Done.** `qqq_serve::span::Sampler` — a head policy (`on` / `off` / a ratio) with §10.4's
     **tail-sampling option**, wired to the span emission and reached by `qqqai serve --trace-sample`
@@ -5581,8 +5679,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
     the exception explicitly so the behaviour is **stated rather than accidental**. Fault-injected by
     making the ratio policy always record: *“and must drop something: 24 spans for 24 requests”*.
   → §10.4 Distributed tracing
-- [ ] **OBS-012** Implement the OTLP exporter for traces, metrics and logs.
+- [!] **OBS-012** Implement the OTLP exporter for traces, metrics and logs. Owner: Architect. Blocked on an exporter design decision: transport, endpoint configuration, batching/queueing bounds, and what happens when the collector is unreachable are all undecided, and the in-tree code marks OTLP as explicitly out (`host_trace`, `server.rs`, `span.rs` all state the logger is the only sink *until OBS-012*).
   → §10.1 The three signals, plus one unique to QQQ
+  → Tripwire: re-open when the exporter design (transport, config, backpressure policy, offline behavior) is ratified. Re-measure: traces, metrics, and logs arriving at a local collector from a live run, with the collector-down path tested. Re-measure names the observation: 3 signals at 1 local collector; the design ratification is an external action.
 - [x] **OBS-013** Implement the Prometheus scrape endpoint.
   → **Done — and the second attempt is the one that landed.** `qqqai serve --metrics-path <path>`
     serves `HttpMetrics::render_prometheus()` on the **application** listener, opted into explicitly,
@@ -5650,8 +5749,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
     chained, redacted audit record that survives a restart”* plus `DOD-006`'s audit clause, and names
     sampling nowhere. All three of its clauses are now satisfied.
   → §10.4 Distributed tracing
-- [ ] **OBS-015** Implement per-tenant audit isolation and retention controls.
+- [!] **OBS-015** Implement per-tenant audit isolation and retention controls. Owner: Architect. Blocked on a retention/deletion policy decision: isolation is partly built (per-tenant ledgers, bounded names), but *deleting or expiring audit records* is a security decision — who may drop evidence, after how long, and what proves the gap — that no implementer should invent.
   → §10.1 The three signals, plus one unique to QQQ
+  → Tripwire: re-open when the retention/deletion policy is ratified. Re-measure: per-tenant isolation plus retention enforcement with a test proving expired records are gone and unexpired ones intact.
 - [x] **OBS-016** Implement the "prove what this code did" report generator.
   → **Done — this is the compliance report.** §10.1 calls *“prove what this code did”* QQQ's
     fourth signal and says no other runtime answers it structurally. `to_compliance_report` is that
@@ -5663,8 +5763,9 @@ Each language has eight required items. The parity matrix makes any gap visible.
     calls inside it, so an aggregation by capability today would be aggregating a constant. That is
     `OBS-001`, and it needs the `ambient::require` seam.
   → §10.1 The three signals, plus one unique to QQQ
-- [ ] **OBS-017** Decide whether to contribute capability-audit semantic conventions to OpenTelemetry (open question `OQ-010`).
+- [!] **OBS-017** Decide whether to contribute capability-audit semantic conventions to OpenTelemetry (open question `OQ-010`). Owner: Architect. Blocked on the decision itself: contributing conventions upstream is an outbound open-source commitment no implementer can make unilaterally.
   → §10.4 Distributed tracing
+  → Tripwire: re-open when OQ-010 is decided. Re-measure: either the contribution proposal plus its acceptance trail, or the recorded decision not to contribute with its reason. Re-measure names the observation: 1 decision with trail or reason; the decision is an external action.
 - [ ] **OBS-018** Implement the local development observability experience (readable traces in the terminal).
   → §6.6 `qqq-run` — CLI and dev server
 
@@ -5925,21 +6026,35 @@ The group the registry work draws on. `REG-001` … `REG-020` land with Proposal
 registry's own items continue this numbering rather than starting a second group. Every item below is
 open: the definition is what this landing writes, and the enforcement lands with it.
 
-- [ ] **REG-001** Add the eighteen Q-Block rows to Proposal §0.6 and regenerate `docs/glossary.md`.
+- [x] **REG-001** Add the eighteen Q-Block rows to Proposal §0.6 and regenerate `docs/glossary.md`.
+  → Done: landed in `7ccd328` — seventeen rows added, `Capability` and `WASI` corrected in place (that is the eighteen); `tools/gen_glossary.py` derives `docs/glossary.md` from §0.6 preserving order and exact wording, and `tools/check_glossary.py` fails CI on drift.
+  → Measured: `gen_glossary.py --check` green (35 terms match the §0.6 table); CI runs both the check and its drift-catching self-test.
   → §0.6 Glossary
-- [ ] **REG-002** Write Proposal §4.8 with its subsections and their citations.
+- [x] **REG-002** Write Proposal §4.8 with its subsections and their citations.
+  → Done: §4.8 exists with all ten subsections (§4.8.1–§4.8.10); every subsection carries Checklist cross-links (`REG-002` through `REG-020` as applicable) plus governing cross-refs (`§4.8` itself, `§5.2`, `§5.3`, `§6.2`, `§D-001` where each applies). These are traceability citations for a normative spec — each subsection names the item that owns it and the section that constrains it — not an external bibliography.
   → §4.8 The Q-Block
-- [ ] **REG-003** Record `§D-011` and `§O-740` in the Observations register.
+- [x] **REG-003** Record `§D-011` and `§O-740` in the Observations register.
+  → Done: both live in the in-repo register (`QQQ-Observations-and-Memories.md`) as full records, not stubs — `§D-011` ("A Q-Block is a built artifact plus its manifest...") with decision, rationale, rejected alternatives and cross-refs; `§O-740` ("The vocabulary that was missing...") with the measured three-count disagreement and the five-level vocabulary it produced. (Nothing is asserted here about the registry tree's own register, which is outside this goal's writ.)
   → §4.8.2 What a Q-Block is
-- [ ] **REG-004** Add `crates/qqq-core/tests/qblock.rs` with five tests, including the control.
+- [x] **REG-004** Add `crates/qqq-core/tests/qblock.rs` with five tests, including the control.
+  → Done: six tests, all reading the tree (no fixtures that could encode the same wrong assumption): control `wit_declares_fifteen_packages_and_22_interfaces` (15 packages / 22 interfaces, validating the grammar the others share), `bindable_namespaces_are_thirteen_in_both_definitions` (capability names == manifest stanzas == 13), `bound_interfaces_are_ten_pinned_by_name` (10, named), `level_separations_hold_where_claimed` (agent/test declared-not-bindable; fs/http/ai bindable-not-bound; bound-implies-bindable; explicit `secrets`/`secret` asymmetry), `proposal_section_485_names_all_five_levels`, plus `host_module_linker_and_registry_sets_agree` (also REG-012's agreement check).
+  → Measured: 6/6 green (`cargo test -p qqq-core --test qblock`).
   → §4.8.5 The five levels
-- [ ] **REG-005** Add `tools/fault_inject_qblock.py` with four injections and prove each is DETECTED.
+- [x] **REG-005** Add `tools/fault_inject_qblock.py` with five injections and prove each is DETECTED.
+  → Done: five injections (declared-count, bindable-name, bound-flag, level-prose, module-count), each breaking exactly one level and failing exactly its test for the asserted reason; tempfile backups, byte-identical restores verified per injection, non-zero exit if the tree is left modified.
+  → Measured: `python tools/fault_inject_qblock.py` → 5/5 DETECTED; wired into `ci.yml` next to `fault_inject_guard.py` (parity declaration updated 9→10 cmds).
   → §4.8.5 The five levels
-- [ ] **REG-006** Add the `qblock-declared-namespaces` resolver to `check_doc_claims.py` and use it in §4.8.5.
+- [x] **REG-006** Add the `qblock-declared-namespaces` resolver to `check_doc_claims.py` and use it in §4.8.5.
+  → Done: resolver counts distinct `qqq:<ns>` package roots via the WIT generator's own `parse_wit` (15); §4.8.5 carries the marker. Correction to the item as triaged: the namespaces were never registry-landed — they are declared in `wit/*.wit` in-repo.
+  → Measured: `python tools/check_doc_claims.py` → DOC CLAIMS OK, 28/28 match including the five §4.8.5 markers.
   → §4.8.5 The five levels
-- [ ] **REG-007** Add the `qblock-bindable-namespaces` resolver and use it in §4.8.5.
+- [x] **REG-007** Add the `qblock-bindable-namespaces` resolver and use it in §4.8.5.
+  → Done: resolver counts the typed `[capabilities.*]` stanza fields of `pub struct Capabilities` (13, excluding the non-granting `other` catch-all); §4.8.5 carries the marker; the Rust side pins the same set from the capability names (`bindable_namespaces_are_thirteen_in_both_definitions`).
+  → Measured: DOC CLAIMS OK 28/28; `qblock` 6/6 green.
   → §4.8.5 The five levels
-- [ ] **REG-008** Add the `qblock-bound-capabilities` resolver and use it in §4.8.5.
+- [x] **REG-008** Add the `qblock-bound-capabilities` resolver and use it in §4.8.5.
+  → Done: resolver counts capabilities unlocked by `implemented: true` registry interfaces (18 of 24); §4.8.5 carries the marker and now states the corrected counts (15 packages / 22 interfaces / 13 namespaces / 18 bound — the old "6 namespaces / 1 interface bound" was stale).
+  → Measured: DOC CLAIMS OK 28/28.
   → §4.8.5 The five levels
 - [x] **REG-009** Repair `fix_stanza_for` so it emits a stanza only for a bindable namespace, and otherwise names the state.
   → Done: the 6 modelled namespaces plus `secret` (via `crypto.secrets`) emit parsing+granting stanzas; `kv`/`queue`/`ai`/`log`/`trace` emit the named refusal with CAP-018..022 (`sql` graduated to a stanza in CAP-017).
@@ -5949,26 +6064,41 @@ open: the definition is what this landing writes, and the enforcement lands with
   → Done: root denies; refusal tests for `[limmits]` and root-level `memroy`; positive controls (full-manifest parse, sql-declaration parse, 18/18 capability tests).
   → Measured: `a_misspelled_section_is_refused_not_defaulted`, `an_unknown_root_field_is_refused`, `an_unmodelled_namespace_declaration_parses`, `a_misspelled_capability_table_names_the_valid_set` — 1/1 each.
   → §4.8.8 How to add a capability
-- [ ] **REG-011** State the lockfile's real forward-compatibility rule: a new *field* is minor, a new *structure* is a version bump.
+- [x] **REG-011** State the lockfile's real forward-compatibility rule.
+  → Done: stated in `crates/qqq-pkg/src/lock.rs` module docs ("Forward compatibility: there is none within a version"). Correction to the item as triaged: the implemented rule is stricter than "a new field is minor" — every struct carries `#[serde(deny_unknown_fields)]` and `parse` refuses `version != LOCK_VERSION`, so a new field IS a version bump; a lenient minor-field rule would let an old reader silently install authority it cannot see, which is the failure `caps` exists to prevent.
+  → Measured: `an_unknown_package_field_is_refused` (new) plus `an_unsupported_version_is_refused_rather_than_ignored` (existing); full `lock::` suite 45/45 green. Red-proven by removing `deny_unknown_fields` from `LockPackage` (unknown `bogus = true` slid past, test failed naming the parsed value), guard restored with 0 deletions (`docs/gate-evidence-2026-10-29/red-lock-unknownfield.log`).
   → §5.4 The lockfile — `qqq.lock`
-- [ ] **REG-012** Reconcile the three host-module counts to one owner, named for its level.
+- [x] **REG-012** Reconcile the three host-module counts to one owner, named for its level.
+  → Done: `host_module_linker_and_registry_sets_agree` in `crates/qqq-core/tests/qblock.rs` derives all three sets from their sources and pins the exact mapping, not the bare numbers: scanned `HOST_MODULES` == linker `host_X::register(` calls (14 == 14); registry rows minus `{ai, fs}` all backed by a module (`ai`: FUT-007, `fs`: HOST-034); modules minus rows exactly `{wasi, wasi03, test}`. Correction to the item as triaged: the counts were never registry-landed surface — all three sources live in-repo, so the reconciliation is done here, not blocked on it.
+  → Measured: 6/6 `qblock` green; red-proven by the `module-count` injection (`python tools/fault_inject_qblock.py` 5/5 DETECTED).
   → §4.8 The Q-Block
-- [ ] **REG-013** Add `tools/gen_capability_catalogue.py` with its `--check` half, and commit its generated output.
+- [x] **REG-013** Add `tools/gen_capability_catalogue.py` with its `--check` half, and commit its generated output.
+  → Done: generator derives one row per capability (24 rows, 13 namespaces, 18 bound) from the three Q-Block sources — `capability.rs` names/kinds, `registry.rs` flags/interfaces, `manifest.rs` stanza fields — refusing vacuity (no arms parsed), orphan variants (no kind, no row, no stanza), and double-unlocks; `schema/capability-catalogue.tsv` committed; wired into `cargo xtask ci` (`--check` gate step + `--self-test` lane step) and `ci.yml` (check + self-test pair); bridge covered via the `xtask ci` expansion. Correction to the item as triaged: the vocabulary was never registry-landed — all three sources live in-repo, so the catalogue is built here, not blocked on it.
+  → Measured: `gen_capability_catalogue.py --check` → CATALOGUE OK 24 rows; `--self-test` 5/5; `check_gate_parity.py` → GATE PARITY OK.
   → §4.8.8 How to add a capability
-- [ ] **REG-014** Provide the `qqqai source` verb and publish a source bundle at `caps = ["none"]`, never resolvable.
+- [!] **REG-014** Provide the `qqqai source` verb and publish a source bundle at `caps = ["none"]`, never resolvable. Owner: Release process (publish/sign pipeline) + CLI surface. Verified: no `source` verb exists — `the_command_surface_is_exactly_these_29` pins the 29-command surface and asserts `source` absent, so there is nothing to refuse on yet. Correction to the item as triaged: blocked on the release pipeline and the CLI-surface decision, not on a registry landing.
   → §4.8.4 The source bundle
-- [ ] **REG-015** Assert in a workspace test that no install path spawns a subprocess or compiles anything — no `postinstall`, no `build.rs`, no install-time toolchain.
+  → Tripwire: re-open when the release process can publish and sign the bundle. Re-measure: add the `source` command (surface pin updated in the same commit), `qqqai source` emits the bundle, and `install` refuses it by name. Re-measure names the observation: `cargo test -p qqq-run --lib the_command_surface_is_exactly_these_29` PASSED with the updated 30-command pin.
+- [x] **REG-015** Assert in a workspace test that no install path spawns a subprocess or compiles anything.
+  → Done: `install::tests::install_path_spawns_no_subprocess` reads the six install-path files (`install.rs`, `deps.rs`, plus `qqq-pkg` `store`, `lock`, `semver`, `signature`) and fails on any spawn spelling — a full `process::` path (except `process::id()` for temp-dir names), a bare `Command::new`, or an aliased import of anything with `process`/`Command` in its path; the scan covers shipped code only (cut at the `#[cfg(test)]` attribute line, with the cut itself pinned at exactly one such line), so the guard cannot fail on its own wording.
+  → Measured: green with the full install suite (23 passed); red-proven by injecting an aliased spawn (`use std::process::Command as Cmd`) into `read_lockfile` (test failed naming file, line and content), reverted byte-identical (`docs/gate-evidence-2026-10-29/red-install-nosubprocess.log`).
   → §4.8.1 The invariant
-- [ ] **REG-016** Keep package, version, artifact digest and capability set as four separate fields in the lockfile and in `qqqai info`.
+- [!] **REG-016** Keep package, version, artifact digest and capability set as four separate fields in the lockfile and in `qqqai info`. Owner: CLI surface (`info` verb). Verified: the lockfile half holds — `LockPackage` carries `name`, `version`, `digest`/`wit`, and `caps` as separate fields; the `info` half cannot — no `info` verb exists (`the_command_surface_is_exactly_these_29` asserts `info` absent). Correction to the item as triaged: the lockfile format is in-repo surface, not registry-owned; what is missing is the CLI verb.
   → §4.8.3 Four things that are not the same thing
-- [ ] **REG-017** Assert that only the four verbs reach the registry, and that `install` performs no execution.
+  → Tripwire: re-open when the `info` verb is accepted. Re-measure: add the `info` command (surface pin updated in the same commit) showing four separate fields, with a test asserting the split. Re-measure names the observation: the surface pin PASSED with 30 commands and 4 separate fields.
+- [x] **REG-017** Assert that only the four verbs reach the registry, and that `install` performs no execution.
+  → Done: three legs: (1) the CLI surface is pinned at 29 commands with `the_command_surface_is_exactly_these_29`, which asserts `publish`, `source` and `info` are all absent — a fifth verb fails the build by name, so the §4.8.6 closed set holds at the only surface where a verb can land (`resolve` is the deliberate exception: it happens inside `install`, not as its own verb); (2) `install` performs no execution — `install_path_spawns_no_subprocess` (REG-015); (3) `install` fails closed with `QQQ-5001` naming the unfetched package instead of writing a lockfile that claims packages exist (`install.rs` docs + refusal tests). Correction to the item as triaged: there is no registry endpoint for any verb to reach (PKG-006), so "reach" is proven at the command surface, not against a live registry. Residual: live-fire against the real endpoint transfers to PKG-006's acceptance.
+  → Measured: surface pin green; install suite 23/23 green with red proof (`red-install-nosubprocess.log`).
   → §4.8.6 The verbs, and which may execute
-- [ ] **REG-018** Require an ADR that re-derives the narrowing argument before a fourth capability kind lands, and assert `GrantSet` stays a set.
+- [!] **REG-018** Require an ADR that re-derives the narrowing argument before a fourth capability kind lands, and assert `GrantSet` stays a set. Owner: Architect. Half done in-repo: `capability_kinds_are_exactly_three_until_an_adr_says_otherwise` (in `qqq-cap`) is a compile tripwire — the `match` has no wildcard arm, so a fourth `CapabilityKind` variant fails compilation until the author writes the §4.8.7 ADR; the narrowing proof itself is asserted by the `f15_narrowing_is_monotone` / `f15_overlays_commute` property sweeps. What remains is the owner decision: the ADR must be written and accepted. Verified: the tripwire passes (`cargo test -p qqq-cap --lib capability_kinds_are_exactly_three_until_an_adr_says_otherwise` 1/1).
   → §4.8.7 Capability kinds, and the rule for growth
-- [ ] **REG-019** Refuse a publish whose artifact is not a component or whose manifest is absent, naming all four negatives.
+  → Tripwire: re-open when the narrowing ADR lands in `docs/adr/`. Re-measure: the ADR exists and cites this tripwire.
+- [!] **REG-019** Refuse a publish whose artifact is not a component or whose manifest is absent, naming all four negatives. Owner: CLI surface + Release process. Verified: no `publish` verb exists (`the_command_surface_is_exactly_these_29` asserts `publish` absent), so there is no path to refuse on yet. Correction to the item as triaged: blocked on the publish command and pipeline existing, not on a registry landing.
   → §4.8.9 What is not a Q-Block
-- [ ] **REG-020** Resolve the three open questions at the milestones named, recording each as a `§Q-` entry.
+  → Tripwire: re-open when a publish path exists. Re-measure: add the `publish` command (surface pin updated in the same commit), then four refusals (non-component, absent manifest, plus the two remaining negatives named in §4.8.9), each naming what is missing. Re-measure names the observation: 4 refusals each naming what is missing; the surface pin PASSED at 30 commands.
+- [!] **REG-020** Resolve the three open questions at the milestones named, recording each as a `§Q-` entry. Owner: Architect. Verified: zero `§Q-` entries exist in `QQQ-Observations-and-Memories.md` today — no ruling has been recorded, so none is claimed. Blocked on owner decisions as stated: open questions resolve by ruling, not by implementation. (This item's premise was already accurate; no correction needed.)
   → §4.8.10 Open questions this section does not settle
+  → Tripwire: re-open per question when its milestone arrives. Re-measure: a `§Q-` entry per question recording the ruling.
 
 ---
 

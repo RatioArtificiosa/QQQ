@@ -1,0 +1,22 @@
+   Compiling qqq-pkg v0.1.1 (E:\QQQ\crates\qqq-pkg)
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.28s
+     Running unittests src\lib.rs (target\debug\deps\qqq_pkg-6ae73f0a1cbe2779.exe)
+
+running 1 test
+test lock::tests::an_unknown_package_field_is_refused ... FAILED
+
+failures:
+
+---- lock::tests::an_unknown_package_field_is_refused stdout ----
+
+thread 'lock::tests::an_unknown_package_field_is_refused' (368584) panicked at crates\qqq-pkg\src\lock.rs:1527:42:
+must refuse: Lockfile { version: 1, packages: [LockPackage { name: "x", version: "1.0.0", source: None, digest: None, wit: None, caps: [], license: None }], metadata: Metadata { generated_by: None, lockfile_hash: None, build: None } }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    lock::tests::an_unknown_package_field_is_refused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 119 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p qqq-pkg --lib`

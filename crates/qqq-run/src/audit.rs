@@ -1106,6 +1106,48 @@ mod tests {
         }
     }
 
+    /// **Every lockfile package is audited, not just the first.**
+    ///
+    /// A loop that stopped after the first package would still flag *something*,
+    /// so single-package tests cannot tell full-tree coverage from a stub that
+    /// never looks past index zero. Two unsigned packages that both declare
+    /// authority prove both were visited — in *each* loop, not merely across
+    /// the two: the assertions below read the per-rule finding, so a
+    /// first-only `provenance` traversal (missing `b@2.0.0`) and a first-only
+    /// `supply_chain` traversal (also missing `b@2.0.0`) each fail on their own.
+    /// The SARIF rendering must carry both package names or a consumer
+    /// diffing runs would lose one of them silently.
+    #[test]
+    fn a_two_package_lockfile_reports_both_packages_including_sarif() {
+        let mut l = lock_with("a", None, &["dns.resolve"]);
+        let mut b = qqq_pkg::lock::LockPackage::new("b", "2.0.0");
+        b.caps = vec!["http.client".to_owned()];
+        l.push(b);
+        let report = audit(&loaded(CHOSEN), Some(&l));
+        let finding = |rule: &str| {
+            report
+                .findings
+                .iter()
+                .find(|f| f.rule == rule)
+                .unwrap_or_else(|| panic!("{rule} must fire: {:?}", report.findings))
+        };
+        let prov = finding("qqq/unsigned-manifest").message.as_str();
+        assert!(
+            prov.contains("a@1.0.0") && prov.contains("b@2.0.0"),
+            "provenance must name both unsigned packages: {prov}"
+        );
+        let esc = finding("qqq/capability-escalation").message.as_str();
+        assert!(
+            esc.contains("a@1.0.0") && esc.contains("b@2.0.0"),
+            "supply chain must name both declaring packages: {esc}"
+        );
+        let sarif = report.to_sarif();
+        assert!(
+            sarif.contains("a@1.0.0") && sarif.contains("b@2.0.0"),
+            "SARIF must carry both audited packages: {sarif}"
+        );
+    }
+
     /// Read-only filesystem access reports the exposed-posture finding
     /// via the implied watch (CAP-024): a read-containing preopen derives
     /// `FsWatch`, and watch is an exposing capability. This is the

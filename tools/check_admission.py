@@ -44,7 +44,7 @@ CHECKLIST = ROOT / "QQQ-Checklist-V1.md"
 DONE_LINES = ROOT / "tools" / "check_done_lines.py"
 
 # **The budget, measured at landing.** It may fall and never rise; `--record` prints the value to use.
-CLAIMS_WITHOUT_FALSIFIER_BUDGET = 331
+CLAIMS_WITHOUT_FALSIFIER_BUDGET = 326
 
 # ---------------------------------------------------------------- the three admissible forms
 
@@ -77,7 +77,7 @@ NONE_DECLARED = re.compile(
     r"\bno (?:observation|measurement|checker|test|number) (?:would|could|can)\b"
     r"|\bnot (?:verifiable|measurable)\b|\bexternal action\b|\bnot a repository artefact\b"
     r"|\bnot verifiable from inside\b|\bno legal review\b",
-    re.I,
+    re.IGNORECASE,
 )
 
 # A note that is ONLY a section pointer.
@@ -102,6 +102,7 @@ def admits(note: str) -> bool:
 
 
 # ---------------------------------------------------------------- reading the checklist
+
 
 def load_blocks():
     """`check_done_lines.blocks`, imported rather than re-implemented.
@@ -138,6 +139,7 @@ def blocked_disagreements(text: str) -> list[tuple[str, str]]:
         if any(BLOCKED_MARKER.search(line) for line in body) and status != "!":
             out.append((oid, status))
     return out
+
 
 def audit(text: str) -> tuple[int, list[tuple[str, str]]]:
     """(claims without a falsifier, items whose blocker and status disagree)."""
@@ -205,16 +207,26 @@ def main(argv: list[str]) -> int:
     # reads this file.
     if disagreements:
         for oid, status in disagreements:
-            print(f"ADMISSION FAILED -- `{oid}` names a blocker but its status is `[{status}]`.")
-        print("  An item whose prose says `blocked-by-...` must carry `[!]`, or the counts read it as work")
+            print(
+                f"ADMISSION FAILED -- `{oid}` names a blocker but its status is `[{status}]`."
+            )
+        print(
+            "  An item whose prose says `blocked-by-...` must carry `[!]`, or the counts read it as work"
+        )
         print("  waiting to be started. See docs/definition-of-ready.md section 3.")
         return 1
 
     if count > budget:
-        print(f"ADMISSION FAILED -- {count} claim(s) without a falsifier; the budget is {budget}.")
-        print("  A claim must name a number, a path, a command with its verdict, or state why none exists.")
+        print(
+            f"ADMISSION FAILED -- {count} claim(s) without a falsifier; the budget is {budget}."
+        )
+        print(
+            "  A claim must name a number, a path, a command with its verdict, or state why none exists."
+        )
         print("  See docs/definition-of-ready.md section 2.")
-        print("  **The budget may only fall.** Raising it is the drift this check exists to notice.")
+        print(
+            "  **The budget may only fall.** Raising it is the drift this check exists to notice."
+        )
         return 1
     print(
         f"ADMISSION OK -- {count} claim(s) without a falsifier, at or under the budget of {budget}; "
@@ -230,69 +242,69 @@ def self_test() -> int:
     cases: list[tuple[str, str, bool]] = [
         (
             "a claim naming a NUMBER passes",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-001** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [x] **TEST-001** does a thing.\n'
             "  \u2192 Done: measured 547 passed.\n",
             True,
         ),
         (
             "a claim naming a PATH passes",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-002** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [x] **TEST-002** does a thing.\n'
             "  \u2192 Done: `crates/qqq-run/src/build.rs` carries it.\n",
             True,
         ),
         (
             "a claim naming a CHECKER AND ITS VERDICT passes",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-003** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [x] **TEST-003** does a thing.\n'
             "  \u2192 Done: `check_xrefs.py` reports validation PASSED.\n",
             True,
         ),
         (
             "a claim declaring that no observation exists passes",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-004** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [x] **TEST-004** does a thing.\n'
             "  \u2192 Done: no legal review has been obtained; it is an external action.\n",
             True,
         ),
         (
             "CONTROL: a bare section reference passes, and must",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-005** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [x] **TEST-005** does a thing.\n'
             "  \u2192 \u00a716 Definition of Done for V1\n",
             True,
         ),
         (
             "CONTROL: an open item with only a reference passes",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [ ] **TEST-006** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [ ] **TEST-006** does a thing.\n'
             "  \u2192 \u00a74.3 Crate topology\n",
             True,
         ),
         (
             "a WRAPPED claim whose falsifier is on its continuation line passes",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-008** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [x] **TEST-008** does a thing.\n'
             "  \u2192 Done: the acceptance-test half is executable --\n"
             "    `tools/check_admission.py` runs in **both** gates and reports `556` at or under `556`.\n",
             True,
         ),
         (
             "a WRAPPED claim with a falsifier on NEITHER line fails",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-009** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [x] **TEST-009** does a thing.\n'
             "  \u2192 Done: the acceptance-test half is executable --\n"
             "    and it is implemented.\n",
             False,
         ),
         (
             "a `blocked-by-` marker with status [!] passes",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [!] **TEST-010** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [!] **TEST-010** does a thing.\n'
             "  \u2192 **blocked-by-upstream-and-time**. See `docs/x.md` for what would unblock it.\n",
             True,
         ),
         (
             "CONTROL: a `blocked-by-` marker with status [ ] FAILS",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [ ] **TEST-011** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [ ] **TEST-011** does a thing.\n'
             "  \u2192 **blocked-by-upstream-and-time**. See `docs/x.md`.\n",
             False,
         ),
         (
             "a claim naming NOTHING fails",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n- [x] **TEST-007** does a thing.\n"
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n- [x] **TEST-007** does a thing.\n'
             "  \u2192 Done: it is implemented.\n",
             False,
         ),

@@ -934,7 +934,7 @@ cmd_checks() {
 #   tools/run_perf_regression.py         starts qqqai serve and drives the reference app; the
 #                                       live measurement belongs to the PERF-020 CI job, while
 #                                       the pure self-test runs in both gates.
-#   tools/fault_inject_*.py (9 cmds)       each recompiles a crate with a mutation applied;
+#   tools/fault_inject_*.py (10 cmds)      each recompiles a crate with a mutation applied;
 #                                          the WIT harnesses instead mutate `.wit` files
 #                                          (verified parseable) and restore them, which is
 #                                          equally unsafe against a bind-mounted working

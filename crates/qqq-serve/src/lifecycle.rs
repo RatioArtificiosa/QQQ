@@ -54,7 +54,9 @@
 //!    only tenant derivation in this crate is
 //!    [`tenant_of`](crate::server), which keys on the *client IP prefix* for per-tenant
 //!    limits. §4.4's claim that "step 4 is the only place routing state lives"
-//!    therefore describes an intent, not the code.
+//!    therefore describes an intent, not the code. Owned as a blocker by
+//!    `ARCH-017` (peer-prefix tenancy is ratified; a real mapping needs the
+//!    authenticated identity V1 does not have).
 //! 2. **Step 11, the call-time re-check — runs per interface, not through the
 //!    named helper.** Every bound interface re-checks the grant at call time,
 //!    but the mechanism is per-interface (inline checks plus the
@@ -217,7 +219,9 @@ pub const STAGES: [Stage; 15] = [
         symbol: None,
         // The only tenant derivation in `qqq-serve` is `tenant_of`, keyed on the
         // client IP prefix for per-tenant limits. There is no host/path -> tenant ->
-        // component ID + manifest rev map anywhere in the workspace.
+        // component ID + manifest rev map anywhere in the workspace. Owned as a
+        // blocker by `ARCH-017`: peer-prefix tenancy is ratified design (`F-13`),
+        // and a real mapping needs the authenticated identity V1 does not have.
         status: Status::Absent,
         gap: "no host/path -> tenant -> component ID + manifest rev mapping exists; `tenant_of` keys on the client IP prefix for limits only",
     },

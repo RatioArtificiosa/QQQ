@@ -24,13 +24,13 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `DOC` | Documentation, docs-as-code, cross-reference machinery | 21 | Tech writer |
 | `MKT` | Market research, positioning, competitive analysis | 16 | Founder |
 | `POS` | Product positioning and messaging | 6 | Founder |
-| `ARCH` | Architecture decisions and crate topology | 16 | Systems lead |
+| `ARCH` | Architecture decisions and crate topology | 17 | Systems lead |
 | `HOST` | `qqq-host` execution engine | 37 | Systems engineer |
 | `CAP` | Capability resolution pipeline | 24 | Security engineer |
 | `SEC` | Security engineering, audits, hardening | 30 | Security engineer |
 | `CON` | Contracts: WIT interfaces, manifest schema, versioning | 20 | Architect |
 | `ABI` | WIT package authoring and binding generation | 18 | Runtime engineer |
-| `SRV` | HTTP/application server | 22 | Systems engineer |
+| `SRV` | HTTP/application server | 24 | Systems engineer |
 | `PKG` | Package manager and registry | 24 | Platform engineer |
 | `SUP` | Supply chain: signing, provenance, SBOM | 12 | Security engineer |
 | `REG` | Q-Block definition, its vocabulary and its five capability levels | 20 | Architect |
@@ -54,7 +54,7 @@ Each item ID is `AREA-NNN`. IDs are **never reused, never renumbered**; a droppe
 | `FUT` | Deferred / future work stubs | 12 | Architect |
 | `OQ` | Open questions requiring a decision | 12 | Founder |
 
-**Total: 641 items.**
+**Total: 644 items.**
 
 ### Status legend
 
@@ -1099,9 +1099,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → **The four findings, each a decision or a debt rather than an oversight.**
     • **Step 4 `TENANT RESOLVE` — absent.** §4.4 maps *host/path → tenant → component ID +
     manifest rev*. There is no such mapping anywhere in the workspace: the router is **path-only**
-    (`Route` has no host field), and the only tenant derivation in `qqq-serve` is `tenant_of`,
+    (`Route` has no host field, and a `host` key is refused at parse time), and the only tenant derivation in `qqq-serve` is `tenant_of`,
     which keys on the **client IP** for per-tenant limits. §4.4's claim that step 4 is the only
-    place routing state lives currently describes intent.
+    place routing state lives currently describes intent. Owned as a blocker by **ARCH-017** (tripwire: `Route` gains a host dimension).
     • **Step 15 `AUDIT APPEND` — implemented on the serve path (re-surveyed 2026-10-28).**
     Formerly *"built, unwired"*: `AuditStream` was complete with only its own tests calling
     it. `GuestApp::handle_request` now commits per-request rows into the shared stream and
@@ -1201,6 +1201,9 @@ Items are grouped below by **phase**, because dependency order matters more than
   → §4.6 Where the artifacts live and how they move
 - [ ] **ARCH-016** Implement build-time component composition with load-time composition as fallback.
   → §4.6 Where the artifacts live and how they move
+- [!] **ARCH-017** Resolve step 4 (`TENANT RESOLVE`): implement the host/path → tenant → component ID + manifest rev mapping, or ratify peer-prefix tenancy and correct §4.4.
+  → §4.4 Request lifecycle — the detailed path
+  → Blocked on an owner design decision, not on code. What exists: the runtime tenant is the peer prefix by ratified design (`F-13`; `tenant_of` keys on the client IP), per-tenant limits/ledger key off it, and name keys are refused at parse time because they could never match (`§O-185`); all authenticating `AuthMode`s refuse rather than verify (`§O-181`), so there is no authenticated subject to map. What remains: either design and ratify an authenticated identity (which unblocks a real mapping) or explicitly scope §4.4's mapping to a future multi-tenant deployment and correct the claim. Owner: Architect. Tripwire: revisit when an authenticating `AuthMode` lands or `Route` gains a host dimension; re-measure with `python tools/check_lifecycle_counts.py` (step-4 row flip) plus a tenant test naming principals instead of prefixes (`a_tenant_is_the_peer_prefix` is the current-behavior pin that must then change). Verified blocked: `Route` carries no host field (scoped grep past `SqlCapability.host`, which names a database file: `grep -A8 "pub struct Route" crates/qqq-cap/src/manifest.rs`), and `deny_unknown_fields` refuses one (`a_route_with_a_host_key_is_refused_at_parse_time`, red-proven).
 
 ### HOST — Execution engine
 
@@ -3597,6 +3600,12 @@ Items are grouped below by **phase**, because dependency order matters more than
   → Done: KEEP. `serve_hyper_tls` takes a caller-built `ServerConfig`, so the hyper path never reads the shared default — but the in-house accept path does, and in-house is HTTP/1.1-only, so flipping the shared default would advertise `h2` on a path with no h2 loop. Per-path ALPN split is future work, not this decision.
   → Measured: `tls::tests::f16_default_alpn_stays_http11_h2_is_an_explicit_opt_in` 1/1 green pins the kept default.
   → §6.4 `qqq-serve` — the HTTP and application server
+- [!] **SRV-023** Decide and implement the served HTTP/2 path: promote the hyper driver to the production listener, or ratify in-house HTTP/1.1-only and correct the served claim.
+  → §6.4 `qqq-serve` — the HTTP and application server
+  → Blocked on an owner decision, not on transport code. What exists: HTTP/2 framing/HPACK/streams/flow-control in the hyper driver (h2spec 145/145 + 146/146 strict green), `serve_hyper_tls` routing by ALPN (`h2` → HTTP/2 driver, else HTTP/1.1), and the per-path ALPN default pinned to http/1.1 (`SRV-022`). What remains: either promote hyper to the `qqqai serve` listener with security/limits parity proven (same pre-reading gates, tenant limits, auth, metrics, drain — plus a real-listener h2 test), or keep in-house as the production listener and scope the `lib.rs` "HTTP/2 on a listener | implemented" row to the hyper transport path. Owner: Maintainer/Architect. Tripwire: revisit when hyper parity is signed off or the claim is corrected; re-measure with `grep -rn "serve_hyper" crates/qqq-run/src` (empty means still unwired) plus the h2spec run and a production-listener h2 test. Verified blocked: the only `serve_hyper_*` callers are `crates/qqq-serve/tests/*` — `qqqai serve` runs the in-house loop (`qqq_serve::serve`), which has no h2 driver.
+- [!] **SRV-024** Author the guest WebSocket/message and server-push event ABI plus manifest route kinds, and wire production dispatch to them.
+  → §6.4 `qqq-serve` — the HTTP and application server
+  → Blocked on an owner/designer decision spanning a frozen surface. What exists on the host: the RFC 6455 handshake/frame loop, hyper h1 `101` and h2 extended-CONNECT upgrades, streaming dispatch maps, the SSE encoder, the `F-14` upgrade policy and `[server.websocket]` manifest policy — all exercised by tests. What does not exist: any guest export that receives a WS message or pushes an event (`wit/qqq-http.wit` `incoming-handler` returns one response; `Route` has no ws/stream marker), so there is nothing for `build_dispatch` to register and production dispatch is flat-only by construction. Wiring host handlers without the guest contract would ship upgrades nobody answers. What remains: WIT guest message/event-stream exports (coordinated with the registry owner — frozen `wit/` surface), a manifest route-kind marker, `build_dispatch` registration, and a guest probe echoing over a real listener. Owner: Architect + registry owner. Tripwire: revisit when `wit/` gains WS/message exports; re-measure with a guest WS-echo probe test plus the fallthrough pin below. Verified blocked: `with_websocket`/`with_streaming` callers are tests only, `WebSocketHandler` is implemented only by `Echo` and test handlers, and `an_upgrade_without_a_websocket_entry_falls_through_to_flat` pins the production shape (red-proven: wiring an entry yields `101`).
 - [x] **ABI-001** Author `qqq:http@1.0` with routing, streaming and client.
   → Done: `wit/qqq-http.wit` — 103 lines, 2 interface(s), 3 function(s).
     Validated by `tools/check_wit.py`, `tools/check_wit_errors.py` and
@@ -5961,9 +5970,9 @@ open: the definition is what this landing writes, and the enforcement lands with
 | Phase | Milestone | Items |
 |---|---|---|
 | P0 Foundation | M0 | 79 |
-| P1 Heartbeat | M1 | 73 |
+| P1 Heartbeat | M1 | 74 |
 | P2 Capability engine | M2 | 54 |
-| P3 HTTP | M3 | 40 |
+| P3 HTTP | M3 | 42 |
 | P4 DX v0 | M4 | 64 |
 | P5 Languages | M5, M8 | 45 |
 | P6 Packages | M6 | 36 |
@@ -5971,7 +5980,7 @@ open: the definition is what this landing writes, and the enforcement lands with
 | P8 Perf/determinism/obs | continuous | 62 |
 | P9 V1 release | M10, M11 | 75 |
 | P10 Beyond V1 | post-1.0 | 54 |
-| **Total** | | **641** |
+| **Total** | | **644** |
 
 **Coverage rule:** every section of `QQQ-Proposal-V1.md` carrying implementation work has at least one item above. The only Proposal sections with no items are §0.1–§0.2, §1.3, §3.3, §13.1 and the appendices, which are narrative, justification or registers rather than buildable work.
 

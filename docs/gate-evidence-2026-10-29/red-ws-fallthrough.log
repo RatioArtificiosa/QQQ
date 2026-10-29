@@ -1,0 +1,12 @@
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    an_upgrade_without_a_websocket_entry_falls_through_to_flat
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.51s
+
+error: test failed, to rerun pass `-p qqq-serve --test websocket`

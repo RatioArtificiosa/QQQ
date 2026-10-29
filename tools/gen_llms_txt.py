@@ -418,6 +418,12 @@ CURATED: list[tuple[str, str, str, str]] = [
         "status",
     ),
     (
+        "docs/runtime-handoff-2026-10-29.md",
+        "Owner handoff dossiers for the three core-runtime blockers: tenant-resolve mapping, H2 on the production listener, and the guest WS/SSE ABI — each with evidence, owner, tripwire, and re-measure command.",
+        "both",
+        "status",
+    ),
+    (
         "PRINCIPLES.md",
         "The non-negotiables the design is held to.",
         "human",

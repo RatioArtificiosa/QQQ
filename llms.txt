@@ -13,7 +13,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 
 ## What is built, and what was learned building it
 
-- [QQQ-Checklist-V1.md](QQQ-Checklist-V1.md) — The 641 tracked items, each citing the Proposal section that governs it, with the evidence for each completed one. (large)
+- [QQQ-Checklist-V1.md](QQQ-Checklist-V1.md) — The 644 tracked items, each citing the Proposal section that governs it, with the evidence for each completed one. (large)
 - [QQQ-Observations-and-Memories.md](QQQ-Observations-and-Memories.md) — Decisions, observations, mistakes and corrections made while building. Read this to learn what was tried and rejected, and why. (large)
 - [docs/rfc/live-components-and-aot.md](docs/rfc/live-components-and-aot.md) — Draft live-component and AOT design: verified baseline, architecture, lifecycle and phased delivery. (13 KB)
 - [docs/live-components-checklist.md](docs/live-components-checklist.md) — Acceptance criteria and remaining work for live components and AOT; completion requires execution evidence. (9 KB)
@@ -23,6 +23,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [docs/deprecations.md](docs/deprecations.md) — The deprecation ledger: every `@deprecated` WIT item with its removal version and replacement. (1 KB)
 - [docs/languages/evidence/matrix.md](docs/languages/evidence/matrix.md) — The generated parity matrix: each language against the HTTP probe vectors, with its gap owners and review dates. Generated from a CI job, so the numbers move with it. (816 B)
 - [docs/runtime-handoff-2026-10-27.md](docs/runtime-handoff-2026-10-27.md) — What changed on the runtime side in the 2026-10-27 round, what the registry owner must re-run, and what stays blocked on owners. (4 KB)
+- [docs/runtime-handoff-2026-10-29.md](docs/runtime-handoff-2026-10-29.md) — Owner handoff dossiers for the three core-runtime blockers: tenant-resolve mapping, H2 on the production listener, and the guest WS/SSE ABI — each with evidence, owner, tripwire, and re-measure command. (6 KB)
 
 ## The machine contracts (for an agent)
 

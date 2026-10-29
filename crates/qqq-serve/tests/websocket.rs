@@ -67,7 +67,11 @@ struct Server {
 }
 
 impl Server {
-    async fn start(ws: Arc<dyn WebSocketHandler>) -> Self {
+    /// Start serving, running `serve` until the test's `Drop` stops it.
+    ///
+    /// Factored so the flat-only variant below shares the retry loop rather
+    /// than duplicating sixteen attempts of port-race handling.
+    async fn start_with(dispatch: Dispatch) -> Self {
         // Retried, because between `free_addr` dropping its listener and `serve` binding the
         // port, another test in this process -- or another process on the runner -- can take
         // it. That happened in CI: `could not bind 127.0.0.1:57009`, after 405 seconds of
@@ -79,12 +83,12 @@ impl Server {
             let config = ServerConfig::for_addr(listen);
             let local = shutdown.clone();
             // Cloned per attempt: the task takes ownership, and a retry needs another one.
-            let ws = Arc::clone(&ws);
+            let dispatch = dispatch.clone();
             let probe = tokio::spawn(async move {
                 if let Err(e) = serve(
                     config,
                     table(),
-                    Dispatch::flat(flat_handler()).with_websocket("ws", ws),
+                    dispatch,
                     local,
                     Logger::new(Format::Json, Level::Error),
                 )
@@ -112,6 +116,18 @@ impl Server {
         // ephemeral ports in a row is not bad luck. `bind_free` explains the race this
         // retries around.
         panic!("could not bind a server after 16 attempts on 16 different ports");
+    }
+
+    /// Start with the WebSocket entry registered, as every existing test does.
+    async fn start(ws: Arc<dyn WebSocketHandler>) -> Self {
+        Self::start_with(Dispatch::flat(flat_handler()).with_websocket("ws", ws)).await
+    }
+
+    /// Start with a flat-only dispatch: no WebSocket entry, the shape the
+    /// production `build_dispatch` installs today (`SRV-024` — no guest ABI
+    /// exists to back a handler, so none is registered).
+    async fn start_flat() -> Self {
+        Self::start_with(Dispatch::flat(flat_handler())).await
     }
 
     /// Connect and send a WebSocket upgrade request, returning the live stream.
@@ -684,6 +700,35 @@ async fn a_route_without_a_websocket_handler_uses_the_flat_one() {
     assert!(response.contains("200 OK"), "{response}");
     assert!(response.ends_with("flat"), "{response}");
     shutdown.signal();
+}
+
+/// **An upgrade to a route with no WebSocket entry falls through to flat.**
+///
+/// The production shape (`SRV-024`): `build_dispatch` registers guest
+/// handlers only, because no guest ABI exists to back a WebSocket entry.
+/// An upgrade request must therefore be answered as ordinary HTTP by the
+/// flat handler — never upgraded into frame mode with nobody reading
+/// frames, and never hung. The positive control is every `101` test above:
+/// the same bytes upgrade when the entry exists, so this test failing with
+/// a `101` means something registered what production must not.
+#[tokio::test]
+async fn an_upgrade_without_a_websocket_entry_falls_through_to_flat() {
+    let server = Server::start_flat().await;
+    let mut client = server.connect_ws(KEY).await;
+    let head = read_head(&mut client).await;
+    assert!(
+        head.starts_with("HTTP/1.1 200"),
+        "no ws entry means no upgrade: {head}"
+    );
+    assert!(
+        !head.contains("101"),
+        "the connection must stay HTTP: {head}"
+    );
+    let body = read_until(&mut client, "flat").await;
+    assert!(
+        body.ends_with("flat"),
+        "the flat handler answers the upgrade as HTTP: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------

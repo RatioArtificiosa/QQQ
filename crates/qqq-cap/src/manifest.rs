@@ -2463,6 +2463,27 @@ allow_origins = ["https://app.example.com"]
         }
     }
 
+    /// A `host` key on a route is refused at parse time, by name.
+    ///
+    /// The router is path-only (`ARCH-011` step 4 is `Absent`): `Route` has no
+    /// host dimension, and a manifest that could state one would read as
+    /// host-based routing that is never applied — the dead-configuration
+    /// shape `§O-185` records for tenant keys that could never match. Until a
+    /// host-aware routing design is ratified (`ARCH-017`), the key must fail
+    /// loudly rather than parse into a field nobody reads.
+    #[test]
+    fn a_route_with_a_host_key_is_refused_at_parse_time() {
+        let route = r#"{ path = "/a", methods = ["GET"], handler = "h", host = "example.com" }"#;
+        let src = format!("{MINIMAL}\n[server]\nroutes = [{route}]\n");
+        let err = Manifest::parse(&src)
+            .expect_err("a host key must be refused: the router cannot honour it");
+        let text = err.to_string();
+        assert!(
+            text.contains("host"),
+            "the refusal must name the offending key: {text}"
+        );
+    }
+
     /// A wildcard origin in `[server.cors]` is rejected by `Manifest::parse`.
     ///
     /// The security-relevant half of the wiring: a manifest is the file an auditor

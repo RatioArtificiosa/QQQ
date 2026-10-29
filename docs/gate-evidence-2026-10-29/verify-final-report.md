@@ -59,14 +59,20 @@ Evidence commit: `86ec3da` (work `52e5eae`), tree clean, `E:\QQQ`, main branch.
   imports refused by name
   (`run_refuses_an_ungranted_import_and_names_the_right_capability`,
   `run_03_guest_without_grant_refuses_naming_capability`).
-- Serve: `qqq-run --lib serve::` 29/29; `qqq-serve` 711 passed total
-  (hyper serve incl. auth-accept/refusal, metrics policy, H2/WS-SSE/TLS).
+- Serve unit + protocol surface (proven by tests, not by live traffic):
+  `qqq-run --lib serve::` 29/29; `cargo test -p qqq-serve` 906 passed,
+  0 failed (hyper unit tests incl. auth-accept/refusal, metrics policy,
+  H2 authority handling, WS frame handling, TLS modes).
+- EXPLICITLY NOT served and NOT claimed: a live HTTP/2 upgrade on the
+  production listener, live guest WS/SSE end-to-end flows, tenant-resolve
+  dispatch (ARCH-017, SRV-023, SRV-024 — owner handoffs with red-first
+  boundary pins). No live H2/WS/SSE transcripts exist; the red-proof logs
+  (`red-hostkey`, `red-ws-fallthrough`) pin only the refusal/fallthrough
+  boundaries, which is what makes the handoffs honest rather than silent.
 - Determinism: `det009_trials.py --full` → 10000/10000 byte-identical,
   0 failed (see `verify/runtime/det009-10000.log`, 41.1 ms/trial).
 - Interfaces: 10 bound of 15 declared packages / 13 bindable namespaces /
   18 bound capabilities (registry pin + qblock tests).
-- Tenant-resolve (ARCH-017), H2 (SRV-023), WS-SSE (SRV-024): still owner
-  handoffs with red-first boundary pins (prior round).
 
 ## 5. Performance
 

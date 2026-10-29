@@ -1,6 +1,7 @@
 run normal guests (4 CLI tests incl. wasi02/03 baselines): ok, 4 passed
 ungranted qqq: refused by name (2 CLI tests): ok, 2 passed
 qqq-run --lib serve::: ok, 29 passed
-cargo test -p qqq-serve: ok, 906 passed, 0 failed
+cargo test -p qqq-serve: ok, 906 passed, 0 failed (unit/protocol tests only)
 DET-009 full re-run: see verify-det009-10000.log (10000/10000 byte-identical)
-tenant-resolve/H2/WS-SSE: owner handoffs, boundary pins kept
+tenant-resolve/H2/WS-SSE: owner handoffs (ARCH-017/SRV-023/SRV-024); NO live
+H2-upgrade, guest-WS/SSE, or tenant-dispatch transcripts exist or are claimed

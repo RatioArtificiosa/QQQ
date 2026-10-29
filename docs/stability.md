@@ -141,8 +141,8 @@ A promise with no check is a wish. Each row above names a mechanism:
 |---|---|
 | Crate tiers | `tools/check_tiers.py` (this document's own source), `tools/check_topology.py` |
 | WIT | `tools/check_wit_style.py`, `tools/check_wit_reference.py`, <!-- qqq:claim wit-files -->17<!-- /qqq:claim --> `.wit` files validating |
-| Ledger | <!-- qqq:claim checklist-done -->318<!-- /qqq:claim --> of <!-- qqq:claim checklist-total -->644<!-- /qqq:claim --> checklist items done, <!-- qqq:claim checklist-open -->309<!-- /qqq:claim --> open (`check_doc_claims.py`) |
-| Register | <!-- qqq:claim observation-headings -->647<!-- /qqq:claim --> distinct `§O` observations, highest `§O-`<!-- qqq:claim observation-highest -->789<!-- /qqq:claim --> |
+| Ledger | <!-- qqq:claim checklist-done -->320<!-- /qqq:claim --> of <!-- qqq:claim checklist-total -->644<!-- /qqq:claim --> checklist items done, <!-- qqq:claim checklist-open -->307<!-- /qqq:claim --> open (`check_doc_claims.py`) |
+| Register | <!-- qqq:claim observation-headings -->648<!-- /qqq:claim --> distinct `§O` observations, highest `§O-`<!-- qqq:claim observation-highest -->790<!-- /qqq:claim --> |
 | Manifest | `schema/qqq-toml.schema.json`, `tools/gen_schemas.py --check` |
 | Lockfile | `schema/qqq-lock.schema.json`, the same check |
 | CLI JSON | `schema/cli-envelope.schema.json`, the error catalogue's round-trip test |

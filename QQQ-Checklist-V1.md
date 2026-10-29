@@ -5320,10 +5320,14 @@ Each language has eight required items. The parity matrix makes any gap visible.
 
 ### DET — Determinism
 
-- [ ] **DET-001** Implement deterministic mode as an engine configuration profile.
+- [x] **DET-001** Implement deterministic mode as an engine configuration profile.
   → §10.5 Determinism — the feature nobody else has
-- [ ] **DET-002** Implement virtualized wall and monotonic clocks.
+  → Done: `EngineConfig::deterministic()` + `AmbientState::new(true)` (`HOST-018`, ticked) — canonical NaN / relaxed-SIMD off in the engine profile, fixed clock and seeded RNG in the ambient state; `qqqai serve --deterministic` behind the F-20 gate (loopback by default, public refusal names `--allow-deterministic-public`, loud startup warning); the per-request virtual-clock tick wired through `GuestApp` (shared admission counter → `deterministic_initial_ticks` → `ambient.set_ticks`, red-first proven: frozen zero tick observed before the fix; see §O-790, which closes the serve half of §O-423).
+  → Measured: `config` 24/24 (`deterministic_preset_is_fully_deterministic`, …); `qqq-run serve::tests::f20` 3/3 + `a_deterministic_server_names_the_mode_in_the_startup_report` 1/1 + `guest_handler::tests::deterministic_requests_observe_advancing_ticks` 1/1 (second body larger than the first); 2026-10-29.
+- [x] **DET-002** Implement virtualized wall and monotonic clocks.
   → §10.5 Determinism — the feature nobody else has
+  → Done: `host_clock` binds `wall-clock` and `monotonic-clock` through `AmbientState` (`crates/qqq-host/src/host_clock.rs`); reads advance only on an explicit host step — `tick()` in tests, `set_ticks()` at request admission — and stay frozen otherwise; real mode advances, monotonic never decreases.
+  → Measured: `host_clock` 12/12 (`the_deterministic_clock_does_not_advance_on_its_own`, `the_monotonic_reading_never_decreases`, `the_real_clock_advances`, …); 2026-10-29.
 - [!] **DET-003** Implement the seeded CSPRNG for deterministic randomness. Owner: Systems engineer. Blocked on an owner decision: the implementation is a hash-DRBG with a fixed public seed (`F-20`) — reproducible and statistically strong, but explicitly not secret, so it cannot be called a CSPRNG.
   → §10.5 Determinism — the feature nobody else has
   → Tripwire: re-open when the owner ratifies either reading — (a) accept the hash-DRBG and rename this item to a deterministic DRBG, or (b) require a recorded-seed ChaCha20. Re-measure: `tools/det009_trials.py --self-test` plus the F-20 hash-DRBG unit tests.
@@ -5350,8 +5354,12 @@ Each language has eight required items. The parity matrix makes any gap visible.
 - [x] **DET-009** Implement the 10,000-trial bit-identical verification required by the Definition of Done.
   → §16 — Definition of Done for V1
   → Done: `tools/det009_trials.py --full` — **10000 of 10000 byte-identical replay logs, 0 failed, 0
-    divergent**, 16.8 ms/trial on an uncontended machine at `03928cc` (`§O-428`), reproduced by the
-    tracked command at 189.8 ms/trial under concurrent load (`§O-431`). **The subject is a pinned
+    divergent**, 16.8 ms/trial on an uncontended machine at `03928cc` (`§O-428`), reproduced as
+    189.8 s elapsed (19.0 ms/trial) under concurrent load (`§O-431`). Re-run at
+    `0658cde99d7f19648cd5c469fef5b7bf1920f441`: **10000/10000, 0 failed, 0 diverged**,
+    28.6 ms/trial under concurrent load, reference `REFERENCE_SHA256
+    aed4cd719c0feec5ad66822f9d48fb69a6144d4773acc851e682a18c960e074e`, log committed at
+    `docs/gate-evidence-2026-10-29/det009-full-10000.log`; 2026-10-29. **The subject is a pinned
     281-byte WAT component** — `reads-clock.wasm`, digest `2a9c3fb3…` — which imports only
     `qqq:clock/wall-clock@1.0.0` and reads `now` once at instantiation; it is carried base64 inside
     the tool with its digest asserted, and the WAT beside it re-derives exactly those bytes.
@@ -5540,20 +5548,19 @@ Each language has eight required items. The parity matrix makes any gap visible.
     design. Corrected, with the reason recorded in the doc itself.
   → §10.3 Logging
 - [ ] **OBS-009** Implement automatic spans for the fifteen lifecycle steps.
-  → **PARTIAL — 1 of the 15 steps emits a span, and the item is NOT ticked.** The shape is built and
+  → **PARTIAL — 3 of the 15 steps emit a span, and the item is NOT ticked.** The shape is built and
     proven: `emit_span` writes a span through the logger so it inherits the level filter, the format
-    and **§10.3's redaction**, for **step 3 ROUTE MATCH** — the one §4.4 step `qqqai serve` reaches
-    with an unambiguous boundary and a measurable duration.
-  → **The other fourteen need boundaries that do not exist yet, and the reason is specific.**
+    and **§10.3's redaction**, for steps 3 `ROUTE MATCH`, 5 `POLICY CHECK` and 8 `LIMIT BIND` — each
+    asserted by a real-binary test (`a_sampled_request_emits_a_span` for step 3;
+    `a_denying_manifest_reaches_the_policy_stage` for step 5;
+    `a_manifest_with_limits_reaches_the_limit_stage` for step 8, which also closed §O-333's owed step).
+  → **The other twelve need boundaries that do not exist yet, and the reason is specific.**
     `INSTANCE ACQUIRE`, `CAPABILITY BIND`, `GUEST ENTRY`, `REQUEST ADAPT` and the rest live inside the
     guest-invocation path, which an unbuilt project does not enter; and the special routes (CORS
     preflight, WebSocket, streaming) are **not §4.4 steps at all**, so emitting for them would
-    mislabel a span rather than cover a step.
-  → **`LIMIT BIND` (8) and `POLICY CHECK` (5) do have boundaries** — the limit and auth refusals — but
-    only on the **refusal** path, where the duration is not a measurement of work done. **A span with
-    a fabricated duration is worse than a missing one**, so they wait for a boundary that measures
-    something.
-  → **Measured**: 5 span tests over the real binary, 2.61 s, fault-injected.
+    mislabel a span rather than cover a step. (Steps 5 and 8 emit on **both** outcomes — a span
+    measures work done, so the earlier refusal-path-only limitation no longer applies.)
+  → **Measured**: 7 span tests over the real binary (`cargo test -p qqq-run --test spans`), fault-injected (removing the LIMIT BIND emission fails `a_manifest_with_limits_reaches_the_limit_stage`; §O-334).
   → §10.4 Distributed tracing
 - [ ] **OBS-010** Implement W3C Trace Context propagation through `wasi:http`.
   → §10.4 Distributed tracing

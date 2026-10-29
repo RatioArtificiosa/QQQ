@@ -238,7 +238,7 @@ fn a_manifest_with_limits_reaches_the_limit_stage() {
 /// |---|---|
 /// | 3 `ROUTE MATCH` | a declared route — the permissive fixture, and `a_sampled_request_emits_a_span` covers it |
 /// | 5 `POLICY CHECK` | an auth policy, which `default_auth = "deny"` installs |
-/// | 8 `LIMIT BIND` | a limits declaration, which no fixture here has yet |
+/// | 8 `LIMIT BIND` | a limits declaration with a per-tenant entry (see the test below) |
 ///
 /// **`OBS-009` stays partial** for the same reason: the other twelve steps live inside the
 /// guest-invocation path, which an unbuilt project does not enter.

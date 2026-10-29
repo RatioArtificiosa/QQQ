@@ -1,0 +1,24 @@
+QQQAI        E:\QQQ\target\debug\qqqai.exe
+ARTIFACT_SHA 2a9c3fb3c48572a78b8119318690f6ffe13a30b1f5dddacd153ef93eccb67b39
+INJECT       False
+PLANNED      10000
+REFERENCE_BYTES 351
+REFERENCE_SHA256 aed4cd719c0feec5ad66822f9d48fb69a6144d4773acc851e682a18c960e074e
+REFERENCE_HEADER_KEYS_OK 5
+PROGRESS trials=1000 compared=1000 failed=0 diverged=0 rate=34.2/s
+PROGRESS trials=2000 compared=2000 failed=0 diverged=0 rate=34.7/s
+PROGRESS trials=3000 compared=3000 failed=0 diverged=0 rate=34.9/s
+PROGRESS trials=4000 compared=4000 failed=0 diverged=0 rate=35.1/s
+PROGRESS trials=5000 compared=5000 failed=0 diverged=0 rate=35.0/s
+PROGRESS trials=6000 compared=6000 failed=0 diverged=0 rate=34.9/s
+PROGRESS trials=7000 compared=7000 failed=0 diverged=0 rate=34.9/s
+PROGRESS trials=8000 compared=8000 failed=0 diverged=0 rate=34.9/s
+PROGRESS trials=9000 compared=9000 failed=0 diverged=0 rate=34.9/s
+PROGRESS trials=10000 compared=10000 failed=0 diverged=0 rate=34.9/s
+TRIALS_ATTEMPTED=10000
+COMPARISONS_PERFORMED=10000
+RUNS_THAT_FAILED=0
+LOGS_THAT_DIVERGED=0
+ELAPSED_SECONDS=286.3
+MS_PER_TRIAL=28.6
+DET009 OK 10000/10000 byte-identical, 0 failed

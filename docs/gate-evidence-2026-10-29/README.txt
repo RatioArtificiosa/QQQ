@@ -26,3 +26,11 @@ FILES
     `an_upgrade_without_a_websocket_entry_falls_through_to_flat` FAILS.
     Restored byte-identical; the test passes (production dispatch stays
     flat-only for SRV-024 until a guest ABI exists).
+  det009-full-10000.log
+    DET-009 re-run on tree 0658cde (runtime-identical to this commit;
+    only checklist prose and generated docs changed after): 10000/10000
+    byte-identical replay logs, 0 failed, 0 diverged, 28.6 ms/trial,
+    reference REFERENCE_SHA256
+    aed4cd719c0feec5ad66822f9d48fb69a6144d4773acc851e682a18c960e074e
+    (pinned guest artifact unchanged: ARTIFACT_SHA 2a9c3fb3…).
+    Cited by DET-009's Done line.

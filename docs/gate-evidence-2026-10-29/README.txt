@@ -12,20 +12,36 @@ HOW TO REPRODUCE (core-runtime round)
 
 HOW TO REPRODUCE (REG-closure round, this directory's red-* and
 xtask-ci-REG-green logs)
-  cargo xtask ci                        # full gate, expect GATE GREEN: 150 steps
+  $env:CARGO_BUILD_JOBS = "4"; cargo xtask ci   # full gate, GATE GREEN: 150 steps
   python tools/fault_inject_qblock.py   # expect 5/5 DETECTED
   python tools/gen_capability_catalogue.py --check      # expect CATALOGUE OK
   python tools/gen_capability_catalogue.py --self-test # expect SELF-TEST OK
   python tools/check_doc_claims.py      # expect DOC CLAIMS OK
+  (CARGO_BUILD_JOBS paces rustc only — same 150 steps and assertions.
+  Unpaced runs on a memory-pressured box flaked exactly one load-sensitive
+  self-test case, live progress.py vs its 120s deadline; that case passes
+  19/19 standalone. See verify-verification-log.md.)
 
 FILES
   xtask-ci-148-green.log
     Full gate on the evidence commit: GATE GREEN, 148 steps, zero
     failures, exit 0.
   xtask-ci-REG-green.log
-    Full gate on the REG-closure tree (this round): replaced by the final
-    committed gate log for the slice; during the run it recorded the
-    mid-tree state. Do not cite step counts from it — cite the final log.
+    Full gate on the REG-closure evidence tree (86ec3da, clean):
+    GATE GREEN, 150 steps, 0 failed. Final verification re-ran it at
+    CARGO_BUILD_JOBS=4 with the same verdict; this file is that run.
+  verify-contract.log / verify-contract-summary.log
+    Plan verification step 2: clean tree, frozen-surface diff (47+/0-,
+    docs+tests only), core-only wasm build, pkg/abi suites, registry note.
+  verify-runtime.log / verify-det009-10000.log
+    Plan verification step 3: run/serve boundary tests + DET-009
+    10000/10000 byte-identical.
+  verify-tests.log
+    Plan verification step 4: new boundary suites, checker/self-tests,
+    fault injector 5/5 DETECTED.
+  verify-final-report.md / verify-open-items.txt / verify-verification-log.md
+    Plan verification step 5: §8 final report, 125 blocked items with
+    owners, steps 1–5 re-run record.
   red-hostkey.log
     Red proof 1: with `deny_unknown_fields` removed from `Route`, a
     `host` key parses silently and

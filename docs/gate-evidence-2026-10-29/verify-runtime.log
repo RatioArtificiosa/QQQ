@@ -1,0 +1,22 @@
+Step 3 — runtime product-boundary proof, evidence commit 86ec3da, clean tree.
+
+$ cargo test -p qqq-run --test cli -- run_full_wasi02_baseline_runs_without_grants run_executes_when_the_capability_is_granted run_03_guest_with_grant_runs run_02_typed_baseline_imports_run_without_grants
+test result: ok. 4 passed (normal wasi/wasip2 guests run green, granted or grant-free)
+
+$ cargo test -p qqq-run --test cli -- run_refuses_an_ungranted_import_and_names_the_right_capability run_03_guest_without_grant_refuses_naming_capability
+test result: ok. 2 passed (ungranted qqq: imports refused by name)
+
+$ cargo test -p qqq-run --lib serve::
+test result: ok. 29 passed (serve unit suite: auth, routes, deterministic mode, ticks)
+
+$ cargo test -p qqq-serve
+589 + 2 + 18 + 22 + 9 + 3 + 22 + 11 + 25 + 7 + 3 passed, 0 failed
+(hyper serve incl. auth-accept/refusal, metrics policy, H2/WS/SSE paths, TLS)
+
+$ python tools/det009_trials.py --full --progress-every 2000
+(see det009-10000.log)
+DET009 OK 10000/10000 byte-identical, 0 failed, 41.1 ms/trial
+
+Tenant-resolve (ARCH-017), H2 (SRV-023) and WS-SSE (SRV-024) remain owner
+handoffs per docs/runtime-handoff-2026-10-27.md with red-first boundary pins
+(red-hostkey.log, red-ws-fallthrough.log); nothing in this round re-opens them.

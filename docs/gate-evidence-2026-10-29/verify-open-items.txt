@@ -1,0 +1,125 @@
+AGENT-002 | Implement the versioning policy for the schema document | Owner: Architect | Tripwire: re-open when the versioning policy is ratified
+AGENT-003 | Implement the CI drift check that fails when schema output diverges from the imp | Owner: Architect | Tripwire: re-open when the drift-check design is ratified
+AGENT-006 | Implement `qqq_new` tool with dry-run | Owner: Architect | Tripwire: re-open when the tool design is ratified
+AGENT-013 | Implement `qqq_dev_status` tool | Owner: Architect | Tripwire: re-open when the tool design is ratified
+AGENT-015 | Implement `qqq_logs`, `qqq_metrics` and `qqq_trace` tools | Owner: Architect | Tripwire: re-open when the read contracts are ratified
+AGENT-016 | Implement `qqq_doctor` tool | Owner: Architect | Tripwire: re-open when the tool design is ratified
+AGENT-017 | Implement `qqq_migrate_plan` tool (read-only analysis) | Owner: Architect | Tripwire: re-open when a migration analyzer exists (MIG-001..MIG-011)
+AGENT-018 | Write MCP tool descriptions for models, then review them with a human | Owner: Architect | Tripwire: re-open when a human reviewer is assigned
+AGENT-025 | Prove all four agent relationships (author, operator, host, adversary) are genui | Owner: Architect | Tripwire: re-open when the exercise set is designed and the adversary participant assigned
+ARCH-017 | Resolve step 4 (`TENANT RESOLVE`): implement the host/path → tenant → component  | Owner: Architect | Tripwire: revisit when an authenticating `AuthMode` lands or `Route` gains a host dimension; re-measure with `python tools/check_l
+CLI-020 | Implement `qqqai trace` | Owner: Architect | Tripwire: re-open when the trace command's contract is ratified
+CLI-024 | Implement `qqqai migrate` | Owner: Architect | Tripwire: re-open with MIG-001
+DET-003 | Implement the seeded CSPRNG for deterministic randomness | Owner: Systems engineer | Tripwire: re-open when the owner ratifies either reading — (a) accept the hash-DRBG and rename this item to a deterministic DRBG, 
+DET-004 | Implement the deterministic single-threaded scheduler for deterministic mode | Owner: Architect | Tripwire: re-open when the owner ratifies a scheduler design (serialize, admit per-request determinism only, or another semantic)
+DET-011 | Implement network-timing recording for replay | Owner: Systems engineer | Tripwire: re-open when the producer design (which events record, per-request bound, redaction rule) lands
+DET-015 | Implement deterministic replay for the agent-sandbox reference architecture | Owner: Architect | Tripwire: re-open when a sandbox reference implementation lands (see AGENT-025/MIG work)
+DET-016 | Implement the deterministic-mode performance-cost report so users know what they | Owner: Performance engineer | Tripwire: re-open when reference hardware is acquired or reserved
+DIST-001 | Implement the POSIX `install.sh` installer with checksum and signature verificat | Owner: Release engineer | Tripwire: re-open when signed release artifacts exist
+DIST-002 | Implement the Windows `install.ps1` installer with the same verification | Owner: Release engineer | Tripwire: re-open with DIST-001
+DIST-003 | Publish GitHub Releases with binaries, checksums and Ed25519 signatures for all  | Owner: Release engineer | Tripwire: re-open when the release process is defined
+DIST-004 | Publish the `qqqai` crate to crates.io and verify `cargo install qqqai` on all t | Owner: Release engineer | Tripwire: re-open when the release process is defined
+DIST-005 | Publish the `qqqai` npm wrapper package and verify `npm install -g qqqai` | Owner: Release engineer | Tripwire: re-open when the release process is defined
+DIST-006 | Submit the Homebrew formula | Owner: Release engineer | Tripwire: re-open with DIST-003
+DIST-007 | Submit Scoop and winget manifests | Owner: Release engineer | Tripwire: re-open with DIST-003
+DIST-008 | Publish the OCI image to `ghcr.io/qqqai/qqqai` | Owner: Release engineer | Tripwire: re-open when the release process is defined
+DIST-009 | Implement `qqqai doctor`'s self-verification of its own binary | Owner: Release engineer | Tripwire: re-open with DIST-003
+DIST-013 | Publish apt/dnf/apk repositories once the release cadence is stable | Owner: Release engineer | Tripwire: re-open when releases ship on a cadence
+DIST-014 | Publish AUR, Nix, asdf and mise specifications | Owner: Release engineer | Tripwire: re-open with DIST-013
+DIST-015 | Implement binary reproducibility verification across independent build hosts | Owner: Release engineer | Tripwire: re-open when two independent builders exist
+DIST-016 | Implement macOS notarization and Windows code signing | Owner: Release engineer | Tripwire: re-open when the signing identities exist
+DIST-017 | Implement offline installation from a local bundle | Owner: Release engineer | Tripwire: re-open when the bundle format is defined
+DIST-018 | Publish the install-verification instructions users can follow without trusting  | Owner: Release engineer | Tripwire: re-open with DIST-003 and DIST-009
+DIST-019 | Implement version-manager support (asdf/mise plugins) with tests | Owner: Release engineer | Tripwire: re-open with DIST-003
+DIST-020 | Resolve open question `OQ-004`: Windows first-class or best-effort, and reflect  | Owner: Architect | Tripwire: re-open when OQ-004 is decided
+DX-006 | Implement the TIER-1 hot reload: component swap preserving the host process | Owner: Architect | Tripwire: re-open when the live-components review completes with merge gates named
+DX-007 | Implement TIER-2 state-preserving swap with declared guest state | Owner: Architect | Tripwire: re-open with DX-006 plus a ratified state-declaration design
+DX-008 | Implement TIER-3 full restart triggered only by manifest capability or limit cha | Owner: Architect | Tripwire: re-open with DX-006
+DX-010 | Implement HTTPS in dev with locally-trusted certificates | Owner: Architect | Tripwire: re-open when the dev-cert trust model is ratified (who mints, who trusts, how it is revoked)
+DX-017 | Implement the DevTools-protocol inspector adapter over DWARF source maps | Owner: Architect | Tripwire: re-open when the adapter design is ratified
+HOST-034 | Bind `qqq:fs/filesystem` in the per-instance linker: preopened directory handles | Owner: Architect | Tripwire: revisit when `wit/qqq-fs.wit` gains a root-opening constructor (e.g. `open-root(name) -> result<directory, fs-error>` na
+LANG-009 | AssemblyScript toolchain integration and build path | Owner: Language maintainer | Tripwire: re-open when `qqqai build` accepts an AssemblyScript project (probe green plus a guest build through the supported path)
+LANG-010 | AssemblyScript bindings generated from `wit/` | Owner: Language maintainer | Tripwire: re-open with LANG-009
+LANG-011 | TypeScript-shaped project template using AssemblyScript | Owner: Language maintainer | Tripwire: re-open with LANG-009
+LANG-012 | AssemblyScript conformance-suite pass | Owner: Language maintainer | Tripwire: re-open with LANG-009
+LANG-013 | AssemblyScript reference application implementation | Owner: Language maintainer | Tripwire: re-open with LANG-012
+LANG-017 | TinyGo toolchain integration and build path | Owner: Language maintainer | Tripwire: re-open when `qqqai build` accepts a Go project on a TinyGo component path
+LANG-018 | Go bindings generated from `wit/` | Owner: Language maintainer | Tripwire: re-open with LANG-017
+LANG-019 | Go project template | Owner: Language maintainer | Tripwire: re-open with LANG-017
+LANG-020 | Go conformance-suite pass | Owner: Language maintainer | Tripwire: re-open with LANG-017
+LANG-021 | Go reference application implementation | Owner: Language maintainer | Tripwire: re-open with LANG-020
+LANG-023 | ? | Owner: ? | Tripwire: ?
+LANG-024 | ? | Owner: ? | Tripwire: ?
+LANG-026 | Python bindings generated from `wit/` via `componentize-py` or equivalent | Owner: Language maintainer | Tripwire: re-open when a `componentize-py`-class toolchain lands in CI probes
+LANG-027 | Python project template | Owner: Language maintainer | Tripwire: re-open with LANG-026
+LANG-028 | Python conformance-suite pass | Owner: Language maintainer | Tripwire: re-open with LANG-026
+LANG-029 | Python reference application implementation | Owner: Language maintainer | Tripwire: re-open with LANG-028
+LANG-030 | Implement precompiled-`.pyc` bundling and interpreter-instance pooling to cut st | Owner: Language maintainer | Tripwire: re-open with LANG-026 plus a startup budget the work charges against
+LANG-033 | Clang `--target=wasm32-wasip2` integration and build path | Owner: Language maintainer | Tripwire: re-open when a WASI SDK toolchain lands in CI probes with a build path
+LANG-034 | C and C++ bindings generated from `wit/` | Owner: Language maintainer | Tripwire: re-open with LANG-033
+LANG-035 | C and C++ project templates | Owner: Language maintainer | Tripwire: re-open with LANG-033
+LANG-036 | C and C++ conformance-suite pass | Owner: Language maintainer | Tripwire: re-open with LANG-033
+LANG-037 | C and C++ reference application implementation | Owner: Language maintainer | Tripwire: re-open with LANG-036
+MIG-001 | Implement Node/Express route-table extraction | Owner: Architect | Tripwire: re-open when the migration analyzer design (inputs, report schema, confidence contract) is ratified
+MIG-002 | Implement middleware-ordering analysis | Owner: Architect | Tripwire: re-open with MIG-001
+MIG-003 | Implement env-var access inventory | Owner: Architect | Tripwire: re-open with MIG-001
+MIG-004 | Implement package inventory with alternative suggestions | Owner: Architect | Tripwire: re-open with MIG-001
+MIG-005 | Implement capability inference from source analysis | Owner: Architect | Tripwire: re-open with MIG-001
+MIG-006 | Implement the Bun-specific API flagging | Owner: Architect | Tripwire: re-open with MIG-001
+MIG-007 | Implement the Deno permission-to-capability mapping | Owner: Architect | Tripwire: re-open with MIG-001
+MIG-008 | Implement core-Wasm-to-component wrapping with a generated manifest | Owner: Architect | Tripwire: re-open with MIG-001
+MIG-009 | Implement `migration-report.md` generation | Owner: Architect | Tripwire: re-open with MIG-001
+MIG-010 | Implement `migration-report.json` with per-file confidence scores | Owner: Architect | Tripwire: re-open with MIG-001
+MIG-011 | Ensure the report is consumable by an agent so it can finish the migration auton | Owner: Architect | Tripwire: re-open with MIG-009/MIG-010
+MIG-012 | Publish worked migration case studies from real projects | Owner: Architect | Tripwire: re-open after the first real migration lands
+MIG-013 | Implement `qqq_migrate_plan` MCP tool (shared with `AGENT-017`) | Owner: Architect | Tripwire: re-open with MIG-001
+MIG-014 | Publish the migration guide with honest "this cannot be migrated" sections | Owner: Architect | Tripwire: re-open with MIG-012
+OBS-010 | Implement W3C Trace Context propagation through `wasi:http` | Owner: Architect | Tripwire: re-open when guest outbound HTTP is bound and the propagation/redaction rule is ratified
+OBS-012 | Implement the OTLP exporter for traces, metrics and logs | Owner: Architect | Tripwire: re-open when the exporter design (transport, config, backpressure policy, offline behavior) is ratified
+OBS-015 | Implement per-tenant audit isolation and retention controls | Owner: Architect | Tripwire: re-open when the retention/deletion policy is ratified
+OBS-017 | Decide whether to contribute capability-audit semantic conventions to OpenTeleme | Owner: Architect | Tripwire: re-open when OQ-010 is decided
+PERF-014 | Evaluate the io_uring backend and publish whether it earns its complexity | Owner: Performance engineer | Tripwire: re-open when a Linux eval host is available
+PERF-015 | Validate the async-single-threaded guest default against a shared-memory alterna | Owner: Architect | Tripwire: re-open when the ADR is written and ratified
+PKG-002 | Implement parallel, resumable fetching with HTTP/3 where available | Owner: Registry team | Tripwire: re-open when a registry endpoint exists
+PKG-003 | Implement the version solver with lockfile-first resolution | Owner: Architect | Tripwire: re-open when range syntax and resolution order are ratified
+PKG-005 | Resolve open question `OQ-006`: build the registry from day one, or bootstrap on | Owner: Architect | Tripwire: re-open when OQ-006 is answered
+PKG-006 | Implement `registry.qqq.codes` as a QQQ application (dogfooding) | Owner: Registry team | Tripwire: re-open when a registry service exists
+PKG-007 | Implement immutable versions with yank support | Owner: Registry team | Tripwire: re-open when the registry stores versions
+PKG-008 | Implement provenance attestation (SLSA-style) for every published artifact | Owner: Registry team | Tripwire: re-open when release builds run with attestation
+PKG-009 | Implement capability metadata on package pages and in the registry API | Owner: Registry team | Tripwire: re-open when the registry API exists
+PKG-010 | Implement capability-aware search ("find a JSON parser needing no capabilities") | Owner: Registry team | Tripwire: re-open when the registry API exists
+PKG-011 | Implement the registry API with a published schema and fair rate limits | Owner: Registry team | Tripwire: re-open when the service exists
+PKG-012 | Implement self-hostable registry mirrors; Fabric adds air-gapped mode | Owner: Registry team | Tripwire: re-open when the registry serves
+PKG-013 | Implement the scoped-namespace and ownership-verification system | Owner: Registry team | Tripwire: re-open when the registry service exists
+PKG-015 | Implement the trust policy for signature verification, configurable per project  | Owner: Architect | Tripwire: re-open when the trust policy is ratified
+PKG-016 | Ship the 30 essential first-party packages (JSON, HTTP client, validation, loggi | Owner: Registry team | Tripwire: re-open when the registry accepts publishes
+PKG-017 | Port the curated top-200 high-value libraries with correct attribution and licen | Owner: Registry team | Tripwire: re-open when the registry accepts publishes and the attribution bar is set
+PKG-018 | Publish the "port a library in an afternoon" guide | Owner: Language maintainer | Tripwire: re-open when at least two non-Rust bindings paths work end to end
+PKG-019 | Launch the public porting bounty programme | Owner: Architect | Tripwire: re-open when the programme is ratified and funded
+PKG-020 | Implement dependency-confusion and typosquatting defences | Owner: Registry team | Tripwire: re-open when scoped namespaces exist
+PKG-022 | Implement the registry's abuse-reporting and takedown process | Owner: Registry team | Tripwire: re-open when the registry serves users
+PKG-023 | Implement registry analytics that respect privacy (aggregate only, no per-user t | Owner: Registry team | Tripwire: re-open when the registry serves traffic
+PKG-024 | Implement the registry's own SLA monitoring and status page | Owner: Registry team | Tripwire: re-open when the registry is deployed
+REG-014 | Provide the `qqqai source` verb and publish a source bundle at `caps = ["none"]` | Owner: Release process (publish/sign pipeline) + CLI surface | Tripwire: re-open when the release process can publish and sign the bundle
+REG-016 | Keep package, version, artifact digest and capability set as four separate field | Owner: CLI surface (`info` verb) | Tripwire: re-open when the `info` verb is accepted
+REG-018 | Require an ADR that re-derives the narrowing argument before a fourth capability | Owner: Architect | Tripwire: re-open when the narrowing ADR lands in `docs/adr/`
+REG-019 | Refuse a publish whose artifact is not a component or whose manifest is absent,  | Owner: CLI surface + Release process | Tripwire: re-open when a publish path exists
+REG-020 | Resolve the three open questions at the milestones named, recording each as a `§ | Owner: Architect | Tripwire: re-open per question when its milestone arrives
+SEC-024 | ? | Owner: ? | Tripwire: ?
+SEC-025 | ? | Owner: ? | Tripwire: ?
+SEC-027 | Implement memory-protection-key support as an optional hardening feature | Owner: Systems engineer | Tripwire: re-open when a second maintainer signs the SAFETY.md exception entry, non-FFI MPK bindings exist, and pku hardware is av
+SRV-023 | Decide and implement the served HTTP/2 path: promote the hyper driver to the pro | Owner: Maintainer/Architect | Tripwire: revisit when hyper parity is signed off or the claim is corrected; re-measure with `grep -rn "serve_hyper" crates/qqq-ru
+SRV-024 | Author the guest WebSocket/message and server-push event ABI plus manifest route | Owner: Architect + registry owner | Tripwire: revisit when `wit/` gains WS/message exports; re-measure with a guest WS-echo probe test plus the fallthrough pin below.
+SUP-001 | Implement artifact signing with Ed25519 at publish time | Owner: Release engineer | Tripwire: re-open when a publish path with signing keys exists
+SUP-002 | Implement signature verification at install time with a configurable trust polic | Owner: Release engineer | Tripwire: re-open when the trust policy is ratified
+SUP-003 | Implement the SBOM generator per artifact | Owner: Release engineer | Tripwire: re-open when the SBOM format is chosen
+SUP-004 | Implement provenance attestation capture in the build pipeline | Owner: Release engineer | Tripwire: re-open when release builds run in CI
+SUP-005 | Implement hash pinning in the lockfile with verification on every install | Owner: Release engineer | Tripwire: re-open with the trust policy
+SUP-006 | Implement the air-gapped mirror workflow for Fabric | Owner: Release engineer | Tripwire: re-open when a registry exists to mirror
+SUP-007 | Implement the dependency-vulnerability feed and `qqqai audit` integration | Owner: Release engineer | Tripwire: re-open when a feed is chosen
+SUP-008 | Establish the incident process for a compromised first-party package | Owner: Release engineer | Tripwire: re-open when release ownership exists
+SUP-009 | Implement build-environment attestation (what ran the build) | Owner: Release engineer | Tripwire: re-open when release builds run in CI
+SUP-010 | Implement the reproducible-build check across independent build hosts | Owner: Release engineer | Tripwire: re-open when two independent builders exist
+SUP-011 | Publish the trust-chain document explaining every verification a user can perfor | Owner: Release engineer | Tripwire: re-open when the verification set it documents exists
+SUP-012 | Implement key-rotation and revocation for the project's signing keys | Owner: Release engineer | Tripwire: re-open when signing keys exist
+TEST-001 | Implement test discovery for all five languages | Owner: Architect | Tripwire: re-open when a second language gains a runner (extend `runner_for` with a discovery test naming it)

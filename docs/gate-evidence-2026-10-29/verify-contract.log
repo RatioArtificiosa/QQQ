@@ -1,0 +1,8 @@
+$ git status --short
+[exit 0 -- clean tree]
+
+$ git diff 3a21c4b..HEAD --stat -- crates/qqq-pkg crates/qqq-abi crates/qqq-cap wit Cargo.toml Cargo.lock
+ crates/qqq-cap/src/capability.rs | 22 ++++++++++++++++++++++
+ crates/qqq-pkg/src/lock.rs       | 25 +++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+[exit 0 -- docs + #[cfg(test)] tests only, no API change]

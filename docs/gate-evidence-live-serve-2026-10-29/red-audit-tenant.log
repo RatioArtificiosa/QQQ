@@ -1,5 +1,5 @@
    Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
-    Finished `test` profile [optimized + debuginfo] target(s) in 14.54s
+    Finished `test` profile [optimized + debuginfo] target(s) in 16.63s
      Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
 
 running 1 test
@@ -9,7 +9,7 @@ failures:
 
 ---- guest_ws::tests::a_message_round_trips_through_the_guest stdout ----
 
-thread 'guest_ws::tests::a_message_round_trips_through_the_guest' (382504) panicked at crates\qqq-run\src\guest_ws.rs:170:9:
+thread 'guest_ws::tests::a_message_round_trips_through_the_guest' (381328) panicked at crates\qqq-run\src\guest_ws.rs:244:9:
 the guest call must be attributed to the calling tenant
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
@@ -17,6 +17,6 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 failures:
     guest_ws::tests::a_message_round_trips_through_the_guest
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 673 filtered out; finished in 0.54s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 678 filtered out; finished in 0.52s
 
 error: test failed, to rerun pass `-p qqq-run --lib`

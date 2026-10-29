@@ -1,10 +1,30 @@
-   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
-    Finished `test` profile [optimized + debuginfo] target(s) in 10.75s
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.83s
      Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
 
 running 2 tests
-test serve_routes::tests::conflicting_paths_for_one_ws_handler_are_refused ... ok
 test serve_routes::tests::conflicting_route_kinds_for_one_handler_are_refused ... ok
+test serve_routes::tests::conflicting_paths_for_one_ws_handler_are_refused ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 672 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 677 filtered out; finished in 0.00s
+
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.96s
+     Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
+
+running 3 tests
+test serve_routes::tests::route_kinds_map_by_handler_name_with_http_implied ... ok
+test serve_routes::tests::parameterized_non_http_routes_are_refused ... ok
+test serve_routes::tests::http_and_ws_handlers_must_not_share_a_name ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 676 filtered out; finished in 0.00s
+
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.24s
+     Running unittests src\lib.rs (target\debug\deps\qqq_cap-4a97a2541397dff0.exe)
+
+running 4 tests
+test manifest::tests::route_kind_defaults_to_http ... ok
+test manifest::tests::route_kind_markers_round_trip ... ok
+test manifest::tests::route_kind_as_str_matches_serde_spelling ... ok
+test manifest::tests::route_kind_unknown_is_refused_by_name ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 320 filtered out; finished in 0.00s
 

@@ -1,0 +1,139 @@
+# Final report — live guest WS/SSE bridges + per-message gates (§8 of the goal)
+
+Evidence commit: `c6ea50b` (parent `3b0871c`), tree clean, `E:\QQQ`, branch main.
+Evidence dir: `docs/gate-evidence-live-serve-2026-10-29/` (all logs below live there
+unless noted). Scratch originals: `{SCRATCH}/verify-c6ea50b/`.
+
+## 1. Commit/tree
+
+- SHA: `c6ea50b7a1cf79c068f651c0a8611d40c7d5793d` — `git status --short` empty.
+- Branch: main. 30 files changed (10 modified, 2 new source, 18 evidence).
+- No files under `F:\QQQ-AUDIT\Registry` touched (commit file list:
+  `contract-commit-filelist.log` — 0 registry paths; all edits under `E:\QQQ`).
+
+## 2. Gate table
+
+- `cargo fmt --all -- --check`: clean (gate log: `ok fmt (6s)`).
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: clean
+  (`ok clippy (1s)`; also re-verified standalone on the touched crates).
+- `cargo test --workspace --all-features`: green inside the gate
+  (`ok build (17s)`, `ok test (285s)`).
+- `cargo deny check`: green — advisories/bans/licenses/sources ok (`ok deny (8s)`).
+- `cargo machete`: clean (`ok machete (1s)`).
+- `cargo xtask ci`: **GATE GREEN: 150 steps, 0 failed**
+  (`docs/gate-evidence-live-serve-2026-10-29/xtask-ci-green.log`, generated from
+  this exact tree and committed in c6ea50b; step-1 extract:
+  `step1-gate-summary.log`).
+- Ignored suites: 1 ignored in `cargo test -p qqq-serve` (pre-existing,
+  environment-gated); named, not marked passed.
+- Python gates: doc-claims 30/30 OK, done-lines OK, counts 644 OK, corpus at
+  rest, backlog OK, dashboard OK, catalogue OK, llms index OK, unsafe-audit
+  doc OK (229 files), api-examples 1931 outstanding ≤ allowance 1932
+  (+9 new compiling doctests for the 8 new public items).
+- Fault injectors / red proofs: 6 red-first pairs on the final tree, each FAIL
+  then byte-identical restore then PASS — `red-audit-tenant`, `red-ws-echo`,
+  `red-sse`, `red-dispatch`, `red-routekind`, `red-kinds-conflict` with green
+  counterparts in the same dir. Restores verified by SHA-256 against
+  pre-mutation baselines (5 exact, 1 fmt-only hunk re-normalized by
+  `cargo fmt`, tree re-verified clean and green).
+- Review: Meta Muse proxy via copilot CLI (Copilot subscription quota-exhausted;
+  see `copilot-review-proxy.log`). 12 findings; all HIGH fixed in-tree, MEDIUMs
+  fixed or dispositioned in the commit message.
+
+## 3. Checklist movement (3b0871c → c6ea50b, total 644)
+
+- Before/after: identical counts (no checklist edits in this round — implementation
+  + tests + evidence only). Standing position from the prior round: 337 done /
+  179 open / 125 blocked / 3 partial; re-verified consistent by
+  `check_checklist_counts` / `gen_backlog --check` / `milestone_dashboard --check`.
+- Newly `[x]`: none (no owner decisions closed; SRV-023/SRV-024/ARCH-017 stay `[!]`).
+- Unticked-but-now-proven (recorded here so a future tick needs no re-proof):
+  live WS/SSE end-to-end (this report §4), per-message tenant gates, tenant-attributed
+  audit rows, hyper-transport H2/TLS/auth parity.
+
+## 4. Runtime behavior (now reachable, with test names)
+
+- `qqqai run`: normal wasi/wasip2 guests run green (6 CLI tests:
+  `run_full_wasi02_baseline_runs_without_grants`,
+  `run_executes_when_the_capability_is_granted`,
+  `run_03_guest_with_grant_runs`,
+  `run_02_typed_baseline_imports_run_without_grants`); ungranted `qqq:`
+  imports refused by name
+  (`run_refuses_an_ungranted_import_and_names_the_right_capability`,
+  `run_03_guest_without_grant_refuses_naming_capability`).
+  See `runtime-cli-run.log` (6 passed).
+- Manifest → dispatch → guest WS/SSE, live on the production in-house path:
+  `guest_ws::a_message_round_trips_through_the_guest`,
+  `guest_ws::a_message_over_the_body_cap_closes_with_1009`,
+  `guest_ws::a_second_message_past_the_rate_closes_with_1013`,
+  `guest_sse::a_live_sse_route_refuses_a_non_event_answer_by_name`,
+  `serve::non_http_kinds_register_by_handler_name`, 5 `serve_routes` kinds tests,
+  4 `manifest::route_kind` tests, `server::a_ws_route_without_get_is_refused`.
+  Serve unit surface: `qqq-run --lib serve::` 30/30; `cargo test -p qqq-serve`
+  all suites green (see `runtime-serve-lib.log`).
+- Tenant-resolve on the production path: peer-prefix tenancy end to end —
+  limits, ledger, access logs, and (fixed this round) guest audit rows
+  (`TenantId` in every served row; red/green pair proves the attribution).
+  Lifecycle step 4 stays Absent (no host dimension); step 15 is wired.
+- HTTP/2 + TLS at the hyper transport (NOT the production listener):
+  `h2_flat_200_matches`, `h2_multiplexed_requests_share_a_connection`,
+  `tls_alpn_h2_routes_to_the_h2_driver`, `tls_alpn_http11_routes_to_the_h1_driver`,
+  `hyper_403_auth_matches`, `hyper_metrics_path_matches`.
+  See `runtime-live-bridges.log`, `live-h2-transport.log`, `live-tls.log`,
+  `live-auth-metrics.log`.
+- Determinism: `det009_trials.py --full` on c6ea50b → 10000/10000
+  byte-identical, 0 failed, 0 diverged, 31.9 ms/trial
+  (see `runtime-det009-10000.log`).
+- Interfaces: no WIT/ABI/capability names added or changed (frozen diff is
+  additive `RouteKind` + validation only).
+
+## 5. Performance
+
+- No new measurements this round (no perf-path code changed; bridges reuse the
+  existing instantiation path). DET-009 cost on this tree: 31.9 ms/trial
+  reference-hardware-adjacent (this box), for replay-cost context only.
+- PERF budgets without reference hardware stay UNMEASURED/BLOCKED with owners
+  (unchanged).
+
+## 6. Cross-repo handoff
+
+- Frozen-surface diff (3b0871c..c6ea50b over qqq-pkg/qqq-abi/qqq-cap/wit/
+  Cargo.toml/Cargo.lock): qqq-pkg, qqq-abi, wit/, Cargo.toml, Cargo.lock —
+  ZERO changes. qqq-cap: +`RouteKind` (new enum + `Route::kind`, both additive,
+  default `Http` preserves every existing manifest) and ws-requires-GET
+  validation. No API/ABI/WIT name changed or reordered.
+  See `contract-frozen-diff-stat.log`, `contract-cap-stat.log`.
+- `core-only` evidence: `cargo build -p qqq-pkg --no-default-features
+  --features core-only --target wasm32-unknown-unknown` exit 0;
+  `cargo test -p qqq-pkg` green; `cargo test -p qqq-abi` 25 passed.
+  See `contract-core-only-wasm.log`, `contract-pkg-test.log`,
+  `contract-abi-test.log`.
+- Registry commands requested: none (no WIT/ABI/contract change needs
+  registry coordination; schema regen is runtime-owned).
+- No registry edits (0 registry paths in the commit).
+
+## 7. Known gaps
+
+- SRV-023 (owner: Maintainer/Architect): hyper H2 promotion to the production
+  listener still needs parity sign-off. Proven here: H2 transport. Tripwire:
+  `grep -rn serve_hyper crates/qqq-run/src` non-empty + production H2 test.
+- SRV-024 (owner: Architect + registry owner): full-duplex guest WS/message +
+  server-push event WIT exports still need coordination. Proven here: the
+  one-request-per-message compat path over existing `handle`. Tripwire: `wit/`
+  gains WS/message exports.
+- ARCH-017 (owner: Architect): host/path → tenant → component mapping still
+  needs an authenticated identity or a host dimension on `Route`. Proven here:
+  peer-prefix tenancy end to end including audit. Tripwire: authenticating
+  `AuthMode` lands or `Route` gains a host field.
+- R1/R2 (this round, in-report): per-message gates cover body-cap + rate only;
+  WS auth is handshake-once. Carried as documented limitations in the bridge
+  docs, not silent gaps.
+
+## 8. Contradictions fixed
+
+- The stale §4 claim "no live guest WS/SSE flows exist or are claimed" is now
+  superseded FOR WS/SSE + tenant-audit by this round's live proofs (see §4);
+  it REMAINS true for production-listener H2 and host-dimension tenant mapping.
+  This report and `verify-runtime-c6ea50b.log` state the corrected split; the
+  2026-10-29 round's logs are left untouched as history.
+- No §9/Appendix-C items touched (no checklist/proposal edits this round).

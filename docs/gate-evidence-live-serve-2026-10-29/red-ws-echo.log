@@ -1,5 +1,5 @@
    Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
-    Finished `test` profile [optimized + debuginfo] target(s) in 9.88s
+    Finished `test` profile [optimized + debuginfo] target(s) in 17.37s
      Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
 
 running 1 test
@@ -9,7 +9,7 @@ failures:
 
 ---- guest_ws::tests::a_message_round_trips_through_the_guest stdout ----
 
-thread 'guest_ws::tests::a_message_round_trips_through_the_guest' (379512) panicked at crates\qqq-run\src\guest_ws.rs:166:9:
+thread 'guest_ws::tests::a_message_round_trips_through_the_guest' (193876) panicked at crates\qqq-run\src\guest_ws.rs:240:9:
 assertion `left == right` failed: the guest echo must round-trip
   left: [119, 114, 111, 110, 103]
  right: [104, 101, 108, 108, 111, 45, 119, 115]
@@ -19,6 +19,6 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 failures:
     guest_ws::tests::a_message_round_trips_through_the_guest
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 673 filtered out; finished in 0.52s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 678 filtered out; finished in 0.55s
 
 error: test failed, to rerun pass `-p qqq-run --lib`

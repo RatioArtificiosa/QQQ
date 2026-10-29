@@ -1,0 +1,39 @@
+verify-runtime on clean HEAD c6ea50b (supersedes the 2026-10-29 verify-runtime.log claim set)
+Date: 2026-10-29. Tree: clean at c6ea50b. Commands below ran on c6ea50b.
+
+run normal guests (6 CLI tests incl. wasi02/03 baselines): ok, 6 passed
+  cargo test -p qqq-run --test cli -- <6 run/refusal test names>
+  see runtime-cli-run.log (6 passed, 0 failed)
+ungranted qqq: refused by name (2 of the 6 above): ok
+qqq-run --lib serve::: ok, 30 passed (was 29: +non_http_kinds_register_by_handler_name)
+cargo test -p qqq-serve: all suites green, 0 failed (1 ignored, pre-existing)
+  see runtime-serve-lib.log (20 result lines, every one ok)
+DET-009 full re-run on c6ea50b: see runtime-det009-10000.log
+  10000/10000 byte-identical, 0 failed, 0 diverged, 31.9 ms/trial
+
+LIVE PROOFS NEW IN THIS ROUND (production in-house path unless noted):
+- WS guest round-trip through manifest/dispatched path: green
+  guest_ws::a_message_round_trips_through_the_guest (+2 per-message gate tests:
+  body-cap closes 1009, spent rate closes 1013)
+  see live-ws-sse-dispatch.log, runtime-live-bridges.log (28 passed)
+- SSE refusal through manifest/dispatched path: green (502 names text/event-stream)
+  guest_sse::a_live_sse_route_refuses_a_non_event_answer_by_name
+- Dispatch registration by handler name: green
+  serve::non_http_kinds_register_by_handler_name + 5 serve_routes kinds tests
+- Tenant-resolve on the production path: green — loopback peer resolves to
+  127.0.0.1 as tenant label in access records AND in guest audit rows
+  (audit-tenant fix; red/green pair in red-audit-tenant.log/green-audit-tenant.log)
+- HTTP/2 at the hyper transport: green (h2_flat_200_matches,
+  h2_multiplexed_requests_share_a_connection); TLS ALPN h2->H2 / h1->H1 routing
+  green; auth-403 + metrics-path parity green
+  see live-h2-transport.log, live-tls.log, live-auth-metrics.log
+
+EXPLICITLY STILL HANDED OFF (unchanged owners/tripwires):
+- Production-listener HTTP/2 promotion (hyper -> qqqai serve): SRV-023.
+  Proven here is H2 framing/transport, not a production H2 listener.
+- Full-duplex guest WS/message + server-push event ABI (new WIT exports): SRV-024.
+  Proven here is the one-request-per-message compat path over existing `handle`;
+  the streaming WIT interface remains future work.
+- Host/path -> tenant -> component mapping (authenticated identity): ARCH-017.
+  Proven here is peer-prefix tenancy end to end (limits, ledger, logs, audit).
+  Step 4 stays Absent in check_lifecycle_counts; step 15 (audit append) is wired.

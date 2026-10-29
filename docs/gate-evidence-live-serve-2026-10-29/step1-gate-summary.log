@@ -1,0 +1,7 @@
+ok   machete                (1s)
+ok   fmt                    (6s)
+ok   deny                   (8s)
+ok   clippy                 (1s)
+ok   build                  (17s)
+ok   test                   (285s)
+GATE GREEN: 150 steps (see docs/gate-evidence-live-serve-2026-10-29/xtask-ci-green.log, committed in c6ea50b)

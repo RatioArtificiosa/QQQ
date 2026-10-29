@@ -1,5 +1,5 @@
    Compiling qqq-cap v0.1.1 (E:\QQQ\crates\qqq-cap)
-    Finished `test` profile [optimized + debuginfo] target(s) in 6.32s
+    Finished `test` profile [optimized + debuginfo] target(s) in 12.96s
      Running unittests src\lib.rs (target\debug\deps\qqq_cap-4a97a2541397dff0.exe)
 
 running 4 tests
@@ -12,7 +12,7 @@ failures:
 
 ---- manifest::tests::route_kind_as_str_matches_serde_spelling stdout ----
 
-thread 'manifest::tests::route_kind_as_str_matches_serde_spelling' (188572) panicked at crates\qqq-cap\src\manifest.rs:2398:44:
+thread 'manifest::tests::route_kind_as_str_matches_serde_spelling' (374116) panicked at crates\qqq-cap\src\manifest.rs:2430:44:
 as_str spelling must parse: InvalidField { field: "<unknown>", reason: "unknown variant `websocket`, expected one of `http`, `ws`, `sse`" }
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
@@ -20,6 +20,6 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 failures:
     manifest::tests::route_kind_as_str_matches_serde_spelling
 
-test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 319 filtered out; finished in 0.00s
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 320 filtered out; finished in 0.00s
 
 error: test failed, to rerun pass `-p qqq-cap --lib`

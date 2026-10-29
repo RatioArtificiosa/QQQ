@@ -1,25 +1,50 @@
    Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
-    Finished `test` profile [optimized + debuginfo] target(s) in 15.97s
+warning: unused variable: `path`
+  --> crates\qqq-run\src\guest_sse.rs:64:9
+   |
+64 |     let path = path.to_owned();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_path`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `is_event_stream` is never used
+   --> crates\qqq-run\src\guest_sse.rs:102:4
+    |
+102 | fn is_event_stream(value: Option<&str>) -> bool {
+    |    ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `qqq-run` (lib test) generated 2 warnings (run `cargo fix --lib -p qqq-run --tests` to apply 1 suggestion)
+    Finished `test` profile [optimized + debuginfo] target(s) in 17.34s
      Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
 
-running 3 tests
+running 4 tests
 test guest_sse::tests::an_event_stream_answer_is_framed_not_reinterpreted ... ok
+test guest_sse::tests::event_stream_media_type_allows_charset_nothing_else ... FAILED
 test guest_sse::tests::a_non_event_stream_answer_is_refused_by_name ... FAILED
 test guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name ... FAILED
 
 failures:
 
----- guest_sse::tests::a_non_event_stream_answer_is_refused_by_name stdout ----
+---- guest_sse::tests::event_stream_media_type_allows_charset_nothing_else stdout ----
 
-thread 'guest_sse::tests::a_non_event_stream_answer_is_refused_by_name' (145324) panicked at crates\qqq-run\src\guest_sse.rs:122:13:
-assertion `left == right` failed: a non-event answer must fail closed: None
+thread 'guest_sse::tests::event_stream_media_type_allows_charset_nothing_else' (172060) panicked at crates\qqq-run\src\guest_sse.rs:231:13:
+assertion `left == right` failed: a different media type must fail closed: "text/event-stream; charset=latin-1"
   left: 200
  right: 502
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
+---- guest_sse::tests::a_non_event_stream_answer_is_refused_by_name stdout ----
+
+thread 'guest_sse::tests::a_non_event_stream_answer_is_refused_by_name' (142288) panicked at crates\qqq-run\src\guest_sse.rs:193:13:
+assertion `left == right` failed: a non-event answer must fail closed: None
+  left: 200
+ right: 502
+
 ---- guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name stdout ----
 
-thread 'guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name' (138976) panicked at crates\qqq-run\src\guest_sse.rs:230:9:
+thread 'guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name' (374020) panicked at crates\qqq-run\src\guest_sse.rs:333:9:
 a non-event answer must fail closed on the wire: HTTP/1.1 200 OK
 Cache-Control: no-store
 X-Accel-Buffering: no
@@ -32,7 +57,8 @@ Connection: close
 failures:
     guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name
     guest_sse::tests::a_non_event_stream_answer_is_refused_by_name
+    guest_sse::tests::event_stream_media_type_allows_charset_nothing_else
 
-test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 671 filtered out; finished in 0.52s
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 675 filtered out; finished in 0.53s
 
 error: test failed, to rerun pass `-p qqq-run --lib`

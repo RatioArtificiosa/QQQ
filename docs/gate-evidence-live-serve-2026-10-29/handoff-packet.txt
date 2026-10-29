@@ -1,0 +1,77 @@
+# QQQ runtime handoff — live guest WS/SSE bridges round
+
+Commit: c6ea50b7a1cf79c068f651c0a8611d40c7d5793d
+Tree: clean (`git status --short` empty at verification).
+Baseline: 644 items; 337 done / 179 open / 125 blocked / 3 partial before this work.
+After: identical counts — no checklist items opened, closed, or re-owned this round
+(implementation + tests + evidence only; see s8-final-report.txt §3).
+
+## Gates
+- fmt: `cargo fmt --all -- --check` -> clean
+- clippy: `cargo clippy --workspace --all-targets --all-features -- -D warnings` -> clean
+- tests: `cargo test --workspace --all-features` (in-gate) -> green; plus
+  targeted re-runs on c6ea50b: qqq-run lib 57 passed, qqq-cap RouteKind 5 passed,
+  serve_routes/dispatch 28+ passed, hyper H2/TLS/auth suites green
+- deny: `cargo deny check` -> green (advisories/bans/licenses/sources)
+- machete: `cargo machete` -> clean
+- xtask ci: `cargo xtask ci` (CARGO_BUILD_JOBS=6) -> GATE GREEN: 150 steps, 0 failed
+- ignored/guest suites: 1 ignored in qqq-serve (pre-existing, environment-gated)
+- Python/gates/fault injectors: doc-claims 30/30, done-lines OK, counts/backlog/
+  dashboard OK, corpus at rest, llms index OK, unsafe-audit 229 OK, api-examples
+  1931 <= 1932; 6 manual red-first pairs (FAIL then byte-identical restore then PASS)
+
+## Runtime changes
+- Host interfaces bound: none added/changed (no WIT/ABI/capability change).
+- HTTP/2 / WS / SSE / streaming: NEW — manifest `kind` marker (`http`/`ws`/`sse`,
+  default `http`); `GuestWsBridge` (one guest POST per message, per-message
+  body-cap 1009 + rate 1013 closes, tenant-attributed); `sse_handler`
+  (event-stream framing, 502 otherwise); dispatch registration by handler name
+  with HTTP/param/duplicate sharing refused. Live proofs on the production
+  in-house path (WS echo, SSE 502, limits closes, tenant in audit). H2 proven
+  at the hyper transport only; production listener stays H1.
+- qqqai run 0.2: unchanged, re-verified green (6 CLI tests).
+- Determinism: DET-009 re-run on c6ea50b → 10000/10000 byte-identical.
+- Languages/test runner: untouched.
+- Package manager/supply chain: untouched.
+- Agent/MCP/migration: untouched.
+- DX/AOT/hot swap/observability: install path unchanged; audit stream now carries
+  the serve tenant on every served row (was: None/unscoped).
+- Performance: no new measurements (no perf-path change).
+
+## Cross-repo
+- Frozen-surface diff: qqq-pkg / qqq-abi / wit/ / Cargo.toml / Cargo.lock —
+  none. qqq-cap — additive `RouteKind` + ws-requires-GET validation only.
+  Exact file list: contract-commit-filelist.log (30 files, 0 registry paths).
+- core-only evidence: contract-core-only-wasm.log (exit 0), pkg + abi green.
+- Registry commands requested (C.4): none — no WIT/ABI/contract change needs
+  registry coordination. If the owner wants, re-run: `cargo test -p qqq-registry`,
+  `python tools/check_specs.py --root specs --qqq-root E:\QQQ`.
+- Registry files edited: none.
+
+## Remaining blockers
+- [SRV-023] Maintainer/Architect / production H2 promotion needs parity sign-off /
+  evidence: live-h2-transport.log proves transport only / tripwire: serve_hyper
+  wired into qqq-run + production H2 test / re-measure: h2spec + gate.
+- [SRV-024] Architect + registry owner / full-duplex guest WS/message + push-event
+  WIT exports / evidence: compat path live in live-ws-sse-dispatch.log / tripwire:
+  wit/ gains WS/message exports / re-measure: guest WS-echo probe + fallthrough pin.
+- [ARCH-017] Architect / host/path->tenant->component mapping / evidence:
+  peer-prefix tenancy end-to-end incl. audit (this round) / tripwire: auth AuthMode
+  lands or Route gains host dimension / re-measure: check_lifecycle_counts step-4 flip.
+- [R1/R2] in-report residuals (per-message gate scope; handshake-once WS auth) —
+  documented limitations, no owner needed unless the threat model changes.
+
+## Known contradictions fixed
+- Corrected split of the stale "no live WS/SSE" claim: WS/SSE + tenant-audit now
+  proven live (this packet §Runtime changes); production-H2 + host-mapping still
+  handoffs. Old-round logs untouched as history.
+
+## Unmeasured or unverified
+- PERF budgets: unchanged standing (no reference hardware) — see s8 §5.
+- Registry-side re-runs: not executed from here (owner-only); none required by
+  this diff, commands listed above if the owner wants them.
+
+## Claims
+- Every numeric claim above has a command and environment in the cited log.
+- No claim is copied from an old checklist count; counts re-verified on c6ea50b
+  (checklist 644, DET-009 10000/10000, gate 150 steps, api-examples 1931).

@@ -35,3 +35,17 @@ HOW TO REPRODUCE
   serve::tests::non_http serve_routes` plus the hyper suites named above.
 - Tree: uncommitted working state at capture; commit message names the
   checklist disposition (SRV-024 narrowed, SRV-023/ARCH-017 still carried).
+
+VERIFICATION ON CLEAN HEAD c6ea50b (this packet)
+- Red/green pairs above were re-captured on the final tree (post-review-fix
+  code) into the same filenames; restores verified SHA-256 byte-identical
+  (one fmt-only hunk re-normalized, tree re-verified clean + green).
+- Steps 1-5 re-run on c6ea50b: step-1 from the committed gate log
+  (`step1-gate-summary.log` <- `xtask-ci-green.log`, GATE GREEN 150 steps);
+  contract (`contract-*.log`: frozen diff additive-only, core-only wasm exit 0,
+  pkg/abi green, 0 registry paths); runtime (`runtime-*.log`: CLI 6/6,
+  serve suites green, DET-009 10000/10000, live bridges/H2/TLS/auth green).
+- Corrected claim set: `verify-runtime-c6ea50b.log` (WS/SSE + tenant-audit live
+  proven; production-H2 + host-mapping still handoffs).
+- Final §8 report: `s8-final-report.txt`. Handoff packet (App. E):
+  `handoff-packet.txt`.

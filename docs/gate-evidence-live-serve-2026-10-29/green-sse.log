@@ -1,12 +1,12 @@
-   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
-    Finished `test` profile [optimized + debuginfo] target(s) in 13.96s
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.83s
      Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
 
-running 3 tests
-test guest_sse::tests::a_non_event_stream_answer_is_refused_by_name ... ok
+running 4 tests
 test guest_sse::tests::an_event_stream_answer_is_framed_not_reinterpreted ... ok
+test guest_sse::tests::a_non_event_stream_answer_is_refused_by_name ... ok
+test guest_sse::tests::event_stream_media_type_allows_charset_nothing_else ... ok
 {"level":"error","trace_id":"00000000000000000000000000000002","span_id":"0000000000000001","tenant":"127.0.0.1","component":"qqq-serve","manifest_rev":"unknown","msg":"GET /events 502","method":"GET","path":"/events","status":"502"}
 test guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 671 filtered out; finished in 0.54s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 675 filtered out; finished in 0.53s
 

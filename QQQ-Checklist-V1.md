@@ -1069,29 +1069,43 @@ Items are grouped below by **phase**, because dependency order matters more than
     rather than competing with it.
 - [ ] **ARCH-011** Implement the fifteen-step request lifecycle as an instrumented pipeline.
   → §4.4 Request lifecycle — the detailed path
-  → **Partial, and the item stays open because 13 of the fifteen steps are not done.** What
+  → **Partial, and the item stays open because 11 of the fifteen steps are not done.** What
     landed is the honest accounting rather than a claim: `crates/qqq-serve/src/lifecycle.rs`
     carries `STAGES` — all fifteen of §4.4's steps, each with the file and symbol that performs
     it, a `Status`, and the `gap` that says what is missing — plus a test that verifies every
     named symbol still exists in the file it names, so a rename or a move cannot leave the table
     pointing at nothing.
-  → **Measured: 2 implemented, 11 partial, 1 built-unwired, 1 absent.** The numbers are
+  → **Measured: 4 implemented, 10 partial, 0 built-unwired, 1 absent.** The numbers are
     **derived, never hand-written**: `Summary::of` folds the table into `Counts`, `Counts`
     renders both the numbers and the step lists, and `the_documented_counts_match_the_table`
     asserts the module's prose against that rendering. Change one row's `Status` and the test
     fails until the documentation is corrected — that injection was run and is captured.
     `tools/check_lifecycle_counts.py` extends the same guarantee to *this entry*, which the
     test binary cannot read. `§O-244` records the defect and the fix.
+  → **Re-surveyed 2026-10-28: steps 7 and 15 flipped to Implemented.** Step 15
+    (`AUDIT APPEND`) is wired on the production serve path — `GuestApp::handle_request`
+    builds a per-request `AuditHandle` over the shared stream, commits exactly its rows,
+    and persists them when an appender is attached (`F-09`; per-request, chaining,
+    persist, resume, hostile/failed-outcome tests in `guest_handler`). Step 7
+    (`CAPABILITY BIND`) binds every interface a guest can import — clock, http, secrets,
+    env, log, trace, kv, queue, dns, sql, full crypto — each grant-gated with a
+    guest-compiled probe (`crates/qqq-host/tests/iface_{crypto,dns,env,kv,log,queue,secrets,sql,trace}.rs`);
+    the one unbound interface (`qqq:fs`) is blocked upstream of the binder (`HOST-034`).
+    Step 11 stays `Partial` by reviewer correction: the re-check runs per interface
+    (inline checks + `require` seam + allowlists) while the row's symbol `recheck` is a
+    tested helper with no production callers — wiring every interface through it would be
+    a behavior-preserving refactor no test could pin. An empty `built-unwired` kind now
+    renders as `(none)` and is pinned by the count test rather than omitted.
   → **The four findings, each a decision or a debt rather than an oversight.**
     • **Step 4 `TENANT RESOLVE` — absent.** §4.4 maps *host/path → tenant → component ID +
     manifest rev*. There is no such mapping anywhere in the workspace: the router is **path-only**
     (`Route` has no host field), and the only tenant derivation in `qqq-serve` is `tenant_of`,
     which keys on the **client IP** for per-tenant limits. §4.4's claim that step 4 is the only
     place routing state lives currently describes intent.
-    • **Step 15 `AUDIT APPEND` — built and unwired.** `AuditStream::record` is complete,
-    hash-chained and append-only, and its only callers are its own tests. This is the gap that
-    matters most for §4.4's security story: step 13 meters and step 15 records, and the
-    recording half does not run.
+    • **Step 15 `AUDIT APPEND` — implemented on the serve path (re-surveyed 2026-10-28).**
+    Formerly *"built, unwired"*: `AuditStream` was complete with only its own tests calling
+    it. `GuestApp::handle_request` now commits per-request rows into the shared stream and
+    the attached appender persists them — the recording half runs.
     • **Steps 6 and 14 are accounting, not reuse.** §4.4's "pooled instance (≈µs)" and "linear
     memory is reset, not freed" do not hold: `Pool::acquire` charges a slot and `release` returns
     it, while the instance is created and dropped per request. `Acquired::pooled` means the idle
@@ -1104,7 +1118,9 @@ Items are grouped below by **phase**, because dependency order matters more than
     `qqq_host::Metrics::note_execution` records fuel, traps and peak memory, but **they are two
     registries with no common key**, and no handle peak reaches telemetry — so step 13 is
     three-quarters done.
-  → Verified: 10 tests green; `clippy -D warnings` clean; the named-symbol audit passes against
+  → Verified: 18 tests green, all pre-existing — the slice hardened the counts and
+    narrative assertions plus the empty-kind `(none)` rendering (red-proven: the count
+    test failed on the stale prose before the fix); `clippy -D warnings` clean; the named-symbol audit passes against
     the real tree and has a **positive control** proving it reports a symbol that does not exist.
     **`audit` no longer skips an unaccountable row** (`§O-245`): a row that names neither a file
     nor a symbol is reported as `Missing::Unaccountable` rather than `continue`d past, so a row

@@ -1653,12 +1653,13 @@ pub fn build_linker<'a>(
             // appears in the crate, which is why it is quoted and explained
             // rather than used.
             //
-            // `recheck` itself is called from its own three tests and from no
-            // invocation path yet: the host interfaces that would call it —
-            // `qqq:fs`, `qqq:http` and the rest — are the ones this
-            // stub records as unbound. That is the honest state, and it is
-            // recorded here rather than left for a reader to discover by
-            // searching for callers.
+            // `recheck` itself is called from its own tests and doctest only:
+            // production call-time re-checks run per interface — inline
+            // `grants.grants` checks plus the allowlist in most host modules,
+            // the `ambient::require` seam for crypto and hashing — and state
+            // the same predicate. That is the honest state, recorded here
+            // rather than left for a reader to discover by searching for
+            // callers.
             //
             // Note that `qqq:crypto` is now fully implemented — `random` and
             // `hashing` via `func_wrap`, `hmac`/`aead`/`signing` via the

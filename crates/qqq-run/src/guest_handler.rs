@@ -908,9 +908,10 @@ impl GuestApp {
         // which is a different remediation from adding a grant.
         {
             // The handle row joins the buffered ambient rows, and the commit
-            // assigns every sequence under ONE lock hold: the returned set
-            // is exactly this request's rows, in commit order. No floor
-            // index, no shared slice, no concurrent rows riding along.
+            // assigns every sequence from this request's private buffer under
+            // the stream lock: the returned set is exactly this request's
+            // rows, in commit order. No floor index, no shared slice, no
+            // concurrent rows riding along.
             audit_handle.record(
                 qqq_cap::capability::Capability::HttpServer,
                 "handle_request",

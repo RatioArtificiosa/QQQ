@@ -15,7 +15,7 @@
 //!
 //! The first version of this module was going to state that the pipeline is
 //! implemented. Auditing each step against the tree, one at a time, showed that
-//! would have been false for **13** of the fifteen, so the table reports a
+//! would have been false for **11** of the fifteen, so the table reports a
 //! [`Status`] per step instead of a verdict. The numeral is deliberate: a number
 //! written as a word cannot be compared to anything without a number-word parser,
 //! and a value that cannot be compared is a value with no owner (`§O-277`).
@@ -23,7 +23,7 @@
 //! **The four counts below are derived, never hand-written.** [`Summary::of`] folds
 //! [`STAGES`] into them, [`Summary::Display`] renders them, and
 //! `the_documented_counts_match_the_table` compares the prose against that
-//! rendering — which is **2 implemented, 11 partial, 1 built-unwired, 1 absent**.
+//! rendering — which is **4 implemented, 10 partial, 0 built-unwired, 1 absent**.
 //! A previous version of this module hand-wrote the same four numbers in three
 //! places, and they disagreed: the table below said steps 2, 6, 8, 10, 14 were
 //! implemented, the checklist entry said `5 implemented, 9 partial, 1 built-unwired,
@@ -32,9 +32,9 @@
 //!
 //! | Kind | Steps | What is actually true |
 //! |---|---|---|
-//! | **Implemented** | 2, 8 | The named symbol performs the step |
-//! | **Partial** | 1, 3, 5, 6, 7, 9, 10, 11, 12, 13, 14 | Something performs the step, but not the whole of what §4.4 describes |
-//! | **Built, unwired** | 15 | A complete implementation with no production caller |
+//! | **Implemented** | 2, 7, 8, 15 | The named symbol performs the step |
+//! | **Partial** | 1, 3, 5, 6, 9, 10, 11, 12, 13, 14 | Something performs the step, but not the whole of what §4.4 describes |
+//! | **Built, unwired** | (none) | No step is built but unwired |
 //! | **Absent** | 4 | No implementation exists |
 //!
 //! A module that said "implemented" would be `§O-219`'s shape — an item that looks
@@ -43,7 +43,7 @@
 //! the file it names.** That is the property a later edit can break, and it is the
 //! one an omission cannot hide from.
 //!
-//! # The five honest gaps, named
+//! # The four honest gaps, named
 //!
 //! These are the findings, and each is a decision or a debt rather than an
 //! oversight:
@@ -55,25 +55,21 @@
 //!    [`tenant_of`](crate::server), which keys on the *client IP prefix* for per-tenant
 //!    limits. §4.4's claim that "step 4 is the only place routing state lives"
 //!    therefore describes an intent, not the code.
-//! 2. **Step 15, `AUDIT APPEND` — built, unwired.**
-//!    [`AuditStream::record`](qqq_host::AuditStream::record) is a complete,
-//!    hash-chained, append-only implementation whose only callers are its own
-//!    tests. No request path constructs an audit stream, so no capability-use
-//!    record reaches any ring.
-//! 3. **Step 11, the call-time re-check — implemented per-function, unwired for the
-//!    unbound interfaces.** [`recheck`](qqq_host::linker::recheck) exists, is
-//!    tested, and is reached through `ambient::require` for the interface that
-//!    needs it. `build_linker`'s own comment records that the interfaces which
-//!    would call it most — `qqq:fs`, `qqq:sql` and the rest — are the ones not yet
-//!    bound.
-//! 4. **Steps 6 and 14 are accounting, not reuse.** §4.4 says step 6 takes "a
+//! 2. **Step 11, the call-time re-check — runs per interface, not through the
+//!    named helper.** Every bound interface re-checks the grant at call time,
+//!    but the mechanism is per-interface (inline checks plus the
+//!    `ambient::require` seam) while the row's symbol, `recheck`, is a tested
+//!    helper with no production callers. Wiring every interface through it
+//!    would be a behavior-preserving refactor no test could pin, so the row
+//!    stays `Partial` and says so rather than claiming the helper runs.
+//! 3. **Steps 6 and 14 are accounting, not reuse.** §4.4 says step 6 takes "a
 //!    pooled instance (≈µs)", and step 14's payoff is that "a pooled instance's
 //!    linear memory is reset, not freed". In V1 nothing reuses an instance:
 //!    [`Pool::acquire`](qqq_host::Pool::acquire) charges a slot and
 //!    [`Pool::release`](qqq_host::Pool::release) returns it, while the instance
 //!    itself is created and dropped per request. `Acquired::pooled` means the idle
 //!    count was non-zero — not that a guest instance was reused.
-//! 5. **Step 10, `GUEST ENTRY` — the production path is synchronous where §4.4 says
+//! 4. **Step 10, `GUEST ENTRY` — the production path is synchronous where §4.4 says
 //!    async.** [`call_handler`](qqq_host::call::call_handler) resolves the handler
 //!    once per component and calls it, and the async machinery exists in full —
 //!    but the dispatch path the server actually takes uses the synchronous entry
@@ -82,6 +78,12 @@
 //!    looked finished because the thing that would notice was the thing describing
 //!    it. `CodeRabbit` raised it twice. It is `Partial` now, and the Status, the gap
 //!    and this list agree (`§O-277`).
+//!
+//! Step 15, `AUDIT APPEND`, was the fifth gap — *"built, unwired"* — until the
+//! serve path wired it: `GuestApp::handle_request` commits per-request rows
+//! into the shared stream and persists them when an appender is attached
+//! (`F-09`). It reads `Implemented` now; the history stays here so a reader
+//! can see what closed and when.
 //!
 //! # Instrumentation
 //!
@@ -246,11 +248,18 @@ pub const STAGES: [Stage; 15] = [
         name: "CAPABILITY BIND",
         file: Some("qqq-host/src/linker.rs"),
         symbol: Some("build_linker"),
-        // Building the linker from the grants alone is the security property and it
-        // holds. The gap is coverage: only the clock, crypto and http interfaces
-        // are registered so far, and the rest are reported as unimplemented.
-        status: Status::Partial,
-        gap: "only clock/crypto/http register; fs, sql and the rest are reported unimplemented rather than bound",
+        // Building the linker from the grants alone is the security property
+        // and it holds for every interface a guest can import: clock, http,
+        // secrets, env, log, trace, kv, queue, dns, sql and the full crypto
+        // set each bind under their grant (each with a guest-compiled probe
+        // proving the import links: `crates/qqq-host/tests/iface_{crypto,
+        // dns,env,kv,log,queue,secrets,sql,trace}.rs`) and stay absent
+        // without it. The one
+        // declared-but-unbound interface, `qqq:fs`, is blocked upstream of
+        // the binder — its WIT has no constructor, so no guest can name the
+        // import (`HOST-034`). There is no binder work left for it to do.
+        status: Status::Implemented,
+        gap: "",
     },
     Stage {
         step: 8,
@@ -295,11 +304,17 @@ pub const STAGES: [Stage; 15] = [
         name: "HOST CALLS",
         file: Some("qqq-host/src/linker.rs"),
         symbol: Some("recheck"),
-        // The re-check exists and is reached for the interfaces that need it. The
-        // unwired part is the interfaces that are not bound yet, which is where
-        // most host calls will eventually come from.
+        // The call-time re-check runs, but not through this symbol: every
+        // bound interface re-checks the grant at call time — inline
+        // `grants.grants` checks plus the manifest allowlist in most
+        // interfaces, the `ambient::require` seam for crypto and hashing.
+        // `recheck` states the same predicate as a tested helper, but its
+        // only callers are its own tests: routing every interface through it
+        // would be a refactor with no behavioral difference for any test to
+        // pin, so the table records the mechanism that runs rather than the
+        // helper that states it.
         status: Status::Partial,
-        gap: "recheck is reached through ambient::require, but the interfaces that would call it most (fs, sql) are not bound",
+        gap: "re-checks run per interface (inline grant checks + require seam + allowlists); the `recheck` helper is tested but has no production callers",
     },
     Stage {
         step: 12,
@@ -338,13 +353,19 @@ pub const STAGES: [Stage; 15] = [
     Stage {
         step: 15,
         name: "AUDIT APPEND",
-        file: Some("qqq-host/src/audit.rs"),
-        symbol: Some("record"),
-        // Complete, hash-chained, append-only, and called by nothing but its own
-        // tests. This is the gap that matters most for §4.4's security story:
-        // step 13 meters and step 15 records, and the recording half does not run.
-        status: Status::BuiltUnwired,
-        gap: "AuditStream has no production caller, so no capability-use record is written",
+        file: Some("qqq-run/src/guest_handler.rs"),
+        symbol: Some("handle_request"),
+        // Wired end to end on the production serve path: `handle_request`
+        // builds a per-request `AuditHandle` over the app's shared stream,
+        // the guest's capability consultations buffer into it, and the commit
+        // sequences exactly this request's private buffer under the stream
+        // lock — never a floor-slice of the shared stream. An
+        // attached appender persists the committed set before the response
+        // is written (`FailClosed` refuses to serve over a dead worker).
+        // `AuditStream::record` remains the primitive; this step is the
+        // caller it was missing.
+        status: Status::Implemented,
+        gap: "",
     },
 ];
 
@@ -614,10 +635,10 @@ impl Counts {
         let c = Self::measured();
         format!(
             "Implemented | {} |\nPartial | {} |\nBuilt, unwired | {} |\nAbsent | {} |\n{}",
-            steps(&c.implemented),
-            steps(&c.partial),
-            steps(&c.built_unwired),
-            steps(&c.absent),
+            steps_or_none(&c.implemented),
+            steps_or_none(&c.partial),
+            steps_or_none(&c.built_unwired),
+            steps_or_none(&c.absent),
             c.summary
         )
     }
@@ -634,20 +655,33 @@ impl Counts {
 /// ```
 /// use qqq_serve::lifecycle::documented_cells;
 ///
-/// for (kind, steps) in documented_cells() {
+/// let cells = documented_cells();
+/// assert_eq!(cells.len(), 4, "all four kinds are always reported");
+/// for (kind, steps) in &cells {
 ///     assert!(!kind.is_empty());
-///     // Every kind has at least one step on the current table.
-///     assert!(!steps.is_empty());
+///     // Each cell states step numbers or the explicit empty marker — the
+///     // same guard the count test applies, so a cell stating neither
+///     // fails here rather than passing vacuously. An empty kind renders
+///     // as `(none)`, never as a missing row, so reaching zero
+///     // built-unwired reads as the success it is.
+///     assert!(
+///         *steps == "(none)" || steps.split(", ").all(|s| s.parse::<u8>().is_ok()),
+///         "{kind} states neither steps nor the empty marker: {steps}"
+///     );
 /// }
+/// assert!(
+///     cells.iter().any(|(_, s)| s == "(none)"),
+///     "the current table leaves one kind empty, and the marker must show: {cells:?}"
+/// );
 /// ```
 #[must_use]
 pub fn documented_cells() -> Vec<(&'static str, String)> {
     let c = Counts::measured();
     vec![
-        ("Implemented", steps(&c.implemented)),
-        ("Partial", steps(&c.partial)),
-        ("Built, unwired", steps(&c.built_unwired)),
-        ("Absent", steps(&c.absent)),
+        ("Implemented", steps_or_none(&c.implemented)),
+        ("Partial", steps_or_none(&c.partial)),
+        ("Built, unwired", steps_or_none(&c.built_unwired)),
+        ("Absent", steps_or_none(&c.absent)),
     ]
 }
 
@@ -657,6 +691,21 @@ fn steps(list: &[u8]) -> String {
         .map(u8::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Render a step list, or the explicit empty marker when the kind holds no
+/// step.
+///
+/// `(none)` rather than an empty string: an empty cell in a Markdown row is
+/// invisible, and a reader cannot tell "zero steps" from "the author stopped
+/// writing". The marker makes the zero state a stated fact the count test
+/// below pins, so a kind that empties out stays reported.
+fn steps_or_none(list: &[u8]) -> String {
+    if list.is_empty() {
+        "(none)".to_owned()
+    } else {
+        steps(list)
+    }
 }
 
 impl fmt::Display for Summary {
@@ -1077,7 +1126,9 @@ mod tests {
         for ((kind, list), row) in documented_cells().iter().zip(&rows) {
             // The doc comment writes the row as a Markdown table row:
             // `| **Implemented** | 2, 8, 10 | The named symbol performs the step |`.
-            // The middle cell is the fact, so it is what is compared.
+            // The middle cell is the fact, so it is what is compared. An empty
+            // kind renders as `(none)` — the explicit marker, never an empty
+            // cell — so a zero reads as a stated zero rather than a dropped row.
             let cell = format!("| {list} |");
             assert!(
                 src.contains(&cell),
@@ -1087,8 +1138,9 @@ mod tests {
                  {rows:?}"
             );
             assert!(
-                !list.trim().is_empty(),
-                "a documented row with an empty step list states a count nowhere: {row}"
+                *list == "(none)" || list.split(", ").all(|s| s.parse::<u8>().is_ok()),
+                "a documented row must state step numbers or the explicit empty \
+                 marker, never an unparseable cell: {row}"
             );
         }
         let summary = documented

@@ -1,59 +1,28 @@
-$ cargo test -p qqq-core --test qblock  [exit 0]
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-$ cargo test -p qqq-pkg --lib lock::  [exit 0]
-test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 75 filtered out; finished in 0.01s
-
-$ cargo test -p qqq-cap --lib capability_kinds_are_exactly_three  [exit 0]
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 318 filtered out; finished in 0.00s
-
-$ cargo test -p qqq-run --lib -- install::tests audit::tests output::tests  [exit 0]
-test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 589 filtered out; finished in 0.02s
-
-$ python tools/check_doc_claims.py  [exit 0]
-
-$ python tools/check_doc_claims.py --self-test  [exit 0]
-
-$ python tools/gen_capability_catalogue.py --check  [exit 0]
-
-$ python tools/gen_capability_catalogue.py --self-test  [exit 0]
-
-$ python tools/check_gate_parity.py  [exit 0]
-
-$ python tools/check_done_lines.py  [exit 0]
-
-$ python tools/check_admission.py  [exit 0]
-
-### tool verdicts
-\$ python tools/check_doc_claims.py
+qblock: 6/6  |  lock: 45/45  |  REG-018 tripwire: 1/1
+install+audit+output suites: 77/77, 0 failed
+\$ python tools/check_doc_claims.py  [exit 0]
 claims checked:    30
 DOC CLAIMS OK -- 30 claim(s) match the tree
 
-\$ python tools/check_doc_claims.py --self-test
+\$ python tools/check_doc_claims.py --self-test  [exit 0]
   OK   documents found: True
 SELF-TEST PASSED -- the scanner, the resolvers and the comparison are live
 
-\$ python tools/gen_capability_catalogue.py --check
+\$ python tools/gen_capability_catalogue.py --check  [exit 0]
 CATALOGUE OK -- 24 row(s) match the tree
 
-\$ python tools/gen_capability_catalogue.py --self-test
+\$ python tools/gen_capability_catalogue.py --self-test  [exit 0]
   OK    a flipped flag changes the rendering
 CATALOGUE SELF-TEST OK -- the parsers detect breakage and the live tree parses
 
-\$ python tools/check_gate_parity.py
+\$ python tools/check_gate_parity.py  [exit 0]
 declared bridge-only      : 0
 GATE PARITY OK -- the two gates agree beyond the declared divergences
 
-\$ python tools/check_done_lines.py
+\$ python tools/check_done_lines.py  [exit 0]
 DONE LINES OK -- no block repeats a substantial line; 52 known item(s) without evidence, and the list agrees both ways; every `[~]` and `[!]` says why
 
-\$ python tools/check_admission.py
+\$ python tools/check_admission.py  [exit 0]
 ADMISSION OK -- 326 claim(s) without a falsifier, at or under the budget of 326; no item's blocker disagrees with its status.
 
-### fault injector (5/5 DETECTED, restores verified; tree clean after)
-[declared-count] DETECTED -- wit_declares_fifteen_packages_and_22_interfaces fails for the right reason
-[bindable-name] DETECTED -- bindable_namespaces_are_thirteen_in_both_definitions fails for the right reason
-[bound-flag] DETECTED -- bound_interfaces_are_ten_pinned_by_name fails for the right reason
-[level-prose] DETECTED -- proposal_section_485_names_all_five_levels fails for the right reason
-[module-count] DETECTED -- host_module_linker_and_registry_sets_agree fails for the right reason
-QBLOCK FAULT INJECTION OK -- 5/5 DETECTED
+fault injector: see verify-fault-inject-qblock.log (5/5 DETECTED)

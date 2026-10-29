@@ -5,4 +5,9 @@ $ git diff 3a21c4b..HEAD --stat -- crates/qqq-pkg crates/qqq-abi crates/qqq-cap 
  crates/qqq-cap/src/capability.rs | 22 ++++++++++++++++++++++
  crates/qqq-pkg/src/lock.rs       | 25 +++++++++++++++++++++++++
  2 files changed, 47 insertions(+)
-[exit 0 -- docs + #[cfg(test)] tests only, no API change]
+[exit 0 -- docs + #[cfg(test)] only, no API change]
+
+core-only wasm build: Finished dev profile, 0 errors
+qqq-pkg default: 120 + 1 passed; core-only: 108 passed
+qqq-abi: 18 + 25 passed
+registry: no writes to F:/QQQ-AUDIT/Registry

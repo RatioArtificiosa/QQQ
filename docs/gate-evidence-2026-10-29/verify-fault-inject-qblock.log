@@ -1,0 +1,6 @@
+[declared-count] DETECTED -- wit_declares_fifteen_packages_and_22_interfaces fails for the right reason
+[bindable-name] DETECTED -- bindable_namespaces_are_thirteen_in_both_definitions fails for the right reason
+[bound-flag] DETECTED -- bound_interfaces_are_ten_pinned_by_name fails for the right reason
+[level-prose] DETECTED -- proposal_section_485_names_all_five_levels fails for the right reason
+[module-count] DETECTED -- host_module_linker_and_registry_sets_agree fails for the right reason
+QBLOCK FAULT INJECTION OK -- 5/5 DETECTED

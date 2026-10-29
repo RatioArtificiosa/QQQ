@@ -110,3 +110,5 @@ Evidence commit: `86ec3da` (work `52e5eae`), tree clean, `E:\QQQ`, main branch.
 - §1 legend `[!]` definition vs practice → legend updated to the enforced
   inline form; stability gap (128 unnamed) → named blocked/partial counts.
 - Open: the 53-contradiction backlog + DOD duplicates (carried, owners TBD).
+
+Fresh re-run (2026-10-30, clean tree at 414bd6a): steps 2-5 re-executed, all green; fault injector 5/5 DETECTED; logs refreshed in this directory.

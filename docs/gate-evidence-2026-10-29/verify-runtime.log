@@ -1,6 +1,6 @@
-run normal guests (4 CLI tests): ok, 4 passed
+run normal guests (4 CLI tests incl. wasi02/03 baselines): ok, 4 passed
 ungranted qqq: refused by name (2 CLI tests): ok, 2 passed
 qqq-run --lib serve::: ok, 29 passed
-cargo test -p qqq-serve: ok, 906 passed, 0 failed (22 binaries)
-DET-009 full re-run: see verify-det009-10000.log (10000/10000)
+cargo test -p qqq-serve: ok, 906 passed, 0 failed
+DET-009 full re-run: see verify-det009-10000.log (10000/10000 byte-identical)
 tenant-resolve/H2/WS-SSE: owner handoffs, boundary pins kept

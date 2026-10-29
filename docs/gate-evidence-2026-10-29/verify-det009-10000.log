@@ -5,15 +5,15 @@ PLANNED      10000
 REFERENCE_BYTES 351
 REFERENCE_SHA256 aed4cd719c0feec5ad66822f9d48fb69a6144d4773acc851e682a18c960e074e
 REFERENCE_HEADER_KEYS_OK 5
-PROGRESS trials=2000 compared=2000 failed=0 diverged=0 rate=33.9/s
-PROGRESS trials=4000 compared=4000 failed=0 diverged=0 rate=33.6/s
-PROGRESS trials=6000 compared=6000 failed=0 diverged=0 rate=33.6/s
-PROGRESS trials=8000 compared=8000 failed=0 diverged=0 rate=33.7/s
-PROGRESS trials=10000 compared=10000 failed=0 diverged=0 rate=33.7/s
+PROGRESS trials=2000 compared=2000 failed=0 diverged=0 rate=36.4/s
+PROGRESS trials=4000 compared=4000 failed=0 diverged=0 rate=36.9/s
+PROGRESS trials=6000 compared=6000 failed=0 diverged=0 rate=37.0/s
+PROGRESS trials=8000 compared=8000 failed=0 diverged=0 rate=37.1/s
+PROGRESS trials=10000 compared=10000 failed=0 diverged=0 rate=37.1/s
 TRIALS_ATTEMPTED=10000
 COMPARISONS_PERFORMED=10000
 RUNS_THAT_FAILED=0
 LOGS_THAT_DIVERGED=0
-ELAPSED_SECONDS=296.4
-MS_PER_TRIAL=29.6
+ELAPSED_SECONDS=269.8
+MS_PER_TRIAL=27.0
 DET009 OK 10000/10000 byte-identical, 0 failed

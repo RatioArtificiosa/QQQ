@@ -4,25 +4,37 @@ install+audit+output suites: 77/77, 0 failed
 claims checked:    30
 DOC CLAIMS OK -- 30 claim(s) match the tree
 
-\$ python tools/check_doc_claims.py --self-test  [exit 0]
-  OK   documents found: True
-SELF-TEST PASSED -- the scanner, the resolvers and the comparison are live
-
-\$ python tools/gen_capability_catalogue.py --check  [exit 0]
-CATALOGUE OK -- 24 row(s) match the tree
-
-\$ python tools/gen_capability_catalogue.py --self-test  [exit 0]
-  OK    a flipped flag changes the rendering
-CATALOGUE SELF-TEST OK -- the parsers detect breakage and the live tree parses
-
-\$ python tools/check_gate_parity.py  [exit 0]
-declared bridge-only      : 0
-GATE PARITY OK -- the two gates agree beyond the declared divergences
-
 \$ python tools/check_done_lines.py  [exit 0]
 DONE LINES OK -- no block repeats a substantial line; 52 known item(s) without evidence, and the list agrees both ways; every `[~]` and `[!]` says why
 
 \$ python tools/check_admission.py  [exit 0]
 ADMISSION OK -- 326 claim(s) without a falsifier, at or under the budget of 326; no item's blocker disagrees with its status.
+
+\$ python tools/check_gate_parity.py  [exit 0]
+declared bridge-only      : 0
+GATE PARITY OK -- the two gates agree beyond the declared divergences
+
+\$ python tools/check_checklist_counts.py  [exit 0]
+CHECKLIST COUNTS OK -- 33 area(s), 644 item(s), §1 and §14 agree with the document
+
+\$ python tools/check_corpus_at_rest.py  [exit 0]
+  at rest  QQQ-Observations-and-Memories.md
+CORPUS AT REST -- 3 document(s) match their recorded digests
+
+\$ python tools/gen_backlog.py --check  [exit 0]
+BACKLOG OK -- 644 item(s) in 33 area(s) over 11 phase(s), matching the checklist
+
+\$ python tools/milestone_dashboard.py --check  [exit 0]
+DASHBOARD OK -- 644 item(s), 33 area(s), 11 phase(s)
+
+\$ python tools/gen_capability_catalogue.py --check  [exit 0]
+CATALOGUE OK -- 24 row(s) match the tree
+
+\$ python tools/gen_llms_txt.py --check  [exit 0]
+  OK    llms-full.txt
+LLMS FILES OK — the index matches the tree
+
+\$ python tools/audit_unsafe.py --check-doc  [exit 0]
+UNSAFE AUDIT DOC OK -- 227 file(s), 12 crate root(s) carrying `forbid(unsafe_code)`
 
 fault injector: see verify-fault-inject-qblock.log (5/5 DETECTED)

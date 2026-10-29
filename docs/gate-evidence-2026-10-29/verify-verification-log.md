@@ -62,3 +62,5 @@ Logs: this directory (`gates/`, `contract/`, `runtime/`, `tests/`, `evidence/`).
 - Before/after counts + newly-[x] (17) + new-[!] (111) recorded in the report.
 
 Fresh re-run 2026-10-30 on clean 414bd6a: contract 47+/0-, wasm ok, pkg 120+1/108, abi 18+25; CLI 4+2, serve 29/29, qqq-serve 906/906; DET-009 10000/10000; qblock 6/6, lock 45/45, suites 77/77, injector 5/5; evidence checks all green. Tree clean before and after.
+
+Fresh re-run on clean ecd287c: contract 47+/0-, wasm ok, pkg 120+1/108, abi 18+25; CLI 4+2, serve 29/29, qqq-serve 906/906, DET-009 10000/10000; qblock 6/6, lock 45/45, suites 77/77, injector 5/5; evidence checks all green. Tree clean before and after.

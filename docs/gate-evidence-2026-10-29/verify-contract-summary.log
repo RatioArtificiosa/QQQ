@@ -1,14 +1,4 @@
-## core-only wasm build
-    Finished `dev` profile [optimized + debuginfo] target(s) in 0.40s
-## qqq-pkg tests (default + core-only features run in gate)
-    Finished `test` profile [optimized + debuginfo] target(s) in 0.47s
-test result: ok. 120 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
-## qqq-abi tests
-    Finished `test` profile [optimized + debuginfo] target(s) in 0.34s
-test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
-test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
-## registry
-no writes to F:/QQQ-AUDIT/Registry were made in this round (all edits under E:/QQQ + scratch); F:/QQQ-AUDIT is not a git checkout so there is no diff to show
-## qqq-pkg tests (core-only features)
-test result: ok. 108 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+core-only wasm build: Finished, 0 errors
+qqq-pkg default: 120 + 1 passed; core-only: 108 + 1 passed
+qqq-abi: 18 + 25 passed
+registry: no writes to F:/QQQ-AUDIT/Registry (all edits under E:/QQQ)

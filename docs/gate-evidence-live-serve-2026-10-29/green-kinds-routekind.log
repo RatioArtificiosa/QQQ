@@ -1,0 +1,10 @@
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+    Finished `test` profile [optimized + debuginfo] target(s) in 10.75s
+     Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
+
+running 2 tests
+test serve_routes::tests::conflicting_paths_for_one_ws_handler_are_refused ... ok
+test serve_routes::tests::conflicting_route_kinds_for_one_handler_are_refused ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 672 filtered out; finished in 0.00s
+

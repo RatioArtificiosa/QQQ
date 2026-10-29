@@ -791,11 +791,24 @@ impl GuestApp {
         // rows regardless of concurrency (`F-09`: the old floor-slice
         // copied every row appended since the request started, growing
         // with concurrency and interleaving other requests' rows).
+        // The tenant travels twice: as the output-budget key in `serve_one`
+        // and as the audit row's tenant here. The audit handle previously
+        // carried `None`, so every served request recorded as unscoped —
+        // the live WebSocket round-trip exposed it: the tenant that paid
+        // for the request was absent from its evidence. An invalid tenant
+        // string cannot become a typed `TenantId`, so it stays unscoped
+        // rather than forging a label; serve labels are peer IPs and always
+        // valid, so this path is only defensive.
+        debug_assert!(
+            qqq_cap::egress::TenantId::new(tenant).is_ok(),
+            "serve tenant labels are peer IPs and must always type-check"
+        );
+        let audit_tenant = qqq_cap::egress::TenantId::new(tenant).ok();
         let audit_handle = qqq_host::audit::AuditHandle::new(
             std::sync::Arc::clone(&self.audit),
             self.component_digest.clone(),
             self.grant_digest.clone(),
-            None,
+            audit_tenant,
         );
         // FailClosed pre-flight (`F-09`): a dead persist path refuses
         // BEFORE the guest runs, so no request executes that its evidence

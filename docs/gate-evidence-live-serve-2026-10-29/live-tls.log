@@ -1,0 +1,10 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.79s
+     Running tests\hyper_tls.rs (target\debug\deps\hyper_tls-b6ea4842d6caa9dd.exe)
+
+running 3 tests
+test tls_alpn_http11_routes_to_the_h1_driver ... ok
+test tls_required_client_auth_reports_peer_identity ... ok
+test tls_alpn_h2_routes_to_the_h2_driver ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+

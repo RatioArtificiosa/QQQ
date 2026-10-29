@@ -1,0 +1,22 @@
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+    Finished `test` profile [optimized + debuginfo] target(s) in 11.29s
+     Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
+
+running 1 test
+test serve::tests::non_http_kinds_register_by_handler_name ... FAILED
+
+failures:
+
+---- serve::tests::non_http_kinds_register_by_handler_name stdout ----
+
+thread 'serve::tests::non_http_kinds_register_by_handler_name' (375244) panicked at crates\qqq-run\src\serve.rs:2226:9:
+a ws-marked handler must upgrade
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    serve::tests::non_http_kinds_register_by_handler_name
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 673 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p qqq-run --lib`

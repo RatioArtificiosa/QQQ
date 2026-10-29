@@ -1,0 +1,9 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.72s
+     Running tests\hyper_h2.rs (target\debug\deps\hyper_h2-2a103ff28e1000dd.exe)
+
+running 2 tests
+test h2_flat_200_matches ... ok
+test h2_multiplexed_requests_share_a_connection ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 30.02s
+

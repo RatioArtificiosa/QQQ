@@ -110,10 +110,16 @@ pub trait WebSocketHandler: Send + Sync {
     /// `send` writes to this connection. It is `async` and takes `&mut` because two
     /// sends must not interleave their frames — a frame written in two pieces by two
     /// tasks is the one way to corrupt the stream that no codec can prevent.
+    ///
+    /// `tenant` is the connection's tenant, and it travels as a parameter for the
+    /// same reason `GuestApp::handle_request` takes one rather than reading the
+    /// head: a handler that answers on behalf of a guest must attribute the work
+    /// to the tenant that sent it, and the head is client-controlled.
     fn on_message<'a>(
         &'a self,
         message: &'a Message,
         send: &'a mut WsSender<'a>,
+        tenant: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 
     /// Called once when the connection closes.
@@ -134,6 +140,7 @@ impl WebSocketHandler for Echo {
         &'a self,
         message: &'a Message,
         send: &'a mut WsSender<'a>,
+        _tenant: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             send.send(message.kind, &message.payload).await;
@@ -390,8 +397,15 @@ where
                         .await;
                         return WsOutcome::ProtocolError;
                     }
-                    if let Some(outcome) =
-                        dispatch_frame(stream, handler, &mut assembler, frame, &mut budget).await
+                    if let Some(outcome) = dispatch_frame(
+                        stream,
+                        handler,
+                        &mut assembler,
+                        frame,
+                        &mut budget,
+                        &ctx.tenant,
+                    )
+                    .await
                     {
                         return outcome;
                     }
@@ -555,6 +569,7 @@ async fn dispatch_frame<S>(
     assembler: &mut Assembler,
     frame: Frame,
     budget: &mut BufferBudget,
+    tenant: &str,
 ) -> Option<WsOutcome>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
@@ -598,7 +613,7 @@ where
         Ok(Progress::Complete(message)) => {
             budget.release(message.payload.len());
             let mut sender = WsSender { stream };
-            handler.on_message(&message, &mut sender).await;
+            handler.on_message(&message, &mut sender, tenant).await;
             None
         }
         Err(e) => {

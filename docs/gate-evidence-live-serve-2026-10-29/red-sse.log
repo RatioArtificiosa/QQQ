@@ -1,0 +1,38 @@
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+    Finished `test` profile [optimized + debuginfo] target(s) in 15.97s
+     Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
+
+running 3 tests
+test guest_sse::tests::an_event_stream_answer_is_framed_not_reinterpreted ... ok
+test guest_sse::tests::a_non_event_stream_answer_is_refused_by_name ... FAILED
+test guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name ... FAILED
+
+failures:
+
+---- guest_sse::tests::a_non_event_stream_answer_is_refused_by_name stdout ----
+
+thread 'guest_sse::tests::a_non_event_stream_answer_is_refused_by_name' (145324) panicked at crates\qqq-run\src\guest_sse.rs:122:13:
+assertion `left == right` failed: a non-event answer must fail closed: None
+  left: 200
+ right: 502
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name stdout ----
+
+thread 'guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name' (138976) panicked at crates\qqq-run\src\guest_sse.rs:230:9:
+a non-event answer must fail closed on the wire: HTTP/1.1 200 OK
+Cache-Control: no-store
+X-Accel-Buffering: no
+Content-Length: 0
+Connection: close
+
+
+
+
+failures:
+    guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name
+    guest_sse::tests::a_non_event_stream_answer_is_refused_by_name
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 671 filtered out; finished in 0.52s
+
+error: test failed, to rerun pass `-p qqq-run --lib`

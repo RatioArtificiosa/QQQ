@@ -1,0 +1,11 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.73s
+     Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
+
+running 3 tests
+test serve::tests::non_http_kinds_register_by_handler_name ... ok
+{"level":"error","trace_id":"00000000000000000000000000000002","span_id":"0000000000000001","tenant":"127.0.0.1","component":"qqq-serve","manifest_rev":"unknown","msg":"GET /events 502","method":"GET","path":"/events","status":"502"}
+test guest_sse::tests::a_live_sse_route_refuses_a_non_event_answer_by_name ... ok
+test guest_ws::tests::a_message_round_trips_through_the_guest ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 671 filtered out; finished in 0.55s
+

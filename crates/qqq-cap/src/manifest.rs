@@ -2001,6 +2001,73 @@ pub struct Route {
     /// This route's authentication mode, overriding `default_auth`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthMode>,
+    /// How this route is served: plain HTTP, a WebSocket message loop, or a
+    /// server-sent event stream.
+    ///
+    /// Absent means [`RouteKind::Http`]: every manifest written before the
+    /// marker keeps parsing with identical meaning. A route that upgrades or
+    /// streams must say so, because the dispatcher resolves handlers by
+    /// name — without the marker a `ws` route would fall through to the
+    /// flat handler and answer HTTP to a client speaking frame mode.
+    #[serde(default, skip_serializing_if = "RouteKind::is_http")]
+    pub kind: RouteKind,
+}
+
+/// How a route is served: plain HTTP, a WebSocket message loop, or a
+/// server-sent event stream.
+///
+/// A closed set so a typo (`kind = "websockets"`) fails closed naming the
+/// valid set rather than silently becoming HTTP. `Http` is the default: see
+/// [`Route::kind`].
+///
+/// ```
+/// # use qqq_cap::manifest::RouteKind;
+/// assert_eq!(RouteKind::Ws.as_str(), "ws");
+/// assert!(RouteKind::is_http(&RouteKind::Http));
+/// assert!(!RouteKind::is_http(&RouteKind::Sse));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RouteKind {
+    /// An ordinary HTTP request and response.
+    #[default]
+    Http,
+    /// Upgrade to WebSocket and run a per-message guest loop.
+    Ws,
+    /// Serve the guest response as a `text/event-stream` event stream.
+    Sse,
+}
+
+impl RouteKind {
+    /// The name as it appears in `qqq.toml`.
+    ///
+    /// ```
+    /// # use qqq_cap::manifest::RouteKind;
+    /// assert_eq!(RouteKind::Sse.as_str(), "sse");
+    /// ```
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Ws => "ws",
+            Self::Sse => "sse",
+        }
+    }
+
+    /// Whether this is the HTTP default, for `skip_serializing_if`.
+    ///
+    /// An `Http` route serializes without the marker so manifests written
+    /// after the marker stay minimal-diff with manifests written before it.
+    ///
+    /// ```
+    /// # use qqq_cap::manifest::RouteKind;
+    /// assert!(RouteKind::is_http(&RouteKind::Http));
+    /// assert!(!RouteKind::is_http(&RouteKind::Ws));
+    /// ```
+    #[must_use]
+    pub fn is_http(kind: &RouteKind) -> bool {
+        matches!(kind, Self::Http)
+    }
 }
 
 /// How a request is authenticated before it reaches a handler.
@@ -2288,6 +2355,94 @@ allow_origins = ["https://app.example.com"]
                 "the proposal's example should grant {expected}, but it did not"
             );
         }
+    }
+
+    /// A route without `kind` is an HTTP route: the marker is new, and every
+    /// manifest written before it must keep parsing with identical meaning.
+    #[test]
+    fn route_kind_defaults_to_http() {
+        let m = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [[server.routes]]\npath = \"/x\"\nmethods = [\"GET\"]\nhandler = \"h\"\n",
+        )
+        .expect("route without kind must parse");
+        assert_eq!(m.server.routes.len(), 1);
+        assert_eq!(
+            m.server.routes[0].kind,
+            RouteKind::Http,
+            "an unmarked route is an HTTP route, not an error"
+        );
+        let back = toml::to_string(&m.server.routes[0]).expect("serializes");
+        assert!(
+            !back.contains("kind"),
+            "an HTTP route must serialize without the marker: {back}"
+        );
+    }
+
+    /// `ws` and `sse` spellings round-trip through parse and serialize.
+    #[test]
+    fn route_kind_markers_round_trip() {
+        for (spelling, kind) in [("ws", RouteKind::Ws), ("sse", RouteKind::Sse)] {
+            let text = format!(
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [[server.routes]]\npath = \"/x\"\nmethods = [\"GET\"]\n\
+                 handler = \"h\"\nkind = \"{spelling}\"\n"
+            );
+            let m = Manifest::parse(&text).expect("marked route must parse");
+            assert_eq!(m.server.routes[0].kind, kind);
+            let back = toml::to_string(&m.server.routes[0]).expect("serializes");
+            assert!(
+                back.contains(&format!("kind = \"{spelling}\"")),
+                "the marker must survive a round trip: {back}"
+            );
+        }
+    }
+
+    /// An unknown kind fails closed naming the valid set — a typo like
+    /// `kind = "websockets"` must not silently become an HTTP route.
+    #[test]
+    fn route_kind_unknown_is_refused_by_name() {
+        let err = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [[server.routes]]\npath = \"/x\"\nmethods = [\"GET\"]\n\
+             handler = \"h\"\nkind = \"websockets\"\n",
+        )
+        .expect_err("an unknown kind must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("websockets") && msg.contains("ws"),
+            "the refusal must name the offending spelling and the valid set: {msg}"
+        );
+    }
+
+    /// `as_str` and serde agree on every spelling: the schema generator reads
+    /// `as_str`, the parser reads `#[serde(rename_all)]`, and a drift between
+    /// them would validate documents the parser rejects or vice versa.
+    #[test]
+    fn route_kind_as_str_matches_serde_spelling() {
+        for kind in [RouteKind::Http, RouteKind::Ws, RouteKind::Sse] {
+            let spelled = format!("kind = \"{}\"", kind.as_str());
+            let text = format!(
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [[server.routes]]\npath = \"/x\"\nmethods = [\"GET\"]\n\
+                 handler = \"h\"\n{spelled}\n"
+            );
+            let m = Manifest::parse(&text).expect("as_str spelling must parse");
+            assert_eq!(m.server.routes[0].kind, kind);
+        }
+        // Uppercase does not parse: TOML values are case-sensitive and the
+        // valid spellings are lowercase, so `kind = "WS"` must fail loudly
+        // rather than mean something.
+        let err = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [[server.routes]]\npath = \"/x\"\nmethods = [\"GET\"]\n\
+             handler = \"h\"\nkind = \"WS\"\n",
+        )
+        .expect_err("uppercase kind must be refused");
+        assert!(
+            err.to_string().contains("WS"),
+            "the refusal must name the offending spelling"
+        );
     }
 
     /// **DOC-SCHEMA-001: the audit's rejected fields still fail.**

@@ -102,6 +102,15 @@ pub struct ServerRoutes {
     /// would point upward. `qqq-run` is the only crate that sees both, which is the same
     /// reason [`routes_from_manifest`] exists.
     pub limits: Option<std::sync::Arc<qqq_serve::limits::TenantLimits>>,
+    /// Non-HTTP routes, keyed by handler name to the kind and path declared.
+    ///
+    /// Dispatch resolves handlers by name, so this is the key the dispatcher can
+    /// actually look up. Absence means HTTP: the common case stays unmarked, and
+    /// a map entry for every HTTP route would be a second statement of the
+    /// default that could disagree with it. `build_dispatch` registers one
+    /// guest-backed handler per entry; a name claimed by two different kinds
+    /// or two different paths fails the build instead of picking silently.
+    pub kinds: std::collections::BTreeMap<String, (qqq_cap::manifest::RouteKind, String)>,
 }
 
 impl ServerRoutes {
@@ -196,13 +205,97 @@ pub fn routes_from_manifest(server: &Server, manifest_path: &str) -> Result<Serv
         .map(|r| r.path.clone())
         .collect();
 
+    let kinds = kinds_from_routes(&server.routes, manifest_path)?;
+
     Ok(ServerRoutes {
         table,
         auth,
         auth_policy,
         unauthenticated,
         limits: build_limits(server.limits.as_ref())?,
+        kinds,
     })
+}
+
+/// Non-HTTP routes by handler name, from the manifest's `kind` markers.
+///
+/// Extracted from `routes_from_manifest`: the handler-name bookkeeping
+/// (HTTP sharing, parameter refusal, duplicate kind/path) is a unit of
+/// work with a name, and inlined it pushed the caller past the line
+/// budget. `Http` needs no entry — absence is the default — and a name
+/// shared between HTTP and `ws`/`sse` is refused, because `Dispatch`
+/// resolves by handler name and a shared name would answer a plain `GET`
+/// with the wrong status at runtime.
+fn kinds_from_routes(
+    routes: &[qqq_cap::manifest::Route],
+    manifest_path: &str,
+) -> Result<std::collections::BTreeMap<String, (qqq_cap::manifest::RouteKind, String)>> {
+    let mut kinds: std::collections::BTreeMap<String, (qqq_cap::manifest::RouteKind, String)> =
+        std::collections::BTreeMap::new();
+    let mut http_handlers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut problems: Vec<String> = Vec::new();
+    for (i, entry) in routes.iter().enumerate() {
+        if entry.kind == qqq_cap::manifest::RouteKind::Http {
+            http_handlers.insert(entry.handler.clone());
+            continue;
+        }
+        if entry.path.contains(':') || entry.path.contains('*') {
+            problems.push(format!(
+                "server.routes[{i}] (`{}`): handler `{}` is `{}` but its path captures \
+                 parameters; a non-HTTP route must be a literal path because the bridge \
+                 answers each message as that path with no captures to carry",
+                entry.path,
+                entry.handler,
+                entry.kind.as_str()
+            ));
+            continue;
+        }
+        if http_handlers.contains(&entry.handler) {
+            problems.push(format!(
+                "server.routes[{i}] (`{}`): handler `{}` also serves an HTTP route; \
+                 one handler name answers either HTTP or one non-HTTP route, never both",
+                entry.path, entry.handler
+            ));
+            continue;
+        }
+        match kinds.get(&entry.handler) {
+            None => {
+                kinds.insert(entry.handler.clone(), (entry.kind, entry.path.clone()));
+            }
+            Some((kind, path)) if *kind == entry.kind && *path == entry.path => {}
+            _ => problems.push(format!(
+                "server.routes[{i}] (`{}`): handler `{}` is already bound to a \
+                 different kind or path; one handler name answers for exactly \
+                 one non-HTTP route",
+                entry.path, entry.handler
+            )),
+        }
+    }
+    for (i, entry) in routes.iter().enumerate() {
+        if entry.kind == qqq_cap::manifest::RouteKind::Http && kinds.contains_key(&entry.handler) {
+            problems.push(format!(
+                "server.routes[{i}] (`{}`): handler `{}` also serves a non-HTTP route; \
+                 one handler name answers either HTTP or one non-HTTP route, never both",
+                entry.path, entry.handler
+            ));
+        }
+    }
+    if problems.is_empty() {
+        Ok(kinds)
+    } else {
+        Err(Error::new(
+            ErrorCode::ManifestSchemaViolation,
+            format!(
+                "{} route(s) in `{manifest_path}` could not be compiled",
+                problems.len()
+            ),
+        )
+        .with_cause(problems.join("; "))
+        .with_remediation(
+            "one handler name answers either HTTP or one non-HTTP route, never both; \
+             a non-HTTP route must be a literal path with its own handler name",
+        ))
+    }
 }
 
 /// Translate the manifest's authentication mode into the server's enforcement vocabulary.
@@ -448,6 +541,143 @@ default_auth = "deny"
         );
         let built = routes_from_manifest(&server, "qqq.toml").expect("must compile");
         assert_eq!(built.unauthenticated, vec!["/healthz".to_owned()]);
+    }
+
+    /// **Unmarked routes are HTTP; marked routes are keyed by handler name.**
+    ///
+    /// Dispatch resolves handlers by name, so the kind map must too. An
+    /// unmarked route is not an entry — absence *is* the HTTP default, and a
+    /// map entry for every HTTP route would be a second statement of the
+    /// default that could disagree with it.
+    #[test]
+    fn route_kinds_map_by_handler_name_with_http_implied() {
+        use qqq_cap::manifest::RouteKind;
+        let server = server_from(
+            r#"
+routes = [
+  { path = "/orders", methods = ["POST"], handler = "order" },
+  { path = "/ws",     methods = ["GET"],  handler = "chat", kind = "ws" },
+  { path = "/events", methods = ["GET"],  handler = "feed", kind = "sse" },
+]
+default_auth = "none"
+"#,
+        );
+        let built = routes_from_manifest(&server, "qqq.toml").expect("must compile");
+        assert_eq!(
+            built.kinds.get("chat"),
+            Some(&(RouteKind::Ws, "/ws".to_owned())),
+            "a ws-marked route must resolve its handler and path"
+        );
+        assert_eq!(
+            built.kinds.get("feed"),
+            Some(&(RouteKind::Sse, "/events".to_owned())),
+            "an sse-marked route must resolve its handler and path"
+        );
+        assert!(
+            !built.kinds.contains_key("order"),
+            "an unmarked route is HTTP by absence, not by entry"
+        );
+    }
+
+    /// **One handler name, one kind and one path — or the manifest is refused.**
+    ///
+    /// Dispatch registers handlers by name, so two rows that share a name but
+    /// name different kinds (or different paths for a stateful kind) would
+    /// make one registration mean two things. The build refuses rather than
+    /// picking a winner silently.
+    #[test]
+    fn conflicting_route_kinds_for_one_handler_are_refused() {
+        let server = server_from(
+            r#"
+routes = [
+  { path = "/ws",   methods = ["GET"], handler = "chat", kind = "ws" },
+  { path = "/chat", methods = ["GET"], handler = "chat", kind = "sse" },
+]
+default_auth = "none"
+"#,
+        );
+        let err = routes_from_manifest(&server, "qqq.toml").expect_err("must refuse");
+        assert!(
+            err.render().contains("chat"),
+            "the refusal must name the handler: {}",
+            err.render()
+        );
+    }
+
+    /// The same rule for paths: a stateful handler bound to one name must
+    /// answer for one path, since the bridge synthesizes its requests to it.
+    #[test]
+    fn conflicting_paths_for_one_ws_handler_are_refused() {
+        let server = server_from(
+            r#"
+routes = [
+  { path = "/ws-a", methods = ["GET"], handler = "chat", kind = "ws" },
+  { path = "/ws-b", methods = ["GET"], handler = "chat", kind = "ws" },
+]
+default_auth = "none"
+"#,
+        );
+        let err = routes_from_manifest(&server, "qqq.toml").expect_err("must refuse");
+        assert!(
+            err.render().contains("chat"),
+            "the refusal must name the handler: {}",
+            err.render()
+        );
+    }
+
+    /// An HTTP route and a `ws` route must not share a handler name.
+    ///
+    /// `Dispatch` resolves by handler name, so a shared name would make a
+    /// plain `GET` to the HTTP path hit the WebSocket registry and answer
+    /// `400` instead of the guest's HTTP answer. The build refuses naming
+    /// the handler rather than served the wrong status at runtime.
+    #[test]
+    fn http_and_ws_handlers_must_not_share_a_name() {
+        for routes in [
+            r#"
+routes = [
+  { path = "/chat", methods = ["GET"], handler = "chat" },
+  { path = "/ws",   methods = ["GET"], handler = "chat", kind = "ws" },
+]
+default_auth = "none"
+"#,
+            r#"
+routes = [
+  { path = "/ws",   methods = ["GET"], handler = "chat", kind = "ws" },
+  { path = "/chat", methods = ["GET"], handler = "chat" },
+]
+default_auth = "none"
+"#,
+        ] {
+            let server = server_from(routes);
+            let err = routes_from_manifest(&server, "qqq.toml").expect_err("must refuse");
+            assert!(
+                err.render().contains("chat"),
+                "the refusal must name the handler: {}",
+                err.render()
+            );
+        }
+    }
+
+    /// A `ws` route with captures is refused: the bridge synthesizes each
+    /// message as the literal path with no `RouteMatch`, so params would
+    /// be dropped silently at runtime.
+    #[test]
+    fn parameterized_non_http_routes_are_refused() {
+        let server = server_from(
+            r#"
+routes = [
+  { path = "/ws/:id", methods = ["GET"], handler = "chat", kind = "ws" },
+]
+default_auth = "none"
+"#,
+        );
+        let err = routes_from_manifest(&server, "qqq.toml").expect_err("must refuse");
+        assert!(
+            err.render().contains("chat"),
+            "the refusal must name the handler: {}",
+            err.render()
+        );
     }
 
     /// An empty `[server]` produces an empty router, not an error.

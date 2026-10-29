@@ -667,6 +667,15 @@
           "description": "The handler name in the guest.",
           "type": "string"
         },
+        "kind": {
+          "description": "How this route is served: plain HTTP, a WebSocket message loop, or a server-sent event stream.",
+          "enum": [
+            "http",
+            "ws",
+            "sse"
+          ],
+          "type": "string"
+        },
         "methods": {
           "description": "The methods this route accepts. Empty is an error, not \"all\".",
           "items": {

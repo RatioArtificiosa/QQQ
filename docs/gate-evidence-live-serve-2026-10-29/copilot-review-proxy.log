@@ -1,0 +1,30 @@
+Checking your uncommitted changes for bugs and risks.
+
+Found the full change set ÔÇö now digging into the new streaming modules.
+
+I've mapped the core dispatch flow ÔÇö now probing edge cases and security boundaries.
+
+Core patterns are clear ÔÇö now verifying the remaining integration points.
+
+I've confirmed the key issues ÔÇö now doing final validation.
+
+Review of uncommitted diff (`RouteKind` + `guest_ws`/`guest_sse` + tenant plumbing). Ordered by severity.
+
+| # | Sev | File:Line | Issue | Fix |
+|---|---|---|---|---|
+| 1 | High | `serve_routes.rs:208-235`, `serve.rs:1290-1310`, `server.rs:2478-2490` | Handler-name-keyed `kinds` collides: same `handler` used for HTTP + `ws`/`sse` on different paths is legal (`validate_route` only forbids same path+method). `websocket_for(name)` is checked for *any* match, so plain `GET /http-path` with shared name enters `serve_ws_route` ÔåÆ `400`; `sse_handler` `with_body` overwrites flat `body_for` ÔåÆ HTTP path now 502s unless event-stream. Breaks ÔÇ£absence means HTTPÔÇØ. | Key by `(path,handler)` or refuse `Http` vs non-`Http` reuse in `routes_from_manifest` (extend existing conflict check to include skipped `Http` rows). |
+| 2 | High | `guest_ws.rs:57-95`, `ws_conn.rs:613` | Per-message bypasses `refuse_before_reading`: `check_body`/`check_and_record`/auth run once at handshake. Each WS frame ÔåÆ `spawn_blocking(dispatchÔÇª)` with no limit check. Single conn = unbounded guest instantiations, bypasses SRV-020. | Thread `TenantLimits`+`AuthPolicy` into `GuestWsBridge`/`WsContext`; `check_body(payload.len)` + `check_and_record` per message, shed with close `1009`/`1013`. |
+| 3 | High | `guest_sse.rs:28` | `Some("text/event-stream")` exact match rejects `text/event-stream; charset=utf-8`, which `qqq-serve/src/sse.rs:58-64` explicitly permits/ignores per spec. Common frameworks set charset ÔåÆ false 502. Value compare also case-sensitive. | Parse media-type: trim, split `;`, `eq_ignore_ascii_case("text/event-stream")`, allow `charset=utf-8` only. |
+| 4 | High | `guest_ws.rs:68-85` | Synthesizes `POST path=static-route-path`. Manifest ws routes declare `methods=["GET"]`; guest branching on method sees different verb for same path. Drops `RouteMatch.params` (`/ws/:id` ÔåÆ `/ws`). `POST /ws` may 405 over HTTP but succeed over WS. | Synthesize handshake method (`GET`) or document; carry `params` (pass `RouteMatch` through `WsContext`/`on_message` or expand path). |
+| 5 | Med | `manifest.rs:2013` | `#[serde(default)] kind` without `skip_serializing_if` emits `kind="http"` on every serialize. Old manifests gain field; violates minimal-diff/back-compat, DOC-SCHEMA parity. | Add `skip_serializing_if="RouteKind::is_http"` + `const fn is_http`. Test that `Http` round-trips absent. |
+| 6 | Med | `server.rs:292-380` (`validate_route`) | No `kind├ùmethods` check: `kind="ws" methods=["POST"]` parses, inserts `POST /ws`, but handshake requires `GET` ÔåÆ dead route (404/400 at runtime, silent). | Refuse `ws` without `GET`; document `sse` method expectations. |
+| 7 | Med | `guest_ws.rs:80` | `Buffered(payload.clone())` doubles peak (Message + copy, up to `max_message_bytes`). | Move: `let body=std::mem::take` / change `Message.payload` handling to pass ownership, avoid clone. |
+| 8 | Med | `guest_handler.rs:801` | `TenantId::new(tenant).ok()` silently maps invalid tenant ÔåÆ `None`/unscoped. Fail-open vs fail-closed (Principles #2/#5). Currently peer-IP so defensive, but future non-IP tenant forges unscoped. | Log/metric on `Err`, or refuse; at least `debug_assert` + comment. |
+| 9 | Med | `schema/qqq-toml.schema.json:670` | `kind` enum added without `"default":"http"`. Schema omits default code guarantees; agent parity gap (Principle #6). | Add `"default":"http"`. Verify generator (test `as_str`Ôåöserde exists, but no schema-default test). |
+| 10 | Low | `serve_routes.rs:230-245` | Kind-conflict error reuses wildcard remediation text ÔÇö misleading. | Distinct message/remediation for kind/path conflict. |
+| 11 | Low | `guest_sse.rs:32-36` | Unconditionally overwrites `Cache-Control`/`X-Accel-Buffering`; ignores guest-set values. | Only set if absent, or document override. |
+| 12 | Gaps | tests | No live SSE *success* via guest returning event-stream; no HTTP+WS same-handler collision test; no binary/charset/per-message-limit tests; `Echo`/`CountingHandler` updated but no tenant-propagation assertion on `on_message`. | Add the four tests; assert `tenant=="127.0.0.1"` already done for happy path ÔÇö extend to refused paths. |
+
+Positive: closed `kind` enum + fail-closed typo test, `kinds` duplicate-kind/path refusal, `tenant` param threading (vs head), audit-tenant fix direction, framing-header rationale docs are correct.
+
+

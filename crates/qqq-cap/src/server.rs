@@ -383,6 +383,20 @@ impl Server {
             }
         }
 
+        // A `ws` route upgrades from `GET`: the handshake is a `GET` with
+        // `Upgrade: websocket`, so a `ws` route without `GET` is a route no
+        // handshake can reach. Refused here rather than as a runtime `400`,
+        // where the author would debug the client instead of the manifest.
+        if route.kind == crate::manifest::RouteKind::Ws && !methods.contains(&"GET") {
+            return Err(ManifestError::InvalidField {
+                field: format!("{where_}.methods"),
+                reason: "a `ws` route must list `GET`: the WebSocket handshake \
+                         is a `GET` with `Upgrade: websocket`, so without it \
+                         no client can ever upgrade"
+                    .to_owned(),
+            });
+        }
+
         Ok(methods)
     }
 }
@@ -462,7 +476,7 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{RequestLimits, ServerTls, TenantLimit};
+    use crate::manifest::{RequestLimits, RouteKind, ServerTls, TenantLimit};
 
     fn route(path: &str, methods: &[&str]) -> Route {
         Route {
@@ -470,6 +484,7 @@ mod tests {
             methods: methods.iter().map(|m| (*m).to_owned()).collect(),
             handler: "handler".to_owned(),
             auth: None,
+            kind: RouteKind::Http,
         }
     }
 
@@ -680,6 +695,17 @@ mod tests {
         assert!(err.to_string().contains("routes[2]"), "{err}");
     }
 
+    /// A `ws` route without `GET` is refused: the handshake is a `GET`
+    /// with `Upgrade: websocket`, so without it no client can upgrade.
+    #[test]
+    fn a_ws_route_without_get_is_refused() {
+        let mut r = route("/ws", &["POST"]);
+        r.kind = RouteKind::Ws;
+        let s = server(vec![r]);
+        let err = s.validate().expect_err("must refuse");
+        assert!(err.to_string().contains("GET"), "{err}");
+    }
+
     // -- CORS in the manifest ----------------------------------------------
 
     /// A `*` origin is refused at parse time, with the reason and the fix.
@@ -856,6 +882,7 @@ allow_origins = ["https://app.example.com"]
                     methods: vec!["GET".to_owned()],
                     handler: "health".to_owned(),
                     auth: Some(AuthMode::None),
+                    kind: RouteKind::Http,
                 },
             ],
             default_auth: AuthMode::BearerJwt,

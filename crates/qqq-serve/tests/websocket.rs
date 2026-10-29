@@ -750,6 +750,7 @@ impl WebSocketHandler for CountingHandler {
         &'a self,
         _message: &'a Message,
         _send: &'a mut WsSender<'a>,
+        _tenant: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         self.messages.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {})

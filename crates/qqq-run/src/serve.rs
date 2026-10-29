@@ -739,12 +739,15 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // The authentication policy. Always attached, never optional on this path: a manifest
     // always has an opinion about authority (`default_auth`), so a server started from one
     // always has a policy. An empty route list is already refused above.
-    config.auth = Some(Arc::new(routes.auth_policy));
+    // Cloned: `build_dispatch` borrows `routes` below for the stateful
+    // kinds and limits, so moving the policy would borrow after move.
+    config.auth = Some(Arc::new(routes.auth_policy.clone()));
 
     // The per-tenant request limits, or `None` when `[server.limits]` is absent — which is
     // the manifest saying "no limits", a different statement from "the server forgot to
-    // install them".
-    config.limits = routes.limits;
+    // install them". Cloned rather than moved: `build_dispatch` needs the same
+    // limiter for the per-message WebSocket gates below.
+    config.limits.clone_from(&routes.limits);
 
     // The cross-origin policy, or `None` when `[server.cors]` is absent.
     config.cors = build_cors(server)?;
@@ -779,7 +782,7 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // `--accept-limit`, which was parsed and ignored. `None` means run until signalled.
     config.accept_limit = opts.accept_limit;
 
-    let built = build_dispatch(loaded, opts)?;
+    let built = build_dispatch(loaded, opts, &routes)?;
 
     Ok(Prepared {
         config,
@@ -1061,6 +1064,13 @@ struct BuiltDispatch {
     deterministic: bool,
 }
 
+/// Non-HTTP routes by handler name, from `serve_routes::ServerRoutes::kinds`.
+///
+/// Absence means HTTP; a name here names one kind and one path. A type
+/// alias rather than the full map in two signatures: the full spelling
+/// pushed `build_dispatch` over the line budget without adding meaning.
+type RouteKinds = std::collections::BTreeMap<String, (qqq_cap::manifest::RouteKind, String)>;
+
 /// Install the deploy-resolved shared views new instances serve from.
 ///
 /// Extracted from `build_dispatch` when the queue arm pushed it over the
@@ -1094,7 +1104,11 @@ fn install_shared_backends(
     app.set_crypto(crate::crypto::view_for_manifest(manifest));
 }
 
-fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltDispatch> {
+fn build_dispatch(
+    loaded: &LoadedManifest,
+    opts: &ServeOptions,
+    routes: &crate::serve_routes::ServerRoutes,
+) -> Result<BuiltDispatch> {
     let Some(artifact) = find_artifact(
         project_dir(loaded),
         "release",
@@ -1229,22 +1243,14 @@ fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltD
     // name the capacity that is actually installed.
 
     // The flat handler stays the default, so a route with no entry behaves as it did.
-    let mut dispatch = Dispatch::flat(app.dispatch());
+    let dispatch = Dispatch::flat(app.dispatch());
+    let dispatch = register_flat_routes(dispatch, &app, &loaded.manifest.server.routes);
 
-    // The body-aware handler is registered for **every** declared route name.
-    //
-    // `Dispatch` resolves a handler by the route's `handler` name, and two rows can
-    // share a name across methods, so gating on the method would make one of them
-    // unreachable depending on table order. One entry per name removes the question, and
-    // the guest decides what to do with the body -- `orders::create` reads it while
-    // `orders::health` ignores it, so the host does not need to know which routes write.
-    //
-    // Without this the reference application answered every `POST` as though its body
-    // were empty: `serve_connection` drained the bytes for the `body_bytes` metric and
-    // then dispatched without them.
-    for route in &loaded.manifest.server.routes {
-        dispatch = dispatch.with_body(route.handler.clone(), app.dispatch_with_body());
-    }
+    // Guest-backed WebSocket routes: one guest call per message, answered as
+    // the route's path. Registered from the manifest's `kind` markers, so a
+    // route the manifest did not mark `ws` can never upgrade into frame mode
+    // with nobody answering — the fallthrough that `start_flat` pins.
+    let dispatch = register_stateful_routes(dispatch, &app, &routes.kinds, routes.limits.as_ref());
 
     Ok(BuiltDispatch {
         dispatch,
@@ -1253,6 +1259,61 @@ fn build_dispatch(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<BuiltD
         live: Some(app),
         deterministic,
     })
+}
+
+/// Register the body-aware handler for every declared route name.
+///
+/// Extracted from `build_dispatch` for the line budget. `Dispatch` resolves
+/// by handler name and two rows can share a name across methods, so gating
+/// on the method would strand one of them; one entry per name removes the
+/// question. Without this the reference application answered every `POST`
+/// as though its body were empty.
+fn register_flat_routes(
+    mut dispatch: Dispatch,
+    app: &crate::live::LiveApp,
+    routes: &[qqq_cap::manifest::Route],
+) -> Dispatch {
+    for route in routes {
+        dispatch = dispatch.with_body(route.handler.clone(), app.dispatch_with_body());
+    }
+    dispatch
+}
+
+/// Register the manifest's non-HTTP routes on an already-flat dispatch.
+///
+/// Extracted from `build_dispatch` because the registration loop plus the
+/// flat loop pushed it past the line budget, and because the loop is a unit
+/// of work with a name — *stateful kinds resolve by handler name* — rather
+/// than an inline block. `Http` needs no entry: absence is the default, and
+/// a map entry for every HTTP route would be a second statement of it.
+fn register_stateful_routes(
+    mut dispatch: Dispatch,
+    app: &crate::live::LiveApp,
+    kinds: &RouteKinds,
+    limits: Option<&std::sync::Arc<qqq_serve::limits::TenantLimits>>,
+) -> Dispatch {
+    for (name, (kind, path)) in kinds {
+        match kind {
+            qqq_cap::manifest::RouteKind::Http => {}
+            qqq_cap::manifest::RouteKind::Ws => {
+                dispatch = dispatch.with_websocket(
+                    name.clone(),
+                    crate::guest_ws::GuestWsBridge::for_route(
+                        &app.dispatch_with_body(),
+                        path,
+                        limits.cloned(),
+                    ),
+                );
+            }
+            qqq_cap::manifest::RouteKind::Sse => {
+                dispatch = dispatch.with_body(
+                    name.clone(),
+                    crate::guest_sse::sse_handler(&app.dispatch_with_body(), path),
+                );
+            }
+        }
+    }
+    dispatch
 }
 
 /// The directory a project lives in — the manifest's parent.
@@ -2131,6 +2192,72 @@ mod tests {
         assert!(
             !line.contains("worker(s)"),
             "`worker(s)` describes nothing an operator can act on: {line}"
+        );
+    }
+
+    /// Non-HTTP kinds from the manifest reach the dispatcher by handler name.
+    ///
+    /// The manifest says `kind` per route, `serve_routes` keys it by handler
+    /// name, and `register_stateful_routes` installs one guest-backed entry
+    /// per name. An `Http` name gets no entry — absence is the default — so
+    /// a route the manifest did not mark `ws` can never upgrade into frame
+    /// mode with nobody answering.
+    #[test]
+    fn non_http_kinds_register_by_handler_name() {
+        let source = include_str!("../tests/fixtures/echo-http.wat");
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("a minimal manifest parses");
+        let engine = wasmtime::Engine::new(
+            &EngineConfig::default()
+                .to_wasmtime_config()
+                .expect("engine config"),
+        )
+        .expect("engine");
+        let app = crate::live::LiveApp::new(
+            GuestApp::with_capacity(
+                engine,
+                source.as_bytes(),
+                GrantSet::from_manifest(&manifest),
+                LimitSet {
+                    memory_bytes: 64 * 1024 * 1024,
+                    fuel: 1_000_000_000,
+                    epoch_deadline_ms: 10_000,
+                    max_open_handles: 64,
+                    max_subrequests: 16,
+                },
+                "127.0.0.1:8080",
+                1,
+            )
+            .expect("the echo fixture must build"),
+        )
+        .expect("live app admits the echo guest");
+        let kinds: RouteKinds = [
+            (
+                "chat".to_owned(),
+                (qqq_cap::manifest::RouteKind::Ws, "/ws".to_owned()),
+            ),
+            (
+                "feed".to_owned(),
+                (qqq_cap::manifest::RouteKind::Sse, "/events".to_owned()),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let dispatch = register_stateful_routes(Dispatch::flat(app.dispatch()), &app, &kinds, None);
+        assert!(
+            dispatch.websocket_for("chat").is_some(),
+            "a ws-marked handler must upgrade"
+        );
+        assert!(
+            dispatch.body_for("feed").is_some(),
+            "an sse-marked handler must answer bodies"
+        );
+        assert!(
+            dispatch.websocket_for("order").is_none(),
+            "an unmarked handler must stay flat"
         );
     }
 }

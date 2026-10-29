@@ -1,0 +1,33 @@
+   Compiling qqq-cap v0.1.1 (E:\QQQ\crates\qqq-cap)
+   Compiling qqq-abi v0.1.1 (E:\QQQ\crates\qqq-abi)
+   Compiling qqq-host v0.1.1 (E:\QQQ\crates\qqq-host)
+   Compiling qqq-serve v0.1.1 (E:\QQQ\crates\qqq-serve)
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+    Finished `test` profile [optimized + debuginfo] target(s) in 15.00s
+     Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
+
+running 2 tests
+test serve_routes::tests::conflicting_route_kinds_for_one_handler_are_refused ... FAILED
+test serve_routes::tests::conflicting_paths_for_one_ws_handler_are_refused ... FAILED
+
+failures:
+
+---- serve_routes::tests::conflicting_route_kinds_for_one_handler_are_refused stdout ----
+
+thread 'serve_routes::tests::conflicting_route_kinds_for_one_handler_are_refused' (380608) panicked at crates\qqq-run\src\serve_routes.rs:547:61:
+must refuse: ServerRoutes { table: RouteTable { root: Node { literals: {"chat": Node { literals: {}, param: None, wildcard: None, handlers: {Get: Route { method: Get, pattern: "/chat", handler: "chat", segments: [Literal("chat")] }} }, "ws": Node { literals: {}, param: None, wildcard: None, handlers: {Get: Route { method: Get, pattern: "/ws", handler: "chat", segments: [Literal("ws")] }} }}, param: None, wildcard: None, handlers: {} }, count: 2 }, auth: [None, None], auth_policy: AuthPolicy { routes: {("/chat", "chat"): Public, ("/ws", "chat"): Public}, ambiguous: [] }, unauthenticated: ["/ws", "/chat"], limits: None, kinds: {"chat": (Ws, "/ws")} }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- serve_routes::tests::conflicting_paths_for_one_ws_handler_are_refused stdout ----
+
+thread 'serve_routes::tests::conflicting_paths_for_one_ws_handler_are_refused' (381504) panicked at crates\qqq-run\src\serve_routes.rs:568:61:
+must refuse: ServerRoutes { table: RouteTable { root: Node { literals: {"ws-a": Node { literals: {}, param: None, wildcard: None, handlers: {Get: Route { method: Get, pattern: "/ws-a", handler: "chat", segments: [Literal("ws-a")] }} }, "ws-b": Node { literals: {}, param: None, wildcard: None, handlers: {Get: Route { method: Get, pattern: "/ws-b", handler: "chat", segments: [Literal("ws-b")] }} }}, param: None, wildcard: None, handlers: {} }, count: 2 }, auth: [None, None], auth_policy: AuthPolicy { routes: {("/ws-a", "chat"): Public, ("/ws-b", "chat"): Public}, ambiguous: [] }, unauthenticated: ["/ws-a", "/ws-b"], limits: None, kinds: {"chat": (Ws, "/ws-a")} }
+
+
+failures:
+    serve_routes::tests::conflicting_paths_for_one_ws_handler_are_refused
+    serve_routes::tests::conflicting_route_kinds_for_one_handler_are_refused
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 672 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p qqq-run --lib`

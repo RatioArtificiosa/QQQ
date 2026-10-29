@@ -56,6 +56,19 @@ pub mod guest_bridge;
 /// The guest handler a `Dispatch` can call: `guest_bridge` + `qqq_host::call`,
 /// composed into the shape `qqq-serve` wants.
 pub mod guest_handler;
+/// Guest-backed Server-Sent Events: one guest answer, framed as an event
+/// stream, on the manifest's `sse` routes.
+///
+/// ```
+/// use qqq_run::guest_sse::sse_handler;
+/// ```
+pub mod guest_sse;
+/// Guest-backed WebSocket handlers: one guest call per message.
+///
+/// ```
+/// use qqq_run::guest_ws::GuestWsBridge;
+/// ```
+pub mod guest_ws;
 pub mod install;
 /// Resolve `qqq:kv` configuration at the deploy layer — `HOST-032`.
 pub mod kv;

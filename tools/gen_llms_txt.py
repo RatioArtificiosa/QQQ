@@ -424,6 +424,12 @@ CURATED: list[tuple[str, str, str, str]] = [
         "status",
     ),
     (
+        "docs/gate-evidence-2026-10-29/verify-final-report.md",
+        "The §8 final report for the 2026-10-29 Q-Block round: gate table, checklist movement, runtime behavior, handoff, gaps, and contradictions fixed.",
+        "both",
+        "status",
+    ),
+    (
         "PRINCIPLES.md",
         "The non-negotiables the design is held to.",
         "human",
@@ -545,6 +551,8 @@ EXCLUDED = {
     # Raw conversation history, kept for provenance rather than for reading.
     "docs/QQQAI-Conversation-Full.md",
     "docs/QQQAI-Full-Conversation-Complete.md",
+    # Round verification transcript, kept for provenance rather than for reading.
+    "docs/gate-evidence-2026-10-29/verify-verification-log.md",
     # Working notes, not documentation.
     "docs/Notes.txt",
 }

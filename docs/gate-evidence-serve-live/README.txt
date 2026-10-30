@@ -30,3 +30,10 @@ shape, or host/path tenant resolution — owner handoffs SRV-023/SRV-024
 (residual) and ARCH-017, with red-first boundary pins in-tree. The live
 transcripts above prove exactly what production dispatch does today,
 including its explicit refusals.
+
+Each .log carries the response bytes twice: decoded UTF-8 and an
+`offset  hex-bytes` dump (16 bytes per row). The sha256 in digests.txt
+is over the exact response bytes, which are precisely the concatenation
+of the hex dump — reparse and rehash to verify. All five were checked
+byte-identical after capture, and every digest reproduced unchanged
+across three separate production runs.

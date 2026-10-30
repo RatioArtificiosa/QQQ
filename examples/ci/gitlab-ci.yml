@@ -1,0 +1,20 @@
+# QQQ CI example: GitLab CI (TEST-018).
+#
+# Copy this file to `.gitlab-ci.yml` in a downstream project that consumes QQQ.
+# The image tag must match `rust-toolchain.toml` (`channel = "1.98"`); the test
+# script must invoke the real gates (`cargo test`, `qqqai test`). If the
+# workspace bumps its toolchain, update the image until `check_ci_examples.py`
+# passes again.
+
+image: rust:1.98
+
+stages:
+  - test
+
+qqq-test:
+  stage: test
+  script:
+    - rustup component add rustfmt clippy
+    - cargo test --workspace --all-features
+    - cargo install --path crates/qqq-run
+    - qqqai test

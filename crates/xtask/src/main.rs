@@ -321,6 +321,11 @@ const PY_STEPS: &[Step] = &[
     ),
     Step::py(
         Lane::Par,
+        "check_ci_examples",
+        &["tools/check_ci_examples.py"],
+    ),
+    Step::py(
+        Lane::Par,
         "check_coderabbit_config",
         &["tools/check_coderabbit_config.py"],
     ),
@@ -606,6 +611,11 @@ const PY_STEPS: &[Step] = &[
         Lane::Seq,
         "check_checklist_counts",
         &["tools/check_checklist_counts.py", "--self-test"],
+    ),
+    Step::py(
+        Lane::Seq,
+        "check_ci_examples",
+        &["tools/check_ci_examples.py", "--self-test"],
     ),
     Step::py(
         Lane::Seq,

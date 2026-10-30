@@ -1,0 +1,29 @@
+# QQQ CI example: CircleCI (TEST-018).
+#
+# Copy this file to `.circleci/config.yml` in a downstream project that consumes
+# QQQ. The Docker image tag must match `rust-toolchain.toml` (`channel = "1.98"`);
+# the steps must invoke the real gates (`cargo test`, `qqqai test`). If the
+# workspace bumps its toolchain, update the image until `check_ci_examples.py`
+# passes again.
+
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/rust:1.98
+    steps:
+      - checkout
+      - run:
+          name: Rust unit tests
+          command: cargo test --workspace --all-features
+      - run:
+          name: QQQ runner tests
+          command: |
+            cargo install --path crates/qqq-run
+            qqqai test
+
+workflows:
+  qqq:
+    jobs:
+      - test

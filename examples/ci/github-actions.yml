@@ -1,0 +1,35 @@
+# QQQ CI example: GitHub Actions (TEST-018).
+#
+# Copy this file to `.github/workflows/qqq.yml` in a downstream project that
+# consumes QQQ, then run `python tools/check_ci_examples.py` semantics by eye:
+# the Rust toolchain here must match `rust-toolchain.toml` (`channel = "1.98"`),
+# and the test steps must invoke the real gates (`cargo test`, `qqqai test`).
+# If the workspace bumps its toolchain, update the version below until the
+# checker passes again.
+
+name: qqq
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: qqq test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.98
+        run: rustup toolchain install 1.98 --profile minimal --component rustfmt,clippy
+
+      - name: Rust unit tests
+        run: cargo test --workspace --all-features
+
+      - name: QQQ runner tests
+        run: |
+          cargo install --path crates/qqq-run
+          qqqai test

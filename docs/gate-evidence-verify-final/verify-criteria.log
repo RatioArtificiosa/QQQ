@@ -1,0 +1,63 @@
+# Final re-verification, criteria 1-5 — clean HEAD a577010
+(evaluates the serve-live + audit-fix window on top of TEST-018 close).
+
+## Criterion 1 — gates green, no weakened policy
+- `cargo fmt --all -- --check`: exit 0 (audit-fmt.log).
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: exit 0.
+- `cargo test --workspace --all-features`: exit 0 (audit-test.log).
+- `cargo deny check`: exit 0 — zstd stays 0.14.3/8.2.0/2.1.2,
+  wasmtime-wasi 48.0.8 resolves RUSTSEC-2026-0420 (audit-deny.log).
+- `cargo machete`: exit 0. No `unsafe_code` change, no linker/limit/
+  deny.toml weakening anywhere in this window (`git diff` clean of them).
+- `cargo xtask ci`: **GATE GREEN: 152 steps** (audit-xtask.log),
+  committed as `docs/gate-evidence-serve-live/gate-*.log`.
+- One gate run hit load-flake `f16_rapid_reset_cannot_exceed_stream_budget`
+  (53 vs >=100 RSTs under parallel load); triaged: 3/3 isolated green +
+  full hyper_h2 binary 22/22 green; H2 paths untouched by this window.
+  Re-ran to clean GREEN; the green log is the committed one.
+
+## Criterion 2 — cross-repo contract intact
+- Frozen diff since TEST-002 close (c67eae0): only Cargo.lock
+  (wasmtime 48.0.7->48.0.8 + cranelift lockstep), Cargo.toml (vendor
+  comment 48.0.7->48.0.8), qqq-host ENGINE_VERSION 48.0.7->48.0.8.
+  No change to crates/qqq-pkg, crates/qqq-abi, crates/qqq-cap, wit/.
+- `cargo build -p qqq-pkg --no-default-features --features core-only
+  --target wasm32-unknown-unknown`: exit 0.
+- `cargo test -p qqq-pkg`: 137+4+18 passed. `cargo test -p qqq-abi`:
+  25 passed. Frozen catalogue/order checks green inside the gate.
+- Registry: zero writes outside E:/QQQ all session; read-only discipline
+  held (no Registry paths in any `git status`).
+
+## Criterion 3 — V1 execution at real boundaries, honestly narrowed
+- `qqqai run`: 5/5 boundary CLI tests green (normal 0.2/0.3 guests run,
+  ungranted imports refused by capability name).
+- `qqqai serve` production binary, live loopback: H1 200, WS 101 +
+  guest echo + same-line tenant attribution, SSE 502 naming
+  text/event-stream (specified refusal), H2c preface -> 400 (no upgrade,
+  no hang), flat fallthrough 200 on plain route; no-kind control proves
+  manifest-driven dispatch. Transcripts + sha256 digests (stable across
+  3 runs, byte-reconstructible) in docs/gate-evidence-serve-live/;
+  procedure is committed tests `production_serve_live_transcript` +
+  `production_serve_without_ws_kind_does_not_upgrade`.
+- NOT claimed: live HTTP/2 upgrade, guest WS/SSE beyond the echo shape,
+  host/path tenant resolution — owner handoffs SRV-023/SRV-024 (residual)
+  + ARCH-017 with red-first pins. Serve suites green in gate.
+
+## Criterion 4 — real-path tests, red-first
+- TEST-018 checker: red (3 missing) -> green; CLEAN proxy review.
+  In gate (check + self-test lanes).
+- TEST-002 watch: red (E0425, unknown --watch, cannot-be-combined)
+  -> green 705 lib / 116 doctests / 139 CLI; CLEAN proxy review.
+- Serve live tests: new-conformance (behavior shipped + lib-proven);
+  honesty pinned by no-kind control; review nits fixed, CLEAN review.
+- No re-running of untouched suites as proof; every number names the
+  test that exercises the changed code.
+
+## Criterion 5 — evidence and handoff
+- Per-slice evidence dirs with red logs, green gate logs, review logs:
+  gate-evidence-test002-watch/, gate-evidence-test018/,
+  gate-evidence-serve-live/, gate-evidence-verify-04d23d7/.
+- Checklist 342/644 done (+2 this window: TEST-002, TEST-018);
+  174 open, 125 blocked ([!] with owners/tripwires), 3 partial.
+  Doc checkers green: claims 30, done-lines, counts, backlog,
+  dashboard, corpus-at-rest.

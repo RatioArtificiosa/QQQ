@@ -4,14 +4,16 @@ Red (proves the checker fails without the shipped examples):
 - test018-red.log — `check_ci_examples.py` on the empty `examples/ci/`
   (3 missing-file findings, exit 1); `--self-test` green on fixtures.
 
-Green (HEAD 3351e22 and code-identical f8cc16f; only generated docs differ):
+Green (verification-plan step 1 re-run on clean HEAD 0abed63):
 - gate-fmt.log, gate-clippy.log, gate-deny.log, gate-machete.log — fast
-  gates exit 0 on 3351e22.
+  gates exit 0 on 0abed63.
 - gate-test.log — `cargo test --workspace --all-features` exit 0 on
-  f8cc16f (code-identical to 3351e22; only llms-full.txt differs).
+  0abed63.
 - gate-xtask-ci.log — `cargo xtask ci` GATE GREEN 152 steps (150 + new
-  check_ci_examples + its self-test) on f8cc16f + uncommitted llms regen
-  whose content is byte-identical to committed 3351e22.
+  check_ci_examples + its self-test) on clean 0abed63.
+- Prior identical green on 3351e22/code-identical f8cc16f superseded by
+  this re-run; TEST-018 close (0abed63) changed only checklist + derived
+  docs since, and the gate re-confirms them.
 
 Dependency note (same window): `cargo deny` went red on RUSTSEC-2026-0420
 (wasip3 UDP, fixed in wasmtime-wasi 48.0.8). A plain update would have

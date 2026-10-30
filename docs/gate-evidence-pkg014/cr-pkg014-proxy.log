@@ -1,0 +1,19 @@
+Scanning uncommitted changes for bugs and invariant breaks.
+
+I've mapped the new offline placement flow ÔÇö now digging into store internals and edge cases.
+
+Unit tests pass ÔÇö now verifying flag interactions and validating edge cases.
+
+Review done ÔÇö uncommitted diff touches only the 4 files, no untracked files. Unit + offline e2e tests pass (5/5). Findings ordered by severity:
+
+| # | Sev | File:line | Issue | Fix |
+|---|-----|------------|-------|-----|
+| 1 | ­ƒƒí MED | `install.rs:777` (`install_offline` phase 2) | `package_dest` name validation runs in the placement loop, not phase 1. A lockfile `[good-pin, ../../evil]` places the good package, then errors ÔÇö breaking the all-or-nothing promise the partial-store test enforces. | Validate every `package_dest(project_dir, name)` in phase 1 alongside the digest/`contains` checks, before any placement. |
+| 2 | ­ƒƒí MED | `install.rs:33-36, ~758` docs vs code | "All-or-nothing across packages" holds only for store-coverage failures. A mid-loop `materialize` IO failure (disk-full, perms) or corrupt entry leaves earlier packages placed. | Either roll back `placed` dests on phase-2 error, or narrow the doc to "coverage failures fail before placing anything; mid-placement IO errors abort without rollback." |
+| 3 | ­ƒƒí MED | `main.rs:2769-2774` + `:2537` | `--offline` is silently swallowed by `--locked`/`--frozen` via `mode.max` (`--frozen --offline` ÔçÆ Frozen ÔçÆ `mode == Offline` false ÔçÆ zero placement, exit 0). Air-gap footgun: looks successful, places nothing. | Reject `--offline` + `--locked`/`--frozen` as contradictory, or make `forbids_network` modes also place. At minimum cover the combo in a test. |
+| 4 | ÔÜ¬ LOW | `install.rs:406-413` `store_root_from` | Empty `QQQ_STORE_DIR=""` (or empty home) counts as "set" ÔåÆ `PathBuf::from("")` ÔåÆ CWD-relative store. Ambient-CWD dependence, fail-open-ish. | `.filter(\|s\| !s.is_empty())` on both inputs in `store_root_from`. |
+| 5 | ÔÜ¬ LOW | `install.rs:~740` phase 1 | `contains()` proves existence, not integrity. A corrupt entry (bytesÔëádigest) passes phase 1 and fails mid-phase-2 ÔåÆ partial placement (same root as #2), and no test covers it. | Add a corrupt-entry unit test; fixed by the #2 rollback/pre-verify. |
+| 6 | ÔÜ¬ LOW | `main.rs:2523`, `cli.rs` offline tests | Only `unresolved.first()` is named (one-at-a-time loop); no e2e for missing-lockfile `--offline`, malformed/digestless-pin e2e, multi-package order, or lockfile-write assertion on the happy path. | Name all unresolved deps; add the missing e2e cases (happy path should assert `qqq.lock` was stamped). |
+
+Not findings (checked, OK): traversal defense is solid (`package_dest` lexical + `materialize` canonical re-check, symlink refusal); check-then-place TOCTOU is closed by `materialize` re-verification; `QQQ_STORE_DIR` child-env isolation in tests is correct; `offline_placed` JSON field is purely additive; `--offline --dry-run` fails closed on cold store and never writes. One pre-existing note, out of scope: `--force` (`honours_lockfile`) is parsed but never consulted by `dispatch_install` ÔÇö predates this diff.
+

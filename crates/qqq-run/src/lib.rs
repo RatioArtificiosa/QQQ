@@ -129,8 +129,9 @@ pub use dev::{
     run as run_dev, select_tier, watch_roots, watch_rules,
 };
 pub use install::{
-    CapabilityChangeReport, InstallOptions, InstallOutput, LockMode, Resolution, cannot_fetch,
-    lockfile_path, lockfile_required, lockfile_stale, read_lockfile, resolve,
+    CapabilityChangeReport, InstallOptions, InstallOutput, LockMode, OfflinePlaced, OfflineReport,
+    Resolution, cannot_fetch, default_store_dir, install_offline, lockfile_path, lockfile_required,
+    lockfile_stale, read_lockfile, resolve,
 };
 pub use manifest_loader::{LoadedManifest, MANIFEST_NAME};
 pub use output::{

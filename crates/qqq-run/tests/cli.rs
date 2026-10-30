@@ -123,13 +123,22 @@ impl Sandbox {
 
     /// Run `qqqai <args>` with the sandbox as the working directory.
     fn run(&self, args: &[&str]) -> Run {
-        let out = qqqai()
-            .args(args)
-            .current_dir(&self.path)
-            .env("CARGO_TARGET_DIR", target_dir_for(&self.path))
-            .output()
-            .expect("the binary must be runnable");
-        Run::from(out)
+        self.run_with_env(args, &[])
+    }
+
+    /// Run `qqqai <args>` with extra environment for the child.
+    ///
+    /// Separate from [`Sandbox::run`] so the default path stays hermetic:
+    /// only the tests that need an override — the store location below —
+    /// pass one, and every other test inherits the isolated defaults.
+    fn run_with_env(&self, args: &[&str], extra: &[(&str, &Path)]) -> Run {
+        let mut cmd = qqqai();
+        cmd.args(args).current_dir(&self.path);
+        cmd.env("CARGO_TARGET_DIR", target_dir_for(&self.path));
+        for (key, value) in extra {
+            cmd.env(key, value);
+        }
+        Run::from(cmd.output().expect("the binary must be runnable"))
     }
 
     /// Run an arbitrary program in the sandbox, for building test fixtures.
@@ -1073,6 +1082,33 @@ fn a_pinned_dependency_installs_and_locks() {
     s.run(&["install", "--locked"]).assert_ok();
 }
 
+/// `--force` ignores the existing pins: the resolution starts from scratch,
+/// so a dependency the lockfile satisfied becomes unresolved — and without a
+/// registry there is nothing to re-resolve it from.
+///
+/// The alternative — silently reusing the pins — would make the flag a lie.
+/// This test pins the honest behavior: force is observed, and the failure it
+/// produces names the package rather than vanishing into a success.
+#[test]
+fn install_force_ignores_the_existing_pins() {
+    let s = Sandbox::new("install-force");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    s.write("qqq.lock", PINNED);
+
+    // Without `--force` this fixture installs: the pin satisfies the manifest.
+    s.run(&["install"]).assert_ok();
+
+    // With `--force` the pin is ignored, so the dependency is unresolved and
+    // the run fails naming it — the flag did what it says.
+    s.run(&["install", "--force"])
+        .assert_failed()
+        .assert_contains("qqqai/json");
+}
+
 /// **`SEC-015`: an authority change is DISPLAYED at install time.**
 ///
 /// # Why this test exists, and the gap it closes
@@ -1307,6 +1343,303 @@ fn install_dry_run_does_not_write_a_lockfile() {
         PINNED,
         "a rehearsal must not rewrite the lockfile"
     );
+}
+
+// ---------------------------------------------------------------------------
+// install --offline — PKG-014: the local store is the source
+// ---------------------------------------------------------------------------
+
+/// Seed a content-addressed store with one artifact and return its digest.
+///
+/// The store is staged with its own `write` — hand-rolling the fan-out layout
+/// would duplicate the layout beside it and pass while the real paths
+/// disagree. `qqq-pkg` is a fixture builder here, not the subject: the subject
+/// is the `qqqai` binary, which is still spawned and asserted black-box.
+fn seed_store(store: &Path, bytes: &[u8]) -> String {
+    let layout = qqq_pkg::store::StoreLayout::new(store);
+    layout.write(bytes).expect("seed store").prefixed()
+}
+
+/// A lockfile pinning `name@version` to `digest`.
+fn pinned_lock(name: &str, version: &str, digest: &str) -> String {
+    let mut lock = qqq_pkg::Lockfile::new();
+    let mut pkg = qqq_pkg::LockPackage::new(name, version);
+    pkg.digest = Some(digest.to_owned());
+    lock.push(pkg);
+    lock.stamp("qqqai test");
+    lock.render().expect("render lockfile")
+}
+
+/// Clear read-only bits under `dir` so the sandbox drop can remove placed
+/// packages on Windows. Test-only: the shipped removal path is the store's
+/// own sweep, not this walk.
+#[allow(
+    clippy::permissions_set_readonly_false,
+    reason = "test cleanup must delete the read-only fixtures materialization leaves"
+)]
+fn clear_readonly(dir: &Path) {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && !path.is_symlink() {
+                stack.push(path);
+            } else if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                let mut perms = meta.permissions();
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(&path, perms);
+            }
+        }
+    }
+}
+
+/// `--offline` places every pinned package from the local store — the end of
+/// PKG-001's half: the store holds bytes, and this is them reaching a project.
+#[test]
+fn install_offline_places_pinned_packages_from_the_store() {
+    let s = Sandbox::new("install-offline");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    let store = s.path.join("store");
+    let digest = seed_store(&store, b"{\"v\":1}");
+    s.write("qqq.lock", &pinned_lock("qqqai/json", "1.2.3", &digest));
+
+    s.run_with_env(&["install", "--offline"], &[("QQQ_STORE_DIR", &store)])
+        .assert_ok()
+        .assert_contains("placed")
+        .assert_contains("qqqai/json");
+
+    assert_eq!(
+        std::fs::read(s.path.join(".qqq/packages/qqqai/json")).expect("placed package"),
+        b"{\"v\":1}",
+        "the placed bytes must be the stored artifact, not a re-fetch"
+    );
+    assert!(
+        s.read("qqq.lock").contains(&digest),
+        "the written lockfile must carry the digest that was placed"
+    );
+    clear_readonly(&s.path);
+}
+
+/// A cold store fails closed naming the package — and writes nothing: no
+/// packages directory, and the lockfile it was given stays byte-identical.
+#[test]
+fn install_offline_fails_closed_on_a_cold_store() {
+    let s = Sandbox::new("install-offline-cold");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    let store = s.path.join("store");
+    let digest = qqq_pkg::store::Digest::of(b"never stored").prefixed();
+    let lock = pinned_lock("qqqai/json", "1.2.3", &digest);
+    s.write("qqq.lock", &lock);
+
+    s.run_with_env(&["install", "--offline"], &[("QQQ_STORE_DIR", &store)])
+        .assert_failed()
+        .assert_contains("qqqai/json");
+
+    assert!(
+        !s.exists(".qqq"),
+        "a refusal must not scaffold the packages directory"
+    );
+    assert_eq!(
+        s.read("qqq.lock"),
+        lock,
+        "a refusal must not rewrite the lockfile"
+    );
+}
+
+/// A partial store fails closed too: the present package must NOT be placed
+/// while its sibling is missing, or repopulating the store would inherit a
+/// half-installed project.
+#[test]
+fn install_offline_fails_closed_on_a_partial_store() {
+    let s = Sandbox::new("install-offline-partial");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n\"qqqai/text\" = \"0.4\"\n",
+    );
+    let store = s.path.join("store");
+    let present = seed_store(&store, b"present");
+    let missing = qqq_pkg::store::Digest::of(b"absent").prefixed();
+    let mut lock = qqq_pkg::Lockfile::new();
+    for (name, version, digest) in [
+        ("qqqai/json", "1.2.3", &present),
+        ("qqqai/text", "0.4.0", &missing),
+    ] {
+        let mut pkg = qqq_pkg::LockPackage::new(name, version);
+        pkg.digest = Some(digest.clone());
+        lock.push(pkg);
+    }
+    lock.stamp("qqqai test");
+    s.write("qqq.lock", &lock.render().expect("render"));
+
+    s.run_with_env(&["install", "--offline"], &[("QQQ_STORE_DIR", &store)])
+        .assert_failed()
+        .assert_contains("qqqai/text");
+
+    assert!(
+        !s.exists(".qqq/packages/qqqai/json"),
+        "all-or-nothing: the present package stays unplaced"
+    );
+    clear_readonly(&s.path);
+}
+
+/// `--offline --dry-run` verifies the store covers the pins without placing
+/// anything: the rehearsal that would otherwise be the only way to learn the
+/// store is short.
+#[test]
+fn install_offline_dry_run_verifies_without_placing() {
+    let s = Sandbox::new("install-offline-dry");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    let store = s.path.join("store");
+    let digest = seed_store(&store, b"{\"v\":1}");
+    let lock = pinned_lock("qqqai/json", "1.2.3", &digest);
+    s.write("qqq.lock", &lock);
+
+    s.run_with_env(
+        &["install", "--offline", "--dry-run"],
+        &[("QQQ_STORE_DIR", &store)],
+    )
+    .assert_ok();
+
+    assert!(!s.exists(".qqq"), "a rehearsal must not place packages");
+    assert_eq!(
+        s.read("qqq.lock"),
+        lock,
+        "a rehearsal must not rewrite the lockfile"
+    );
+    clear_readonly(&s.path);
+}
+
+/// An unpinned dependency under `--offline` names the flag, not the registry:
+/// even a built registry could not be reached, so the message must say what
+/// the user can actually do — pin it with an online install first.
+#[test]
+fn install_offline_names_unpinned_packages_for_the_online_path() {
+    let s = Sandbox::new("install-offline-unpinned");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n\"qqqai/new\" = \"2.0\"\n",
+    );
+    let store = s.path.join("store");
+    let digest = seed_store(&store, b"{\"v\":1}");
+    s.write("qqq.lock", &pinned_lock("qqqai/json", "1.2.3", &digest));
+
+    s.run_with_env(&["install", "--offline"], &[("QQQ_STORE_DIR", &store)])
+        .assert_failed()
+        .assert_contains("qqqai/new")
+        .assert_contains("offline");
+}
+
+/// `--frozen --offline` verifies the lockfile and places nothing: frozen wins
+/// by strictness, and that is the verify-only contract doing its job rather
+/// than a skipped placement step.
+#[test]
+fn install_frozen_offline_verifies_without_placing() {
+    let s = Sandbox::new("install-frozen-offline");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    let store = s.path.join("store");
+    let digest = seed_store(&store, b"{\"v\":1}");
+    s.write("qqq.lock", &pinned_lock("qqqai/json", "1.2.3", &digest));
+
+    s.run_with_env(
+        &["install", "--frozen", "--offline"],
+        &[("QQQ_STORE_DIR", &store)],
+    )
+    .assert_ok();
+
+    assert!(
+        !s.exists(".qqq"),
+        "frozen writes nothing, not even placed packages"
+    );
+    clear_readonly(&s.path);
+}
+
+/// No lockfile under `--offline` names the first unpinned dependency for the
+/// online path: there are no pins to place from, and the flag forbids fetching
+/// what is missing.
+#[test]
+fn install_offline_without_a_lockfile_names_the_first_unpinned() {
+    let s = Sandbox::new("install-offline-nolock");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    let store = s.path.join("store");
+
+    s.run_with_env(&["install", "--offline"], &[("QQQ_STORE_DIR", &store)])
+        .assert_failed()
+        .assert_contains("qqqai/json")
+        .assert_contains("offline");
+}
+
+/// Without `QQQ_STORE_DIR` the store resolves under the home profile: the run
+/// fails closed on the missing entries rather than inventing a store beside
+/// the project.
+#[test]
+fn install_offline_without_an_override_uses_the_home_profile() {
+    let s = Sandbox::new("install-offline-home");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    let digest = qqq_pkg::store::Digest::of(b"never stored").prefixed();
+    s.write("qqq.lock", &pinned_lock("qqqai/json", "1.2.3", &digest));
+
+    // No `QQQ_STORE_DIR`: the child falls back to the test home profile,
+    // whose store holds nothing.
+    s.run(&["install", "--offline"])
+        .assert_failed()
+        .assert_contains("qqqai/json");
+
+    assert!(
+        !s.exists(".qqq"),
+        "a refusal must not scaffold the packages directory"
+    );
+}
+/// A digestless pin fails closed under `--offline`: the store is addressed by
+/// digest, so a pin without one can never be found in it.
+#[test]
+fn install_offline_rejects_a_digestless_pin() {
+    let s = Sandbox::new("install-offline-nodigest");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\"qqqai/json\" = \"1.2\"\n",
+    );
+    let store = s.path.join("store");
+    seed_store(&store, b"unrelated");
+    let mut lock = qqq_pkg::Lockfile::new();
+    lock.push(qqq_pkg::LockPackage::new("qqqai/json", "1.2.3"));
+    lock.stamp("qqqai test");
+    s.write("qqq.lock", &lock.render().expect("render"));
+
+    s.run_with_env(&["install", "--offline"], &[("QQQ_STORE_DIR", &store)])
+        .assert_failed()
+        .assert_contains("qqqai/json")
+        .assert_contains("digest");
+    clear_readonly(&s.path);
 }
 
 // ---------------------------------------------------------------------------

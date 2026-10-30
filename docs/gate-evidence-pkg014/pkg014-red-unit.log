@@ -1,0 +1,138 @@
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+error[E0425]: cannot find function `install_offline` in this scope
+    --> crates\qqq-run\src\install.rs:1117:22
+     |
+1117 |         let report = install_offline(&store, &project, &lock).expect("must place");
+     |                      ^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `install_offline` in this scope
+    --> crates\qqq-run\src\install.rs:1133:9
+     |
+1133 |         install_offline(&store, &project, &lock).expect("first");
+     |         ^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `install_offline` in this scope
+    --> crates\qqq-run\src\install.rs:1134:22
+     |
+1134 |         let second = install_offline(&store, &project, &lock).expect("second");
+     |                      ^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `install_offline` in this scope
+    --> crates\qqq-run\src\install.rs:1158:17
+     |
+1158 |         let e = install_offline(&store, &project, &lock).unwrap_err();
+     |                 ^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `install_offline` in this scope
+    --> crates\qqq-run\src\install.rs:1184:17
+     |
+1184 |         let e = install_offline(&store, &project, &lock).unwrap_err();
+     |                 ^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `install_offline` in this scope
+    --> crates\qqq-run\src\install.rs:1215:17
+     |
+1215 |         let e = install_offline(&store, &project, &lock).unwrap_err();
+     |                 ^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `install_offline` in this scope
+    --> crates\qqq-run\src\install.rs:1236:17
+     |
+1236 |         let e = install_offline(&store, &project, &lock).unwrap_err();
+     |                 ^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `package_dest` in this scope
+    --> crates\qqq-run\src\install.rs:1251:17
+     |
+ 343 | pub fn package_for(name: &str, version: &str, caps: &[&str]) -> LockPackage {
+     | --------------------------------------------------------------------------- similarly named function `package_for` defined here
+...
+1251 |         assert!(package_dest(&project, "../../evil").is_err());
+     |                 ^^^^^^^^^^^^
+     |
+help: a function with a similar name exists
+     |
+1251 -         assert!(package_dest(&project, "../../evil").is_err());
+1251 +         assert!(package_for(&project, "../../evil").is_err());
+     |
+
+error[E0425]: cannot find function `package_dest` in this scope
+    --> crates\qqq-run\src\install.rs:1252:17
+     |
+ 343 | pub fn package_for(name: &str, version: &str, caps: &[&str]) -> LockPackage {
+     | --------------------------------------------------------------------------- similarly named function `package_for` defined here
+...
+1252 |         assert!(package_dest(&project, "a/../../b").is_err());
+     |                 ^^^^^^^^^^^^
+     |
+help: a function with a similar name exists
+     |
+1252 -         assert!(package_dest(&project, "a/../../b").is_err());
+1252 +         assert!(package_for(&project, "a/../../b").is_err());
+     |
+
+error[E0425]: cannot find function `package_dest` in this scope
+    --> crates\qqq-run\src\install.rs:1253:17
+     |
+ 343 | pub fn package_for(name: &str, version: &str, caps: &[&str]) -> LockPackage {
+     | --------------------------------------------------------------------------- similarly named function `package_for` defined here
+...
+1253 |         assert!(package_dest(&project, "..\\evil").is_err());
+     |                 ^^^^^^^^^^^^
+     |
+help: a function with a similar name exists
+     |
+1253 -         assert!(package_dest(&project, "..\\evil").is_err());
+1253 +         assert!(package_for(&project, "..\\evil").is_err());
+     |
+
+error[E0425]: cannot find function `package_dest` in this scope
+    --> crates\qqq-run\src\install.rs:1254:17
+     |
+ 343 | pub fn package_for(name: &str, version: &str, caps: &[&str]) -> LockPackage {
+     | --------------------------------------------------------------------------- similarly named function `package_for` defined here
+...
+1254 |         assert!(package_dest(&project, "").is_err());
+     |                 ^^^^^^^^^^^^
+     |
+help: a function with a similar name exists
+     |
+1254 -         assert!(package_dest(&project, "").is_err());
+1254 +         assert!(package_for(&project, "").is_err());
+     |
+
+error[E0425]: cannot find function `package_dest` in this scope
+    --> crates\qqq-run\src\install.rs:1256:13
+     |
+ 343 | pub fn package_for(name: &str, version: &str, caps: &[&str]) -> LockPackage {
+     | --------------------------------------------------------------------------- similarly named function `package_for` defined here
+...
+1256 |             package_dest(&project, "qqqai/json").expect("scoped name"),
+     |             ^^^^^^^^^^^^
+     |
+help: a function with a similar name exists
+     |
+1256 -             package_dest(&project, "qqqai/json").expect("scoped name"),
+1256 +             package_for(&project, "qqqai/json").expect("scoped name"),
+     |
+
+error[E0425]: cannot find function `store_root_from` in this scope
+    --> crates\qqq-run\src\install.rs:1265:13
+     |
+1265 |             store_root_from(Some(OsStr::new("/s")), Some(OsStr::new("/h"))),
+     |             ^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `store_root_from` in this scope
+    --> crates\qqq-run\src\install.rs:1273:13
+     |
+1273 |             store_root_from(None, Some(OsStr::new("/h"))),
+     |             ^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `store_root_from` in this scope
+    --> crates\qqq-run\src\install.rs:1276:20
+     |
+1276 |         assert_eq!(store_root_from(None, None), None);
+     |                    ^^^^^^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `qqq-run` (lib test) due to 15 previous errors

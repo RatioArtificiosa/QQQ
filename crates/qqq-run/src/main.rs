@@ -2388,9 +2388,10 @@ fn dispatch_remove(
 /// # Why this reports rather than pretends
 ///
 /// There is no registry yet, so nothing can be fetched. The command does the
-/// half that is real — reading the lockfile, resolving the manifest against it,
-/// and printing the capability diff that Proposal §5.4 exists for — and then
-/// **fails**, naming the packages it could not fetch.
+/// half that is real — reading the lockfile, resolving the manifest against
+/// it, and printing the capability diff that Proposal §5.4 exists for —
+/// **places** every pinned package from the local store under `--offline`
+/// (PKG-014), and otherwise **fails**, naming the packages it could not fetch.
 ///
 /// The alternative, writing a lockfile that lists packages never fetched, is the
 /// worst available outcome: a lockfile is a promise about bytes, the next
@@ -2449,7 +2450,16 @@ fn dispatch_install(
             return Err(qqq_run::lockfile_required(&path));
         }
 
-        let resolution = qqq_run::resolve(&deps, previous.as_ref());
+        // `--force` re-resolves from scratch, ignoring the existing pins.
+        // Without a registry there is nothing to re-resolve from, so every
+        // dependency becomes unresolved and the run fails naming the first —
+        // which is the honest answer rather than silently reusing the pins it
+        // was told to ignore.
+        let resolution = if opts.honours_lockfile() {
+            qqq_run::resolve(&deps, previous.as_ref())
+        } else {
+            qqq_run::resolve(&deps, None)
+        };
 
         // A `--locked` run must fail if the lockfile would change, and it must
         // fail *before* reporting the diff as though it had been applied.
@@ -2473,53 +2483,128 @@ fn dispatch_install(
         // Nothing can be fetched, so anything unresolved is a hard stop. This is
         // checked after the `--locked` path so that CI reports "out of date"
         // rather than "no registry" — the first is actionable, the second is not.
+        // Under `--offline` the message names the flag instead: even a built
+        // registry could not be reached, so the user needs the pin-it-online
+        // path, not the registry plan.
         if let Some(missing) = resolution.unresolved.first() {
+            if opts.mode == qqq_run::LockMode::Offline {
+                return Err(offline_unpinned_error(missing));
+            }
             return Err(qqq_run::cannot_fetch(
                 missing,
                 "it is not in `qqq.lock` and there is no registry to resolve it from",
             ));
         }
 
-        let wrote = if opts.may_write() {
-            let mut lock = resolution.lockfile.clone();
-            lock.stamp(&format!(
-                "{} {}",
-                qqq_core::BINARY_NAME,
-                qqq_core::SCHEMA_VERSION
-            ));
-            let text = lock.render()?;
-            std::fs::write(&path, text).map_err(|e| {
-                qqq_core::Error::new(
-                    qqq_core::ErrorCode::LockfileOutOfDate,
-                    format!("could not write `{}`", path.display()),
-                )
-                .with_cause(e.to_string())
-            })?;
-            true
+        // `--offline` places every pinned package from the local store before
+        // the lockfile is written: a cold or partial store fails here, so the
+        // lockfile is never updated to promise bytes that were not placed.
+        // `--dry-run` verifies coverage without placing.
+        let offline_placed = if opts.mode == qqq_run::LockMode::Offline {
+            place_offline_packages(loaded, &resolution, opts.dry_run)?
         } else {
-            false
+            Vec::new()
         };
 
-        Ok(qqq_run::InstallOutput {
-            manifest: qqq_run::deps::display_manifest(&loaded.path),
-            lockfile: qqq_run::deps::display_manifest(&path),
-            packages: resolution.lockfile.len(),
-            wrote_lockfile: wrote,
-            dry_run: opts.dry_run,
-            mode: opts.mode.as_str().to_owned(),
-            capability_changes: resolution
-                .diff
-                .capability_changes
-                .iter()
-                .map(|d| qqq_run::CapabilityChangeReport {
-                    package: d.package.clone(),
-                    added: d.added.clone(),
-                    removed: d.removed.clone(),
-                })
-                .collect(),
-            changes: resolution.diff.changes.len(),
-            escalation: resolution.diff.has_escalation(),
-        })
+        write_lock_and_report(&loaded.path, &path, &resolution, opts, offline_placed)
+    })
+}
+
+/// The error for a dependency that cannot be pinned offline.
+///
+/// Separate from [`qqq_run::cannot_fetch`] because the reason differs: even a
+/// built registry could not be reached under `--offline`, so the message must
+/// name the pin-it-online path rather than the registry plan.
+fn offline_unpinned_error(missing: &str) -> qqq_core::Error {
+    qqq_core::Error::new(
+        qqq_core::ErrorCode::RegistryUnreachable,
+        format!(
+            "could not fetch `{missing}`: it is not pinned in `qqq.lock` and `--offline` forbids fetching it"
+        ),
+    )
+    .with_remediation(
+        "run `qqqai install` with network access once to pin it (fetching is Checklist PKG-002), then retry `--offline`",
+    )
+}
+
+/// Place every resolved pin from the local store (`install --offline`).
+///
+/// Returns the placed package names for the machine-readable output. A cold or
+/// partial store fails here — before the lockfile is written — so the lockfile
+/// never promises bytes that were not placed. `dry_run` verifies coverage
+/// without placing anything.
+fn place_offline_packages(
+    loaded: &qqq_run::LoadedManifest,
+    resolution: &qqq_run::Resolution,
+    dry_run: bool,
+) -> qqq_core::Result<Vec<String>> {
+    let store_dir = qqq_run::default_store_dir().ok_or_else(|| {
+        qqq_core::Error::new(
+            qqq_core::ErrorCode::RegistryUnreachable,
+            "could not resolve the local store: `QQQ_STORE_DIR` is not set and no home profile was found",
+        )
+        .with_remediation("set `QQQ_STORE_DIR` to the store root and retry `--offline`")
+    })?;
+    let project_dir = loaded.path.parent().map_or_else(
+        || std::path::PathBuf::from("."),
+        std::path::Path::to_path_buf,
+    );
+    let report = qqq_run::install_offline(&store_dir, &project_dir, &resolution.lockfile, dry_run)?;
+    Ok(report.placed.iter().map(|p| p.package.clone()).collect())
+}
+
+/// Write the resolved lockfile (unless forbidden) and report the outcome.
+///
+/// Split out of `dispatch_install` because the command body owns resolution
+/// policy while this owns the write-and-report mechanics: stamping, rendering,
+/// writing, and shaping the machine-readable output.
+fn write_lock_and_report(
+    manifest_path: &std::path::Path,
+    path: &std::path::Path,
+    resolution: &qqq_run::Resolution,
+    opts: qqq_run::InstallOptions,
+    offline_placed: Vec<String>,
+) -> qqq_core::Result<qqq_run::InstallOutput> {
+    let wrote = if opts.may_write() {
+        let mut lock = resolution.lockfile.clone();
+        lock.stamp(&format!(
+            "{} {}",
+            qqq_core::BINARY_NAME,
+            qqq_core::SCHEMA_VERSION
+        ));
+        let text = lock.render()?;
+        std::fs::write(path, text).map_err(|e| {
+            qqq_core::Error::new(
+                qqq_core::ErrorCode::LockfileOutOfDate,
+                format!("could not write `{}`", path.display()),
+            )
+            .with_cause(e.to_string())
+        })?;
+        true
+    } else {
+        false
+    };
+
+    Ok(qqq_run::InstallOutput {
+        manifest: qqq_run::deps::display_manifest(manifest_path),
+        lockfile: qqq_run::deps::display_manifest(path),
+        packages: resolution.lockfile.len(),
+        wrote_lockfile: wrote,
+        dry_run: opts.dry_run,
+        mode: opts.mode.as_str().to_owned(),
+        capability_changes: resolution
+            .diff
+            .capability_changes
+            .iter()
+            .map(|d| qqq_run::CapabilityChangeReport {
+                package: d.package.clone(),
+                added: d.added.clone(),
+                removed: d.removed.clone(),
+            })
+            .collect(),
+        changes: resolution.diff.changes.len(),
+        escalation: resolution.diff.has_escalation(),
+        offline_placed,
     })
 }
 

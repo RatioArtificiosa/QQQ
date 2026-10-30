@@ -218,8 +218,8 @@
     },
     "PKG": {
       "blocked": 20,
-      "done": 3,
-      "open": 1,
+      "done": 4,
+      "open": 0,
       "partial": 0,
       "total": 24,
       "unknown": 0,
@@ -364,8 +364,8 @@
     },
     "P6": {
       "blocked": 32,
-      "done": 3,
-      "open": 1,
+      "done": 4,
+      "open": 0,
       "partial": 0,
       "total": 36,
       "unknown": 0,
@@ -618,8 +618,8 @@
     },
     "PKG": {
       "blocked": 20,
-      "done": 3,
-      "open": 1,
+      "done": 4,
+      "open": 0,
       "partial": 0,
       "total": 24,
       "unknown": 0,
@@ -3898,7 +3898,7 @@
       "id": "PKG-014",
       "line": 4577,
       "phase": "P6",
-      "status": "open",
+      "status": "done",
       "title": "Implement `--offline` fully from the local store."
     },
     {

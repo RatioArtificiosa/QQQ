@@ -1,0 +1,17 @@
+Fixes verified ÔÇö scanning the offline-install diff for leftovers.
+
+First fix confirmed ÔÇö now checking the remaining five.
+
+Core placement checks look solid ÔÇö now digging into flag handling and edge cases.
+
+Flag precedence validated ÔÇö now verifying corruption handling and store integrity.
+
+All targeted tests pass ÔÇö now hunting for any remaining gaps.
+
+Remaining bugs (6 fixes verified except below):
+
+* `crates/qqq-run/src/install.rs:431` ÔÇö `default_store_dir` incomplete fix for (4): `var_os("USERPROFILE").or_else(HOME)` keeps `Some("")`, shadowing non-empty `HOME`. Empty `USERPROFILE`+set `HOME` yields `None` instead of fallback. Filter empties before `or_else`.
+* `crates/qqq-run/src/install.rs:37` ÔÇö (2) incomplete: module doc still claims `all-or-nothing across packages`, contradicting narrowed `install_offline` docs at `:562-565` (mid-placement leaves earlier placements, no rollback).
+* `crates/qqq-run/src/install.rs:558` ÔÇö wrong: `fails with every offender named` for `bad pin`. Code returns first `digestless/bad-digest/bad-name` (`:739-760`); only cold/partial `missing` collects all (`:769-786`).
+
+

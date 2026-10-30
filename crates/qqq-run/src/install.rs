@@ -32,6 +32,12 @@
 //!   feature §5.4 names.
 //! * It **fails** with `QQQ-5001` naming the package it could not fetch, rather
 //!   than writing a lockfile that claims packages exist.
+//! * Under `--offline` it **places** every pinned package from the local store
+//!   into `.qqq/packages` (PKG-014) — digest-verified, atomic per package.
+//!   Name and coverage failures place nothing; a failure mid-placement aborts
+//!   loud with earlier verified placements left in place (see
+//!   [`install_offline`]). New versions still need the registry
+//!   (PKG-002); the store only serves what is already in it.
 //!
 //! Writing a lockfile listing packages that were never fetched would be the
 //! worst outcome available: the next command would trust it, and a
@@ -49,17 +55,27 @@
 //! | *(none)* | resolve | re-resolve and update | yes |
 //! | `--locked` | **error** | **error** | no |
 //! | `--frozen` | **error** | **error** | no, and no network |
-//! | `--offline` | resolve from the store | re-resolve from the store | yes |
+//! | `--offline` | resolve the pins, place from the store | re-resolve the pins, place from the store | yes |
 //!
 //! `--locked` answers "does the committed lockfile match this manifest?" — the
 //! question CI asks. `--frozen` is `--locked` plus "and do not touch the
 //! network", for an air-gapped build. `--offline` is different in kind: it
 //! permits resolution but forbids fetching, which is why it is not a synonym.
+//!
+//! Combined flags resolve by strictness (`LockMode::max`): `--frozen --offline`
+//! is a frozen run — it verifies the lockfile is current and places nothing,
+//! even with a populated store. That is the verify-only contract doing its
+//! job, not a skipped step: placing packages writes files, and frozen writes
+//! nothing.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use qqq_core::{Error, ErrorCode, Result};
-use qqq_pkg::{LockDiff, LockPackage, Lockfile};
+use qqq_pkg::{
+    LockDiff, LockPackage, Lockfile,
+    store::{Digest, LinkMethod, StoreLayout},
+};
 
 /// How strictly `install` treats the lockfile and the network.
 ///
@@ -345,6 +361,465 @@ pub fn package_for(name: &str, version: &str, caps: &[&str]) -> LockPackage {
 }
 
 // ---------------------------------------------------------------------------
+// PKG-014: `install --offline` from the local store
+// ---------------------------------------------------------------------------
+
+/// The environment variable overriding the store root.
+///
+/// Private: the contract callers rely on is [`default_store_dir`]'s documented
+/// precedence, not this spelling in isolation — and the remediation text below
+/// already names it where a user needs to read it.
+const STORE_DIR_ENV: &str = "QQQ_STORE_DIR";
+
+/// The project-relative directory materialized packages land in.
+///
+/// A hidden directory beside `qqq.toml` rather than a shared cache, so a
+/// project carries its own inputs and deleting the directory is a clean
+/// uninstall. Scoped names (`qqqai/json`) become subdirectories, which is why
+/// [`package_dest`] validates every segment.
+const PACKAGES_DIR: &str = ".qqq/packages";
+
+/// Resolve the store root from an explicit override and a home profile.
+///
+/// Pure so tests drive it without touching the process environment — parallel
+/// tests sharing one environment would race on set/remove. [`default_store_dir`]
+/// reads the real environment and delegates here.
+///
+/// * `store_env` — the value of `QQQ_STORE_DIR`, used as-is when present, so
+///   tests and operators can point at a scratch store without touching the
+///   profile.
+/// * `home` — `%USERPROFILE%`/`$HOME`, holding `.qqq/store` when no override
+///   is set. `None` means neither is known: there is no store to use, and the
+///   caller fails closed naming both variables rather than inventing a
+///   relative store beside whatever the working directory happens to be.
+///
+/// ```
+/// use std::ffi::OsStr;
+/// use qqq_run::install::store_root_from;
+///
+/// // An explicit override is used as-is, whatever the profile says.
+/// assert_eq!(
+///     store_root_from(Some(OsStr::new("/s")), Some(OsStr::new("/h"))),
+///     Some(std::path::PathBuf::from("/s"))
+/// );
+/// // Otherwise the store lives under the home profile.
+/// assert_eq!(
+///     store_root_from(None, Some(OsStr::new("/h"))),
+///     Some(std::path::PathBuf::from("/h/.qqq/store"))
+/// );
+/// // With neither known there is no store to use.
+/// assert_eq!(store_root_from(None, None), None);
+/// ```
+#[must_use]
+pub fn store_root_from(store_env: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    // An explicitly empty override (`QQQ_STORE_DIR=""`) is not a root: it
+    // would resolve relative to the working directory, which is ambient state
+    // a placement path must never depend on. Same for an empty home.
+    if let Some(dir) = store_env.filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    home.filter(|h| !h.is_empty())
+        .map(|h| PathBuf::from(h).join(".qqq").join("store"))
+}
+
+/// Where `install --offline` resolves the store from.
+///
+/// `QQQ_STORE_DIR` wins when it is set; otherwise the store lives under the
+/// home profile (`%USERPROFILE%` first, mirroring the toolchain lookup, then
+/// `$HOME`). `None` means neither is known — the caller fails closed rather
+/// than materializing beside the working directory.
+#[must_use]
+pub fn default_store_dir() -> Option<PathBuf> {
+    let non_empty = |key: &str| std::env::var_os(key).filter(|s| !s.is_empty());
+    let home = non_empty("USERPROFILE").or_else(|| non_empty("HOME"));
+    store_root_from(std::env::var_os(STORE_DIR_ENV).as_deref(), home.as_deref())
+}
+
+/// Map a package name to its destination under the project.
+///
+/// A name is a relative path under `.qqq/packages`: `qqqai/json` becomes
+/// `.qqq/packages/qqqai/json`. Every segment is validated because the lockfile
+/// is an input — a name containing `..` (or a separator smuggled past the
+/// check as `\`) must be refused rather than followed out of the directory.
+///
+/// # Errors
+///
+/// `QQQ-5006` when the name is empty or any segment is empty, `.`, `..`, or
+/// contains a backslash. The error names the package: the lockfile pin is
+/// suspect, and the remediation says to re-resolve it.
+fn package_dest(project_dir: &Path, name: &str) -> Result<PathBuf> {
+    if name.is_empty() || name.contains('\\') {
+        return Err(Error::new(
+            ErrorCode::StoreCorrupted,
+            format!("could not place `{name}`: the package name is not a valid relative path"),
+        )
+        .with_remediation(
+            "re-resolve the dependency so its lockfile pin carries a plain scoped name",
+        ));
+    }
+    let mut dest = project_dir.join(PACKAGES_DIR);
+    for part in name.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(Error::new(
+                ErrorCode::StoreCorrupted,
+                format!(
+                    "could not place `{name}`: the package name escapes the packages directory"
+                ),
+            )
+            .with_remediation(
+                "re-resolve the dependency so its lockfile pin carries a plain scoped name",
+            ));
+        }
+        dest.push(part);
+    }
+    Ok(dest)
+}
+
+/// One package placed from the local store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflinePlaced {
+    /// The package name, as pinned in `qqq.lock`.
+    pub package: String,
+    /// How the bytes got there: `hardlink`, `copied`, or `already-present`.
+    ///
+    /// The strings are spelled out rather than `Debug`-formatted so the JSON
+    /// contract does not move when a variant is renamed: a machine reader
+    /// branches on these, and `HardLink` becoming `hardlink` by accident
+    /// would be a silent contract break.
+    ///
+    /// ```
+    /// use qqq_pkg::LockPackage;
+    /// use qqq_pkg::store::StoreLayout;
+    /// use qqq_run::install::install_offline;
+    ///
+    /// let base = std::env::temp_dir().join(format!("qqq-doctest-placed-{}", std::process::id()));
+    /// let _ = std::fs::remove_dir_all(&base);
+    /// let store = base.join("store");
+    /// let project = base.join("proj");
+    /// std::fs::create_dir_all(&project).unwrap();
+    /// let layout = StoreLayout::new(&store);
+    /// let digest = layout.write(b"payload").unwrap();
+    /// let mut pkg = LockPackage::new("qqqai/json", "1.2.3");
+    /// pkg.digest = Some(digest.prefixed());
+    /// let mut lock = qqq_pkg::Lockfile::new();
+    /// lock.push(pkg);
+    ///
+    /// let report = install_offline(&store, &project, &lock, false).unwrap();
+    /// assert_eq!(report.placed[0].package, "qqqai/json");
+    /// assert!(
+    ///     ["hardlink", "copied"].contains(&report.placed[0].method.as_str()),
+    ///     "a first placement links or copies, never reports a no-op: {}",
+    ///     report.placed[0].method
+    /// );
+    /// let _ = std::fs::remove_dir_all(&base);
+    /// ```
+    pub method: String,
+    /// How many bytes were placed.
+    pub bytes: u64,
+}
+
+/// The outcome of an `--offline` placement run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineReport {
+    /// Every package placed, in lockfile order.
+    ///
+    /// ```
+    /// use qqq_pkg::LockPackage;
+    /// use qqq_pkg::store::StoreLayout;
+    /// use qqq_run::install::install_offline;
+    ///
+    /// let base = std::env::temp_dir().join(format!("qqq-doctest-report-{}", std::process::id()));
+    /// let _ = std::fs::remove_dir_all(&base);
+    /// let store = base.join("store");
+    /// let project = base.join("proj");
+    /// std::fs::create_dir_all(&project).unwrap();
+    /// let layout = StoreLayout::new(&store);
+    /// let digest = layout.write(b"payload").unwrap();
+    /// let mut pkg = LockPackage::new("qqqai/json", "1.2.3");
+    /// pkg.digest = Some(digest.prefixed());
+    /// let mut lock = qqq_pkg::Lockfile::new();
+    /// lock.push(pkg);
+    ///
+    /// let report = install_offline(&store, &project, &lock, false).unwrap();
+    /// assert_eq!(report.placed.len(), 1);
+    /// assert_eq!(report.placed[0].bytes, 7);
+    /// let _ = std::fs::remove_dir_all(&base);
+    /// ```
+    pub placed: Vec<OfflinePlaced>,
+}
+
+/// Place every package a lockfile pins, from the local store, into the project.
+///
+/// This is PKG-014's whole behavior: resolve (done by [`resolve`]) decides
+/// *what* the project needs, and this decides *where the bytes come from* —
+/// the store, never the network. Fetching new versions is PKG-002's job; this
+/// function places what is already here.
+///
+/// The run is two-phase. First every pin is checked — a digest present, parsing,
+/// in the store, and a name that stays inside `.qqq/packages` — and only then
+/// is anything placed. A cold or partial store therefore fails with every
+/// missing package named and the project untouched; a bad pin (no digest, an
+/// unparsable digest, an escaping name) fails on the first offender, which is
+/// also before anything is placed.
+///
+/// What the check cannot cover is the placement itself: a store entry that
+/// corrupts between check and link, or an IO failure mid-loop (disk full),
+/// aborts loud — naming the package — with the earlier verified placements
+/// left in place. Each placement is individually verified by `materialize`,
+/// but there is no rollback of bytes already laid down, because a replaced
+/// destination's previous bytes are already gone. Name and coverage failures
+/// fail before placing anything; placement failures fail loud mid-run.
+///
+/// `dry_run` verifies coverage without placing: the check phase runs unchanged,
+/// so a cold store still fails closed, but nothing is written and the report
+/// comes back empty. That is the rehearsal `install --offline --dry-run`
+/// needs — "would the store cover these pins?" — without touching the project.
+///
+/// ```
+/// use qqq_pkg::LockPackage;
+/// use qqq_pkg::store::StoreLayout;
+/// use qqq_run::install::install_offline;
+///
+/// let base = std::env::temp_dir().join(format!("qqq-doctest-offline-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&base);
+/// let store = base.join("store");
+/// let project = base.join("proj");
+/// std::fs::create_dir_all(&project).unwrap();
+/// let layout = StoreLayout::new(&store);
+/// let digest = layout.write(b"payload").unwrap();
+/// let mut pkg = LockPackage::new("qqqai/json", "1.2.3");
+/// pkg.digest = Some(digest.prefixed());
+/// let mut lock = qqq_pkg::Lockfile::new();
+/// lock.push(pkg);
+///
+/// let report = install_offline(&store, &project, &lock, false).unwrap();
+/// assert_eq!(report.placed.len(), 1);
+/// assert_eq!(
+///     std::fs::read(project.join(".qqq/packages/qqqai/json")).unwrap(),
+///     b"payload"
+/// );
+/// let _ = std::fs::remove_dir_all(&base);
+/// ```
+///
+/// A rehearsal covers the pins and places nothing:
+///
+/// ```
+/// use qqq_pkg::LockPackage;
+/// use qqq_pkg::store::StoreLayout;
+/// use qqq_run::install::install_offline;
+///
+/// let base = std::env::temp_dir().join(format!("qqq-doctest-dry-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&base);
+/// let store = base.join("store");
+/// let project = base.join("proj");
+/// std::fs::create_dir_all(&project).unwrap();
+/// let layout = StoreLayout::new(&store);
+/// let digest = layout.write(b"payload").unwrap();
+/// let mut pkg = LockPackage::new("qqqai/json", "1.2.3");
+/// pkg.digest = Some(digest.prefixed());
+/// let mut lock = qqq_pkg::Lockfile::new();
+/// lock.push(pkg);
+///
+/// let report = install_offline(&store, &project, &lock, true).unwrap();
+/// assert!(report.placed.is_empty());
+/// assert!(
+///     !project.join(".qqq").exists(),
+///     "a rehearsal must not scaffold the packages directory"
+/// );
+/// let _ = std::fs::remove_dir_all(&base);
+/// ```
+///
+/// ```should_panic
+/// use qqq_pkg::LockPackage;
+/// use qqq_run::install::install_offline;
+///
+/// // A cold store holds nothing, so placing from it must refuse.
+/// let base = std::env::temp_dir().join(format!("qqq-doctest-cold-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&base);
+/// let store = base.join("store");
+/// let project = base.join("proj");
+/// std::fs::create_dir_all(&project).unwrap();
+/// let digest = qqq_pkg::store::Digest::of(b"never stored");
+/// let mut pkg = LockPackage::new("qqqai/json", "1.2.3");
+/// pkg.digest = Some(digest.prefixed());
+/// let mut lock = qqq_pkg::Lockfile::new();
+/// lock.push(pkg);
+///
+/// install_offline(&store, &project, &lock, false).unwrap();
+/// ```
+///
+/// ```should_panic
+/// use qqq_pkg::LockPackage;
+/// use qqq_pkg::store::StoreLayout;
+/// use qqq_run::install::install_offline;
+///
+/// // A partial store is a cold store for the missing half: the present
+/// // package is verified, but nothing is placed until everything is.
+/// let base = std::env::temp_dir().join(format!("qqq-doctest-partial-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&base);
+/// let store = base.join("store");
+/// let project = base.join("proj");
+/// std::fs::create_dir_all(&project).unwrap();
+/// let layout = StoreLayout::new(&store);
+/// let present = layout.write(b"present").unwrap();
+/// let mut have = LockPackage::new("qqqai/json", "1.2.3");
+/// have.digest = Some(present.prefixed());
+/// let missing = qqq_pkg::store::Digest::of(b"absent");
+/// let mut want = LockPackage::new("qqqai/text", "0.4.0");
+/// want.digest = Some(missing.prefixed());
+/// let mut lock = qqq_pkg::Lockfile::new();
+/// lock.push(have);
+/// lock.push(want);
+///
+/// install_offline(&store, &project, &lock, false).unwrap();
+/// ```
+///
+/// A second run over identical bytes is a no-op that reports itself, so a
+/// repeated install is safe and observable:
+///
+/// ```
+/// use qqq_pkg::LockPackage;
+/// use qqq_pkg::store::StoreLayout;
+/// use qqq_run::install::install_offline;
+///
+/// let base = std::env::temp_dir().join(format!("qqq-doctest-idem-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&base);
+/// let store = base.join("store");
+/// let project = base.join("proj");
+/// std::fs::create_dir_all(&project).unwrap();
+/// let layout = StoreLayout::new(&store);
+/// let digest = layout.write(b"same").unwrap();
+/// let mut pkg = LockPackage::new("qqqai/json", "1.2.3");
+/// pkg.digest = Some(digest.prefixed());
+/// let mut lock = qqq_pkg::Lockfile::new();
+/// lock.push(pkg);
+///
+/// install_offline(&store, &project, &lock, false).unwrap();
+/// let second = install_offline(&store, &project, &lock, false).unwrap();
+/// assert_eq!(second.placed[0].method, "already-present");
+/// let _ = std::fs::remove_dir_all(&base);
+/// ```
+///
+/// A pin without a digest fails closed: the store is content-addressed, and a
+/// digestless pin can never be found in it — scanning by name would pretend
+/// the store indexes what it does not:
+///
+/// ```should_panic
+/// use qqq_pkg::LockPackage;
+/// use qqq_pkg::store::StoreLayout;
+/// use qqq_run::install::install_offline;
+///
+/// let base = std::env::temp_dir().join(format!("qqq-doctest-nodigest-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&base);
+/// let store = base.join("store");
+/// let project = base.join("proj");
+/// std::fs::create_dir_all(&project).unwrap();
+/// StoreLayout::new(&store).write(b"unrelated").unwrap();
+/// let mut lock = qqq_pkg::Lockfile::new();
+/// lock.push(LockPackage::new("qqqai/json", "1.2.3"));
+///
+/// install_offline(&store, &project, &lock, false).unwrap();
+/// ```
+///
+/// # Errors
+///
+/// * `QQQ-5001` — a pin carries no digest (the store cannot be searched by
+///   name), naming that package; or a digest is absent from the store (cold or
+///   partial store), naming every missing package. Nothing is placed on
+///   either path.
+/// * `QQQ-5001`/`QQQ-5006` — a pin's digest does not parse, carrying the
+///   digest parser's own code: the pin is corrupt, not merely absent.
+/// * `QQQ-5006` — a package name escapes `.qqq/packages`, or a link, copy,
+///   rename, or read-only step failed mid-placement, naming the package.
+pub fn install_offline(
+    store_root: &Path,
+    project_dir: &Path,
+    lockfile: &Lockfile,
+    dry_run: bool,
+) -> Result<OfflineReport> {
+    // Phase 1 — check everything before placing anything. A digest is looked
+    // up exactly once per package: presence here, then placement below, so a
+    // package cannot pass the check against one store state and place from
+    // another without `materialize`'s own verification catching it. Names are
+    // validated here too, so a bad pin fails before its siblings are placed.
+    let store = StoreLayout::new(store_root);
+    let mut wanted: Vec<(&str, Digest, PathBuf)> = Vec::with_capacity(lockfile.len());
+    for pkg in &lockfile.packages {
+        let Some(digest_text) = pkg.digest.as_deref() else {
+            return Err(Error::new(
+                ErrorCode::RegistryUnreachable,
+                format!(
+                    "could not place `{}` from the local store: `qqq.lock` pins no digest for it",
+                    pkg.name
+                ),
+            )
+            .with_remediation(
+                "re-resolve with network access so the pin records a digest (fetching is Checklist PKG-002), then retry `--offline`",
+            ));
+        };
+        let digest = Digest::parse(digest_text).map_err(|parse_err| {
+            Error::new(
+                parse_err.code,
+                format!(
+                    "could not place `{}` from the local store: its `qqq.lock` digest does not parse",
+                    pkg.name
+                ),
+            )
+            .with_cause(parse_err.message)
+            .with_remediation("re-resolve with network access so the pin records a digest, then retry `--offline`")
+        })?;
+        let dest = package_dest(project_dir, &pkg.name)?;
+        wanted.push((pkg.name.as_str(), digest, dest));
+    }
+    let mut missing: Vec<String> = Vec::new();
+    for (name, digest, _) in &wanted {
+        if !store.contains(digest) {
+            missing.push(format!("`{name}` ({})", digest.prefixed()));
+        }
+    }
+    if !missing.is_empty() {
+        return Err(Error::new(
+            ErrorCode::RegistryUnreachable,
+            format!(
+                "could not place {} from the local store: not in the store",
+                missing.join(", ")
+            ),
+        )
+        .with_remediation(
+            "populate the store first (fetching is Checklist PKG-002), or narrow the manifest to what the store holds",
+        ));
+    }
+
+    // Phase 2 — every digest is present, so place each one, unless this is a
+    // rehearsal. `materialize` re-verifies the bytes at link time, closing the
+    // check-then-place window to a loud refusal rather than a silent mismatch.
+    if dry_run {
+        return Ok(OfflineReport { placed: Vec::new() });
+    }
+    let mut placed = Vec::with_capacity(wanted.len());
+    for (name, digest, dest) in &wanted {
+        let materialized = store.materialize(digest, dest).map_err(|e| {
+            Error::new(
+                e.code,
+                format!("could not place `{name}` from the local store"),
+            )
+            .with_cause(e.message)
+        })?;
+        placed.push(OfflinePlaced {
+            package: (*name).to_owned(),
+            method: match materialized.method {
+                LinkMethod::HardLink => "hardlink",
+                LinkMethod::Copied => "copied",
+                LinkMethod::AlreadyPresent => "already-present",
+            }
+            .to_owned(),
+            bytes: materialized.bytes,
+        });
+    }
+    Ok(OfflineReport { placed })
+}
+
+// ---------------------------------------------------------------------------
 // The error for a package that cannot be fetched
 // ---------------------------------------------------------------------------
 
@@ -432,6 +907,36 @@ pub struct InstallOutput {
     /// Denormalized deliberately: CI needs to branch on this without walking
     /// the list, and §5.4's whole point is that this must be branchable on.
     pub escalation: bool,
+    /// The packages an `--offline` run placed from the local store, in lockfile
+    /// order. Empty on every other mode — and on an offline dry run, which
+    /// verifies coverage without placing.
+    ///
+    /// Additive on purpose: the JSON contract only ever gains this field, so a
+    /// reader written before PKG-014 ignores it rather than breaking. What it
+    /// names is the whole result of the offline path — resolve decides the set
+    /// (see `packages`), this decides what reached the project.
+    ///
+    /// ```
+    /// use qqq_run::install::{InstallOutput, LockMode};
+    /// use qqq_run::output::CommandOutput;
+    ///
+    /// let out = InstallOutput {
+    ///     manifest: "qqq.toml".to_owned(),
+    ///     lockfile: "qqq.lock".to_owned(),
+    ///     packages: 1,
+    ///     wrote_lockfile: true,
+    ///     dry_run: false,
+    ///     mode: LockMode::Offline.as_str().to_owned(),
+    ///     changes: 0,
+    ///     capability_changes: Vec::new(),
+    ///     escalation: false,
+    ///     offline_placed: vec!["qqqai/json".to_owned()],
+    /// };
+    /// let json = out.to_json();
+    /// assert_eq!(json["offline_placed"][0], "qqqai/json");
+    /// assert_eq!(json["mode"], "offline");
+    /// ```
+    pub offline_placed: Vec<String>,
 }
 
 impl crate::output::CommandOutput for InstallOutput {
@@ -455,6 +960,18 @@ impl crate::output::CommandOutput for InstallOutput {
                 self.lockfile,
                 self.packages,
                 detail.join("; ")
+            );
+        }
+
+        // The offline path places bytes, not just pins: the summary says what
+        // reached the project, because a lockfile write alone would report
+        // success for work the store may still refuse.
+        if self.mode == LockMode::Offline.as_str() && !self.offline_placed.is_empty() {
+            return format!(
+                "{}: placed {} package(s) from the local store ({})",
+                self.lockfile,
+                self.offline_placed.len(),
+                self.offline_placed.join(", ")
             );
         }
 
@@ -1062,5 +1579,309 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -- PKG-014: `install --offline` from the local store --------------------
+
+    /// Seed a store with `entries` and pin their digests in a lockfile.
+    ///
+    /// Returns the lockfile, the store root, and the project directory. The
+    /// world is staged with the store's own `write` — the alternative,
+    /// hand-rolling the fan-out layout, would duplicate the layout beside it
+    /// and pass while the real paths disagree.
+    fn offline_world(tag: &str, entries: &[(&str, &str, &[u8])]) -> (Lockfile, PathBuf, PathBuf) {
+        let base = temp_dir(&format!("offline-{tag}"));
+        let store = base.join("store");
+        let project = base.join("proj");
+        std::fs::create_dir_all(&project).expect("create project");
+        let layout = qqq_pkg::store::StoreLayout::new(&store);
+        let mut lock = Lockfile::new();
+        for (name, version, bytes) in entries {
+            let digest = layout.write(bytes).expect("seed store");
+            let mut pkg = LockPackage::new(*name, *version);
+            pkg.digest = Some(digest.prefixed());
+            lock.push(pkg);
+        }
+        (lock, store, project)
+    }
+
+    /// Remove a tree that may hold read-only materialized files.
+    ///
+    /// `remove_dir_all` fails on Windows when a file is read-only, and every
+    /// placement below leaves its destination read-only by design — so the bit
+    /// is cleared first. Only the test trees are walked, never the store.
+    #[allow(
+        clippy::permissions_set_readonly_false,
+        reason = "test cleanup must delete the read-only fixtures materialization leaves; the shipped replacement path goes through settle_destination instead"
+    )]
+    fn remove_tree(root: &Path) {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && !path.is_symlink() {
+                    stack.push(path);
+                } else if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                    let mut perms = meta.permissions();
+                    perms.set_readonly(false);
+                    let _ = std::fs::set_permissions(&path, perms);
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The whole point: every pinned package lands in the project byte-identical,
+    /// in lockfile order.
+    #[test]
+    fn offline_install_places_every_pinned_package() {
+        let (lock, store, project) = offline_world(
+            "happy",
+            &[
+                ("qqqai/json", "1.2.3", b"{\"v\":1}"),
+                ("qqqai/text", "0.4.0", b"plain"),
+            ],
+        );
+        let report = install_offline(&store, &project, &lock, false).expect("must place");
+        assert_eq!(report.placed.len(), 2);
+        assert_eq!(
+            report
+                .placed
+                .iter()
+                .map(|p| p.package.as_str())
+                .collect::<Vec<_>>(),
+            vec!["qqqai/json", "qqqai/text"],
+            "the report follows lockfile order"
+        );
+        assert_eq!(
+            std::fs::read(project.join(".qqq/packages/qqqai/json")).expect("read placed"),
+            b"{\"v\":1}"
+        );
+        assert_eq!(
+            std::fs::read(project.join(".qqq/packages/qqqai/text")).expect("read placed"),
+            b"plain"
+        );
+        remove_tree(project.parent().expect("base"));
+    }
+
+    /// A second run is a no-op that reports itself: nothing is re-fetched because
+    /// there is nothing to fetch from, and nothing is re-linked.
+    #[test]
+    fn offline_install_is_idempotent() {
+        let (lock, store, project) =
+            offline_world("idempotent", &[("qqqai/json", "1.2.3", b"same")]);
+        install_offline(&store, &project, &lock, false).expect("first");
+        let second = install_offline(&store, &project, &lock, false).expect("second");
+        assert_eq!(second.placed.len(), 1);
+        assert_eq!(
+            second.placed.first().expect("one package placed").method,
+            "already-present",
+            "the bytes are already there; the report must say so"
+        );
+        remove_tree(project.parent().expect("base"));
+    }
+
+    /// A cold store fails closed naming the package and its digest — and places
+    /// nothing, because the check runs before the first placement.
+    #[test]
+    fn offline_install_fails_closed_on_a_cold_store() {
+        let base = temp_dir("offline-cold");
+        let store = base.join("store");
+        let project = base.join("proj");
+        std::fs::create_dir_all(&project).expect("create project");
+        let digest = qqq_pkg::store::Digest::of(b"never stored");
+        let mut pkg = LockPackage::new("qqqai/json", "1.2.3");
+        pkg.digest = Some(digest.prefixed());
+        let mut lock = Lockfile::new();
+        lock.push(pkg);
+
+        let e = install_offline(&store, &project, &lock, false).unwrap_err();
+        let text = e.render();
+        assert!(text.contains("qqqai/json"), "must name the package: {text}");
+        assert!(
+            text.contains(digest.hex()),
+            "must name the missing digest: {text}"
+        );
+        assert!(
+            !project.join(".qqq").exists(),
+            "a refusal must not scaffold the packages directory"
+        );
+        remove_tree(&base);
+    }
+
+    /// A partial store fails closed too — and all-or-nothing: the present
+    /// package must NOT be placed when its sibling is missing, or a retry
+    /// after repopulating the store would inherit a half-installed project.
+    #[test]
+    fn offline_install_fails_closed_on_a_partial_store() {
+        let (mut lock, store, project) =
+            offline_world("partial", &[("qqqai/json", "1.2.3", b"present")]);
+        let missing = qqq_pkg::store::Digest::of(b"absent");
+        let mut pkg = LockPackage::new("qqqai/text", "0.4.0");
+        pkg.digest = Some(missing.prefixed());
+        lock.push(pkg);
+
+        let e = install_offline(&store, &project, &lock, false).unwrap_err();
+        let text = e.render();
+        assert!(
+            text.contains("qqqai/text"),
+            "must name the missing one: {text}"
+        );
+        assert!(
+            !text.contains("qqqai/json"),
+            "must not blame the present one: {text}"
+        );
+        assert!(
+            !project.join(".qqq/packages/qqqai/json").exists(),
+            "all-or-nothing: the present package stays unplaced: {text}"
+        );
+        remove_tree(project.parent().expect("base"));
+    }
+
+    /// The store is content-addressed: a pin without a digest can never be
+    /// found in it, so it fails closed naming the package rather than
+    /// scanning the store for a name the store does not index by.
+    #[test]
+    fn offline_install_needs_a_digest_for_every_package() {
+        let base = temp_dir("offline-nodigest");
+        let store = base.join("store");
+        let project = base.join("proj");
+        std::fs::create_dir_all(&project).expect("create project");
+        let layout = qqq_pkg::store::StoreLayout::new(&store);
+        layout.write(b"unrelated").expect("seed");
+        let mut lock = Lockfile::new();
+        lock.push(LockPackage::new("qqqai/json", "1.2.3"));
+
+        let e = install_offline(&store, &project, &lock, false).unwrap_err();
+        assert!(
+            e.render().contains("qqqai/json"),
+            "must name the digestless package: {}",
+            e.render()
+        );
+        remove_tree(&base);
+    }
+
+    /// A digest that does not parse is a corrupt pin, not a missed lookup.
+    #[test]
+    fn offline_install_rejects_a_malformed_digest() {
+        let base = temp_dir("offline-baddigest");
+        let store = base.join("store");
+        let project = base.join("proj");
+        std::fs::create_dir_all(&project).expect("create project");
+        let mut pkg = LockPackage::new("qqqai/json", "1.2.3");
+        pkg.digest = Some("not-a-digest".to_owned());
+        let mut lock = Lockfile::new();
+        lock.push(pkg);
+
+        let e = install_offline(&store, &project, &lock, false).unwrap_err();
+        assert!(
+            e.render().contains("qqqai/json"),
+            "must name the package with the bad pin: {}",
+            e.render()
+        );
+        remove_tree(&base);
+    }
+
+    /// A store entry that fails verification aborts loudly: the error names the
+    /// package, and the destination is left absent — `materialize` removes its
+    /// temp file rather than leaving a suspect file behind.
+    #[test]
+    fn offline_install_aborts_loud_on_a_corrupt_store_entry() {
+        let base = temp_dir("offline-corrupt");
+        let store = base.join("store");
+        let project = base.join("proj");
+        std::fs::create_dir_all(&project).expect("create project");
+        let layout = qqq_pkg::store::StoreLayout::new(&store);
+        let digest = layout.write(b"the original content").expect("seed");
+        // Corrupt the entry in place, the way a truncated write would.
+        std::fs::write(layout.artifact_path(&digest), b"tampered").expect("corrupt");
+        let mut pkg = LockPackage::new("qqqai/json", "1.2.3");
+        pkg.digest = Some(digest.prefixed());
+        let mut lock = Lockfile::new();
+        lock.push(pkg);
+
+        let e = install_offline(&store, &project, &lock, false).unwrap_err();
+        let text = e.render();
+        assert!(text.contains("qqqai/json"), "must name the package: {text}");
+        assert!(
+            !project.join(".qqq/packages/qqqai/json").exists(),
+            "a refused placement leaves no destination behind"
+        );
+        remove_tree(&base);
+    }
+
+    /// A bad name fails before its siblings are placed: validation lives in the
+    /// check phase, so `[good-pin, ../../evil]` places nothing.
+    #[test]
+    fn offline_install_validates_every_name_before_placing_anything() {
+        let (mut lock, store, project) =
+            offline_world("badname", &[("qqqai/json", "1.2.3", b"present")]);
+        let layout = qqq_pkg::store::StoreLayout::new(&store);
+        let digest = layout.write(b"evil-bytes").expect("seed");
+        let mut evil = LockPackage::new("../../evil", "9.9.9");
+        evil.digest = Some(digest.prefixed());
+        lock.push(evil);
+
+        let e = install_offline(&store, &project, &lock, false).unwrap_err();
+        assert!(
+            e.render().contains("../../evil"),
+            "must name the escaping pin: {}",
+            e.render()
+        );
+        assert!(
+            !project.join(".qqq/packages/qqqai/json").exists(),
+            "all-or-nothing: the good pin stays unplaced"
+        );
+        remove_tree(project.parent().expect("base"));
+    }
+
+    /// A package name is a relative path under `.qqq/packages` — and `..`
+    /// must not escape it. The lockfile is an input, and an input that names
+    /// `../../evil` must be refused rather than followed.
+    #[test]
+    fn offline_package_names_cannot_escape_the_packages_dir() {
+        let project = PathBuf::from("/proj");
+        assert!(package_dest(&project, "../../evil").is_err());
+        assert!(package_dest(&project, "a/../../b").is_err());
+        assert!(package_dest(&project, "..\\evil").is_err());
+        assert!(package_dest(&project, "").is_err());
+        assert_eq!(
+            package_dest(&project, "qqqai/json").expect("scoped name"),
+            PathBuf::from("/proj/.qqq/packages/qqqai/json")
+        );
+    }
+
+    /// `QQQ_STORE_DIR` wins when it is set; the home profile is the fallback.
+    #[test]
+    fn store_root_prefers_the_explicit_override() {
+        assert_eq!(
+            store_root_from(Some(OsStr::new("/s")), Some(OsStr::new("/h"))),
+            Some(PathBuf::from("/s"))
+        );
+    }
+
+    #[test]
+    fn store_root_falls_back_to_the_home_profile() {
+        assert_eq!(
+            store_root_from(None, Some(OsStr::new("/h"))),
+            Some(PathBuf::from("/h/.qqq/store"))
+        );
+        assert_eq!(store_root_from(None, None), None);
+    }
+
+    /// An explicitly empty override is not a root: it would resolve relative
+    /// to the working directory, which is ambient state a placement path must
+    /// never depend on.
+    #[test]
+    fn store_root_ignores_empty_values() {
+        assert_eq!(
+            store_root_from(Some(OsStr::new("")), Some(OsStr::new("/h"))),
+            Some(PathBuf::from("/h/.qqq/store"))
+        );
+        assert_eq!(store_root_from(Some(OsStr::new("")), None), None);
+        assert_eq!(store_root_from(None, Some(OsStr::new(""))), None);
     }
 }

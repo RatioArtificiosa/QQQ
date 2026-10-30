@@ -1,0 +1,44 @@
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+warning: variable does not need to be mutable
+   --> crates\qqq-run\src\install.rs:768:9
+    |
+768 |     let mut missing: Vec<String> = Vec::new();
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `qqq-run` (lib test) generated 1 warning (run `cargo fix --lib -p qqq-run --tests` to apply 1 suggestion)
+    Finished `test` profile [optimized + debuginfo] target(s) in 12.94s
+     Running unittests src\lib.rs (target\debug\deps\qqq_run-1556b855476140be.exe)
+
+running 8 tests
+test install::tests::offline_install_rejects_a_malformed_digest ... ok
+test install::tests::offline_install_fails_closed_on_a_cold_store ... ok
+test install::tests::offline_install_needs_a_digest_for_every_package ... ok
+test install::tests::offline_install_aborts_loud_on_a_corrupt_store_entry ... ok
+test install::tests::offline_install_fails_closed_on_a_partial_store ... FAILED
+test install::tests::offline_install_validates_every_name_before_placing_anything ... ok
+test install::tests::offline_install_is_idempotent ... ok
+test install::tests::offline_install_places_every_pinned_package ... ok
+
+failures:
+
+---- install::tests::offline_install_fails_closed_on_a_partial_store stdout ----
+
+thread 'install::tests::offline_install_fails_closed_on_a_partial_store' (386864) panicked at crates\qqq-run\src\install.rs:1720:9:
+all-or-nothing: the present package stays unplaced: error[QQQ-5001]: could not place `qqqai/text` from the local store
+  caused by: `sha256:5ad38304b535c2987dbd24657c1a11b884984ff600d9f389deb0d4e634fee792` is not in the store
+
+  Docs: https://qqq.codes/errors/QQQ-5001
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    install::tests::offline_install_fails_closed_on_a_partial_store
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 683 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p qqq-run --lib`

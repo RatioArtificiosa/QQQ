@@ -1,0 +1,72 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.76s
+     Running tests\cli.rs (target\debug\deps\cli-5eea4757785ed60f.exe)
+
+running 5 tests
+test install_offline_fails_closed_on_a_cold_store ... FAILED
+test install_offline_names_unpinned_packages_for_the_online_path ... FAILED
+test install_offline_dry_run_verifies_without_placing ... ok
+test install_offline_places_pinned_packages_from_the_store ... FAILED
+test install_offline_fails_closed_on_a_partial_store ... FAILED
+
+failures:
+
+---- install_offline_fails_closed_on_a_cold_store stdout ----
+
+thread 'install_offline_fails_closed_on_a_cold_store' (392556) panicked at crates\qqq-run\tests\cli.rs:211:9:
+assertion `left != right` failed: expected failure, got exit 0
+stdout:
+qqq.lock: 1 package(s) resolved, wrote qqq.lock
+
+stderr:
+
+  left: 0
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- install_offline_names_unpinned_packages_for_the_online_path stdout ----
+
+thread 'install_offline_names_unpinned_packages_for_the_online_path' (394652) panicked at crates\qqq-run\tests\cli.rs:221:9:
+output must contain "offline"
+stdout:
+error[QQQ-5001]: could not fetch `qqqai/new`: it is not in `qqq.lock` and there is no registry to resolve it from
+
+  ÔåÆ the QQQ registry is not built yet (Checklist `PKG-006`), so only dependencies already in `qqq.lock` resolve; see QQQ-Proposal-V1.md ┬º6.5 for the registry plan
+
+  Docs: https://qqq.codes/errors/QQQ-5001
+
+
+stderr:
+
+
+---- install_offline_places_pinned_packages_from_the_store stdout ----
+
+thread 'install_offline_places_pinned_packages_from_the_store' (400380) panicked at crates\qqq-run\tests\cli.rs:221:9:
+output must contain "placed"
+stdout:
+qqq.lock: 1 package(s) resolved, wrote qqq.lock
+
+stderr:
+
+
+---- install_offline_fails_closed_on_a_partial_store stdout ----
+
+thread 'install_offline_fails_closed_on_a_partial_store' (392012) panicked at crates\qqq-run\tests\cli.rs:211:9:
+assertion `left != right` failed: expected failure, got exit 0
+stdout:
+qqq.lock: 2 package(s) resolved, wrote qqq.lock
+
+stderr:
+
+  left: 0
+ right: 0
+
+
+failures:
+    install_offline_fails_closed_on_a_cold_store
+    install_offline_fails_closed_on_a_partial_store
+    install_offline_names_unpinned_packages_for_the_online_path
+    install_offline_places_pinned_packages_from_the_store
+
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 101 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p qqq-run --test cli`

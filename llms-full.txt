@@ -5175,12 +5175,12 @@ Pre-1.0, only the latest release receives security fixes. After 1.0, the two mos
 
 <!-- source: docs/dependency-decisions/zstd-cache.md -->
 
-## Dependency decision: vendored `wasmtime-internal-cache` 48.0.7 (zstd 0.13 → 0.14)
+## Dependency decision: vendored `wasmtime-internal-cache` 48.0.8 (zstd 0.13 → 0.14)
 
-- **Date:** 2026-10-27
+- **Date:** 2026-10-27 (re-vendored 48.0.7 → 48.0.8 on 2026-10-30 for RUSTSEC-2026-0420)
 - **Status:** implemented, `cargo deny check` green, cache path exercised
 - **Scope:** `E:\QQQ\vendor\wasmtime-internal-cache` + `[patch.crates-io]` in workspace `Cargo.toml`
-- **Checklist:** Phase 0 gate work (`cargo deny` red on four zstd advisories)
+- **Checklist:** Phase 0 gate work (`cargo deny` red on four zstd advisories; 2026-10-30 red on RUSTSEC-2026-0420 wasip3 UDP)
 
 ### The problem
 
@@ -5217,11 +5217,12 @@ Pre-1.0, only the latest release receives security fixes. After 1.0, the two mos
 ### What was done instead: vendor with a one-line requirement change
 
 `vendor/wasmtime-internal-cache` is a byte copy of the crates.io source for
-48.0.7 with exactly one functional edit. Provenance is verified, not assumed:
-re-extract the upstream source (`cargo vendor --versioned-dirs` into a scratch
-dir, or unpack the `.crate` file) and `diff -r` it against `vendor/` — the
-only content difference must be the `zstd` requirement line below plus the
-absent registry artifacts (`.cargo-ok`, root `Cargo.lock`, `.cargo-checksum.json`
+48.0.8 (previously 48.0.7; re-vendored 2026-10-30) with exactly one functional
+edit. Provenance is verified, not assumed: re-extract the upstream source
+(`cargo vendor --versioned-dirs` into a scratch dir, or unpack the `.crate`
+file) and `diff -r` it against `vendor/` — the only content difference must
+be the `zstd` requirement line below plus the absent registry artifacts
+(`.cargo-ok`, root `Cargo.lock`, `.cargo-checksum.json`, `.cargo_vcs_info.json`
 are registry bookkeeping, not upstream sources, and are not vendored):
 
 ```diff
@@ -5269,6 +5270,14 @@ the 0.13→0.14 boundary — verified by compile, not by reading changelogs.
   keep `.cargo-checksum.json` from upstream, re-run `cargo deny check` and
   the cache tests above. Any other diff against upstream must be justified
   in this file.
+- **2026-10-30 re-vendor (48.0.7 → 48.0.8):** `cargo deny` went red on
+  RUSTSEC-2026-0420 (wasip3 UDP `send` to a receive-only address, fixed in
+  `wasmtime-wasi 48.0.8`). A plain `cargo update -p wasmtime-wasi --precise
+  48.0.8` resolves the advisory but downgrades `zstd 0.14.3 → 0.13.3`,
+  re-opening RUSTSEC-2026-0391/0398/0403/0410 — so the vendor directory was
+  re-based onto the 48.0.8 upstream source with the same one-line zstd
+  requirement. Verified: `zstd` stays `0.14.3` / `zstd-safe 8.2.0` /
+  `zstd-sys 2.1.2`, `cargo deny check` green (advisories/bans/licenses/sources).
 - **Exit condition:** delete `vendor/` and the `[patch]` block when a
   Wasmtime release compatible with the engine pin requires `zstd >= 0.14`
   natively. Watch each Wasmtime 48+ release for the zstd requirement.

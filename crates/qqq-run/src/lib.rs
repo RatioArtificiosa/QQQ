@@ -150,7 +150,7 @@ pub use scaffold::{
 pub use test_runner::{
     DiscoveredTest, OutcomeReport, SnapshotMode, SnapshotStatus, TestFormat, TestOptions,
     TestOutcome, TestOutput, by_file, discover, execute as run_tests, filter_tests, tests_dir,
-    to_junit, to_tap,
+    to_junit, to_tap, watch_loop,
 };
 pub use update::{
     CandidateReport, Decision, FixedVersions, NoRegistry, Strategy, UpdateCandidate, UpdateOptions,

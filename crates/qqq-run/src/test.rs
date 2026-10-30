@@ -122,6 +122,25 @@ pub struct TestOptions {
     /// assert_eq!(opts.trial_count(), 1, "jobs do not change trial semantics");
     /// ```
     pub jobs: Option<u32>,
+    /// Re-run the suite whenever the sources change (`TEST-002`, watch half).
+    ///
+    /// `false` (the default) runs once and exits: a loop that never returns
+    /// is not a default anyone can use in CI.
+    pub watch: bool,
+    /// Cap on watch re-runs, for tests (`TEST-002`).
+    ///
+    /// `None` (the default) means unbounded: the loop runs until interrupted.
+    /// `Some(n)` stops after `n` re-runs, which is what makes the loop
+    /// verifiable rather than merely observable — an unbounded loop cannot be
+    /// asserted on. The CLI exposes this as `--watch-limit`.
+    ///
+    /// ```
+    /// use qqq_run::test_runner::TestOptions;
+    ///
+    /// let opts = TestOptions::default();
+    /// assert!(opts.watch_limit.is_none(), "unbounded unless capped");
+    /// ```
+    pub watch_limit: Option<u32>,
 }
 
 impl TestOptions {
@@ -1748,6 +1767,149 @@ fn execute_parallel(
         .collect::<Vec<_>>();
     done.sort_by_key(|(index, _)| *index);
     Ok(done.into_iter().map(|(_, report)| report).collect())
+}
+
+/// Watch the project and re-run the suite on change (`TEST-002`, watch half).
+///
+/// The shape mirrors `dev::watch` deliberately: snapshot the tree, poll for
+/// changes, feed the debouncer, and re-run only after the tree has been
+/// quiet for the debounce window. A failed run does not stop the loop — the
+/// failure is what the next edit fixes — and [`Snapshot`]s and debounce
+/// windows are shared with the dev watcher so the two loops agree on what
+/// counts as a change and when it is quiet.
+///
+/// What the watcher looks at: the whole project directory, minus the default
+/// ignore rules (which already skip `target/`, `.git/`, and `.qqq/`) plus
+/// `tests/snapshots/`, whose recordings are outputs — re-running because a
+/// recording landed would chase its own tail — plus the `--history` file
+/// when it lives inside the tree (every rerun appends, so watching it
+/// would self-trigger) and `.cargo-target/`, the CLI integration tests'
+/// per-sandbox Cargo target directory (build output like `target/`, but
+/// under a name the defaults do not match). A test that writes elsewhere
+/// into the tree will retrigger the suite; that is the documented cost of an
+/// honest watcher, and `--isolate` (writes under ignored `target/`) avoids it.
+///
+/// The baseline is refreshed after every run, so files a test wrote are
+/// absorbed rather than re-triggering: without that, a test that writes on
+/// every run would loop forever. The price is that edits made *while a run
+/// is executing* are absorbed too and do not trigger an extra run — save
+/// again after the run finishes. `dev::watch` baselines *before* its
+/// rebuild so concurrent edits survive; the test watcher deliberately
+/// baselines *after* the run so per-run outputs (snapshots, history,
+/// cargo products) do not chase their own tail. Same primitives, different
+/// policy for a different output shape — not a disagreement about what
+/// changed.
+///
+/// `watch_limit` is read from [`TestOptions::watch_limit`]: `Some(n)` stops
+/// after `n` re-runs (the initial run always happens), `None` runs until
+/// interrupted. Returns the number of re-runs performed. Callers set
+/// [`TestOptions::watch`]; calling with it cleared is a programming error.
+///
+/// # Errors
+///
+/// Whatever [`execute`] fails with: an infra failure aborts the loop rather
+/// than reporting stale results forever.
+pub fn watch_loop(
+    project_dir: &Path,
+    language: &str,
+    opts: &TestOptions,
+    emit: &mut dyn FnMut(TestOutput),
+) -> Result<u32> {
+    use crate::watch::{DEFAULT_POLL_INTERVAL, Debouncer, Snapshot};
+    use std::time::Instant;
+
+    debug_assert!(
+        opts.watch,
+        "watch_loop with watch=false loops once and exits; call execute instead"
+    );
+    let rules = test_watch_rules_for(project_dir, opts.history.as_deref());
+    let mut debouncer = Debouncer::with_default_window();
+    let mut reruns = 0u32;
+    loop {
+        let output = execute(project_dir, language, opts)?;
+        emit(output);
+        if opts.watch_limit == Some(reruns) {
+            break;
+        }
+        // Re-baseline after the run: files a test wrote (or cargo wrote
+        // beside it) are absorbed rather than treated as edits. Without
+        // this, every run that touches the tree schedules another run.
+        // The documented price: an edit made *while* a run executes is
+        // absorbed too, and does not trigger its own re-run.
+        let mut snapshot = Snapshot::take(project_dir, &rules);
+        loop {
+            std::thread::sleep(DEFAULT_POLL_INTERVAL);
+            let now = Snapshot::take(project_dir, &rules);
+            let pending = now.changes_since(&snapshot);
+            snapshot = now;
+            if !pending.is_empty() {
+                debouncer.observe(pending.len(), Instant::now());
+            }
+            if debouncer.should_fire(Instant::now()).is_some() {
+                break;
+            }
+        }
+        // A visible marker that the loop is alive and why it woke up: a
+        // silent re-run reads as a hang. Stderr, like the dev server's
+        // reload lines, so machine-readable stdout stays one document
+        // per run.
+        eprintln!("watch: re-running");
+        reruns = reruns.checked_add(1).ok_or_else(|| {
+            Error::new(
+                ErrorCode::InternalInvariantViolated,
+                "watch re-runs overflowed u32",
+            )
+        })?;
+    }
+    Ok(reruns)
+}
+
+/// Ignore rules for `test --watch`: the defaults (which already skip
+/// `target/`, `.git/`, and `.qqq/`) plus `tests/snapshots/`, whose
+/// recordings are outputs — re-running because a recording landed would
+/// chase its own tail — plus `.cargo-target/`, which the CLI integration
+/// tests use as a per-sandbox Cargo target directory (see
+/// `target_dir_for`): it changes as a result of the run, like `target/`,
+/// but its name does not match the default `target` entry.
+///
+/// Ignoring one extra build-output name in production is safe: a directory
+/// named `.cargo-target` holding real sources would be surprising, and the
+/// failure mode is a missed trigger rather than a spurious run.
+#[cfg(test)]
+fn test_watch_rules() -> crate::watch::IgnoreRules {
+    test_watch_rules_for(std::path::Path::new("."), None)
+}
+
+/// Watch rules plus the `--history` file when it lives inside the tree.
+///
+/// Every rerun appends to the history file, so watching it would
+/// self-trigger: run writes history, history counts as a change, change
+/// schedules a run. The path is relativized against `project_dir` so an
+/// absolute `--history` inside the tree becomes the relative prefix the
+/// watcher expects; a history outside the tree needs no rule.
+fn test_watch_rules_for(
+    project_dir: &std::path::Path,
+    history: Option<&std::path::Path>,
+) -> crate::watch::IgnoreRules {
+    let mut rules = crate::watch::IgnoreRules::default()
+        .ignoring("tests/snapshots")
+        .ignoring(".cargo-target");
+    if let Some(path) = history {
+        // Absolute inside the tree -> relative prefix; relative -> as given;
+        // absolute outside -> nothing to ignore (it is not watched anyway).
+        if let Ok(rel) = path.strip_prefix(project_dir) {
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if !rel_str.is_empty() {
+                rules = rules.ignoring(rel_str);
+            }
+        } else if path.is_relative() {
+            let rel_str = path.to_string_lossy().replace('\\', "/");
+            if !rel_str.is_empty() {
+                rules = rules.ignoring(rel_str);
+            }
+        }
+    }
+    rules
 }
 
 /// Group outcomes by file, for a readable summary.
@@ -3625,5 +3787,74 @@ mod cr22_tests {
         let msg = failure_message(&outcome);
         assert!(msg.contains("snapshot mismatch"), "{msg}");
         assert!(msg.contains("trial(s) 2"), "{msg}");
+    }
+
+    // -- TEST-002: watch mode --------------------------------------------------
+
+    /// Snapshots are inputs, not triggers: a recording landing in
+    /// `tests/snapshots/` must not schedule another run, while sources,
+    /// manifests, and build files must.
+    #[test]
+    fn watch_ignores_recordings_but_watches_sources() {
+        let dir = snap_dir("watch-rules");
+        let rules = test_watch_rules();
+        assert!(
+            rules.is_ignored(&dir, &dir.join("tests/snapshots/a.snap")),
+            "recordings are outputs, not triggers"
+        );
+        assert!(
+            !rules.is_ignored(&dir, &dir.join("src/lib.rs")),
+            "sources must trigger"
+        );
+        assert!(
+            !rules.is_ignored(&dir, &dir.join("qqq.toml")),
+            "the manifest must trigger"
+        );
+        assert!(
+            !rules.is_ignored(&dir, &dir.join("Cargo.toml")),
+            "the build file must trigger"
+        );
+        assert!(
+            rules.is_ignored(&dir, &dir.join("target/debug/x")),
+            "build products must not trigger"
+        );
+        assert!(
+            rules.is_ignored(&dir, &dir.join(".cargo-target/debug/x")),
+            "the integration-test target dir is build output too"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `--history` file is output, not a trigger: when it lives inside
+    /// the tree, every rerun would append and self-schedule without this.
+    #[test]
+    fn watch_ignores_in_tree_history() {
+        let dir = snap_dir("watch-history");
+        // Relative history inside the tree.
+        let rules = test_watch_rules_for(&dir, Some(std::path::Path::new("history.jsonl")));
+        assert!(
+            rules.is_ignored(&dir, &dir.join("history.jsonl")),
+            "a history file the run appends must not retrigger"
+        );
+        assert!(
+            !rules.is_ignored(&dir, &dir.join("src/lib.rs")),
+            "sources must still trigger with history set"
+        );
+        // Absolute history inside the tree relativizes to the same rule.
+        let abs = dir.join("logs/history.jsonl");
+        let rules_abs = test_watch_rules_for(&dir, Some(&abs));
+        assert!(
+            rules_abs.is_ignored(&dir, &abs),
+            "an absolute in-tree history must be relativized, not watched"
+        );
+        // Absolute history outside the tree needs no rule — and must not
+        // swallow sources.
+        let outside = std::env::temp_dir().join("qqq-watch-outside-history.jsonl");
+        let rules_out = test_watch_rules_for(&dir, Some(&outside));
+        assert!(
+            !rules_out.is_ignored(&dir, &dir.join("src/lib.rs")),
+            "an outside history must not change what triggers"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

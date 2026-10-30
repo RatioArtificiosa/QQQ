@@ -1895,17 +1895,6 @@ fn dispatch_test(
         .to_path_buf();
     let language = loaded.manifest.build.language.clone();
 
-    let result = match qqq_run::run_tests(&project_dir, &language, &opts) {
-        Ok(mut r) => {
-            loaded.name().clone_into(&mut r.project);
-            r
-        }
-        Err(e) => {
-            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
-            return ExitCode::from(exit::FAILURE);
-        }
-    };
-
     // A determinism failure counts as a failure for the exit code. A test
     // that passed 4 of 5 trials is not a passing test, and exiting `0`
     // would let CI accept it — which is the one outcome `--trials` exists
@@ -1922,35 +1911,53 @@ fn dispatch_test(
         }
     };
 
-    // `TEST-003`. A foreign report format is a document for **another tool**, so it is written
-    // raw rather than through the envelope — a CI reporter handed JUnit XML inside QQQ's JSON
-    // envelope would parse neither. The precedent is `qqqai mcp`, whose output is the protocol
-    // and which ignores the formatter for the same reason.
-    if opts.format.is_foreign() {
-        let document = match opts.format {
-            qqq_run::TestFormat::Junit => qqq_run::to_junit(&result),
-            qqq_run::TestFormat::Tap => qqq_run::to_tap(&result),
-            // `is_foreign` is exactly these two, so this arm is unreachable. It exists rather
-            // than a wildcard so that adding a format is a compile error here instead of a
-            // silently empty document — an empty report parses as "no tests", which reads as a
-            // pass.
-            qqq_run::TestFormat::Human | qqq_run::TestFormat::Json => String::new(),
-        };
-        print!("{document}");
-        let _ = std::io::stdout().flush();
-        return ExitCode::from(verdict(&result));
+    // `TEST-002` watch half: loop `execute` until interrupted, emitting every
+    // run through the same path the single run uses. The final run's verdict
+    // is the exit code. `--watch-limit N` bounds the loop for tests and
+    // scripts; without it the loop has no end.
+    if opts.watch {
+        eprintln!(
+            "watching {} for changes (Ctrl-C to stop)",
+            project_dir.display()
+        );
+        let mut code = ExitCode::from(exit::OK);
+        {
+            let out_ref = &mut *out;
+            let mut emit = |result: qqq_run::TestOutput| {
+                let mut result = result;
+                loaded.name().clone_into(&mut result.project);
+                code = emit_test_report(out_ref, name, &opts, &verdict, &result);
+            };
+            if let Err(e) = qqq_run::watch_loop(&project_dir, &language, &opts, &mut emit) {
+                let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
+                return ExitCode::from(exit::FAILURE);
+            }
+        }
+        return code;
     }
 
-    report_with_verdict(out, name, &result, verdict)
+    let result = match qqq_run::run_tests(&project_dir, &language, &opts) {
+        Ok(mut r) => {
+            loaded.name().clone_into(&mut r.project);
+            r
+        }
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
+
+    emit_test_report(out, name, &opts, &verdict, &result)
 }
 
 /// Apply one `test` runner execution flag (`--jobs`, `--snapshot`,
-/// `--snapshot-update`).
+/// `--snapshot-update`, `--watch`, `--watch-limit`).
 ///
-/// Split out of [`test_options`]: those three arms pushed it over the line
+/// Split out of [`test_options`]: those arms pushed it over the line
 /// budget, and they form one family (how tests run, not which tests run
-/// or what they report). `index` points at the flag; `--jobs` advances it
-/// past its value, mirroring how the caller advances past the flag itself.
+/// or what they report). `index` points at the flag; `--jobs` and
+/// `--watch-limit` advance it past their value, mirroring how the caller
+/// advances past the flag itself.
 fn test_exec_flag(
     opts: &mut qqq_run::TestOptions,
     flag: &str,
@@ -1998,6 +2005,29 @@ fn test_exec_flag(
                 ));
             }
             opts.jobs = Some(jobs);
+            *index += 1;
+        }
+        // `TEST-002` watch half. `--watch` loops until interrupted; the
+        // `--watch-limit` bound exists so the loop is verifiable rather than
+        // merely observable, and setting it implies watching (a limit without
+        // a loop is meaningless, and erroring would punish the explicit form).
+        "--watch" => {
+            opts.watch = true;
+        }
+        "--watch-limit" => {
+            let v = args.get(*index + 1).ok_or_else(|| missing_value(flag))?;
+            let limit: u32 = v
+                .parse()
+                .map_err(|_| bad_value(flag, v, "a whole number of re-runs to allow"))?;
+            if limit == 0 {
+                return Err(bad_value(
+                    flag,
+                    v,
+                    "at least 1 re-run (omit --watch-limit for unbounded)",
+                ));
+            }
+            opts.watch = true;
+            opts.watch_limit = Some(limit);
             *index += 1;
         }
         _ => {
@@ -2077,9 +2107,9 @@ fn test_options(
                 i += 1;
             }
             // Execution-mode flags live in `test_exec_flag`: comparing,
-            // recording, and parallelism are how tests run, not which tests
-            // run or what they report.
-            "--snapshot" | "--snapshot-update" | "--jobs" => {
+            // recording, parallelism, and watching are how tests run, not
+            // which tests run or what they report.
+            "--snapshot" | "--snapshot-update" | "--jobs" | "--watch" | "--watch-limit" => {
                 test_exec_flag(&mut opts, a, args, &mut i)?;
             }
             // `TEST-014`. `--history` records a run; `--flaky` reports one. The commit and the run
@@ -2102,7 +2132,7 @@ fn test_options(
                     format!("unknown flag `{other}` for `test`"),
                 )
                 .with_remediation(
-                    "`test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --format, \
+                    "`test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --watch, --watch-limit, --format, \
                      --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest",
                 ));
             }
@@ -2115,6 +2145,35 @@ fn test_options(
             }
         }
         i += 1;
+    }
+    // `TEST-002` watch exclusions: a loop must emit one document per run,
+    // so foreign single-document formats, one-shot readers, and rehearsals
+    // cannot loop. Each is a usage error naming both flags, not a silent
+    // downgrade — silently dropping `--watch` would report success for work
+    // that did not happen, and concatenating N JUnit/TAP documents breaks
+    // the `TEST-003` raw-document invariant.
+    if opts.watch || opts.watch_limit.is_some() {
+        if opts.format.is_foreign() {
+            return Err(qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                "`--watch` cannot be combined with `--format junit` or `--format tap`",
+            )
+            .with_remediation("watch with the default human or json format, or drop --watch"));
+        }
+        if opts.flaky.is_some() {
+            return Err(qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                "`--watch` cannot be combined with `--flaky`",
+            )
+            .with_remediation("`--flaky` reports a history instead of running; drop one flag"));
+        }
+        if opts.dry_run {
+            return Err(qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                "`--watch` cannot be combined with `--dry-run`",
+            )
+            .with_remediation("a rehearsal has nothing to re-run; drop one flag"));
+        }
     }
     Ok(opts)
 }
@@ -3102,6 +3161,36 @@ fn unknown_choice(kind: &str, got: &str, valid: &[&str]) -> qqq_core::Error {
         format!("`{got}` is not a known {kind}"),
     )
     .with_remediation(format!("choose one of: {}", valid.join(", ")))
+}
+
+/// Emit one test run's report and compute its exit code.
+///
+/// Shared by the single-run and watch paths so a format cannot report
+/// differently depending on how the run was launched: the envelope carries
+/// the code the process returns, and the foreign formats bypass it.
+fn emit_test_report(
+    out: &mut Output<std::io::Stdout>,
+    name: CommandName,
+    opts: &qqq_run::TestOptions,
+    verdict: &dyn Fn(&qqq_run::TestOutput) -> u8,
+    result: &qqq_run::TestOutput,
+) -> ExitCode {
+    if opts.format.is_foreign() {
+        let document = match opts.format {
+            qqq_run::TestFormat::Junit => qqq_run::to_junit(result),
+            qqq_run::TestFormat::Tap => qqq_run::to_tap(result),
+            // `is_foreign` is exactly these two, so this arm is unreachable. It exists rather
+            // than a wildcard so that adding a format is a compile error here instead of a
+            // silently empty document — an empty report parses as "no tests", which reads as a
+            // pass.
+            qqq_run::TestFormat::Human | qqq_run::TestFormat::Json => String::new(),
+        };
+        print!("{document}");
+        let _ = std::io::stdout().flush();
+        return ExitCode::from(verdict(result));
+    }
+
+    report_with_verdict(out, name, result, verdict)
 }
 
 /// Load the project manifest, run `f`, and emit the result.

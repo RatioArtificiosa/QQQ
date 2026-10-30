@@ -41,7 +41,7 @@
 //! directory so any future cache or config lookup is isolated.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// The binary under test, located through Cargo's own variable.
 ///
@@ -2556,6 +2556,269 @@ fn test_snapshot_update_skips_failing_tests() {
         saw_passing = saw_passing || name.contains("snap_prints_answer");
     }
     assert!(saw_passing, "the passing test still records");
+}
+
+/// A child `qqqai` whose stdout is consumed line-by-line while it runs.
+///
+/// For `test --watch`, which never exits on its own: the test must observe
+/// output *during* the run (wait for the first result), prod the child
+/// mid-run (touch a source file), and then stop it. A plain
+/// `wait_with_output` would block until the child exits — which is never —
+/// and a blocking readline in the test thread would hang the suite if the
+/// child wedged instead of printing.
+///
+/// A background thread pumps stdout lines into a channel; the test thread
+/// only ever `recv_timeout`s, so every wait is bounded (the lesson of
+/// `§O-309`: an unbounded wait is a hung suite, not a failing test).
+/// Stdout carries the assertions (`wait_for` watches it); stderr (watch
+/// markers such as `watch: re-running`) is drained to the void so a
+/// verbose child can never block filling it while the test waits on stdout.
+struct Watching {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+    collected: String,
+}
+
+impl Watching {
+    fn spawn(sandbox: &Sandbox, args: &[&str]) -> Self {
+        use std::io::BufRead as _;
+
+        let mut child = qqqai()
+            .args(args)
+            .current_dir(&sandbox.path)
+            .env("CARGO_TARGET_DIR", target_dir_for(&sandbox.path))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn qqqai");
+        let out = std::io::BufReader::new(child.stdout.take().expect("piped stdout"));
+        let err = child.stderr.take().expect("piped stderr");
+        let (tx, lines) = std::sync::mpsc::channel();
+        // Stdout is pumped line by line for `wait_for`; stderr is drained
+        // into the void. Two threads rather than one reader because the
+        // pipes are independent: waiting on stdout while a verbose child
+        // fills stderr would deadlock it, and the test that hangs its
+        // subject is the failure this helper exists to prevent.
+        let pump_tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in out.lines().map_while(Result::ok) {
+                if pump_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut sink = Vec::new();
+            let _ = std::io::BufReader::new(err).read_to_end(&mut sink);
+        });
+        drop(tx);
+        Self {
+            child,
+            lines,
+            collected: String::new(),
+        }
+    }
+
+    /// Read lines until one contains `needle` or `secs` elapse. A timeout
+    /// fails loudly with everything seen so far, so a wedged child reads as
+    /// a red test rather than a hung job.
+    fn wait_for(&mut self, needle: &str, secs: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.lines.recv_timeout(remaining) {
+                Ok(line) => {
+                    self.collected.push_str(&line);
+                    self.collected.push('\n');
+                    if line.contains(needle) {
+                        return;
+                    }
+                }
+                // A timeout means the deadline passed without the line; a
+                // disconnect means the child exited without printing it.
+                // Either way the test failed, and the output so far says why.
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                    "timed out after {secs}s waiting for {needle:?}; output so far:\n{}",
+                    self.collected
+                ),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!(
+                    "the child exited without printing {needle:?}; output so far:\n{}",
+                    self.collected
+                ),
+            }
+        }
+    }
+
+    /// Stop the child and return everything it printed. Killing (rather than
+    /// joining) is the point: a watch loop has no natural end. The drain
+    /// uses a bounded `recv_timeout` rather than `try_recv` so lines the
+    /// pump thread has read but not yet sent still arrive — a `try_recv`
+    /// loop can miss the second `2 passed` that was already in flight.
+    fn finish(mut self) -> String {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        while let Ok(line) = self.lines.recv_timeout(std::time::Duration::from_secs(2)) {
+            self.collected.push_str(&line);
+            self.collected.push('\n');
+        }
+        std::mem::take(&mut self.collected)
+    }
+}
+
+impl Drop for Watching {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+/// `--watch` re-runs the suite when a source file changes: the first run
+/// reports, a touch schedules a second, and `--watch-limit 1` stops the loop
+/// after it.
+#[test]
+fn test_watch_reruns_on_changed_source() {
+    let s = Sandbox::new("test-watch-rerun");
+    project_with_printing_tests(&s);
+
+    let mut child = Watching::spawn(&s, &["test", "--watch", "--watch-limit", "1"]);
+    child.wait_for("2 passed", 120);
+    // The second run must be caused by this edit: it lands strictly after
+    // the first run completed, so no race decides the outcome. A second
+    // "2 passed" in the output means a second full run happened. The short
+    // sleep lets the watcher finish its post-run re-baseline (which absorbs
+    // files the run itself wrote) before the edit lands; without it the
+    // edit can land mid-baseline and be absorbed as if it were run output.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let mut lib = s.read("src/lib.rs");
+    lib.push_str("\n// touched to trigger a re-run\n");
+    s.write("src/lib.rs", &lib);
+    child.wait_for("2 passed", 120);
+    let out = child.finish();
+    assert!(
+        out.matches("2 passed").count() >= 2,
+        "both runs must report: {out}"
+    );
+}
+
+/// `--watch` stays quiet with no changes: the initial run reports, and no
+/// amount of quiet polling schedules another.
+#[test]
+fn test_watch_stays_quiet_without_changes() {
+    let s = Sandbox::new("test-watch-quiet");
+    project_with_printing_tests(&s);
+
+    let mut child = Watching::spawn(&s, &["test", "--watch", "--watch-limit", "5"]);
+    child.wait_for("2 passed", 120);
+    // Longer than any poll interval plus the debounce window: a spurious
+    // re-run has ample time to show itself.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    let out = child.finish();
+    assert_eq!(
+        out.matches("2 passed").count(),
+        1,
+        "a quiet tree must not schedule re-runs: {out}"
+    );
+}
+
+/// `--watch-limit 0` is a usage error: zero re-runs is `test` spelled
+/// verbosely, and a flag that means nothing must say so.
+#[test]
+fn test_watch_limit_zero_is_a_usage_error() {
+    let s = Sandbox::new("test-watch-zero");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--watch", "--watch-limit", "0"])
+        .assert_failed()
+        .assert_contains("--watch-limit");
+}
+
+/// `--watch-limit` without a value is a usage error naming the flag.
+#[test]
+fn test_watch_limit_needs_a_value() {
+    let s = Sandbox::new("test-watch-novalue");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--watch-limit"])
+        .assert_failed()
+        .assert_contains("--watch-limit");
+}
+
+/// `--watch` with a foreign format is a usage error: looping would print N
+/// concatenated JUnit/TAP documents, which is neither document.
+#[test]
+fn test_watch_rejects_foreign_format() {
+    let s = Sandbox::new("test-watch-format");
+    project_with_printing_tests(&s);
+
+    for format in ["junit", "tap"] {
+        s.run(&["test", "--watch", "--format", format])
+            .assert_failed()
+            .assert_contains("cannot be combined");
+    }
+}
+
+/// `--watch` with `--flaky` is a usage error: `--flaky` reports a history
+/// instead of running, so the loop would silently never run.
+#[test]
+fn test_watch_rejects_flaky() {
+    let s = Sandbox::new("test-watch-flaky");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--watch", "--flaky", "history.jsonl"])
+        .assert_failed()
+        .assert_contains("cannot be combined");
+}
+
+/// `--watch` with `--dry-run` is a usage error: a rehearsal has nothing
+/// to re-run, and looping would re-emit the identical plan forever.
+#[test]
+fn test_watch_rejects_dry_run() {
+    let s = Sandbox::new("test-watch-dryrun");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--watch", "--dry-run"])
+        .assert_failed()
+        .assert_contains("cannot be combined");
+}
+
+/// `--history` inside the tree does not self-trigger: every rerun appends,
+/// so watching the file would schedule another run for every run.
+#[test]
+fn test_watch_ignores_in_tree_history() {
+    let s = Sandbox::new("test-watch-history");
+    project_with_printing_tests(&s);
+
+    let mut child = Watching::spawn(
+        &s,
+        &[
+            "test",
+            "--watch",
+            "--watch-limit",
+            "5",
+            "--history",
+            "history.jsonl",
+        ],
+    );
+    child.wait_for("2 passed", 120);
+    // Let the post-run baseline settle, then trigger exactly one re-run.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let mut lib = s.read("src/lib.rs");
+    lib.push_str("\n// touched to trigger a re-run\n");
+    s.write("src/lib.rs", &lib);
+    child.wait_for("2 passed", 120);
+    // History appends on every run: without the ignore, the second run's
+    // own history write would schedule a third.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    let out = child.finish();
+    assert_eq!(
+        out.matches("2 passed").count(),
+        2,
+        "history appends must not schedule extra runs: {out}"
+    );
+    assert!(
+        s.exists("history.jsonl"),
+        "the history file must still be recorded"
+    );
 }
 
 /// Two files declaring the same test name are two tests: discovery keys on

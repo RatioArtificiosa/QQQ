@@ -14,7 +14,7 @@
 //! | `qqq.lock` read/write, with a covering hash | **implemented** (`PKG-004`) |
 //! | Capability diff between two lockfiles | **implemented** (`PKG-009`, §5.4) |
 //! | Semver requirement parsing and matching | **implemented** (`PKG-003` partial) |
-//! | Content-addressed store layout and verification | **implemented** (`PKG-001` partial) |
+//! | Content-addressed store layout, verification, and materialization | **implemented** (`PKG-001`) |
 //! | Full dependency solver with backtracking | not implemented (`PKG-003`) |
 //! | Registry client, fetching, resume | not implemented (`PKG-002`, `PKG-011`) |
 //! | Signature verification and trust policy | not implemented (`PKG-015`) |
@@ -47,4 +47,4 @@ pub mod store;
 
 pub use lock::{CapabilityDelta, DependencyChange, LockDiff, LockPackage, Lockfile, LockfileError};
 pub use semver::{Requirement, Version};
-pub use store::{Digest, StoreLayout};
+pub use store::{Digest, LinkMethod, Materialized, StoreLayout};

@@ -35,8 +35,7 @@ Two consequences shape the code:
 | `qqq.lock` read/write with a covering hash | **implemented** (`PKG-004`) |
 | Capability diff between two lockfiles | **implemented** (`PKG-009` partial) |
 | Version requirement parsing and matching | **implemented** (`PKG-003` partial) |
-| Content-addressed store layout and verified reads | **implemented** (`PKG-001` partial) |
-| **Hard-link/reflink materialization** | **not implemented** — the half that makes the store worth having |
+| Content-addressed store layout, verified reads, hard-link/copy materialization | **implemented** (`PKG-001`) |
 | Full solver with backtracking | not implemented (`PKG-003`) |
 | Registry client, fetching, resume | not implemented (`PKG-002`, `PKG-011`) |
 | Signature verification and trust policy | not implemented (`PKG-015`) |

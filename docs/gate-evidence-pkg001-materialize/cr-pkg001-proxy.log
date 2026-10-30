@@ -1,0 +1,21 @@
+Reviewing your uncommitted store.rs changes for bugs and security gaps.
+
+Diff mapped ÔÇö now checking invariants and surrounding context.
+
+Review of uncommitted `materialize` work (863+/8-; `cargo test` 131+108 pass, clippy clean, invariants hold: `forbid(unsafe_code)` intact, no new deps ÔÇö `sha2` pre-exists).
+
+| # | Sev | File:Line | Finding | Fix |
+|---|-----|-----------|---------|-----|
+| 1 | ­ƒƒá HIGH | store.rs:393-412,803 | Copy fallback writes through a planted symlink: `tmp` name (`<stem>.tmp-<8hex>-<pid>`) is predictable; `fs::copy` follows symlinks, so a pre-created `*.tmp-*` symlink makes the copy truncate its target. Link path is safe (EEXIST). | Before copy, `symlink_metadata(tmp)`: if symlink ÔåÆ error/refuse; if file ÔåÆ remove; or add random/counter suffix + `create_new` semantics |
+| 2 | ­ƒƒá HIGH | store.rs:280-297,704-743 | Content-tree fence is lexical: `absolutize` never resolves symlinks/`..`, so `dest` through a symlinked parent pointing into `store/sha256/` bypasses the guard and reaches the delete path | Canonicalize `dest.parent()` (post-`create_dir_all`) and re-check `starts_with(&content)` |
+| 3 | ­ƒƒí MED | store.rs:748-793 | `create_dir_all(parent)` runs before the store-exists + verify checks, so absent/corrupt digests create empty dirs as a side effect, contradicting "refusal leaves nothing behind" | Move store check + `hash_streaming` verify before `create_dir_all`; mkdir just before `link_or_copy` |
+| 4 | ­ƒƒí MED | store.rs:760-803 | TOCTOU verifyÔåÆlink: `src.is_file()`/`hash_streaming` follow symlinks; a swapped-in symlink or replaced bytes between hash and `hard_link` links unverified bytes; no `symlink_metadata` check on `src` | Assert `symlink_metadata(src)` is file-not-symlink immediately before link; ideally re-hash the linked `tmp` |
+| 5 | ­ƒƒí MED | store.rs:339-360 | `settle_destination` checks `symlink_metadata` then `hash_streaming`/`make_readonly` follow symlinks ÔÇö swap race chmods/hashes through a link | Re-`symlink_metadata` after open; document residual local-race acceptance (no libc/`O_NOFOLLOW` under `forbid(unsafe)`) |
+| 6 | ÔÜ¬ LOW | store.rs:303-331 | `sweep_stale_tmps` matches any `stem.tmp-*` (no hex/pid shape check) and resolves `parent` lexically ÔÇö can delete user files or files via a symlinked parent; cross-deletes same-stem sibling dests | Match `\.tmp-[0-9a-f]+-\d+$` exactly; canonicalize parent first |
+| 7 | ÔÜ¬ LOW | store.rs:807-818 | `make_readonly` failure after successful `rename` leaves the destination behind, violating the documented guarantee | Remove `dest` on that path or qualify the docs |
+| 8 | ÔÜ¬ LOW | store.rs:228 | `buf.get(..n).unwrap_or(&[])` would silently hash empty on over-read instead of failing loudly | Use `&buf[..n]` + `debug_assert!(n <= buf.len())` |
+| 9 | ÔÜ¬ LOW | store.rs:418-427 | Any non-`CrossesDevices` link error (incl. `AlreadyExists` from a surviving tmp) reports "filesystem supporting hard links" | Map `AlreadyExists` to retry/sweep-then-retry with accurate message |
+| 10 | ÔÜ¬ LOW | store.rs:1196-1213 | Test-only `remove_temp` uses `path.is_dir()` (follows symlinks) ÔÇö latent outside-tree chmod/delete if a symlink ever enters the tree | Guard with `symlink_metadata` + `file_type().is_symlink()` skip |
+
+Missing tests: symlink at dest (dangling, to-file-same-bytes, to-dir), tmp-symlink plant on the copy path, symlinked parent pointing into the store, `..`-containing dest, and a "no parent-dir created on refusal" assertion. Digest-as-path-boundary itself is sound (`hex` private, length+hex validated at parse).
+

@@ -1,0 +1,155 @@
+   Compiling qqq-pkg v0.1.1 (E:\QQQ\crates\qqq-pkg)
+error[E0658]: use of unstable library feature `windows_by_handle`
+   --> crates\qqq-pkg\src\store.rs:739:12
+    |
+739 |         ma.volume_serial_number() == mb.volume_serial_number()
+    |            ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: see issue #63010 <https://github.com/rust-lang/rust/issues/63010> for more information
+
+error[E0658]: use of unstable library feature `windows_by_handle`
+   --> crates\qqq-pkg\src\store.rs:739:41
+    |
+739 |         ma.volume_serial_number() == mb.volume_serial_number()
+    |                                         ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: see issue #63010 <https://github.com/rust-lang/rust/issues/63010> for more information
+
+error[E0658]: use of unstable library feature `windows_by_handle`
+   --> crates\qqq-pkg\src\store.rs:740:19
+    |
+740 |             && ma.file_index() == mb.file_index()
+    |                   ^^^^^^^^^^
+    |
+    = note: see issue #63010 <https://github.com/rust-lang/rust/issues/63010> for more information
+
+error[E0658]: use of unstable library feature `windows_by_handle`
+   --> crates\qqq-pkg\src\store.rs:740:38
+    |
+740 |             && ma.file_index() == mb.file_index()
+    |                                      ^^^^^^^^^^
+    |
+    = note: see issue #63010 <https://github.com/rust-lang/rust/issues/63010> for more information
+
+error[E0599]: no method named `materialize` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:758:24
+    |
+176 | pub struct StoreLayout {
+    | ---------------------- method `materialize` not found for this struct
+...
+758 |         let m = layout.materialize(&digest, &dest).expect("must materialize");
+    |                        ^^^^^^^^^^^ method not found in `store::StoreLayout`
+
+error[E0599]: no method named `materialize` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:789:28
+    |
+176 | pub struct StoreLayout {
+    | ---------------------- method `materialize` not found for this struct
+...
+789 |         let first = layout.materialize(&digest, &dest).expect("first");
+    |                            ^^^^^^^^^^^ method not found in `store::StoreLayout`
+
+error[E0599]: no method named `materialize` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:790:29
+    |
+176 | pub struct StoreLayout {
+    | ---------------------- method `materialize` not found for this struct
+...
+790 |         let second = layout.materialize(&digest, &dest).expect("second");
+    |                             ^^^^^^^^^^^ method not found in `store::StoreLayout`
+
+error[E0599]: no method named `materialize` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:811:16
+    |
+176 | pub struct StoreLayout {
+    | ---------------------- method `materialize` not found for this struct
+...
+811 |         layout.materialize(&digest, &dest).expect("first");
+    |                ^^^^^^^^^^^ method not found in `store::StoreLayout`
+
+error[E0599]: no method named `materialize` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:820:16
+    |
+176 | pub struct StoreLayout {
+    | ---------------------- method `materialize` not found for this struct
+...
+820 |         layout.materialize(&digest, &dest).expect("re-materialize");
+    |                ^^^^^^^^^^^ method not found in `store::StoreLayout`
+
+error[E0599]: no method named `materialize` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:838:24
+    |
+176 | pub struct StoreLayout {
+    | ---------------------- method `materialize` not found for this struct
+...
+838 |         let e = layout.materialize(&digest, &dest).unwrap_err();
+    |                        ^^^^^^^^^^^ method not found in `store::StoreLayout`
+
+error[E0599]: no method named `materialize` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:868:24
+    |
+176 | pub struct StoreLayout {
+    | ---------------------- method `materialize` not found for this struct
+...
+868 |         let e = layout.materialize(&digest, &dest).unwrap_err();
+    |                        ^^^^^^^^^^^ method not found in `store::StoreLayout`
+
+error[E0599]: no method named `materialize_with` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:892:14
+    |
+176 |   pub struct StoreLayout {
+    |   ---------------------- method `materialize_with` not found for this struct
+...
+891 |           let m = layout
+    |  _________________-
+892 | |             .materialize_with(&digest, &dest, true)
+    | |             -^^^^^^^^^^^^^^^^ method not found in `store::StoreLayout`
+    | |_____________|
+    |
+
+error[E0599]: no method named `materialize_with` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:908:14
+    |
+176 |   pub struct StoreLayout {
+    |   ---------------------- method `materialize_with` not found for this struct
+...
+907 |           let e = layout
+    |  _________________-
+908 | |             .materialize_with(&digest, &dest2, true)
+    | |             -^^^^^^^^^^^^^^^^ method not found in `store::StoreLayout`
+    | |_____________|
+    |
+
+error[E0599]: no method named `materialize` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:933:24
+    |
+176 | pub struct StoreLayout {
+    | ---------------------- method `materialize` not found for this struct
+...
+933 |         let e = layout.materialize(&digest, &dest).unwrap_err();
+    |                        ^^^^^^^^^^^ method not found in `store::StoreLayout`
+
+error[E0599]: no method named `materialize` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:953:16
+    |
+176 | pub struct StoreLayout {
+    | ---------------------- method `materialize` not found for this struct
+...
+953 |         layout.materialize(&digest, &linked).expect("link");
+    |                ^^^^^^^^^^^ method not found in `store::StoreLayout`
+
+error[E0599]: no method named `materialize_with` found for struct `store::StoreLayout` in the current scope
+   --> crates\qqq-pkg\src\store.rs:956:14
+    |
+176 |   pub struct StoreLayout {
+    |   ---------------------- method `materialize_with` not found for this struct
+...
+955 | /         layout
+956 | |             .materialize_with(&digest, &copied, true)
+    | |             -^^^^^^^^^^^^^^^^ method not found in `store::StoreLayout`
+    | |_____________|
+    |
+
+Some errors have detailed explanations: E0599, E0658.
+For more information about an error, try `rustc --explain E0599`.
+error: could not compile `qqq-pkg` (lib test) due to 16 previous errors

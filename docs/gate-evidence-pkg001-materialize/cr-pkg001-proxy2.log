@@ -1,0 +1,35 @@
+Verifying all 10 fixes and hunting for new bugs.
+
+Diff is large (~1,260 lines) ÔÇö reading it in sections.
+
+I've mapped the new materialization flow ÔÇö now checking each claimed fix.
+
+Review of `crates/qqq-pkg/src/store.rs` ÔÇö all new `materialize` code (HEAD has none). Tests: `cargo test -p qqq-pkg --all-features` 134 passed, doctests 4 passed.
+
+### Prior 10
+
+| # | Finding | Verdict | Evidence |
+|---|---------|---------|----------|
+| 1 | tmp-symlink plant | FIXED | `link_or_copy:562` refuses symlink at tmp; test `materialize_refuses_a_symlink_at_the_temp_name:1849`. Residual copy-race documented `556-560`, no `O_NOFOLLOW` per `forbid(unsafe)`. |
+| 2 | lexical fence bypass | FIXED | Lexical `929-950` + canonical `canonical_place:358`, `dest_inside_store:395`, re-check `979-991`. Tests dotdot `:1816`, symparent `:1921`. |
+| 3 | mkdir-before-verify | FIXED | Order `settle:950` ÔåÆ `verified_source:955` ÔåÆ `mkdir:957`. Test `creates_no_directories:1795`. Note: mkdir still precedes canonical re-check (unavoidable, dirs must exist). |
+| 4 | TOCTOU on link | FIXED | `verified_source:1011` + re-hash in `commit_placed:430` before rename. Tests corrupt `:1608`, copy-verified `:1632`. |
+| 5 | settle race | FIXED* | Atomic rename + post-rename symlink check `468-477`. *Residual chmod-follows-symlink window remains (see N4), documented `895-908`. No corruption. |
+| 6 | sweep shape | FIXED | `sweep_stale_tmps:304` exact `tmp-<8hex>-<pid>`; decoy test `:1724`. Note N5 overmatch. |
+| 7 | readonly-failure cleanup | FIXED | `commit_placed:459-483` removes tmp on rename fail, dest on symlink/chmod fail. |
+| 8 | unwrap_or fallback | STILL-OPEN | `hash_streaming:227` still `buf.get(..n).unwrap_or(&[])` ÔÇö silent empty-hash on impossible OOB; should `expect`/error. |
+| 9 | AlreadyExists message | FIXED | Stale regular tmp pre-cleared `578-594`; race-only `AlreadyExists` surfaces with cause `606-616`. Dest handled by settle/rename. |
+| 10 | test tmp cleanup | FIXED | `remove_temp:1433` clears readonly; all materialize tests use it. Minor: `temp_root:1205` initial clean + doctest fixed-dir still plain `remove_dir_all`. |
+
+### New findings
+
+- MEDIUM `store.rs:950-955` ÔÇö settle deletes differing dest before `verified_source`. Absent digest + existing dest = file deleted then `RegistryUnreachable`. Verify store before destructive clear.
+- MEDIUM `store.rs:358-392` ÔÇö bare `out.bin` always refused: empty parent `""` fails `canonicalize`. Map empty ÔåÆ `.`.
+- LOW `store.rs:995-1000` ÔÇö tmp `tmp-<prefix>-<pid>` not unique: same-pid concurrent different-dests same-parent collide; sweep can delete in-flight tmp. Add counter/random.
+- LOW `store.rs:253,500,528` ÔÇö `make_readonly`/`set_permissions` follow symlinks; settle `AlreadyPresent` has no pre-chmod re-check. Local racer gets chmod-on-target.
+- LOW `store.rs:313-321` ÔÇö sweep uses `is_ascii_hexdigit` (accepts `A-F`) but link site always lowercase; deletes user `tmp-DEADBEEF-123`. Restrict to `0-9a-f`.
+- LOW `store.rs:445` ÔÇö `hash_streaming(tmp)` I/O error leaves tmp (only mismatch cleans). Next sweep heals, but inconsistent.
+- LOW `store.rs:528-545` ÔÇö replacing linked dest clears store-entry bit via shared inode; old entry left writable.
+- LOW `store.rs:1433-1452` ÔÇö test-only `remove_temp` uses `is_dir`/`metadata` (follow symlinks), can chmod outside tree via `linked` fixture. Use `symlink_metadata`.
+
+

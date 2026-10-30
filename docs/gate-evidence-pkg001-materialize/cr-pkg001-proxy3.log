@@ -1,0 +1,32 @@
+Verifying those 7 post-review changes and hunting new bugs.
+
+I've mapped the core fixes ÔÇö now checking docs and running tests.
+
+Review of `store.rs` materialization changes. Ran `cargo test -p qqq-pkg`: 135 passed / 1 ignored; doctests 4 passed; clippy + fmt clean (Windows).
+
+## Changed items
+
+| # | Item | Verdict | Evidence |
+|---|------|---------|----------|
+| 1 | settle split (inspect + `clear_for_replace` after verify) | FIXED (with caveat ÔåÆ N1) | `store.rs:534` returns `DestState` no-delete; `:588` clears; `:1051ÔåÆ:1059` verify-before-clear; corrupt+absent-dest path preserves |
+| 2 | `canonical_place` empty parent ÔåÆ `.` | FIXED | `store.rs:388` maps empty parent to `.`; test `:1890` |
+| 3 | Counter-suffixed tmp names | FIXED | `store.rs:628,1102` `TMP_SEQ` + `tmp-{short}-{pid}-{n}`; sweep shape matches |
+| 4 | `make_readonly` symlink re-check | FIXED | `store.rs:264` `symlink_metadata` + refuse if `!is_file \|\| is_symlink` before chmod |
+| 5 | `commit_placed` cleans tmp on re-read fail | FIXED | `store.rs:467` removes tmp on hash error, mismatch, rename fail; removes dest post-rename on chmod fail |
+| 6 | Sweep lowercase-hex only | FIXED | `store.rs:342` `is_ascii_hexdigit && !is_uppercase`; test `:1838` keeps `tmp-DEADBEEF-88888-0`, deletes stale |
+| 7 | New tests | FIXED (gaps ÔåÆ N4) | no-mkdir `:1932`, dotdot `:1979`, sym-parent `:2064` (unix-only), tmp-link `:2010` (unix-only)/tmp-dir `:2045`, in-store `:1807`, bare `:1890` + ignored `:1955`, sweep decoys `:1838` |
+
+## New findings
+
+| # | Severity | File:Lines | Issue |
+|---|----------|------------|-------|
+| N1 | HIGH | `store.rs:1059 vs 1079-1080` | `clear_for_replace` runs *before* canonical in-store re-check. Differ dest via symlinked-parent/`..` into store is deleted, then refused. Direct in-store path is safe (lexical fence `:1043` fires first), so test `:1807` passes but guarantee "refusal leaves store untouched" fails for canonical paths. Fix: move clear after `:1080` check. |
+| N2 | MEDIUM | `store.rs:534-560` | `Same` path hashes then chmods with no re-verify; swap in between returns `AlreadyPresent` with wrong bytes. Contradicts "every loss is a loud refusal, never silent corruption" (`:975`). |
+| N3 | MEDIUM | `store.rs:836` (`write`) | "Already present and verified" comment is false: `contains()` (`is_file`) trusts presence without hashing. Corrupt entry makes `write` a no-op; later `read` fails. Pre-existing, adjacent to this change. |
+| N4 | MEDIUM | tests | Gaps: no corrupt-store+Differ-preservation test (the core verify-before-clear property); no canonical-in-store+Differ test (would catch N1); bare-name e2e `:1955` is `#[ignore]` so never runs in CI; symlink arms `:2010,:2064` compile out on Windows ÔÇö the platform run here. |
+| N5 | LOW | `store.rs:588-625,264` | `clear`/`make_readonly` statÔåÆchmodÔåÆremove on paths: swap after check chmods victim through symlink. Disclosed in residual-race note, but `clear`'s "swap is refused" (`:1055`) overclaims intra-call window. |
+| N6 | LOW | `store.rs:1090` | Sweep deletes any matching tmp in dir, so concurrent same-dir different-artifact installs can delete a live peer tmp (linkÔåÆrename window). Doc says only "same-dest" unsupported; scope is same-dir. Plus per-file full dir scan = O(N┬▓) for big installs. |
+| N7 | LOW | docs | Overclaims: "refused materialization leaves no destination behind" (`:940`) false when Differ+corrupt-store preserves dest; checklist counts "4 more tests" then lists 5; evidence date `2026-10-30` vs today `10-29`; stale allow-comment `:1307` names `settle_destination` instead of `clear_for_replace`. |
+
+Suggested next: fix N1 ordering, re-verify N2 wording, add the two Differ-preservation tests + un-ignore bare-name (serial) or gate it, then re-run `cargo test -p qqq-pkg` + clippy.
+

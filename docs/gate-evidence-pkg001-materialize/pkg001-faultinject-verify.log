@@ -1,0 +1,29 @@
+   Compiling qqq-pkg v0.1.1 (E:\QQQ\crates\qqq-pkg)
+    Finished `test` profile [optimized + debuginfo] target(s) in 2.69s
+     Running unittests src\lib.rs (target\debug\deps\qqq_pkg-6ae73f0a1cbe2779.exe)
+
+running 2 tests
+test store::fs_tests::materialize_does_not_link_a_corrupted_artifact ... FAILED
+test store::fs_tests::the_copy_fallback_is_verified_like_the_link_path ... FAILED
+
+failures:
+
+---- store::fs_tests::materialize_does_not_link_a_corrupted_artifact stdout ----
+
+thread 'store::fs_tests::materialize_does_not_link_a_corrupted_artifact' (376136) panicked at crates\qqq-pkg\src\store.rs:1288:52:
+called `Result::unwrap_err()` on an `Ok` value: Materialized { method: HardLink, bytes: 9 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- store::fs_tests::the_copy_fallback_is_verified_like_the_link_path stdout ----
+
+thread 'store::fs_tests::the_copy_fallback_is_verified_like_the_link_path' (379116) panicked at crates\qqq-pkg\src\store.rs:1330:64:
+called `Result::unwrap_err()` on an `Ok` value: Materialized { method: Copied, bytes: 9 }
+
+
+failures:
+    store::fs_tests::materialize_does_not_link_a_corrupted_artifact
+    store::fs_tests::the_copy_fallback_is_verified_like_the_link_path
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 126 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p qqq-pkg --lib`

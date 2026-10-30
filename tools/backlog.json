@@ -218,8 +218,8 @@
     },
     "PKG": {
       "blocked": 20,
-      "done": 2,
-      "open": 2,
+      "done": 3,
+      "open": 1,
       "partial": 0,
       "total": 24,
       "unknown": 0,
@@ -364,8 +364,8 @@
     },
     "P6": {
       "blocked": 32,
-      "done": 2,
-      "open": 2,
+      "done": 3,
+      "open": 1,
       "partial": 0,
       "total": 36,
       "unknown": 0,
@@ -618,8 +618,8 @@
     },
     "PKG": {
       "blocked": 20,
-      "done": 2,
-      "open": 2,
+      "done": 3,
+      "open": 1,
       "partial": 0,
       "total": 24,
       "unknown": 0,
@@ -3794,7 +3794,7 @@
       "id": "PKG-001",
       "line": 4538,
       "phase": "P6",
-      "status": "open",
+      "status": "done",
       "title": "Implement the content-addressed global store with hard-link/reflink materialization."
     },
     {

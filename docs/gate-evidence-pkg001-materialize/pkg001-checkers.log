@@ -1,0 +1,35 @@
+documents scanned: 66
+resolvers seen:    checklist-blocked, checklist-done, checklist-open, checklist-partial, checklist-total, conformance-cases, conformance-definition-cases, conformance-execution-cases, host-bound-modules, observation-headings, observation-highest, qblock-bindable-namespaces, qblock-bound-capabilities, qblock-declared-namespaces, tools-python, wit-files, wit-functions, wit-interfaces, wit-packages, wit-types
+  checklist-blocked: 125
+  checklist-done: 338
+  checklist-open: 178
+  checklist-partial: 3
+  checklist-total: 644
+  conformance-cases: 10
+  conformance-definition-cases: 6
+  conformance-execution-cases: 4
+  host-bound-modules: 14
+  observation-headings: 648
+  observation-highest: 790
+  qblock-bindable-namespaces: 13
+  qblock-bound-capabilities: 18
+  qblock-declared-namespaces: 15
+  tools-python: 97
+  wit-files: 17
+  wit-functions: 80
+  wit-interfaces: 22
+  wit-packages: 15
+  wit-types: 53
+claims checked:    30
+
+  STALE    docs\AGENT-HANDBOOK.md:80  `checklist-done` says 337, the tree has 338
+  STALE    docs\AGENT-HANDBOOK.md:80  `checklist-open` says 179, the tree has 178
+  STALE    docs\AGENT-HANDBOOK.md:1408  `checklist-done` says 337, the tree has 338
+  STALE    docs\stability.md:144  `checklist-done` says 337, the tree has 338
+  STALE    docs\stability.md:144  `checklist-open` says 179, the tree has 178
+
+DOC CLAIMS FAILED -- 5 stale, 0 unknown resolver(s)
+DONE LINES OK -- no block repeats a substantial line; 52 known item(s) without evidence, and the list agrees both ways; every `[~]` and `[!]` says why
+CHECKLIST COUNTS OK -- 33 area(s), 644 item(s), ┬º1 and ┬º14 agree with the document
+BACKLOG OK -- 644 item(s) in 33 area(s) over 11 phase(s), matching the checklist
+DASHBOARD OK -- 644 item(s), 33 area(s), 11 phase(s)

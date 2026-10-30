@@ -1,0 +1,157 @@
+   Compiling qqq-pkg v0.1.1 (E:\QQQ\crates\qqq-pkg)
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.05s
+     Running unittests src\lib.rs (target\debug\deps\qqq_pkg-6ae73f0a1cbe2779.exe)
+
+running 138 tests
+test lock::tests::a_digest_swap_is_reported_as_a_modified_in_place ... ok
+test lock::tests::a_new_lockfile_has_the_current_version_and_no_packages ... ok
+test lock::tests::a_lockfile_without_config_hashes_exactly_as_before ... ok
+test lock::tests::a_package_key_combines_name_and_version ... ok
+test lock::tests::a_duplicate_package_is_refused ... ok
+test lock::tests::a_hand_edited_lockfile_is_detected ... ok
+test lock::tests::a_build_config_round_trips_through_toml ... ok
+test lock::tests::a_removed_capability_is_reported_but_is_not_an_escalation ... ok
+test lock::tests::a_package_can_be_looked_up_by_name ... ok
+test lock::tests::a_plain_version_bump_is_not_an_escalation ... ok
+test lock::tests::a_new_package_reports_all_its_capabilities_as_added ... ok
+test lock::tests::a_removed_package_is_reported_as_removed ... ok
+test lock::tests::an_authority_change_without_a_version_change_is_reported ... ok
+test lock::tests::a_lockfile_round_trips_through_toml ... ok
+test lock::tests::an_empty_config_is_recognised_as_empty ... ok
+test lock::tests::an_empty_name_or_version_is_refused ... ok
+test lock::tests::an_identical_lockfile_produces_no_changes ... ok
+test lock::tests::an_unknown_config_key_is_refused ... ok
+test lock::tests::an_unknown_package_field_is_refused ... ok
+test lock::tests::an_unstamped_lockfile_parses ... ok
+test lock::tests::an_unsupported_version_is_refused_rather_than_ignored ... ok
+test lock::tests::an_update_is_one_change_not_an_addition_and_a_removal ... ok
+test lock::tests::an_update_that_adds_authority_is_reported ... ok
+test lock::tests::capability_order_does_not_affect_equality ... ok
+test lock::tests::change_kind_names_are_stable ... ok
+test lock::tests::changes_are_sorted_by_package_name ... ok
+test lock::tests::declaring_none_is_distinguished_from_declaring_nothing ... ok
+test lock::tests::duplicate_capabilities_are_collapsed ... ok
+test lock::tests::every_authority_change_appears_in_the_capability_list ... ok
+test lock::tests::every_config_field_participates_in_the_hash ... ok
+test lock::tests::every_lockfile_error_renders_with_a_remediation ... ok
+test lock::tests::field_boundaries_are_unambiguous ... ok
+test lock::tests::malformed_toml_is_reported_as_a_syntax_error ... ok
+test lock::tests::packages_are_sorted_by_name ... ok
+test lock::tests::stamping_records_the_hash_and_the_producer ... ok
+test lock::tests::the_config_group_is_separated_from_the_package_records ... ok
+test lock::tests::the_hash_changes_with_every_covered_field ... ok
+test lock::tests::the_hash_covers_the_artifact_digest ... ok
+test lock::tests::the_hash_covers_the_build_config ... ok
+test lock::tests::the_hash_covers_the_capabilities ... ok
+test lock::tests::the_hash_is_prefixed_with_its_algorithm ... ok
+test lock::tests::the_hash_is_stable_across_capability_reordering ... ok
+test lock::tests::the_hash_is_stable_across_config_capability_reordering ... ok
+test lock::tests::the_rendered_form_uses_the_documented_field_names ... ok
+test lock::tests::with_caps_sorts_and_deduplicates ... ok
+test semver::tests::a_bare_version_means_caret ... ok
+test semver::tests::a_bounded_requirement_round_trips_through_display ... ok
+test semver::tests::a_comma_list_requires_every_clause ... ok
+test semver::tests::a_comma_range_accepts_partial_versions ... ok
+test semver::tests::a_conjunction_admits_one_span_not_two ... ok
+test semver::tests::a_non_numeric_component_is_refused ... ok
+test semver::tests::a_nonsense_version_is_refused_with_the_shape ... ok
+test semver::tests::a_one_component_requirement_parses ... ok
+test semver::tests::a_partial_requirement_matches_the_versions_it_should ... ok
+test semver::tests::a_requirement_naming_a_pre_release_is_refused_rather_than_truncated ... ok
+test semver::tests::a_single_bound_is_one_clause ... ok
+test semver::tests::a_two_component_requirement_parses_as_the_proposal_writes_it ... ok
+test semver::tests::an_empty_clause_between_commas_is_refused ... ok
+test semver::tests::an_empty_component_is_refused_with_a_useful_message ... ok
+test semver::tests::an_empty_requirement_is_refused ... ok
+test semver::tests::an_error_in_a_later_clause_quotes_the_whole_requirement ... ok
+test semver::tests::an_in_range_host_satisfies_the_declared_abi_host_range ... ok
+test semver::tests::an_operator_without_a_version_is_refused ... ok
+test semver::tests::an_out_of_range_host_is_refused_with_a_clear_code ... ok
+test semver::tests::any_matches_everything_released ... ok
+test semver::tests::caret_allows_a_minor_and_patch_bump_within_a_major ... ok
+test semver::tests::caret_at_zero_one_allows_patch_bumps_only ... ok
+test semver::tests::caret_at_zero_zero_pins_the_patch ... ok
+test semver::tests::caret_below_one_treats_the_minor_as_breaking ... ok
+test semver::tests::caret_refuses_a_major_bump_and_a_downgrade ... ok
+test semver::tests::comma_spacing_is_flexible ... ok
+test semver::tests::comparison_operators_behave_as_written ... ok
+test semver::tests::degenerate_dotted_forms_are_refused ... ok
+test semver::tests::every_operator_parses ... ok
+test semver::tests::exact_matches_only_the_exact_version ... ok
+test semver::tests::four_components_is_refused_rather_than_truncated ... ok
+test semver::tests::operators_accept_partial_versions ... ok
+test semver::tests::ordinary_versions_still_parse ... ok
+test semver::tests::pre_releases_are_not_representable_and_this_records_it ... ok
+test semver::tests::requirements_round_trip_through_display ... ok
+test semver::tests::the_any_requirement_is_a_single_clause ... ok
+test semver::tests::tilde_allows_patch_bumps_within_a_minor ... ok
+test semver::tests::two_character_operators_are_not_split ... ok
+test semver::tests::whitespace_is_tolerated ... ok
+test signature::tests::a_required_signature_that_is_absent_fails ... ok
+test signature::tests::a_signature_file_of_the_wrong_length_names_both_numbers ... ok
+test signature::tests::a_signature_checked_against_no_keys_is_refused_rather_than_accepted ... ok
+test signature::tests::a_forged_key_id_cannot_select_a_forged_key ... ok
+test signature::tests::a_second_acceptable_key_verifies_too ... ok
+test signature::tests::a_signature_round_trips_through_its_bytes ... ok
+test signature::tests::an_empty_policy_with_no_signature_performs_no_check ... ok
+test signature::tests::a_signed_artifact_verifies_and_names_its_key ... ok
+test signature::tests::an_optional_signature_that_is_absent_is_unsigned_not_verified ... ok
+test signature::tests::an_unlisted_key_is_refused_before_any_crypto ... ok
+test signature::tests::one_flipped_artifact_byte_fails_and_says_which_key ... ok
+test signature::tests::the_key_id_is_sixteen_hex_characters ... ok
+test signature::tests::one_flipped_signature_byte_fails ... ok
+test store::fs_tests::a_missing_store_root_lists_nothing_rather_than_failing ... ok
+test store::fs_tests::canonical_place_accepts_a_bare_file_name ... ok
+test store::fs_tests::materialize_accepts_a_bare_file_name ... ignored, changes the process working directory; run explicitly
+test store::fs_tests::listing_an_empty_store_yields_nothing ... ok
+test store::fs_tests::materialize_creates_no_directories_on_refusal ... ok
+test store::fs_tests::an_empty_artifact_is_storable ... ok
+test store::fs_tests::a_written_artifact_can_be_read_back ... ok
+test store::fs_tests::a_corrupted_artifact_is_detected_on_read ... ok
+test store::fs_tests::materialize_of_an_absent_digest_is_refused_by_name ... ok
+test store::fs_tests::a_truncated_artifact_is_detected ... ok
+test store::fs_tests::listing_skips_metadata_sidecars ... ok
+test store::fs_tests::link_or_copy_refuses_a_non_file_at_the_temp_name ... ok
+test store::fs_tests::listing_treats_an_upper_case_sidecar_as_a_sidecar ... ok
+test store::fs_tests::different_content_produces_different_digests ... ok
+test store::fs_tests::materialize_does_not_link_a_corrupted_artifact ... ok
+test store::fs_tests::materialize_refuses_a_destination_inside_the_store ... ok
+test store::fs_tests::materialize_refuses_a_directory_at_the_destination ... ok
+test store::fs_tests::reading_an_absent_artifact_names_its_digest ... ok
+test store::fs_tests::materialize_is_already_present_without_a_store_entry ... ok
+test store::tests::a_bare_hex_digest_parses ... ok
+test store::tests::a_digest_round_trips_through_its_prefixed_form ... ok
+test store::tests::a_known_answer_digest_matches_the_published_value ... ok
+test store::fs_tests::materialize_refuses_a_dotdot_escape_into_the_store ... ok
+test store::tests::a_non_hex_digest_is_refused ... ok
+test store::fs_tests::materialize_is_idempotent ... ok
+test store::tests::a_weaker_algorithm_is_refused ... ok
+test store::tests::parsing_is_case_insensitive ... ok
+test store::tests::a_wrong_length_digest_is_refused ... ok
+test store::tests::the_artifact_path_follows_the_documented_layout ... ok
+test store::tests::the_fanout_splits_the_first_four_hex_characters ... ok
+test store::tests::the_metadata_path_sits_beside_the_artifact ... ok
+test store::tests::whitespace_is_trimmed ... ok
+test store::fs_tests::materialize_refuses_an_in_store_dest_without_touching_it ... ok
+test store::fs_tests::materialize_links_the_artifact_and_reads_back_identical ... ok
+test store::fs_tests::writing_the_same_bytes_twice_is_idempotent ... ok
+test store::fs_tests::materialize_leaves_a_differing_dest_alone_when_the_store_is_corrupt ... ok
+test store::fs_tests::materialize_sweeps_a_stale_temp_name ... ok
+test store::fs_tests::materialized_files_are_read_only_on_both_paths ... ok
+test store::fs_tests::materialize_replaces_differing_content_at_a_managed_path ... ok
+test store::fs_tests::the_copy_fallback_is_verified_like_the_link_path ... ok
+test store::fs_tests::listing_returns_every_artifact_sorted ... ok
+
+test result: ok. 137 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+   Doc-tests qqq_pkg
+
+running 4 tests
+test crates\qqq-pkg\src\semver.rs - semver::check_host_requirement (line 318) ... ok
+test crates\qqq-pkg\src\store.rs - store::Materialized (line 189) ... ok
+test crates\qqq-pkg\src\store.rs - store::LinkMethod (line 172) ... ok
+test crates\qqq-pkg\src\store.rs - store::StoreLayout::materialize (line 944) ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+all doctests ran in 1.03s; merged doctests compilation took 0.86s

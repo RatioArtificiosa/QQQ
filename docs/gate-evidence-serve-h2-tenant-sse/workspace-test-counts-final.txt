@@ -1,0 +1,9 @@
+# Full workspace test counts on the final tree (`2a76e73`).
+
+Command: `cargo test --workspace --all-features`
+Result: 4008 passed, 0 failed, 15 ignored, across 100 suites.
+Delta vs the `30b5963` count (4007/0): +1, the SRV-024 tripwire
+`no_multishot_http_guest_export_exists_yet`.
+The full gate (`cargo xtask ci`, 152 steps, exit 0 — log
+`gate-xtask-ci-152-on-2a76e73.log`) ran on the same clean tree and
+covers fmt/clippy/deny/machete/lang/conformance/audit/self-tests.

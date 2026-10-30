@@ -1,0 +1,399 @@
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.16s
+     Running `target\debug\xtask.exe ci`
+ok   check_lifecycle_counts (0s)
+ok   check_done_lines       (0s)
+ok   check_error_all        (1s)
+ok   check_doc_claims       (1s)
+ok   check_advisories       (1s)
+ok   check_threat_model     (1s)
+ok   check_glossary_usage   (1s)
+ok   orders-fmt             (1s)
+ok   check_batch_first      (1s)
+ok   check_no_ambient       (1s)
+ok   machete                (1s)
+ok   check_error_catalogue  (1s)
+ok   check_admission        (1s)
+ok   check_tiers            (1s)
+ok   check_wit_bindings     (1s)
+ok   milestone_dashboard    (2s)
+ok   check_security_scope   (2s)
+ok   check_source_claims    (2s)
+ok   check_checklist_counts (2s)
+ok   check_wit_style        (2s)
+ok   check_unicode_escapes  (2s)
+ok   check_license_boundary (2s)
+ok   check_metric_cardinality (2s)
+ok   check_bench_contract   (2s)
+ok   check_public_reachability (3s)
+ok   check_glossary         (3s)
+ok   gen_llms_txt           (3s)
+ok   check_wit_deprecated   (3s)
+ok   check_toolchain        (3s)
+ok   gen_capability_catalogue (3s)
+ok   check_topology         (3s)
+ok   check_schema_conformance (3s)
+ok   check_wit              (3s)
+ok   check_spdx             (4s)
+ok   check_wit_errors       (4s)
+ok   gen_schemas            (4s)
+ok   check_subprocess_encoding (4s)
+ok   check_panic_strategy   (4s)
+ok   normalize_eol          (4s)
+ok   check_verified_facts   (4s)
+ok   check_ci_examples      (4s)
+ok   check_milestones       (4s)
+ok   check_scope_table      (4s)
+ok   check_tombstones       (4s)
+ok   check_wit_since        (4s)
+ok   check_language_parity  (4s)
+ok   check_reconciliation   (4s)
+ok   gen_backlog            (4s)
+ok   check_wit_reference    (5s)
+ok   check_ordered_maps     (6s)
+ok   check_no_poison_expect (7s)
+ok   check_checklist_citations (7s)
+ok   check_include_str      (8s)
+ok   deny                   (9s)
+ok   fmt                    (13s)
+ok   check_coderabbit_config (19s)
+ok   check_wit_vendoring    (20s)
+ok   check_agent_cookbook   (51s)
+ok   check_agent_bench      (169s)
+ok   check_xrefs            (239s)
+ok   sync_docs              (244s)
+run  clippy
+ok   clippy                 (4s)
+run  build
+ok   build                  (7s)
+run  test
+ok   test                   (201s)
+run  lang001
+ok   lang001                (8s)
+run  lang002
+ok   lang002                (31s)
+run  lang003
+ok   lang003                (83s)
+run  conformance_exec
+ok   conformance_exec       (4s)
+run  lang005
+ok   lang005                (1s)
+run  audit_load
+ok   audit_load             (89s)
+run  orders-clippy
+ok   orders-clippy          (1s)
+run  orders-test
+ok   orders-test            (26s)
+run  f01-probe
+ok   f01-probe              (0s)
+run  unsafe-scan
+ok   unsafe-scan            (0s)
+run  help-brevity
+ok   help-brevity           (0s)
+run  check_conformance
+ok   check_conformance      (0s)
+run  check_conformance
+ok   check_conformance      (0s)
+run  check_error_standard
+ok   check_error_standard   (0s)
+run  check_gate_parity
+ok   check_gate_parity      (0s)
+run  audit_unsafe
+ok   audit_unsafe           (3s)
+run  audit_unsafe
+ok   audit_unsafe           (3s)
+run  audit_unsafe
+ok   audit_unsafe           (4s)
+run  check_admission
+ok   check_admission        (0s)
+run  check_advisories
+ok   check_advisories       (0s)
+run  check_agent_bench
+ok   check_agent_bench      (0s)
+run  check_agent_cookbook
+ok   check_agent_cookbook   (0s)
+run  check_api_examples
+ok   check_api_examples     (31s)
+run  check_api_examples
+ok   check_api_examples     (0s)
+run  check_bench_contract
+ok   check_bench_contract   (0s)
+run  check_checklist_citations
+ok   check_checklist_citations (3s)
+run  check_checklist_counts
+ok   check_checklist_counts (9s)
+run  check_ci_examples
+ok   check_ci_examples      (0s)
+run  check_coderabbit_config
+ok   check_coderabbit_config (58s)
+run  check_conformance
+ok   check_conformance      (0s)
+run  check_corpus_at_rest
+ok   check_corpus_at_rest   (0s)
+run  check_corpus_repair
+ok   check_corpus_repair    (3s)
+run  check_corpus_repair
+ok   check_corpus_repair    (3s)
+run  check_doc_claims
+ok   check_doc_claims       (0s)
+run  check_done_lines
+ok   check_done_lines       (0s)
+run  check_error_all
+ok   check_error_all        (0s)
+run  check_error_catalogue
+ok   check_error_catalogue  (1s)
+run  check_error_standard
+ok   check_error_standard   (0s)
+run  check_gate_parity
+ok   check_gate_parity      (0s)
+run  check_glossary
+ok   check_glossary         (1s)
+run  check_glossary_usage
+ok   check_glossary_usage   (0s)
+run  check_handoff
+ok   check_handoff          (0s)
+run  check_include_str
+ok   check_include_str      (1s)
+run  check_language_parity
+ok   check_language_parity  (0s)
+run  check_license_boundary
+ok   check_license_boundary (0s)
+run  check_lifecycle_counts
+ok   check_lifecycle_counts (0s)
+run  check_live_dev
+ok   check_live_dev         (0s)
+run  check_metric_cardinality
+ok   check_metric_cardinality (0s)
+run  check_milestones
+ok   check_milestones       (0s)
+run  check_no_poison_expect
+ok   check_no_poison_expect (49s)
+run  check_ordered_maps
+ok   check_ordered_maps     (0s)
+run  check_panic_strategy
+ok   check_panic_strategy   (0s)
+run  check_public_reachability
+ok   check_public_reachability (0s)
+run  check_reconciliation
+ok   check_reconciliation   (1s)
+run  check_sbom
+ok   check_sbom             (0s)
+run  check_schema_conformance
+ok   check_schema_conformance (20s)
+run  check_scope_table
+ok   check_scope_table      (0s)
+run  check_security_scope
+ok   check_security_scope   (0s)
+run  check_source_claims
+ok   check_source_claims    (0s)
+run  check_spdx
+ok   check_spdx             (0s)
+run  check_subprocess_encoding
+ok   check_subprocess_encoding (0s)
+run  check_threat_model
+ok   check_threat_model     (0s)
+run  check_tiers
+ok   check_tiers            (0s)
+run  check_tombstones
+ok   check_tombstones       (0s)
+run  check_toolchain
+ok   check_toolchain        (0s)
+run  check_unicode_escapes
+ok   check_unicode_escapes  (0s)
+run  check_verified_facts
+ok   check_verified_facts   (0s)
+run  check_wit
+ok   check_wit              (0s)
+run  check_wit_bindings
+ok   check_wit_bindings     (0s)
+run  check_wit_reference
+ok   check_wit_reference    (0s)
+run  check_wit_style
+ok   check_wit_style        (0s)
+run  check_wit_vendoring
+ok   check_wit_vendoring    (7s)
+run  check_xrefs
+ok   check_xrefs            (2s)
+run  det009_trials
+ok   det009_trials          (0s)
+run  fault_inject_live_components
+ok   fault_inject_live_components (0s)
+run  gen_backlog
+ok   gen_backlog            (0s)
+run  gen_capability_catalogue
+ok   gen_capability_catalogue (0s)
+run  gen_llms_txt
+ok   gen_llms_txt           (4s)
+run  milestone_dashboard
+ok   milestone_dashboard    (0s)
+run  normalize_eol
+ok   normalize_eol          (0s)
+run  run_conformance
+ok   run_conformance        (0s)
+run  run_conformance
+ok   run_conformance        (0s)
+run  run_conformance
+ok   run_conformance        (0s)
+run  run_language_probes
+ok   run_language_probes    (0s)
+run  run_perf_regression
+ok   run_perf_regression    (0s)
+run  self_test_schemas
+ok   self_test_schemas      (3s)
+run  self_test_xrefs
+ok   self_test_xrefs        (168s)
+run  self_test_xrefs
+ok   self_test_xrefs        (0s)
+---- summary ----
+fmt                      ok (13s)
+deny                     ok (9s)
+machete                  ok (1s)
+orders-fmt               ok (1s)
+check_admission          ok (1s)
+check_advisories         ok (1s)
+check_agent_bench        ok (169s)
+check_agent_cookbook     ok (51s)
+check_batch_first        ok (1s)
+check_bench_contract     ok (2s)
+check_checklist_citations ok (7s)
+check_checklist_counts   ok (2s)
+check_ci_examples        ok (4s)
+check_coderabbit_config  ok (19s)
+check_doc_claims         ok (1s)
+check_done_lines         ok (0s)
+check_error_all          ok (1s)
+check_error_catalogue    ok (1s)
+check_glossary           ok (3s)
+check_glossary_usage     ok (1s)
+check_include_str        ok (8s)
+check_language_parity    ok (4s)
+check_license_boundary   ok (2s)
+check_lifecycle_counts   ok (0s)
+check_metric_cardinality ok (2s)
+check_milestones         ok (4s)
+check_no_ambient         ok (1s)
+check_no_poison_expect   ok (7s)
+check_ordered_maps       ok (6s)
+check_panic_strategy     ok (4s)
+check_public_reachability ok (3s)
+check_reconciliation     ok (4s)
+check_schema_conformance ok (3s)
+check_scope_table        ok (4s)
+check_security_scope     ok (2s)
+check_source_claims      ok (2s)
+check_spdx               ok (4s)
+check_subprocess_encoding ok (4s)
+check_threat_model       ok (1s)
+check_tiers              ok (1s)
+check_tombstones         ok (4s)
+check_toolchain          ok (3s)
+check_topology           ok (3s)
+check_unicode_escapes    ok (2s)
+check_verified_facts     ok (4s)
+check_wit                ok (3s)
+check_wit_bindings       ok (1s)
+check_wit_deprecated     ok (3s)
+check_wit_errors         ok (4s)
+check_wit_reference      ok (5s)
+check_wit_since          ok (4s)
+check_wit_style          ok (2s)
+check_wit_vendoring      ok (20s)
+check_xrefs              ok (239s)
+gen_backlog              ok (4s)
+gen_capability_catalogue ok (3s)
+gen_llms_txt             ok (3s)
+gen_schemas              ok (4s)
+milestone_dashboard      ok (2s)
+normalize_eol            ok (4s)
+sync_docs                ok (244s)
+clippy                   ok (4s)
+build                    ok (7s)
+test                     ok (201s)
+lang001                  ok (8s)
+lang002                  ok (31s)
+lang003                  ok (83s)
+conformance_exec         ok (4s)
+lang005                  ok (1s)
+audit_load               ok (89s)
+orders-clippy            ok (1s)
+orders-test              ok (26s)
+f01-probe                ok (0s)
+unsafe-scan              ok (0s)
+help-brevity             ok (0s)
+check_conformance        ok (0s)
+check_conformance        ok (0s)
+check_error_standard     ok (0s)
+check_gate_parity        ok (0s)
+audit_unsafe             ok (3s)
+audit_unsafe             ok (3s)
+audit_unsafe             ok (4s)
+check_admission          ok (0s)
+check_advisories         ok (0s)
+check_agent_bench        ok (0s)
+check_agent_cookbook     ok (0s)
+check_api_examples       ok (31s)
+check_api_examples       ok (0s)
+check_bench_contract     ok (0s)
+check_checklist_citations ok (3s)
+check_checklist_counts   ok (9s)
+check_ci_examples        ok (0s)
+check_coderabbit_config  ok (58s)
+check_conformance        ok (0s)
+check_corpus_at_rest     ok (0s)
+check_corpus_repair      ok (3s)
+check_corpus_repair      ok (3s)
+check_doc_claims         ok (0s)
+check_done_lines         ok (0s)
+check_error_all          ok (0s)
+check_error_catalogue    ok (1s)
+check_error_standard     ok (0s)
+check_gate_parity        ok (0s)
+check_glossary           ok (1s)
+check_glossary_usage     ok (0s)
+check_handoff            ok (0s)
+check_include_str        ok (1s)
+check_language_parity    ok (0s)
+check_license_boundary   ok (0s)
+check_lifecycle_counts   ok (0s)
+check_live_dev           ok (0s)
+check_metric_cardinality ok (0s)
+check_milestones         ok (0s)
+check_no_poison_expect   ok (49s)
+check_ordered_maps       ok (0s)
+check_panic_strategy     ok (0s)
+check_public_reachability ok (0s)
+check_reconciliation     ok (1s)
+check_sbom               ok (0s)
+check_schema_conformance ok (20s)
+check_scope_table        ok (0s)
+check_security_scope     ok (0s)
+check_source_claims      ok (0s)
+check_spdx               ok (0s)
+check_subprocess_encoding ok (0s)
+check_threat_model       ok (0s)
+check_tiers              ok (0s)
+check_tombstones         ok (0s)
+check_toolchain          ok (0s)
+check_unicode_escapes    ok (0s)
+check_verified_facts     ok (0s)
+check_wit                ok (0s)
+check_wit_bindings       ok (0s)
+check_wit_reference      ok (0s)
+check_wit_style          ok (0s)
+check_wit_vendoring      ok (7s)
+check_xrefs              ok (2s)
+det009_trials            ok (0s)
+fault_inject_live_components ok (0s)
+gen_backlog              ok (0s)
+gen_capability_catalogue ok (0s)
+gen_llms_txt             ok (4s)
+milestone_dashboard      ok (0s)
+normalize_eol            ok (0s)
+run_conformance          ok (0s)
+run_conformance          ok (0s)
+run_conformance          ok (0s)
+run_language_probes      ok (0s)
+run_perf_regression      ok (0s)
+self_test_schemas        ok (3s)
+self_test_xrefs          ok (168s)
+self_test_xrefs          ok (0s)
+GATE GREEN: 152 steps

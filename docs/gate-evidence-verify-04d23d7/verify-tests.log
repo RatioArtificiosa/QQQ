@@ -1,0 +1,18 @@
+Verification plan step 4 — tests proof on clean HEAD 04d23d7.
+
+- New checker since last verification: tools/check_ci_examples.py
+  (TEST-018) + --self-test, registered in `cargo xtask ci` (Par lane) and
+  the self-test lane (152-step gate, up from 150).
+- Red once: `check_ci_examples.py` on empty examples/ci/ → 3 missing-file
+  findings, exit 1 (test018-red.log); green after examples landed
+  (CI EXAMPLES OK, 3 examples pin Rust 1.98).
+- Green: checker exit 0, self-test exit 0 (good/missing/broken-YAML/
+  no-cargo-test/no-qqqai-test/stale-pin).
+- Review-driven: proxy review found 1 weakened gate (bare `qqqai` passed);
+  fixed to require `qqqai test` + added no-qqqai fixture; CLEAN re-review
+  (cr-test018-proxy.log, cr-test018-proxy2.log in docs/gate-evidence-test018/).
+- Watch slice (prior round, same tree lineage): 705 lib / 116 doctests /
+  139 CLI green; red-unit (E0425), red-cli (unknown --watch), review-red
+  (cannot be combined) logs in docs/gate-evidence-test002-watch/.
+- No re-running of an old suite as proof: every number above names the
+  test that exercises the changed code path.

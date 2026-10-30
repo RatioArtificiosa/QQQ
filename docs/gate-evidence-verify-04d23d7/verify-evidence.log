@@ -1,0 +1,17 @@
+Verification plan step 5 — evidence on clean HEAD 04d23d7.
+
+- Doc checker set (all on this tree):
+    check_doc_claims: OK (30 claims match)
+    check_done_lines: OK (52 known items, no block repeats)
+    check_checklist_counts: OK (33 areas, 644 items)
+    gen_backlog --check: OK (644 items, 33 areas, 11 phases)
+    milestone_dashboard --check: OK
+    check_corpus_at_rest: AT REST (3 documents)
+- Checklist: 342 done / 174 open / 125 blocked / 3 partial / 644 total;
+  TEST area 15/20. Remaining [!]/UNMEASURED/BLOCKED items keep their
+  recorded owners, tripwires, and re-measure commands in
+  QQQ-Checklist-V1.md (125 blocked unchanged by this window).
+- Step-1 logs for this HEAD lineage: docs/gate-evidence-test018/
+  (GATE GREEN 152 steps re-run on clean 0abed63, committed as 04d23d7).
+- No Registry edits; handoff packet unchanged
+  (docs/runtime-handoff-2026-10-27.md lineage).

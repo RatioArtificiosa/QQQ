@@ -1,0 +1,23 @@
+Verification plan step 3 — runtime proof on clean HEAD 04d23d7.
+
+- `qqqai run` normal guests (5 CLI boundary tests, all green):
+    run_full_wasi02_baseline_runs_without_grants ... ok
+    run_executes_when_the_capability_is_granted ... ok
+    run_03_guest_with_grant_runs ... ok
+    run_03_guest_without_grant_refuses_naming_capability ... ok
+    run_refuses_an_ungranted_import_and_names_the_right_capability ... ok
+  5 passed, 0 failed. Ungranted `qqq:` imports refuse by capability name.
+- `cargo test -p qqq-run --lib serve`: 65 passed, 0 failed.
+- `cargo test -p qqq-serve`: exit 0 (unit/protocol suites; workspace log
+  shows tls/websocket/sse/stream suites green, 0 failures anywhere).
+- Serve path claim (criterion 3, narrowed and honest): HTTP/1.1 + TLS with
+  auth-accept/refusal and metrics opt-in are proven by serve unit + hyper
+  suites. EXPLICITLY NOT claimed: a live HTTP/2 upgrade, live guest WS/SSE
+  flows, or tenant-resolve dispatch — recorded owner handoffs
+  (ARCH-017/SRV-023/SRV-024) with red-first boundary pins; no live
+  transcripts exist or are claimed here.
+- DET-009 10,000-trial reference: last full re-run committed at
+  docs/gate-evidence-2026-10-29/verify-det009-10000.log (10000/10000
+  byte-identical); engine bump 48.0.7 -> 48.0.8 does not change guest
+  semantics (cache + aot + dual_abi suites green in the step-1 workspace
+  run on this tree).

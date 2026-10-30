@@ -1,0 +1,16 @@
+Verification plan step 2 — contract proof on clean HEAD 04d23d7
+(evaluates the 0abed63 TEST-018 close; 04d23d7 adds only evidence logs).
+
+- HEAD: 04d23d7 (git rev-parse HEAD); `git status --short` clean (empty).
+- Frozen-surface diff vs c67eae0 (pre-slice):
+    Cargo.lock                    (wasmtime 48.0.7 -> 48.0.8, cranelift 0.135.7 -> 0.135.8, zstd stays 0.14.3)
+    Cargo.toml                    (vendor comment 48.0.7 -> 48.0.8 only)
+    crates/qqq-host/src/config.rs (ENGINE_VERSION 48.0.7 -> 48.0.8 only)
+  No changes to crates/qqq-pkg, crates/qqq-abi, crates/qqq-cap, wit/,
+  crates/qqq-run. The lock/pin moves are the coordinated RUSTSEC-2026-0420
+  fix (see docs/dependency-decisions/zstd-cache.md); no ABI change.
+- core-only build: `cargo build -p qqq-pkg --no-default-features --features core-only --target wasm32-unknown-unknown` exit 0.
+- `cargo test -p qqq-pkg` exit 0; `cargo test -p qqq-abi` exit 0 (25 passed).
+- Registry: read-only discipline held — zero writes outside E:/QQQ this
+  session (all commits under E:/QQQ; F:/QQQ-AUDIT/Registry never listed for
+  edit and no tool was given a write path there).

@@ -1,0 +1,12 @@
+Checking your docs close-out ÔÇö verifying counts and claims.
+
+Working tree is clean ÔÇö reviewing the close commit itself.
+
+Counts check out so far ÔÇö now verifying the Done line details.
+
+Not CLEAN ÔÇö 1 overclaim:
+
+* `QQQ-Checklist-V1.md:4771` Done line says "7 lib filter tests" ÔÇö tree has 5: `crates/qqq-run/src/test.rs:2775,2792,2806,2820,2830` (`the_filtered_countÔÇª`, `a_filter_matchesÔÇª`, `a_filter_matching_a_filenameÔÇª`, `no_filterÔÇª`, `a_filter_matching_nothingÔÇª`). Old Partial line correctly said 5; no filter tests added in `2a3ff1f`/`6a26ccb`/`4800e1d`. Fix: change 7 ÔåÆ 5.
+
+Verified OK: `--filter` (`main.rs:2077`), `--jobs` (`main.rs:1995`), `filter_tests` + 2 CLI names, shared index queue/discovery-order/fail-fast/isolation, barrier fixture (`cli.rs:2913`), `--watch/--watch-limit`, `emit_test_report`, re-baseline (`test.rs:1841`), ignore rules, 3 incompatible-combo rejections, E0425 red log, 8 watch tests, 705/116/139 gate logs, GREEN 150 steps, CLEAN re-review, counts 341/175/125/3/644 math, `check_doc_claims.py` OK (30), backlog line 4770, dashboard/llms/backlog consistent.
+

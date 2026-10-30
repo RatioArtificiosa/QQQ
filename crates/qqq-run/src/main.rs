@@ -1944,6 +1944,69 @@ fn dispatch_test(
     report_with_verdict(out, name, &result, verdict)
 }
 
+/// Apply one `test` runner execution flag (`--jobs`, `--snapshot`,
+/// `--snapshot-update`).
+///
+/// Split out of [`test_options`]: those three arms pushed it over the line
+/// budget, and they form one family (how tests run, not which tests run
+/// or what they report). `index` points at the flag; `--jobs` advances it
+/// past its value, mirroring how the caller advances past the flag itself.
+fn test_exec_flag(
+    opts: &mut qqq_run::TestOptions,
+    flag: &str,
+    args: &[String],
+    index: &mut usize,
+) -> qqq_core::Result<()> {
+    // `TEST-011`. Comparing and recording are separate flags rather than a
+    // `--snapshot <mode>` value: a bare `--snapshot` is the common verify
+    // step, and `--snapshot-update` names the destructive half explicitly so
+    // it cannot be typed by accident. The two together are a usage error,
+    // because the last flag silently winning would let a verify-only intent
+    // record instead.
+    let conflict = || {
+        qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`--snapshot` and `--snapshot-update` cannot be combined",
+        )
+        .with_remediation(
+            "run one or the other: `--snapshot` verifies, `--snapshot-update` records",
+        )
+    };
+    match flag {
+        "--snapshot" => {
+            if opts.snapshot == Some(qqq_run::SnapshotMode::Update) {
+                return Err(conflict());
+            }
+            opts.snapshot = Some(qqq_run::SnapshotMode::Compare);
+        }
+        "--snapshot-update" => {
+            if opts.snapshot == Some(qqq_run::SnapshotMode::Compare) {
+                return Err(conflict());
+            }
+            opts.snapshot = Some(qqq_run::SnapshotMode::Update);
+        }
+        "--jobs" => {
+            let v = args.get(*index + 1).ok_or_else(|| missing_value(flag))?;
+            let jobs: u32 = v
+                .parse()
+                .map_err(|_| bad_value(flag, v, "a whole number of parallel jobs"))?;
+            if jobs == 0 {
+                return Err(bad_value(
+                    flag,
+                    v,
+                    "at least 1 worker (omit --jobs for sequential)",
+                ));
+            }
+            opts.jobs = Some(jobs);
+            *index += 1;
+        }
+        _ => {
+            unreachable!("the caller matches exactly this family's flags");
+        }
+    }
+    Ok(())
+}
+
 /// Decode `qqqai test`'s flags.
 ///
 /// # Why the global flags are taken as a parameter
@@ -2013,8 +2076,14 @@ fn test_options(
                 );
                 i += 1;
             }
+            // Execution-mode flags live in `test_exec_flag`: comparing,
+            // recording, and parallelism are how tests run, not which tests
+            // run or what they report.
+            "--snapshot" | "--snapshot-update" | "--jobs" => {
+                test_exec_flag(&mut opts, a, args, &mut i)?;
+            }
             // `TEST-014`. `--history` records a run; `--flaky` reports one. The commit and the run
-            // identifier come from the environment, which keeps this list at nine entries for a help
+            // identifier come from the environment, which keeps this list at twelve entries for a help
             // text with a brevity budget (`DX-013`).
             "--history" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
@@ -2026,36 +2095,6 @@ fn test_options(
                 opts.flaky = Some(std::path::PathBuf::from(v));
                 i += 1;
             }
-            // `TEST-011`. Comparing and recording are separate flags rather
-            // than a `--snapshot <mode>` value: a bare `--snapshot` is the
-            // common verify step, and `--snapshot-update` names the destructive
-            // half explicitly so it cannot be typed by accident. The two
-            // together are a usage error, because the last flag silently
-            // winning would let a verify-only intent record instead.
-            "--snapshot" => {
-                if opts.snapshot == Some(qqq_run::SnapshotMode::Update) {
-                    return Err(qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
-                        "`--snapshot` and `--snapshot-update` cannot be combined",
-                    )
-                    .with_remediation(
-                        "run one or the other: `--snapshot` verifies, `--snapshot-update` records",
-                    ));
-                }
-                opts.snapshot = Some(qqq_run::SnapshotMode::Compare);
-            }
-            "--snapshot-update" => {
-                if opts.snapshot == Some(qqq_run::SnapshotMode::Compare) {
-                    return Err(qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
-                        "`--snapshot` and `--snapshot-update` cannot be combined",
-                    )
-                    .with_remediation(
-                        "run one or the other: `--snapshot` verifies, `--snapshot-update` records",
-                    ));
-                }
-                opts.snapshot = Some(qqq_run::SnapshotMode::Update);
-            }
             "--manifest" => i += 1,
             other if other.starts_with('-') => {
                 return Err(qqq_core::Error::new(
@@ -2063,7 +2102,7 @@ fn test_options(
                     format!("unknown flag `{other}` for `test`"),
                 )
                 .with_remediation(
-                    "`test` accepts --filter, --fail-fast, --isolate, --trials, --format, \
+                    "`test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --format, \
                      --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest",
                 ));
             }

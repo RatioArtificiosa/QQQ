@@ -97,6 +97,31 @@ pub struct TestOptions {
     /// tests whose output differs from (or lacks) a recording; `Update`
     /// records or refreshes the recordings instead of comparing.
     pub snapshot: Option<SnapshotMode>,
+    /// How many tests run at once (`TEST-002`).
+    ///
+    /// `None` (the default) runs tests one after another, exactly as before:
+    /// sequential is the safe default because tests sharing the project
+    /// directory can observe each other's files. `Some(n)` runs up to `n`
+    /// tests concurrently on worker threads (capped at an absolute 256, so
+    /// an absurd value cannot fork-bomb the machine); outcomes are
+    /// reassembled in discovery order, so reports are stable regardless of
+    /// finish order.
+    /// `Some(0)` and `Some(1)` both mean sequential — the CLI rejects `0`,
+    /// so only a direct API caller can pass it, and treating it as "no
+    /// parallelism" is the fail-closed reading rather than an error deep in
+    /// thread setup. Trials within one test stay sequential — cross-trial
+    /// agreement needs an order. `--fail-fast` stops scheduling new tests
+    /// after the first failure while letting running ones finish.
+    ///
+    /// ```
+    /// use qqq_run::test_runner::TestOptions;
+    ///
+    /// let mut opts = TestOptions::default();
+    /// assert!(opts.jobs.is_none(), "sequential unless asked");
+    /// opts.jobs = Some(4);
+    /// assert_eq!(opts.trial_count(), 1, "jobs do not change trial semantics");
+    /// ```
+    pub jobs: Option<u32>,
 }
 
 impl TestOptions {
@@ -909,21 +934,19 @@ fn first_difference(outputs: &[String]) -> String {
     "identical lines, differing trailing bytes".to_owned()
 }
 
-/// Escape a snapshot identity into a flat file stem.
+/// Escape an identity into a flat, filesystem-safe stem.
 ///
-/// The identity is `name\0file`: the NUL separates the two because neither a
-/// test name nor a file path can contain one, which makes the mapping
-/// injective where a visible separator would collide (`a-b` + `c` vs `a` +
-/// `b-c` share every visible join). Every byte outside `[A-Za-z0-9_-]`
-/// becomes `%XX`, so no separator survives (a snapshot can never escape
-/// `tests/snapshots/`) and distinct tests never share a file. Long identities
-/// are truncated to 100 characters plus a 16-hex-digit FNV-1a suffix, because
-/// a Windows path still has a limit and a test name does not. FNV-1a is
-/// chosen for determinism across runs — `DefaultHasher` is randomly seeded
-/// per process, which would rename every snapshot on every run — and it is
-/// documented as *not* a security digest: collisions only misattribute a
-/// snapshot, they grant nothing.
-fn escape_snapshot_name(identity: &str) -> String {
+/// Every byte outside `[A-Za-z0-9_-]` becomes `%XX`, so no separator survives
+/// and the mapping is injective: distinct inputs never share an output.
+/// Long identities are truncated to 100 characters plus a 16-hex-digit
+/// FNV-1a suffix, because a Windows path still has a limit and a test name
+/// does not. FNV-1a is chosen for determinism across runs — `DefaultHasher`
+/// is randomly seeded per process, which would rename every snapshot on
+/// every run — and it is documented as *not* a security digest: collisions
+/// only misattribute a file, they grant nothing. Used for snapshot file
+/// names and per-test isolation directories, which share the no-separators,
+/// injective, deterministic requirements.
+fn escape_identifier(identity: &str) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::with_capacity(identity.len().saturating_add(5));
@@ -945,15 +968,28 @@ fn escape_snapshot_name(identity: &str) -> String {
         }
         let _ = write!(out, "-{hash:016x}");
     }
-    out.push_str(".snap");
     out
+}
+
+/// A snapshot's file name for one test in one file.
+///
+/// The identity is `name\0file`: the NUL separates the two because neither a
+/// test name nor a file path can contain one, which makes the mapping
+/// injective where a visible separator would collide (`a-b` + `c` vs `a` +
+/// `b-c` share every visible join). Same-named tests in different files
+/// therefore never share a recording.
+fn snapshot_file_name(file: &str, test_name: &str) -> String {
+    format!(
+        "{}.snap",
+        escape_identifier(&format!("{test_name}\0{file}"))
+    )
 }
 
 /// A 64-bit FNV-1a digest, for filename shortening only.
 ///
 /// Deterministic across runs and platforms, which is the one property the
 /// snapshot path needs. Explicitly not a security boundary: see
-/// [`escape_snapshot_name`].
+/// [`escape_identifier`].
 fn short_hash(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
@@ -965,20 +1001,16 @@ fn short_hash(bytes: &[u8]) -> u64 {
 
 /// Where a test's expectation lives: `tests/snapshots/<escaped>.snap`.
 ///
-/// The escaped stem covers `name\0file` (see [`escape_snapshot_name`]), so
+/// The escaped stem covers `name\0file` (see [`snapshot_file_name`]), so
 /// same-named tests in different files never share a recording. Beside the
 /// tests rather than under `target/`: snapshots are committed expectations,
 /// not build products, and `target/` is gitignored, cleaned by `cargo clean`,
 /// and never reviewed. A snapshot nobody reviews is a blessed-by-accident
 /// file, which is the failure this placement prevents.
 fn snapshot_path(project_dir: &Path, file: &str, test_name: &str) -> PathBuf {
-    let mut identity = String::with_capacity(test_name.len() + file.len() + 1);
-    identity.push_str(test_name);
-    identity.push('\0');
-    identity.push_str(file);
     tests_dir(project_dir)
         .join("snapshots")
-        .join(escape_snapshot_name(&identity))
+        .join(snapshot_file_name(file, test_name))
 }
 
 /// A unified diff of the recorded expectation against the actual output.
@@ -1294,7 +1326,7 @@ fn run_one_test(
     // `TEST-012`. **A fresh directory per test, not per binary.** The failure this exists for is *between*
     // tests in one binary -- one writes a marker, the next reads it -- so a directory per binary would
     // leave that channel open and would pass a single-test fixture.
-    let isolated = isolate.then(|| isolation_dir(project_dir, &test.name));
+    let isolated = isolate.then(|| isolation_dir(project_dir, &test.file, &test.name));
     let workdir: &Path = isolated.as_deref().unwrap_or(project_dir);
 
     for _ in 0..trials {
@@ -1333,22 +1365,20 @@ fn run_one_test(
 /// looks in the one place the project already puts build products. A system temp directory has none of
 /// those properties and would need a name scheme invented for it.
 ///
-/// # Why the name is derived from the test's own name
+/// # Why the name is derived from the test's own file and name
 ///
-/// So a directory left behind by a killed run names the test that owned it. The test name is filtered to
-/// characters that are safe on all three platforms -- a test named after a path, which is the common
-/// shape here, contains `::` and would otherwise make a nested directory that `remove_dir_all` then has to
-/// remove from the middle.
+/// So a directory left behind by a killed run names the test that owned it,
+/// and so same-named tests in different files — which parallel runs execute
+/// concurrently — never share a working directory. The `file\0name` identity
+/// goes through the same injective escaping as snapshots for exactly the same
+/// reason: a dash-mapped name would collide across files.
 #[must_use]
-fn isolation_dir(project_dir: &Path, test: &str) -> std::path::PathBuf {
-    let safe: String = test
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
+fn isolation_dir(project_dir: &Path, file: &str, test_name: &str) -> std::path::PathBuf {
+    let stem = escape_identifier(&format!("{file}\0{test_name}"));
     let dir = project_dir
         .join("target")
         .join("qqq-test-isolation")
-        .join(format!("{}-{}", std::process::id(), safe));
+        .join(format!("{}-{}", std::process::id(), stem));
     // A previous run of the same test in the same process cannot happen -- the name carries the test -- so
     // this only clears a leftover from a killed one.
     let _ = std::fs::remove_dir_all(&dir);
@@ -1424,9 +1454,54 @@ pub fn execute(project_dir: &Path, language: &str, opts: &TestOptions) -> Result
         });
     }
 
+    let outcomes = match opts.jobs.filter(|jobs| *jobs > 1) {
+        // Parallel workers report in completion order and are reassembled
+        // in discovery order inside `execute_parallel`, so the sequential
+        // path below is not the only one that reports stably.
+        Some(_) => execute_parallel(project_dir, &selected, trials, opts)?,
+        None => execute_sequential(project_dir, &selected, trials, opts)?,
+    };
+
+    let passed = outcomes.iter().filter(|o| o.passed).count();
+    let failed = outcomes.iter().filter(|o| !o.passed).count();
+    let nondeterministic = outcomes.iter().filter(|o| o.nondeterministic).count();
+
+    // `TEST-014`. **Recorded HERE rather than in `dispatch_test`**, because this is what holds each
+    // test's outcome. A recorder reading a `TestOutput` after the report shaping would record what the
+    // report chose to say, and that differs between `human`, `json`, `junit` and `tap`.
+    if let Some(path) = opts.history.as_deref() {
+        crate::flaky::record_run(path, &outcomes)?;
+    }
+
+    Ok(TestOutput {
+        project: String::new(),
+        discovered: all.len(),
+        ran: outcomes.len(),
+        passed,
+        failed,
+        nondeterministic,
+        trials,
+        dry_run: false,
+        outcomes,
+    })
+}
+
+/// Run every selected test one after another, stopping early for --fail-fast.
+///
+/// The sequential path preserves the exact historical behavior: discovery
+/// order, fail-fast breaking out of the loop, and outcomes in completion
+/// (= discovery) order. Anything `--jobs` changes goes through
+/// [`execute_parallel`] instead, so this path is the control the parallel
+/// one is measured against.
+fn execute_sequential(
+    project_dir: &Path,
+    selected: &[DiscoveredTest],
+    trials: u32,
+    opts: &TestOptions,
+) -> Result<Vec<OutcomeReport>> {
     let mut outcomes = Vec::with_capacity(selected.len());
 
-    for test in &selected {
+    for test in selected {
         let outcome = run_one_test(project_dir, test, trials, opts.isolate);
 
         // When the trials disagreed, record **how** — the first differing line,
@@ -1493,28 +1568,186 @@ pub fn execute(project_dir: &Path, language: &str, opts: &TestOptions) -> Result
         }
     }
 
-    let passed = outcomes.iter().filter(|o| o.passed).count();
-    let failed = outcomes.iter().filter(|o| !o.passed).count();
-    let nondeterministic = outcomes.iter().filter(|o| o.nondeterministic).count();
+    Ok(outcomes)
+}
 
-    // `TEST-014`. **Recorded HERE rather than in `dispatch_test`**, because this is what holds each
-    // test's outcome. A recorder reading a `TestOutput` after the report shaping would record what the
-    // report chose to say, and that differs between `human`, `json`, `junit` and `tap`.
-    if let Some(path) = opts.history.as_deref() {
-        crate::flaky::record_run(path, &outcomes)?;
+/// Run one discovered test to its report, including snapshot handling.
+///
+/// The unit of work the sequential loop and the parallel pool share: run
+/// the trials, record divergence, check the snapshot, and shape the
+/// report. Kept in one place so the two schedulers cannot disagree about
+/// what a test result is.
+fn execute_one(
+    project_dir: &Path,
+    test: &DiscoveredTest,
+    trials: u32,
+    opts: &TestOptions,
+) -> Result<OutcomeReport> {
+    let outcome = run_one_test(project_dir, test, trials, opts.isolate);
+
+    // When the trials disagreed, record **how** — the first differing line,
+    // from the first two trials that differ.
+    //
+    // Without this, a nondeterminism report says only that outputs differ,
+    // and the reader cannot tell whether the difference is meaningful (a
+    // panic message) or environmental (a timing line the normaliser missed).
+    // That ambiguity cost a full debugging round on CI (`§O-042b`), where
+    // the report was correct that something differed and useless about
+    // what.
+    if outcome.trials_passed > 0 && outcome.is_nondeterministic() {
+        eprintln!(
+            "qqqai test: trial divergence in `{}`: {}",
+            outcome.test.name,
+            first_difference(&outcome.trial_outputs)
+        );
     }
 
-    Ok(TestOutput {
-        project: String::new(),
-        discovered: all.len(),
-        ran: outcomes.len(),
+    // Snapshots compare the first trial's output — cross-trial agreement
+    // is `--trials`' job, not the snapshot's — and only for tests that
+    // passed: failure output is noise, and blessing it would turn the next
+    // red into a green. A mismatch or a missing recording fails the test,
+    // so snapshots feed the same exit code as any other failure.
+    let first_output = outcome.trial_outputs.first().map_or("", String::as_str);
+    let snapshot = match (opts.snapshot, outcome.passed) {
+        (Some(mode), true) => Some(check_snapshot(
+            project_dir,
+            &test.file,
+            &test.name,
+            first_output,
+            mode,
+        )?),
+        _ => None,
+    };
+    let mut passed = outcome.passed;
+    if matches!(
+        snapshot,
+        Some(SnapshotStatus::Mismatched(_) | SnapshotStatus::Missing)
+    ) {
+        passed = false;
+    }
+
+    Ok(OutcomeReport {
+        name: outcome.test.name.clone(),
+        file: outcome.test.file.clone(),
         passed,
-        failed,
-        nondeterministic,
-        trials,
-        dry_run: false,
-        outcomes,
+        trials: outcome.trials,
+        trials_passed: outcome.trials_passed,
+        nondeterministic: outcome.is_nondeterministic(),
+        divergent_trials: outcome.divergent_trials(),
+        duration_ms: outcome.duration_ms,
+        snapshot,
     })
+}
+
+/// Run the selected tests concurrently on worker threads (`--jobs N`).
+///
+/// A shared index queue feeds up to N workers; each completed outcome carries
+/// its discovery index and the batch is reassembled in discovery order, so
+/// reports are stable regardless of finish order. `--fail-fast` stops
+/// scheduling new tests after the first failure while letting running ones
+/// finish — the same contract as the sequential loop, which reports only
+/// completed tests when it breaks early. A poisoned mutex is recovered
+/// rather than panicking on: poison means a sibling worker panicked, and
+/// that panic already propagates through the scope join.
+///
+/// N is an upper bound, not a promise: the pool never exceeds the machine's
+/// hardware parallelism, because a hundred thousand requested threads would
+/// otherwise be a self-inflicted fork bomb.
+fn execute_parallel(
+    project_dir: &Path,
+    selected: &[DiscoveredTest],
+    trials: u32,
+    opts: &TestOptions,
+) -> Result<Vec<OutcomeReport>> {
+    use std::collections::VecDeque;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    // An absolute bomb-guard, not a core count: these threads mostly wait on
+    // child test processes, so tying workers to hardware parallelism would
+    // serialize `--jobs 2` on a one-core machine. `selected.len()` is
+    // non-zero here (empty selections return early above).
+    let workers = (opts.jobs.unwrap_or(2) as usize)
+        .min(selected.len())
+        .min(256);
+    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..selected.len()).collect()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let done: Arc<Mutex<Vec<(usize, OutcomeReport)>>> = Arc::new(Mutex::new(Vec::new()));
+    let failed: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let (queue, stop, done, failed) = (
+                Arc::clone(&queue),
+                Arc::clone(&stop),
+                Arc::clone(&done),
+                Arc::clone(&failed),
+            );
+            scope.spawn(move || {
+                loop {
+                    // Stopped for any reason — a hard error, or a failed test
+                    // under `--fail-fast`. Either way no new work starts; running
+                    // tests finish. Without this check a known-fatal run would
+                    // keep scheduling tests whose results are discarded.
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let next = queue
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .pop_front();
+                    let Some(index) = next else { break };
+                    // `unreachable!`, not a silent `break`: the queue is seeded
+                    // with exactly these indices, so a miss is a bug in the
+                    // scheduler — and silently dropping a test would be a green
+                    // run for work that did not happen.
+                    let Some(test) = selected.get(index) else {
+                        unreachable!(
+                            "job index out of range: the queue is seeded from the selection"
+                        );
+                    };
+                    match execute_one(project_dir, test, trials, opts) {
+                        Ok(report) => {
+                            if opts.fail_fast && !report.passed {
+                                stop.store(true, Ordering::SeqCst);
+                            }
+                            done.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .push((index, report));
+                        }
+                        Err(e) => {
+                            stop.store(true, Ordering::SeqCst);
+                            let mut slot = failed
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if slot.is_none() {
+                                *slot = Some(e);
+                            }
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    if let Some(e) = failed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        return Err(e);
+    }
+    let mut done = done
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain(..)
+        .collect::<Vec<_>>();
+    done.sort_by_key(|(index, _)| *index);
+    Ok(done.into_iter().map(|(_, report)| report).collect())
 }
 
 /// Group outcomes by file, for a readable summary.
@@ -3314,23 +3547,23 @@ mod cr22_tests {
     fn snapshot_names_escape_safely_and_injectively() {
         let key = |file: &str, name: &str| format!("{name}\0{file}");
         assert_ne!(
-            escape_snapshot_name(&key("a.rs", "t")),
-            escape_snapshot_name(&key("a.rs", "t%00")),
+            escape_identifier(&key("a.rs", "t")),
+            escape_identifier(&key("a.rs", "t%00")),
             "a literal %00 must not collide with the separator"
         );
         assert_ne!(
-            escape_snapshot_name(&key("a/b.rs", "t")),
-            escape_snapshot_name(&key("a%2Fb.rs", "t")),
+            escape_identifier(&key("a/b.rs", "t")),
+            escape_identifier(&key("a%2Fb.rs", "t")),
             "an escaped separator must not collide with a literal one"
         );
         assert_ne!(
-            escape_snapshot_name(&key("a.rs", "t")),
-            escape_snapshot_name(&key("b.rs", "t")),
+            escape_identifier(&key("a.rs", "t")),
+            escape_identifier(&key("b.rs", "t")),
             "same-named tests in different files must not share a snapshot"
         );
         assert_ne!(
-            escape_snapshot_name(&key("a.rs", "t")),
-            escape_snapshot_name(&key("a.rs", "u")),
+            escape_identifier(&key("a.rs", "t")),
+            escape_identifier(&key("a.rs", "u")),
             "different tests in one file must not share a snapshot"
         );
         for key in [
@@ -3338,22 +3571,17 @@ mod cr22_tests {
             "a%b\0c".to_owned(),
             "..\\evil\0..".to_owned(),
         ] {
-            let escaped = escape_snapshot_name(&key);
+            let escaped = escape_identifier(&key);
             assert!(
                 !escaped.contains('/') && !escaped.contains('\\'),
                 "no separators may survive: {escaped}"
             );
             assert!(!escaped.contains(".."), "no parent escapes: {escaped}");
-            assert!(
-                std::path::Path::new(&escaped)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("snap")),
-                "snapshots keep the .snap extension: {escaped}"
-            );
         }
         assert_eq!(
-            escape_snapshot_name("adding_works\0src/lib.rs"),
-            "adding_works%00src%2Flib%2Ers.snap"
+            snapshot_file_name("src/lib.rs", "adding_works"),
+            "adding_works%00src%2Flib%2Ers.snap",
+            "the file name pins name-first ordering plus the .snap suffix"
         );
     }
 
@@ -3362,19 +3590,19 @@ mod cr22_tests {
     #[test]
     fn snapshot_names_truncate_long_identities() {
         let long = format!("{}:{}", "t".repeat(200), "f".repeat(200));
-        let escaped = escape_snapshot_name(&long);
-        assert!(escaped.len() <= 120 + ".snap".len(), "{escaped}");
+        let escaped = escape_identifier(&long);
+        assert!(escaped.len() <= 120, "{escaped}");
         assert!(
             !escaped.contains("%\0") && !escaped.ends_with('%'),
             "no dangling escape: {escaped}"
         );
         assert_ne!(
-            escape_snapshot_name(&format!("{long}a")),
+            escape_identifier(&format!("{long}a")),
             escaped,
             "the hash suffix must distinguish long names"
         );
         assert!(
-            escape_snapshot_name(&long).starts_with(&"t".repeat(100)),
+            escape_identifier(&long).starts_with(&"t".repeat(100)),
             "the readable prefix survives: {escaped}"
         );
     }

@@ -1,0 +1,20 @@
+Adversarial final audit ÔÇö hunting races and silent loss in the parallel diff.
+
+The full-file view is too large ÔÇö switching to ranged reads.
+
+Core scheduling looks sound ÔÇö now checking snapshots, isolation, and flag plumbing.
+
+One solid finding so far ÔÇö pinning down exact lines for the report.
+
+One real bug; everything else audited clean.
+
+**Bug ÔÇö `crates/qqq-run/src/test.rs:1670-1673`:** worker count is capped by `available_parallelism`. On a 1-core machine `--jobs 2` yields 1 worker, so the run is sequential and the barrier test (`crates/qqq-run/tests/cli.rs:2679`, waiter in `2650`) fails after its 30s poll. Cores Ôëá concurrency ÔÇö these threads sleep/poll and multiplex fine. Repro: constrain to 1 CPU and run the barrier test.
+
+**Fix:** honor the request with an absolute bomb-guard instead of a core cap:
+```rust
+let workers = (opts.jobs.unwrap_or(2) as usize).min(selected.len()).min(256);
+```
+and update the "never exceeds hardware" comment above it.
+
+**Clean:** queue/stop/done/failed (single-held locks, poison recovered, scope-joined, no condvar to miss, no ABA); no silent loss (`unreachable!` on bad index, `Err` aborts, fail-fast matches sequential, empty selection early-returns); isolation/snapshot keys injective (NUL-joined + escaped); reports re-sorted by index; `--jobs` validation/edges correct; sandboxes per-tag, no shared ports; no tight timing bounds.
+

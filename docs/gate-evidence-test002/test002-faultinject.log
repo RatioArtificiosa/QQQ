@@ -1,0 +1,33 @@
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+    Finished `test` profile [optimized + debuginfo] target(s) in 14.03s
+     Running tests\cli.rs (target\debug\deps\cli-5eea4757785ed60f.exe)
+
+running 1 test
+test test_jobs_runs_tests_in_parallel ... FAILED
+
+failures:
+
+---- test_jobs_runs_tests_in_parallel stdout ----
+
+thread 'test_jobs_runs_tests_in_parallel' (141344) panicked at crates\qqq-run\tests\cli.rs:202:9:
+assertion `left == right` failed: expected success, got exit 1
+stdout:
+1 passed, 1 failed of 2 (1 trial each)
+
+Failures
+  a_waits_for_the_signal  (tests/gate.rs)
+      passed 0/1
+
+stderr:
+
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_jobs_runs_tests_in_parallel
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 126 filtered out; finished in 31.77s
+
+error: test failed, to rerun pass `-p qqq-run --test cli`

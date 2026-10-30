@@ -2604,6 +2604,194 @@ fn test_snapshot_keeps_same_named_tests_in_different_files() {
     s.run(&["test", "--snapshot"]).assert_ok();
 }
 
+/// `--jobs 0` is a usage error: zero workers would run nothing and report
+/// success for work that did not happen.
+#[test]
+fn test_jobs_zero_is_a_usage_error() {
+    let s = Sandbox::new("test-jobs-zero");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--jobs", "0"])
+        .assert_failed()
+        .assert_contains("--jobs");
+}
+
+/// `--jobs` with a non-number is a usage error, like `--trials`.
+#[test]
+fn test_jobs_non_numeric_is_a_usage_error() {
+    let s = Sandbox::new("test-jobs-nan");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--jobs", "many"])
+        .assert_failed()
+        .assert_contains("--jobs");
+}
+
+/// `--jobs 1` runs sequentially: the flag is honored without changing the
+/// default scheduling.
+#[test]
+fn test_jobs_one_runs_sequentially() {
+    let s = Sandbox::new("test-snap-jobs1");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--jobs", "1"])
+        .assert_ok()
+        .assert_contains("2 passed");
+}
+
+/// A project whose tests rendezvous through the filesystem.
+///
+/// `a_waits_for_the_signal` polls for a marker file that only `z_sends_the
+/// signal` creates. Run sequentially, the waiter always times out — the
+/// signaler never starts until the waiter fails. Run in parallel, the
+/// signaler creates the marker and both pass. The test is therefore a
+/// *proof* of concurrency, not a timing assertion: no wall-clock bound that
+/// CI load could break.
+fn project_with_barrier_tests(dir: &Sandbox) {
+    dir.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n",
+    );
+    dir.write(
+        "Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[lib]\npath = \"src/lib.rs\"\n",
+    );
+    dir.write("src/lib.rs", "pub fn nothing() {}\n");
+    dir.write(
+        "tests/gate.rs",
+        "#[test]\nfn a_waits_for_the_signal() {\n\
+         \x20   for _ in 0..300 {\n\
+         \x20       if std::path::Path::new(\"tests/signal.txt\").exists() { return; }\n\
+         \x20       std::thread::sleep(std::time::Duration::from_millis(100));\n\
+         \x20   }\n\
+         \x20   panic!(\"signal never arrived: the other test never ran concurrently\");\n\
+         }\n\
+         \n#[test]\nfn z_sends_the_signal() {\n\
+         \x20   std::fs::write(\"tests/signal.txt\", b\"go\").expect(\"signal must be writable\");\n\
+         }\n",
+    );
+}
+
+/// `--jobs 2` runs tests concurrently: the waiter test can only pass if the
+/// signaling test runs at the same time.
+#[test]
+fn test_jobs_runs_tests_in_parallel() {
+    let s = Sandbox::new("test-jobs-parallel");
+    project_with_barrier_tests(&s);
+
+    s.run(&["test", "--jobs", "2"])
+        .assert_ok()
+        .assert_contains("2 passed");
+}
+
+/// Same-named tests in different files stay isolated from each other under
+/// parallel execution: `tests/a.rs::smoke` and `tests/b.rs::smoke` each get
+/// their own isolation directory even when they run at the same time.
+#[test]
+fn test_parallel_isolated_tests_do_not_share_state() {
+    let s = Sandbox::new("test-jobs-isolate");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n",
+    );
+    s.write(
+        "Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[lib]\npath = \"src/lib.rs\"\n",
+    );
+    s.write("src/lib.rs", "pub fn nothing() {}\n");
+    for (file, marker) in [("tests/a.rs", "from-a"), ("tests/b.rs", "from-b")] {
+        s.write(
+            file,
+            &format!(
+                "#[test]\nfn smoke() {{\n    std::fs::write(\"marker.txt\", b\"{marker}\")\n        .expect(\"the isolated directory must be writable\");\n    std::thread::sleep(std::time::Duration::from_millis(500));\n    assert_eq!(\n        std::fs::read(\"marker.txt\").expect(\"read back\"),\n        b\"{marker}\",\n        \"another test's state is visible in this test's directory\"\n    );\n}}\n"
+            ),
+        );
+    }
+
+    s.run(&["test", "--isolate", "--jobs", "2"])
+        .assert_ok()
+        .assert_contains("2 passed");
+}
+
+/// `--jobs` without a value is a usage error naming the flag.
+#[test]
+fn test_jobs_missing_value_is_a_usage_error() {
+    let s = Sandbox::new("test-jobs-novalue");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--jobs"])
+        .assert_failed()
+        .assert_contains("--jobs");
+}
+
+/// `--fail-fast` stops scheduling under `--jobs`: the failing test runs, and
+/// the run reports the failure rather than everything after it.
+#[test]
+fn test_fail_fast_stops_scheduling_under_parallel() {
+    let s = Sandbox::new("test-jobs-failfast");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n",
+    );
+    s.write(
+        "Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[lib]\npath = \"src/lib.rs\"\n",
+    );
+    s.write(
+        "src/lib.rs",
+        "#[cfg(test)]\nmod t {\n    #[test]\n    fn a_fails() { assert_eq!(1, 2); }\n    #[test]\n    fn z_passes() { assert_eq!(1, 1); }\n}\n",
+    );
+
+    let run = s.run(&["test", "--jobs", "2", "--fail-fast"]);
+    run.assert_failed().assert_contains("a_fails");
+}
+
+/// Reports stay in discovery order under `--jobs`: the JSON names must read
+/// the same forwards as a sequential run, regardless of finish order.
+#[test]
+fn test_parallel_reports_in_discovery_order() {
+    let sequential = Sandbox::new("test-order-seq");
+    project_with_printing_tests(&sequential);
+    let parallel = Sandbox::new("test-order-par");
+    project_with_printing_tests(&parallel);
+
+    let names = |s: &Sandbox, extra: &[&str]| {
+        let mut args = vec!["test", "--json"];
+        args.extend_from_slice(extra);
+        let run = s.run(&args);
+        run.assert_ok();
+        let v: serde_json::Value =
+            serde_json::from_str(&run.stdout).expect("machine-readable output must parse");
+        v["data"]["outcomes"]
+            .as_array()
+            .expect("outcomes array")
+            .iter()
+            .map(|o| o["name"].as_str().expect("name").to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        names(&sequential, &[]),
+        names(&parallel, &["--jobs", "2"]),
+        "parallel reports must read in discovery order"
+    );
+}
+
+/// An empty selection under `--jobs` is a quiet success, not a failure:
+/// nothing ran, so nothing failed.
+#[test]
+fn test_jobs_with_no_matching_tests_reports_zero() {
+    let s = Sandbox::new("test-jobs-empty");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--jobs", "4", "--filter", "no_such_test_name"])
+        .assert_ok()
+        .assert_contains("0 passed");
+}
+
 /// `--snapshot` and `--snapshot-update` together are a usage error: the last
 /// flag silently winning would let a verify-only intent record instead.
 #[test]

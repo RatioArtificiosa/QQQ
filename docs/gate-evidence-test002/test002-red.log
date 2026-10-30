@@ -1,0 +1,121 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.78s
+     Running tests\cli.rs (target\debug\deps\cli-5eea4757785ed60f.exe)
+
+running 6 tests
+test test_jobs_non_numeric_is_a_usage_error ... ok
+test test_jobs_with_no_matching_tests_reports_zero ... FAILED
+test test_jobs_runs_tests_in_parallel ... FAILED
+test test_jobs_one_runs_sequentially ... FAILED
+test test_jobs_zero_is_a_usage_error ... ok
+test test_jobs_missing_value_is_a_usage_error ... ok
+
+failures:
+
+---- test_jobs_with_no_matching_tests_reports_zero stdout ----
+
+thread 'test_jobs_with_no_matching_tests_reports_zero' (6104) panicked at crates\qqq-run\tests\cli.rs:202:9:
+assertion `left == right` failed: expected success, got exit 2
+stdout:
+error[QQQ-7001]: unknown flag `--jobs` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+  left: 2
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_jobs_runs_tests_in_parallel stdout ----
+
+thread 'test_jobs_runs_tests_in_parallel' (357912) panicked at crates\qqq-run\tests\cli.rs:202:9:
+assertion `left == right` failed: expected success, got exit 2
+stdout:
+error[QQQ-7001]: unknown flag `--jobs` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+  left: 2
+ right: 0
+
+---- test_jobs_one_runs_sequentially stdout ----
+
+thread 'test_jobs_one_runs_sequentially' (398552) panicked at crates\qqq-run\tests\cli.rs:202:9:
+assertion `left == right` failed: expected success, got exit 2
+stdout:
+error[QQQ-7001]: unknown flag `--jobs` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+  left: 2
+ right: 0
+
+
+failures:
+    test_jobs_one_runs_sequentially
+    test_jobs_runs_tests_in_parallel
+    test_jobs_with_no_matching_tests_reports_zero
+
+test result: FAILED. 3 passed; 3 failed; 0 ignored; 0 measured; 125 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `-p qqq-run --test cli`
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.82s
+     Running tests\cli.rs (target\debug\deps\cli-5eea4757785ed60f.exe)
+
+running 2 tests
+test test_parallel_isolated_tests_do_not_share_state ... FAILED
+test test_parallel_reports_in_discovery_order ... FAILED
+
+failures:
+
+---- test_parallel_isolated_tests_do_not_share_state stdout ----
+
+thread 'test_parallel_isolated_tests_do_not_share_state' (393532) panicked at crates\qqq-run\tests\cli.rs:202:9:
+assertion `left == right` failed: expected success, got exit 2
+stdout:
+error[QQQ-7001]: unknown flag `--jobs` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+  left: 2
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_parallel_reports_in_discovery_order stdout ----
+
+thread 'test_parallel_reports_in_discovery_order' (400432) panicked at crates\qqq-run\tests\cli.rs:202:9:
+assertion `left == right` failed: expected success, got exit 2
+stdout:
+{"producer":"qqqai","version":"0.1.1","schema_version":"1.0.0","command":"test","ok":false,"exit_code":2,"summary":"unknown flag `--jobs` for `test`","error":{"code":"QQQ-7001","message":"unknown flag `--jobs` for `test`","remediation":"`test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest","docs_url":"https://qqq.codes/errors/QQQ-7001","retryable":false}}
+
+stderr:
+
+  left: 2
+ right: 0
+
+
+failures:
+    test_parallel_isolated_tests_do_not_share_state
+    test_parallel_reports_in_discovery_order
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 129 filtered out; finished in 0.98s
+
+error: test failed, to rerun pass `-p qqq-run --test cli`

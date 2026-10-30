@@ -1,0 +1,17 @@
+Final sweep for missed parallel-execution bugs ÔÇö checking the full diff.
+
+Seen the core parallel and flag changes ÔÇö now verifying the surrounding invariants.
+
+Verdict and empty-selection paths check out so far ÔÇö now validating the remaining edge cases.
+
+Core execution logic looks sound ÔÇö now checking CLI plumbing and test coverage.
+
+Test assertions look consistent with existing patterns ÔÇö now confirming no gaps in parallel edge cases.
+
+Deep review found no functional defects ÔÇö running the new CLI tests to confirm.
+
+Everything is resolved ÔÇö no remaining functional bugs.
+
+(a) `unreachable!` correct: queue holds exactly `0..len`, fail-closed. (b) Hardware cap + `min(len)` sound; `unwrap_or(2)` unreachable via `execute`. (c) Stop-check sound: fail-fast/empty only stop scheduling, running finish; no wakeup bug. (d) Empty early-return preserves invariants: counts zero, verdict OK, history no-op. (e) `failure_message` joins snapshot+nondet; JUnit/TAP share classifier. (f) `test_exec_flag` identical codes/messages, index advance correct. (g) All 8 CLI tests pass and pin behavior.
+
+

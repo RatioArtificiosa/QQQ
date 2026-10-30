@@ -143,27 +143,31 @@ def run_self_test() -> int:
         ),
     }
     with tempfile.TemporaryDirectory() as tmp:
-        base = pathlib.Path(tmp)
+        base = pathlib.Path(tmp) / "good"
+        base.mkdir()
         for name, text in good.items():
             (base / name).write_text(text, encoding="utf-8")
         expect_ok(base, "good fixtures")
 
         # Missing file.
-        missing = pathlib.Path(tempfile.mkdtemp())
+        missing = pathlib.Path(tmp) / "missing"
+        missing.mkdir()
         for name, text in good.items():
             if name != "circleci.yml":
                 (missing / name).write_text(text, encoding="utf-8")
         expect_fail(missing, "circleci.yml: missing", "missing file")
 
         # Broken YAML.
-        broken = pathlib.Path(tempfile.mkdtemp())
+        broken = pathlib.Path(tmp) / "broken"
+        broken.mkdir()
         for name, text in good.items():
             (broken / name).write_text(text, encoding="utf-8")
         (broken / "gitlab-ci.yml").write_text(":\n  - [\n", encoding="utf-8")
         expect_fail(broken, "invalid YAML", "broken YAML")
 
         # No cargo test.
-        nocargo = pathlib.Path(tempfile.mkdtemp())
+        nocargo = pathlib.Path(tmp) / "nocargo"
+        nocargo.mkdir()
         for name, text in good.items():
             (nocargo / name).write_text(text, encoding="utf-8")
         (nocargo / "github-actions.yml").write_text(
@@ -175,7 +179,8 @@ def run_self_test() -> int:
         expect_fail(nocargo, "must invoke `cargo test`", "no cargo test")
 
         # No qqqai test (bare qqqai mention must not pass).
-        noqqqai = pathlib.Path(tempfile.mkdtemp())
+        noqqqai = pathlib.Path(tmp) / "noqqqai"
+        noqqqai.mkdir()
         for name, text in good.items():
             (noqqqai / name).write_text(text, encoding="utf-8")
         (noqqqai / "gitlab-ci.yml").write_text(
@@ -187,7 +192,8 @@ def run_self_test() -> int:
         expect_fail(noqqqai, "must show `qqqai test`", "no qqqai test")
 
         # Wrong toolchain pin.
-        oldpin = pathlib.Path(tempfile.mkdtemp())
+        oldpin = pathlib.Path(tmp) / "oldpin"
+        oldpin.mkdir()
         for name, text in good.items():
             (oldpin / name).write_text(text.replace(channel, "1.0"), encoding="utf-8")
         expect_fail(oldpin, f"must pin Rust {channel}", "stale toolchain pin")

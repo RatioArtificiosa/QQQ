@@ -364,4 +364,49 @@ mod tests {
         shutdown.signal();
         let _ = server_task.await;
     }
+
+    /// The one-shot bridge is load-bearing on the guest HTTP ABI having no
+    /// multi-shot export: the day another interface (e.g. a planned
+    /// `incoming-streaming`) lands in the `qqq:http` package, this test
+    /// goes red and forces `SRV-024`'s remaining half — a real multi-shot
+    /// bridge — to be built instead of silently extending the one-shot
+    /// adaptation. Scoped to the HTTP package on purpose: other
+    /// capabilities (e.g. `qqq:queue/messaging`) are guest-to-host calls,
+    /// not host-to-guest pushes, so they must not trip this wire.
+    #[test]
+    fn no_multishot_http_guest_export_exists_yet() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../wit");
+        let mut names = std::collections::BTreeSet::new();
+        for relative in ["qqq-http.wit", "app/deps/qqq-http/qqq-http.wit"] {
+            let path = root.join(relative);
+            let text = std::fs::read_to_string(&path).expect("http wit must read");
+            for line in text.lines().map(str::trim) {
+                let line = line.split("//").next().unwrap_or("").trim();
+                if let Some(name) = line
+                    .strip_prefix("interface ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                {
+                    names.insert(format!(
+                        "{}:{}",
+                        relative,
+                        name.trim_end_matches('{').trim()
+                    ));
+                }
+            }
+        }
+        let expected: std::collections::BTreeSet<String> = [
+            "qqq-http.wit:http",
+            "qqq-http.wit:incoming-handler",
+            "app/deps/qqq-http/qqq-http.wit:http",
+            "app/deps/qqq-http/qqq-http.wit:incoming-handler",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            names, expected,
+            "the qqq:http package gained an interface — build the multi-shot \
+             bridge (SRV-024) instead of extending the one-shot adaptation"
+        );
+    }
 }

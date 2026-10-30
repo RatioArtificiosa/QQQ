@@ -1,0 +1,25 @@
+# Registry read-only proof (this work made zero modifications there).
+
+Rule: `F:\QQQ-AUDIT\Registry` is read-only to runtime work (goal §1.1).
+The registry tree IS dirty, so this file records that the dirt predates
+this session and none of it is mine.
+
+- Registry HEAD: `48a020e01030cc61178e8cf40f04fe628f82011d`
+- Dirty paths at capture: 335 (87 modified tracked + 248 untracked),
+  all owner-side work (worker, migrations, contract, proposals, checks).
+- Newest mtime among dirty tracked files: 2026-10-26 20:02
+  (`worker/src/gen/llms-assets.ts`), then `docs/DECISIONS.md`,
+  `docs/proposals/QQQ-RUNTIME-REGISTRY-COMPLETION-CHECKLIST.md`.
+- This session's E:QQQ work ran 2026-10-30 (commits `a8e52ee`,
+  `8f82565`, `30b5963` and after). Every write this session targeted
+  `E:\QQQ`, the session dir, or the scratch temp dir — no write tool
+  invocation in this session names `F:\QQQ-AUDIT\Registry` except
+  read-only `git status`/`rev-parse` checks.
+- "Restore to clean" was NOT performed: that would mean discarding the
+  owner's in-progress work (`git checkout -- .` + deleting 248 untracked
+  files), which the read-only rule forbids. The correct disposition is
+  documented here instead: prove zero modifications by this work, leave
+  the owner's tree exactly as found.
+
+Re-verify: `git -C F:/QQQ-AUDIT/Registry status --short` (read-only) and
+compare mtimes; any file dated >= 2026-10-30 would be suspect.

@@ -1,0 +1,12 @@
+assertion `left == right` failed: the qqq:http package gained an interface ÔÇö build the multi-shot bridge (SRV-024) instead of extending the one-shot adaptation
+  left: {"app/deps/qqq-http/qqq-http.wit:http", "app/deps/qqq-http/qqq-http.wit:incoming-handler", "qqq-http.wit:http", "qqq-http.wit:incoming-handler", "qqq-http.wit:incoming-streaming"}
+ right: {"app/deps/qqq-http/qqq-http.wit:http", "app/deps/qqq-http/qqq-http.wit:incoming-handler", "qqq-http.wit:http", "qqq-http.wit:incoming-handler"}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    guest_sse::tests::no_multishot_http_guest_export_exists_yet
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 706 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p qqq-run --lib`

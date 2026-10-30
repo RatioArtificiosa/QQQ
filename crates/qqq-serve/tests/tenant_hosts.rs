@@ -212,15 +212,21 @@ async fn rotating_mapped_hosts_shares_one_rate_bucket() {
         },
     ));
     let server = Server::start(Some(tenants), Some(limits)).await;
-    let (first, _) = get(server.addr, "a.example.com").await;
+    let (first, first_body) = get(server.addr, "a.example.com").await;
     assert!(
         first.starts_with("HTTP/1.1 200"),
         "first request serves: {first:?}"
     );
-    let (second, _) = get(server.addr, "b.example.com").await;
+    let (second, second_body) = get(server.addr, "b.example.com").await;
     assert!(
         second.starts_with("HTTP/1.1 200"),
         "a second mapped name serves from the same peer: {second:?}"
+    );
+    assert_eq!(
+        first_body, second_body,
+        "component selection ignores the tenant label: different mapped \
+         hosts reach the same component until ARCH-017's mapping lands, \
+         and this test must go red the day they do not"
     );
     let (third, body) = get(server.addr, "a.example.com").await;
     assert!(

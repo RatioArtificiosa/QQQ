@@ -123,10 +123,12 @@ interface incoming-handler {
   ///
   /// # Why this returns a single response rather than streaming
   ///
-  /// The streaming form is `qqq:http@1.0.0/incoming-streaming`, which exists for
-  /// bodies that can exceed memory. This interface is the simple case, and
-  /// keeping it separate means a guest that does not need streaming does not
-  /// have to reason about it.
+  /// A multi-shot streaming form (`incoming-streaming`) is planned for
+  /// bodies that can exceed memory, but it is **not defined yet** — no
+  /// such interface exists in this package, and the host bridges adapt
+  /// this one-shot interface per message instead. Keeping this interface
+  /// one-shot means a guest that does not need streaming does not have
+  /// to reason about it.
   @since(version = 1.0.0)
   handle: func(req: request) -> result<response, http-error>;
 }

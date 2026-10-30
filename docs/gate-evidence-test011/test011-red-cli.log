@@ -1,0 +1,124 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.82s
+     Running tests\cli.rs (target\debug\deps\cli-5eea4757785ed60f.exe)
+
+running 6 tests
+test test_snapshot_compare_fails_closed_without_snapshots ... FAILED
+test test_snapshot_compare_fails_on_changed_output ... FAILED
+test test_snapshot_update_rerecords_after_a_change ... FAILED
+test test_snapshot_update_records_snapshots ... FAILED
+test test_snapshot_compare_matches_recorded_output ... FAILED
+test test_snapshot_update_skips_failing_tests ... FAILED
+
+failures:
+
+---- test_snapshot_compare_fails_closed_without_snapshots stdout ----
+
+thread 'test_snapshot_compare_fails_closed_without_snapshots' (394448) panicked at crates\qqq-run\tests\cli.rs:221:9:
+output must contain "prints_the_answer"
+stdout:
+error[QQQ-7001]: unknown flag `--snapshot` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_snapshot_compare_fails_on_changed_output stdout ----
+
+thread 'test_snapshot_compare_fails_on_changed_output' (380796) panicked at crates\qqq-run\tests\cli.rs:202:9:
+assertion `left == right` failed: expected success, got exit 2
+stdout:
+error[QQQ-7001]: unknown flag `--snapshot-update` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+  left: 2
+ right: 0
+
+---- test_snapshot_update_rerecords_after_a_change stdout ----
+
+thread 'test_snapshot_update_rerecords_after_a_change' (396236) panicked at crates\qqq-run\tests\cli.rs:202:9:
+assertion `left == right` failed: expected success, got exit 2
+stdout:
+error[QQQ-7001]: unknown flag `--snapshot-update` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+  left: 2
+ right: 0
+
+---- test_snapshot_update_records_snapshots stdout ----
+
+thread 'test_snapshot_update_records_snapshots' (395032) panicked at crates\qqq-run\tests\cli.rs:202:9:
+assertion `left == right` failed: expected success, got exit 2
+stdout:
+error[QQQ-7001]: unknown flag `--snapshot-update` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+  left: 2
+ right: 0
+
+---- test_snapshot_compare_matches_recorded_output stdout ----
+
+thread 'test_snapshot_compare_matches_recorded_output' (400348) panicked at crates\qqq-run\tests\cli.rs:202:9:
+assertion `left == right` failed: expected success, got exit 2
+stdout:
+error[QQQ-7001]: unknown flag `--snapshot-update` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+  left: 2
+ right: 0
+
+---- test_snapshot_update_skips_failing_tests stdout ----
+
+thread 'test_snapshot_update_skips_failing_tests' (186816) panicked at crates\qqq-run\tests\cli.rs:221:9:
+output must contain "nope"
+stdout:
+error[QQQ-7001]: unknown flag `--snapshot-update` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --format, --dry-run, --history, --flaky and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+
+
+failures:
+    test_snapshot_compare_fails_closed_without_snapshots
+    test_snapshot_compare_fails_on_changed_output
+    test_snapshot_compare_matches_recorded_output
+    test_snapshot_update_records_snapshots
+    test_snapshot_update_rerecords_after_a_change
+    test_snapshot_update_skips_failing_tests
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 111 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p qqq-run --test cli`

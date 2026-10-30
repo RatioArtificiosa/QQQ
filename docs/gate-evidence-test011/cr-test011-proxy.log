@@ -1,0 +1,22 @@
+Snapshot review ÔÇö checking TEST-011 diff for correctness and bypasses.
+
+Got the full diff ÔÇö now tracing edge cases and invariants.
+
+Evidence gathered. Now verifying the new code compiles and unit tests pass.
+
+Review complete ÔÇö all 6 unit + 6 e2e snapshot tests pass. No silent-green paths found, but several bugs:
+
+| # | Sev | File:Lines | Issue | Fix |
+|---|---|------------|-------|-----|
+| 1 | ­ƒƒá HIGH | `test.rs:1423` | `--fail-fast` reads pre-snapshot `outcome.passed`, so snapshot Missing/Mismatch never stops the run | `if opts.fail_fast && !passed` |
+| 2 | ­ƒƒí MED | `main.rs:2033-34` | `--snapshot --snapshot-update` together: last wins silently, destructive mode by accident | usage error when both flags present |
+| 3 | ­ƒƒí MED | `test.rs:959-63` | Snapshot key is name-only; same-named tests in different files share one `.snap` (partly masked by name-only `dedup_by` at `:466`) | key by `file + name` |
+| 4 | ­ƒƒí MED | `test.rs:1173-97` | `write`/`read` follow symlinks planted in `tests/snapshots/` (overwrite/read outside dir) | reject non-regular files via `symlink_metadata` before IO |
+| 5 | ­ƒƒí MED | `test.rs:1179-84` | Re-running `--snapshot-update` with identical bytes still reports `Updated` | byte-compare first; report unchanged distinctly |
+| 6 | ÔÜ¬ LOW | `test.rs:931-35` | `truncate(100)` can split a `%XX` escape | backtrack to escape boundary before hashing |
+| 7 | ÔÜ¬ LOW | `test.rs:1723-32` | `failure_message` returns snapshot text first, hiding concurrent nondeterminism info | append both messages |
+| 8 | ÔÜ¬ LOW | `test.rs:1188-97` | Non-UTF8 snapshot colliding under `from_utf8_lossy` yields `Mismatched("")` ÔÇö fails closed but diff is empty | fallback to byte-count message when diff is empty |
+| 9 | ÔÜ¬ LOW | `tests/cli.rs`, `test.rs:2961+` | Missing coverage: `--snapshot`├ù`--dry-run` (no writes), ├ù`--trials` (first-trial semantics), Compare-writes-nothing, CRLF byte-exactness claimed at `test.rs:970`, truncation/hash unit test | add the five tests |
+
+Verified sound: Missing/Mismatch force `passed=false` ÔåÆ exit FAILURE; Compare never writes; failing tests never record; dry-run short-circuits before any IO; IO errors abort the run; history records the post-snapshot verdict.
+

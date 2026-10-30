@@ -2026,6 +2026,36 @@ fn test_options(
                 opts.flaky = Some(std::path::PathBuf::from(v));
                 i += 1;
             }
+            // `TEST-011`. Comparing and recording are separate flags rather
+            // than a `--snapshot <mode>` value: a bare `--snapshot` is the
+            // common verify step, and `--snapshot-update` names the destructive
+            // half explicitly so it cannot be typed by accident. The two
+            // together are a usage error, because the last flag silently
+            // winning would let a verify-only intent record instead.
+            "--snapshot" => {
+                if opts.snapshot == Some(qqq_run::SnapshotMode::Update) {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        "`--snapshot` and `--snapshot-update` cannot be combined",
+                    )
+                    .with_remediation(
+                        "run one or the other: `--snapshot` verifies, `--snapshot-update` records",
+                    ));
+                }
+                opts.snapshot = Some(qqq_run::SnapshotMode::Compare);
+            }
+            "--snapshot-update" => {
+                if opts.snapshot == Some(qqq_run::SnapshotMode::Compare) {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        "`--snapshot` and `--snapshot-update` cannot be combined",
+                    )
+                    .with_remediation(
+                        "run one or the other: `--snapshot` verifies, `--snapshot-update` records",
+                    ));
+                }
+                opts.snapshot = Some(qqq_run::SnapshotMode::Update);
+            }
             "--manifest" => i += 1,
             other if other.starts_with('-') => {
                 return Err(qqq_core::Error::new(
@@ -2034,7 +2064,7 @@ fn test_options(
                 )
                 .with_remediation(
                     "`test` accepts --filter, --fail-fast, --isolate, --trials, --format, \
-                     --dry-run, --history, --flaky and --manifest",
+                     --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest",
                 ));
             }
             // A bare argument is treated as a filter, which is what every other

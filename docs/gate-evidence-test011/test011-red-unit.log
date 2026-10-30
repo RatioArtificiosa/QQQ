@@ -1,0 +1,124 @@
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+error[E0433]: cannot find type `SnapshotMode` in this scope
+    --> crates\qqq-run\src\test.rs:2514:58
+     |
+2514 |             check_snapshot(&dir, "adding_works", "ok\n", SnapshotMode::Update).expect("record");
+     |                                                          ^^^^^^^^^^^^ use of undeclared type `SnapshotMode`
+
+error[E0425]: cannot find function `check_snapshot` in this scope
+    --> crates\qqq-run\src\test.rs:2514:13
+     |
+2514 |             check_snapshot(&dir, "adding_works", "ok\n", SnapshotMode::Update).expect("record");
+     |             ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `SnapshotStatus` in this scope
+    --> crates\qqq-run\src\test.rs:2515:28
+     |
+2515 |         assert_eq!(status, SnapshotStatus::Created);
+     |                            ^^^^^^^^^^^^^^ use of undeclared type `SnapshotStatus`
+
+error[E0433]: cannot find type `SnapshotMode` in this scope
+    --> crates\qqq-run\src\test.rs:2531:58
+     |
+2531 |             check_snapshot(&dir, "adding_works", "ok\n", SnapshotMode::Compare).expect("compare");
+     |                                                          ^^^^^^^^^^^^ use of undeclared type `SnapshotMode`
+
+error[E0425]: cannot find function `check_snapshot` in this scope
+    --> crates\qqq-run\src\test.rs:2531:13
+     |
+2531 |             check_snapshot(&dir, "adding_works", "ok\n", SnapshotMode::Compare).expect("compare");
+     |             ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `SnapshotStatus` in this scope
+    --> crates\qqq-run\src\test.rs:2532:28
+     |
+2532 |         assert_eq!(status, SnapshotStatus::Matched);
+     |                            ^^^^^^^^^^^^^^ use of undeclared type `SnapshotStatus`
+
+error[E0433]: cannot find type `SnapshotMode` in this scope
+    --> crates\qqq-run\src\test.rs:2543:75
+     |
+2543 |         let status = check_snapshot(&dir, "adding_works", "answer: 43\n", SnapshotMode::Compare)
+     |                                                                           ^^^^^^^^^^^^ use of undeclared type `SnapshotMode`
+
+error[E0425]: cannot find function `check_snapshot` in this scope
+    --> crates\qqq-run\src\test.rs:2543:22
+     |
+2543 |         let status = check_snapshot(&dir, "adding_works", "answer: 43\n", SnapshotMode::Compare)
+     |                      ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `SnapshotMode` in this scope
+    --> crates\qqq-run\src\test.rs:2561:62
+     |
+2561 |         let e = check_snapshot(&dir, "adding_works", "ok\n", SnapshotMode::Compare).unwrap_err();
+     |                                                              ^^^^^^^^^^^^ use of undeclared type `SnapshotMode`
+
+error[E0425]: cannot find function `check_snapshot` in this scope
+    --> crates\qqq-run\src\test.rs:2561:17
+     |
+2561 |         let e = check_snapshot(&dir, "adding_works", "ok\n", SnapshotMode::Compare).unwrap_err();
+     |                 ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `SnapshotMode` in this scope
+    --> crates\qqq-run\src\test.rs:2579:59
+     |
+2579 |             check_snapshot(&dir, "adding_works", "new\n", SnapshotMode::Update).expect("update");
+     |                                                           ^^^^^^^^^^^^ use of undeclared type `SnapshotMode`
+
+error[E0425]: cannot find function `check_snapshot` in this scope
+    --> crates\qqq-run\src\test.rs:2579:13
+     |
+2579 |             check_snapshot(&dir, "adding_works", "new\n", SnapshotMode::Update).expect("update");
+     |             ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `SnapshotStatus` in this scope
+    --> crates\qqq-run\src\test.rs:2580:28
+     |
+2580 |         assert_eq!(status, SnapshotStatus::Updated);
+     |                            ^^^^^^^^^^^^^^ use of undeclared type `SnapshotStatus`
+
+error[E0425]: cannot find function `escape_snapshot_name` in this scope
+    --> crates\qqq-run\src\test.rs:2589:20
+     |
+2589 |         assert_ne!(escape_snapshot_name("a/b"), escape_snapshot_name("a%b"));
+     |                    ^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `escape_snapshot_name` in this scope
+    --> crates\qqq-run\src\test.rs:2589:49
+     |
+2589 |         assert_ne!(escape_snapshot_name("a/b"), escape_snapshot_name("a%b"));
+     |                                                 ^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `escape_snapshot_name` in this scope
+    --> crates\qqq-run\src\test.rs:2590:20
+     |
+2590 |         assert_ne!(escape_snapshot_name("a/b"), escape_snapshot_name("a-b"));
+     |                    ^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `escape_snapshot_name` in this scope
+    --> crates\qqq-run\src\test.rs:2590:49
+     |
+2590 |         assert_ne!(escape_snapshot_name("a/b"), escape_snapshot_name("a-b"));
+     |                                                 ^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `escape_snapshot_name` in this scope
+    --> crates\qqq-run\src\test.rs:2592:27
+     |
+2592 |             let escaped = escape_snapshot_name(name);
+     |                           ^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `escape_snapshot_name` in this scope
+    --> crates\qqq-run\src\test.rs:2600:13
+     |
+2600 |             escape_snapshot_name("adding_works").ends_with(".snap"),
+     |             ^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `SnapshotStatus` in this scope
+    --> crates\qqq-run\src\test.rs:2545:13
+     |
+2545 |         let SnapshotStatus::Mismatched(diff) = status else {
+     |             ^^^^^^^^^^^^^^ use of undeclared type `SnapshotStatus`
+
+Some errors have detailed explanations: E0425, E0433.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `qqq-run` (lib test) due to 20 previous errors

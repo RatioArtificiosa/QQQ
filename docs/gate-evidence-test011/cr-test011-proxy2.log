@@ -1,0 +1,13 @@
+Re-checking all 9 snapshot fixes plus new splits.
+
+First-pass reads look clean ÔÇö now digging into edge cases.
+
+Core snapshot behaviors check out ÔÇö now verifying diff rendering and test coverage.
+
+Flag handling and error codes look consistent ÔÇö now checking unit tests for gaps.
+
+2 remaining bugs:
+
+- `crates/qqq-run/src/test.rs:466-467` ÔÇö `discover()` sorts/dedups by `name` only, collapsing same-named tests in different files. Should be `(file,name)` like `parse_libtest_list:578-579`. Fix (3) incomplete.
+- `crates/qqq-run/tests/cli.rs:2482-2483` ÔÇö expects `-test snap_prints_answer ... answer: 42`; snapshots keep status and `answer:` on separate lines, real diff is `-answer: 42` / `+answer: 43`.
+

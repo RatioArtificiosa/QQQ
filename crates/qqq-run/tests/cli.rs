@@ -2356,6 +2356,330 @@ fn a_non_numeric_trial_count_is_a_usage_error() {
 }
 
 // ---------------------------------------------------------------------------
+// test --snapshot — TEST-011: reviewable output snapshots
+// ---------------------------------------------------------------------------
+
+/// A Rust project whose tests print deterministic lines.
+///
+/// Snapshot testing observes *output*, so the fixture must produce some: a
+/// silent passing test would pass whether or not any output was captured,
+/// which is the shape of a test that passes for the wrong reason.
+fn project_with_printing_tests(dir: &Sandbox) {
+    dir.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n",
+    );
+    dir.write(
+        "Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[workspace]\n",
+    );
+    dir.write(
+        "src/lib.rs",
+        "pub fn answer() -> i32 { 42 }\n\
+         \n#[cfg(test)]\nmod tests {\n\
+         \x20   #[test]\n    fn prints_the_answer() {\n\
+         \x20       println!(\"answer: {}\", super::answer());\n\
+         \x20   }\n\
+         }\n",
+    );
+    dir.write(
+        "tests/snap.rs",
+        "#[test]\nfn snap_prints_answer() {\n    println!(\"answer: 42\");\n}\n",
+    );
+}
+
+/// The snapshot files a recording run must leave behind, by exact name: the
+/// integration test keeps its bare name, while the unit test's `::` is
+/// escaped flat (`%3A`) rather than becoming a nested directory.
+///
+/// Paths are joined segment-wise, mirroring the shipped code: one `join`
+/// per segment, so no assertion depends on how a multi-separator string
+/// is split.
+fn snap_dir(dir: &Sandbox) -> PathBuf {
+    dir.path.join("tests").join("snapshots")
+}
+
+fn snap_file(dir: &Sandbox, file: &str) -> PathBuf {
+    snap_dir(dir).join(file)
+}
+
+fn list_snaps(dir: &Sandbox) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(snap_dir(dir)) {
+        for entry in entries.flatten() {
+            out.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    out.sort();
+    out
+}
+
+fn expect_recorded(dir: &Sandbox) {
+    for file in [
+        "snap_prints_answer%00tests%2Fsnap%2Ers.snap",
+        "tests%3A%3Aprints_the_answer%00src%2Flib%2Ers.snap",
+    ] {
+        let path = snap_file(dir, file);
+        assert!(
+            path.exists(),
+            "a recording run must leave {file} behind; snapshots dir holds: {:?}",
+            list_snaps(dir)
+        );
+        let content = std::fs::read_to_string(&path).expect("a recorded snapshot must read");
+        assert!(
+            content.contains("answer: 42"),
+            "the snapshot must hold the printed line"
+        );
+    }
+}
+
+/// `--snapshot-update` records each passing test's output under
+/// `tests/snapshots/` — the committed expectation, not a cache.
+#[test]
+fn test_snapshot_update_records_snapshots() {
+    let s = Sandbox::new("test-snap-record");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--snapshot-update"]).assert_ok();
+
+    expect_recorded(&s);
+}
+
+/// `--snapshot` compares against the recorded expectations and passes when
+/// the output is unchanged.
+#[test]
+fn test_snapshot_compare_matches_recorded_output() {
+    let s = Sandbox::new("test-snap-match");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--snapshot-update"]).assert_ok();
+    s.run(&["test", "--snapshot"])
+        .assert_ok()
+        .assert_contains("snapshot");
+}
+
+/// Changed output fails naming the test and shows the removed and added
+/// lines: the diff is the review, not just a verdict.
+#[test]
+fn test_snapshot_compare_fails_on_changed_output() {
+    let s = Sandbox::new("test-snap-diff");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--snapshot-update"]).assert_ok();
+
+    let mut snap = s.read("tests/snap.rs");
+    snap = snap.replace("answer: 42", "answer: 43");
+    s.write("tests/snap.rs", &snap);
+
+    let run = s.run(&["test", "--snapshot"]);
+    run.assert_failed().assert_contains("snap_prints_answer");
+    let out = run.all();
+    assert!(
+        out.contains("--- snapshot")
+            && out.contains("+++ actual")
+            && out.contains("@@")
+            && out.contains("-test snap_prints_answer ... answer: 42")
+            && out.contains("+test snap_prints_answer ... answer: 43"),
+        "the output must carry a reviewable unified diff: {out}"
+    );
+}
+
+/// Comparing without recorded snapshots fails naming the tests and the
+/// recording command — auto-creating on compare would bless an unreviewed
+/// expectation.
+#[test]
+fn test_snapshot_compare_fails_closed_without_snapshots() {
+    let s = Sandbox::new("test-snap-missing");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--snapshot"])
+        .assert_failed()
+        .assert_contains("snap_prints_answer")
+        .assert_contains("--snapshot-update");
+}
+
+/// `--snapshot-update` re-records after an intended change, and the next
+/// compare passes on the new expectation.
+#[test]
+fn test_snapshot_update_rerecords_after_a_change() {
+    let s = Sandbox::new("test-snap-rerecord");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--snapshot-update"]).assert_ok();
+
+    let mut lib = s.read("src/lib.rs");
+    lib = lib.replace("42", "43");
+    s.write("src/lib.rs", &lib);
+    let mut snap = s.read("tests/snap.rs");
+    snap = snap.replace("answer: 42", "answer: 43");
+    s.write("tests/snap.rs", &snap);
+
+    s.run(&["test", "--snapshot-update"]).assert_ok();
+    s.run(&["test", "--snapshot"]).assert_ok();
+    for file in [
+        "snap_prints_answer%00tests%2Fsnap%2Ers.snap",
+        "tests%3A%3Aprints_the_answer%00src%2Flib%2Ers.snap",
+    ] {
+        assert!(
+            std::fs::read_to_string(snap_file(&s, file))
+                .expect("stored snapshot must read")
+                .contains("answer: 43"),
+            "the stored expectation must be the new output"
+        );
+    }
+}
+
+/// A failing test records no snapshot: blessing failure output as the
+/// expectation would turn the next red into a green.
+#[test]
+fn test_snapshot_update_skips_failing_tests() {
+    let s = Sandbox::new("test-snap-skip-fail");
+    project_with_printing_tests(&s);
+
+    let mut lib = s.read("src/lib.rs");
+    lib.push_str(
+        "\n#[cfg(test)]\nmod failing {\n    #[test]\n    fn nope() { println!(\"broken\"); assert_eq!(1, 2); }\n}\n",
+    );
+    s.write("src/lib.rs", &lib);
+
+    let run = s.run(&["test", "--snapshot-update"]);
+    run.assert_failed().assert_contains("nope");
+    let mut saw_passing = false;
+    for entry in std::fs::read_dir(s.path.join("tests/snapshots")).expect("list snaps") {
+        let entry = entry.expect("dir entry");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.contains("nope"),
+            "a failing test must not gain a snapshot: {name}"
+        );
+        saw_passing = saw_passing || name.contains("snap_prints_answer");
+    }
+    assert!(saw_passing, "the passing test still records");
+}
+
+/// Two files declaring the same test name are two tests: discovery keys on
+/// (file, name), and each recording lands in its own snapshot file. Deduping
+/// by name alone would silently drop one — a green run for work that did
+/// not happen.
+#[test]
+fn test_snapshot_keeps_same_named_tests_in_different_files() {
+    let s = Sandbox::new("test-snap-samename");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+         [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n",
+    );
+    s.write(
+        "Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    );
+    s.write("src/lib.rs", "pub fn nothing() {}\n");
+    s.write(
+        "tests/a.rs",
+        "#[test]\nfn smoke() { println!(\"from a\"); }\n",
+    );
+    s.write(
+        "tests/b.rs",
+        "#[test]\nfn smoke() { println!(\"from b\"); }\n",
+    );
+
+    s.run(&["test", "--snapshot-update"])
+        .assert_ok()
+        .assert_contains("2 passed");
+
+    for file in ["smoke%00tests%2Fa%2Ers.snap", "smoke%00tests%2Fb%2Ers.snap"] {
+        let content = std::fs::read_to_string(snap_file(&s, file))
+            .expect("each same-named test must gain its own snapshot");
+        assert!(
+            content.contains("from a") || content.contains("from b"),
+            "the snapshot must hold that test's output: {content}"
+        );
+    }
+    // And the recordings are distinct files with distinct bytes.
+    let a = std::fs::read(snap_file(&s, "smoke%00tests%2Fa%2Ers.snap")).expect("read a");
+    let b = std::fs::read(snap_file(&s, "smoke%00tests%2Fb%2Ers.snap")).expect("read b");
+    assert_ne!(a, b, "same-named tests must not share one recording");
+
+    s.run(&["test", "--snapshot"]).assert_ok();
+}
+
+/// `--snapshot` and `--snapshot-update` together are a usage error: the last
+/// flag silently winning would let a verify-only intent record instead.
+#[test]
+fn test_snapshot_flags_conflict_is_a_usage_error() {
+    let s = Sandbox::new("test-snap-conflict");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--snapshot", "--snapshot-update"])
+        .assert_failed()
+        .assert_contains("--snapshot");
+}
+
+/// `--snapshot` with `--dry-run` verifies nothing and writes nothing: a
+/// rehearsal runs no tests, so there is no output to check or record.
+#[test]
+fn test_snapshot_dry_run_writes_nothing() {
+    let s = Sandbox::new("test-snap-dry");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--snapshot", "--dry-run"]).assert_ok();
+    assert!(
+        !s.exists("tests/snapshots"),
+        "a rehearsal must not scaffold the snapshots directory"
+    );
+}
+
+/// `--snapshot` compares the first trial's output: cross-trial agreement is
+/// `--trials`' job, and a deterministic test passes under both flags.
+#[test]
+fn test_snapshot_covers_the_first_trial() {
+    let s = Sandbox::new("test-snap-trials");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--snapshot-update", "--trials", "2"])
+        .assert_ok();
+    s.run(&["test", "--snapshot", "--trials", "2"])
+        .assert_ok()
+        .assert_contains("snapshot");
+}
+
+/// Comparing never writes: the recorded bytes are identical before and after.
+#[test]
+fn test_snapshot_compare_leaves_recordings_untouched() {
+    let s = Sandbox::new("test-snap-readonly");
+    project_with_printing_tests(&s);
+
+    s.run(&["test", "--snapshot-update"]).assert_ok();
+    let mut before: Vec<(String, Vec<u8>)> = std::fs::read_dir(snap_dir(&s))
+        .expect("list snaps")
+        .flatten()
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).expect("read snap"),
+            )
+        })
+        .collect();
+    assert!(!before.is_empty(), "the recording run must leave files");
+    before.sort();
+
+    s.run(&["test", "--snapshot"]).assert_ok();
+    let mut after: Vec<(String, Vec<u8>)> = std::fs::read_dir(snap_dir(&s))
+        .expect("list snaps")
+        .flatten()
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).expect("read snap"),
+            )
+        })
+        .collect();
+    after.sort();
+    assert_eq!(before, after, "a compare must not touch the recordings");
+}
+
+// ---------------------------------------------------------------------------
 // run — the capability enforcement path
 // ---------------------------------------------------------------------------
 

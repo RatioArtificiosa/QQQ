@@ -148,8 +148,9 @@ pub use scaffold::{
     validate_name,
 };
 pub use test_runner::{
-    DiscoveredTest, OutcomeReport, TestFormat, TestOptions, TestOutcome, TestOutput, by_file,
-    discover, execute as run_tests, filter_tests, tests_dir, to_junit, to_tap,
+    DiscoveredTest, OutcomeReport, SnapshotMode, SnapshotStatus, TestFormat, TestOptions,
+    TestOutcome, TestOutput, by_file, discover, execute as run_tests, filter_tests, tests_dir,
+    to_junit, to_tap,
 };
 pub use update::{
     CandidateReport, Decision, FixedVersions, NoRegistry, Strategy, UpdateCandidate, UpdateOptions,

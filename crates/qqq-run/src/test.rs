@@ -91,6 +91,12 @@ pub struct TestOptions {
     /// tools around it is not a guarantee** -- so this *makes isolation available and provable* rather
     /// than claiming the default was isolated.
     pub isolate: bool,
+    /// Snapshot each passing test's output under `tests/snapshots/` (`TEST-011`).
+    ///
+    /// Absent by default: a run compares nothing unless asked. `Compare` fails
+    /// tests whose output differs from (or lacks) a recording; `Update`
+    /// records or refreshes the recordings instead of comparing.
+    pub snapshot: Option<SnapshotMode>,
 }
 
 impl TestOptions {
@@ -142,6 +148,62 @@ pub struct DiscoveredTest {
     /// silently vanish is a green run for work that did not happen**, and that is why those cases are
     /// reported at all.
     pub executable: std::path::PathBuf,
+}
+
+/// How `qqqai test --snapshot` treats recorded expectations.
+///
+/// ```
+/// use qqq_run::test_runner::{SnapshotMode, TestOptions};
+///
+/// let mut opts = TestOptions::default();
+/// assert!(opts.snapshot.is_none(), "a run compares nothing unless asked");
+/// opts.snapshot = Some(SnapshotMode::Compare);
+/// assert_ne!(opts.snapshot, Some(SnapshotMode::Update));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotMode {
+    /// Compare each passing test's output against `tests/snapshots/`.
+    ///
+    /// A mismatch fails the test with a unified diff; a missing recording
+    /// fails it with the command that records one. Nothing is written.
+    Compare,
+    /// Record (or refresh) expectations instead of comparing.
+    ///
+    /// Only passing tests record: blessing failure output would turn the next
+    /// red into a green.
+    Update,
+}
+
+/// What one test's snapshot check found.
+///
+/// ```
+/// use qqq_run::test_runner::SnapshotStatus;
+///
+/// assert_eq!(
+///     serde_json::to_value(SnapshotStatus::Matched).expect("json"),
+///     serde_json::Value::String("Matched".to_owned())
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum SnapshotStatus {
+    /// The output matches the recording.
+    Matched,
+    /// A new recording was written.
+    Created,
+    /// An existing recording was refreshed.
+    Updated,
+    /// No recording exists; the test fails until one is recorded.
+    Missing,
+    /// The output differs; carries the unified diff for review.
+    ///
+    /// ```
+    /// use qqq_run::test_runner::SnapshotStatus;
+    ///
+    /// let status = SnapshotStatus::Mismatched("--- snapshot\n+++ actual\n".to_owned());
+    /// let json = serde_json::to_value(&status).expect("json");
+    /// assert_eq!(json["Mismatched"], "--- snapshot\n+++ actual\n");
+    /// ```
+    Mismatched(String),
 }
 
 /// The outcome of running one test.
@@ -241,6 +303,30 @@ pub struct OutcomeReport {
     pub divergent_trials: Vec<usize>,
     /// Milliseconds.
     pub duration_ms: u128,
+    /// The snapshot verdict, when snapshotting ran for this test.
+    ///
+    /// `None` when `--snapshot` was not passed, or when the test failed
+    /// before any output could be checked — a failing test has no output
+    /// worth blessing, so nothing is recorded or compared.
+    ///
+    /// ```
+    /// use qqq_run::test_runner::{OutcomeReport, SnapshotStatus};
+    ///
+    /// let out = OutcomeReport {
+    ///     name: "prints_the_answer".to_owned(),
+    ///     file: "src/lib.rs".to_owned(),
+    ///     passed: false,
+    ///     trials: 1,
+    ///     trials_passed: 1,
+    ///     nondeterministic: false,
+    ///     divergent_trials: Vec::new(),
+    ///     duration_ms: 3,
+    ///     snapshot: Some(SnapshotStatus::Mismatched("--- snapshot\n".to_owned())),
+    /// };
+    /// let json = serde_json::to_value(&out).expect("json");
+    /// assert_eq!(json["snapshot"]["Mismatched"], "--- snapshot\n");
+    /// ```
+    pub snapshot: Option<SnapshotStatus>,
 }
 
 // ---------------------------------------------------------------------------
@@ -377,8 +463,12 @@ pub fn discover(project_dir: &Path, language: &str) -> Result<Vec<DiscoveredTest
         }
     }
 
-    tests.sort_by(|a, b| a.name.cmp(&b.name));
-    tests.dedup_by(|a, b| a.name == b.name);
+    // Sort and dedup by (file, name), not name alone: two files can each
+    // contain a test with the same name, and deduping by name would silently
+    // drop one — a green run for work that did not happen. The sort is stable,
+    // so tests keep their toolchain-reported order within a file.
+    tests.sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.name.cmp(&b.name)));
+    tests.dedup_by(|a, b| a.file == b.file && a.name == b.name);
     Ok(tests)
 }
 
@@ -489,8 +579,8 @@ fn parse_libtest_list(stdout: &str, file: &str, executable: &Path) -> Vec<Discov
         })
         .collect();
 
-    tests.sort_by(|a, b| a.name.cmp(&b.name));
-    tests.dedup_by(|a, b| a.name == b.name);
+    tests.sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.name.cmp(&b.name)));
+    tests.dedup_by(|a, b| a.file == b.file && a.name == b.name);
     tests
 }
 
@@ -819,6 +909,363 @@ fn first_difference(outputs: &[String]) -> String {
     "identical lines, differing trailing bytes".to_owned()
 }
 
+/// Escape a snapshot identity into a flat file stem.
+///
+/// The identity is `name\0file`: the NUL separates the two because neither a
+/// test name nor a file path can contain one, which makes the mapping
+/// injective where a visible separator would collide (`a-b` + `c` vs `a` +
+/// `b-c` share every visible join). Every byte outside `[A-Za-z0-9_-]`
+/// becomes `%XX`, so no separator survives (a snapshot can never escape
+/// `tests/snapshots/`) and distinct tests never share a file. Long identities
+/// are truncated to 100 characters plus a 16-hex-digit FNV-1a suffix, because
+/// a Windows path still has a limit and a test name does not. FNV-1a is
+/// chosen for determinism across runs — `DefaultHasher` is randomly seeded
+/// per process, which would rename every snapshot on every run — and it is
+/// documented as *not* a security digest: collisions only misattribute a
+/// snapshot, they grant nothing.
+fn escape_snapshot_name(identity: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(identity.len().saturating_add(5));
+    for byte in identity.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' {
+            out.push(char::from(byte));
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    if out.len() > 120 {
+        let hash = short_hash(identity.as_bytes());
+        out.truncate(100);
+        // Truncation may split a `%XX` escape, leaving a dangling `%` or
+        // `%X` that changes what the stem means. Backtrack to the escape
+        // boundary so the shortened stem is still a prefix of escapes.
+        while out.ends_with('%') || out.as_bytes().get(out.len().saturating_sub(2)) == Some(&b'%') {
+            out.pop();
+        }
+        let _ = write!(out, "-{hash:016x}");
+    }
+    out.push_str(".snap");
+    out
+}
+
+/// A 64-bit FNV-1a digest, for filename shortening only.
+///
+/// Deterministic across runs and platforms, which is the one property the
+/// snapshot path needs. Explicitly not a security boundary: see
+/// [`escape_snapshot_name`].
+fn short_hash(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+/// Where a test's expectation lives: `tests/snapshots/<escaped>.snap`.
+///
+/// The escaped stem covers `name\0file` (see [`escape_snapshot_name`]), so
+/// same-named tests in different files never share a recording. Beside the
+/// tests rather than under `target/`: snapshots are committed expectations,
+/// not build products, and `target/` is gitignored, cleaned by `cargo clean`,
+/// and never reviewed. A snapshot nobody reviews is a blessed-by-accident
+/// file, which is the failure this placement prevents.
+fn snapshot_path(project_dir: &Path, file: &str, test_name: &str) -> PathBuf {
+    let mut identity = String::with_capacity(test_name.len() + file.len() + 1);
+    identity.push_str(test_name);
+    identity.push('\0');
+    identity.push_str(file);
+    tests_dir(project_dir)
+        .join("snapshots")
+        .join(escape_snapshot_name(&identity))
+}
+
+/// A unified diff of the recorded expectation against the actual output.
+///
+/// LCS over lines with three lines of context and merged hunks, in the shape
+/// every code-review tool renders: `--- snapshot` / `+++ actual` headers, `@@`
+/// hunk markers, ` `/`-`/`+` lines. Byte-exact — line endings included — so a
+/// `\r\n` change reads as a change rather than vanishing in normalization.
+///
+/// Capped at 1000 lines per side: beyond that the quadratic table stops being
+/// a reviewer aid and starts being a latency event, so a bounded
+/// first-difference summary is returned instead.
+fn unified_diff(expected: &str, actual: &str) -> String {
+    const LINE_CAP: usize = 1000;
+    let exp_lines: Vec<&str> = expected.split('\n').collect();
+    let act_lines: Vec<&str> = actual.split('\n').collect();
+    if exp_lines.len() > LINE_CAP || act_lines.len() > LINE_CAP {
+        let first = exp_lines
+            .iter()
+            .zip(act_lines.iter())
+            .position(|(one, other)| one != other)
+            .unwrap_or(exp_lines.len().min(act_lines.len()));
+        return format!(
+            "outputs differ ({} vs {} lines); first difference at line {}",
+            exp_lines.len(),
+            act_lines.len(),
+            first + 1
+        );
+    }
+    let edits = edit_script(&exp_lines, &act_lines);
+    if edits.iter().all(|edit| matches!(edit, Edit::Keep(_))) {
+        return String::new();
+    }
+    render_hunks(&edits)
+}
+
+/// One step of the diff between expectation and output, borrowed from the
+/// caller's line slices so large outputs are not copied into the script.
+#[derive(PartialEq, Eq)]
+enum Edit<'line> {
+    Keep(&'line str),
+    Del(&'line str),
+    Add(&'line str),
+}
+
+/// The longest-common-subsequence table for two line slices.
+///
+/// `table[row * stride + col]` holds the LCS length of `exp[row..]` and
+/// `act[col..]`, filled back-to-front. All indices derive from the two line
+/// counts, so every access is in bounds by construction.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "LCS indices derive from the two line counts; the arithmetic keeps every access in bounds"
+)]
+fn lcs_table(exp_lines: &[&str], act_lines: &[&str]) -> Vec<u32> {
+    let (exp_len, act_len) = (exp_lines.len(), act_lines.len());
+    let stride = act_len + 1;
+    let mut table = vec![0u32; (exp_len + 1) * stride];
+    for exp_idx in (0..exp_len).rev() {
+        for act_idx in (0..act_len).rev() {
+            table[exp_idx * stride + act_idx] = if exp_lines[exp_idx] == act_lines[act_idx] {
+                table[(exp_idx + 1) * stride + act_idx + 1] + 1
+            } else {
+                table[(exp_idx + 1) * stride + act_idx].max(table[exp_idx * stride + act_idx + 1])
+            };
+        }
+    }
+    table
+}
+
+/// Walk the LCS table back into a minimal edit script.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "walk indices stay inside the two line counts, mirroring the table fill"
+)]
+fn edit_script<'line>(exp_lines: &[&'line str], act_lines: &[&'line str]) -> Vec<Edit<'line>> {
+    let stride = act_lines.len() + 1;
+    let table = lcs_table(exp_lines, act_lines);
+    let (exp_len, act_len) = (exp_lines.len(), act_lines.len());
+    let mut edits = Vec::new();
+    let (mut exp_idx, mut act_idx) = (0usize, 0usize);
+    while exp_idx < exp_len && act_idx < act_len {
+        if exp_lines[exp_idx] == act_lines[act_idx] {
+            edits.push(Edit::Keep(exp_lines[exp_idx]));
+            exp_idx += 1;
+            act_idx += 1;
+        } else if table[(exp_idx + 1) * stride + act_idx] >= table[exp_idx * stride + act_idx + 1] {
+            edits.push(Edit::Del(exp_lines[exp_idx]));
+            exp_idx += 1;
+        } else {
+            edits.push(Edit::Add(act_lines[act_idx]));
+            act_idx += 1;
+        }
+    }
+    while exp_idx < exp_len {
+        edits.push(Edit::Del(exp_lines[exp_idx]));
+        exp_idx += 1;
+    }
+    while act_idx < act_len {
+        edits.push(Edit::Add(act_lines[act_idx]));
+        act_idx += 1;
+    }
+    edits
+}
+
+/// Render an edit script as hunks with three context lines each side.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "hunk windows are clamped to the script length before slicing"
+)]
+fn render_hunks(edits: &[Edit<'_>]) -> String {
+    use std::fmt::Write as _;
+
+    const CONTEXT: usize = 3;
+    let mut out = String::from("--- snapshot\n+++ actual\n");
+    let mut hunk_start = 0usize;
+    while hunk_start < edits.len() {
+        // Skip to the next change, keeping up to CONTEXT lines before it.
+        let mut change_at = hunk_start;
+        while change_at < edits.len() && matches!(edits[change_at], Edit::Keep(_)) {
+            change_at += 1;
+        }
+        if change_at == edits.len() {
+            break;
+        }
+        let start = hunk_start.max(change_at.saturating_sub(CONTEXT));
+        let mut end = change_at;
+        while end < edits.len() && !matches!(edits[end], Edit::Keep(_)) {
+            end += 1;
+        }
+        end = (end + CONTEXT).min(edits.len());
+        // Hunk header in 1-based line numbers over each side.
+        let (mut exp_line, mut act_line) = (1usize, 1usize);
+        for edit in &edits[..start] {
+            match edit {
+                Edit::Keep(_) => {
+                    exp_line += 1;
+                    act_line += 1;
+                }
+                Edit::Del(_) => exp_line += 1,
+                Edit::Add(_) => act_line += 1,
+            }
+        }
+        let (mut exp_len, mut act_len) = (0usize, 0usize);
+        for edit in &edits[start..end] {
+            match edit {
+                Edit::Keep(_) => {
+                    exp_len += 1;
+                    act_len += 1;
+                }
+                Edit::Del(_) => exp_len += 1,
+                Edit::Add(_) => act_len += 1,
+            }
+        }
+        let _ = writeln!(out, "@@ -{exp_line},{exp_len} +{act_line},{act_len} @@");
+        for edit in &edits[start..end] {
+            match edit {
+                Edit::Keep(line) => {
+                    out.push(' ');
+                    out.push_str(line);
+                }
+                Edit::Del(line) => {
+                    out.push('-');
+                    out.push_str(line);
+                }
+                Edit::Add(line) => {
+                    out.push('+');
+                    out.push_str(line);
+                }
+            }
+            out.push('\n');
+        }
+        hunk_start = end;
+    }
+    out
+}
+
+/// Check one passing test's output against its recorded snapshot.
+///
+/// * `Update` writes the bytes (creating parents) and reports whether the
+///   file is new (`Created`) or refreshed (`Updated`); byte-identical content
+///   reports `Matched` without touching the file, so a re-record does not
+///   churn mtimes on unchanged expectations.
+/// * `Compare` reports `Matched` on identical bytes, `Mismatched` with a
+///   unified diff on any difference, and `Missing` when no recording exists —
+///   a missing expectation fails the test rather than erroring the run, so
+///   one missing file reads as one failure and not as a broken invocation.
+///   Only a real IO failure is an error, because silently skipping an
+///   unrecordable check would be a hole in the run.
+///
+/// A path that is a symlink — or anything but a regular file — is refused
+/// rather than followed: `tests/snapshots/` is committed input, and a link
+/// planted there must not redirect a write outside the directory or a read
+/// from outside it. The check-then-act window between the refusal and the IO
+/// is narrowed to adjacent calls; without `O_NOFOLLOW` (blocked by
+/// `forbid(unsafe_code)`) no userspace check closes it fully.
+///
+/// # Errors
+///
+/// `QQQ-5006` when the snapshot directory cannot be created, the file cannot
+/// be read or written, or the path is not a regular file — naming the path.
+/// The code is the store-corruption code because the situation is the same
+/// shape: committed bytes that are not what they claim to be, and the
+/// remediation is to restore or re-record them.
+fn check_snapshot(
+    project_dir: &Path,
+    file: &str,
+    test_name: &str,
+    output: &str,
+    mode: SnapshotMode,
+) -> Result<SnapshotStatus> {
+    use std::io::ErrorKind;
+
+    fn snap_error(path: &Path, action: &str, detail: &str) -> Error {
+        Error::new(
+            ErrorCode::StoreCorrupted,
+            format!("could not {action} snapshot `{}`: {detail}", path.display()),
+        )
+        .with_remediation(
+            "restore the recording from version control, or re-record it with --snapshot-update",
+        )
+    }
+
+    /// Refuse anything that is not a plain regular file, without following it.
+    fn regular_file(path: &Path) -> Result<bool> {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    return Err(snap_error(path, "touch", "it is not a regular file"));
+                }
+                Ok(true)
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(snap_error(path, "stat", &e.to_string())),
+        }
+    }
+
+    let path = snapshot_path(project_dir, file, test_name);
+    match mode {
+        SnapshotMode::Update => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| snap_error(&path, "create the directory for", &e.to_string()))?;
+            }
+            let existed = regular_file(&path)?;
+            if existed {
+                let current =
+                    std::fs::read(&path).map_err(|e| snap_error(&path, "read", &e.to_string()))?;
+                if current == output.as_bytes() {
+                    return Ok(SnapshotStatus::Matched);
+                }
+            }
+            std::fs::write(&path, output)
+                .map_err(|e| snap_error(&path, "write", &e.to_string()))?;
+            Ok(if existed {
+                SnapshotStatus::Updated
+            } else {
+                SnapshotStatus::Created
+            })
+        }
+        SnapshotMode::Compare => {
+            if !regular_file(&path)? {
+                return Ok(SnapshotStatus::Missing);
+            }
+            let expected =
+                std::fs::read(&path).map_err(|e| snap_error(&path, "read", &e.to_string()))?;
+            if expected == output.as_bytes() {
+                Ok(SnapshotStatus::Matched)
+            } else {
+                let diff = unified_diff(&String::from_utf8_lossy(&expected), output);
+                if diff.is_empty() {
+                    // Equal lines but unequal bytes: only a lossy-collision
+                    // (non-UTF8 bytes) reads this way, so report the byte
+                    // counts rather than showing nothing.
+                    Ok(SnapshotStatus::Mismatched(format!(
+                        "outputs differ ({} recorded bytes vs {} actual bytes) with identical lines",
+                        expected.len(),
+                        output.len()
+                    )))
+                } else {
+                    Ok(SnapshotStatus::Mismatched(diff))
+                }
+            }
+        }
+    }
+}
+
 /// Run one test's trials and build its outcome.
 ///
 /// # Why this is a function rather than a block in `execute`
@@ -971,6 +1418,7 @@ pub fn execute(project_dir: &Path, language: &str, opts: &TestOptions) -> Result
                     nondeterministic: false,
                     divergent_trials: Vec::new(),
                     duration_ms: 0,
+                    snapshot: None,
                 })
                 .collect(),
         });
@@ -998,23 +1446,49 @@ pub fn execute(project_dir: &Path, language: &str, opts: &TestOptions) -> Result
             );
         }
 
+        // Snapshots compare the first trial's output — cross-trial agreement
+        // is `--trials`' job, not the snapshot's — and only for tests that
+        // passed: failure output is noise, and blessing it would turn the next
+        // red into a green. A mismatch or a missing recording fails the test,
+        // so snapshots feed the same exit code as any other failure.
+        let first_output = outcome.trial_outputs.first().map_or("", String::as_str);
+        let snapshot = match (opts.snapshot, outcome.passed) {
+            (Some(mode), true) => Some(check_snapshot(
+                project_dir,
+                &test.file,
+                &test.name,
+                first_output,
+                mode,
+            )?),
+            _ => None,
+        };
+        let mut passed = outcome.passed;
+        if matches!(
+            snapshot,
+            Some(SnapshotStatus::Mismatched(_) | SnapshotStatus::Missing)
+        ) {
+            passed = false;
+        }
+
         outcomes.push(OutcomeReport {
             name: outcome.test.name.clone(),
             file: outcome.test.file.clone(),
-            passed: outcome.passed,
+            passed,
             trials: outcome.trials,
             trials_passed: outcome.trials_passed,
             nondeterministic: outcome.is_nondeterministic(),
             divergent_trials: outcome.divergent_trials(),
             duration_ms: outcome.duration_ms,
+            snapshot,
         });
 
-        // **`outcome.passed`, not `passed`.** The `passed` declared below the loop is the *count* of
-        // passing tests, and the two are one word apart -- which is why `fail_fast` here reads the
-        // outcome's own field. The isolation directory is removed inside `run_one_test`, whether the test
-        // passed or failed, because a directory left by a *failing* test is the one a reader most wants to
-        // look at and least wants to confuse with a later run's.
-        if opts.fail_fast && !outcome.passed {
+        // **`passed`, not `outcome.passed`.** The snapshot check above can
+        // fail the test after the trials passed, and `fail_fast` must stop on
+        // the verdict the report carries. The isolation directory is removed
+        // inside `run_one_test`, whether the test passed or failed, because a
+        // directory left behind by a *failing* test is the one a reader most
+        // wants to look at and least wants to confuse with a later run's.
+        if opts.fail_fast && !passed {
             break;
         }
     }
@@ -1127,7 +1601,45 @@ impl crate::output::CommandOutput for TestOutput {
                 } else {
                     let _ = write!(out, "\n      passed {}/{}", o.trials_passed, o.trials);
                 }
+                match o.snapshot {
+                    Some(SnapshotStatus::Mismatched(ref diff)) => {
+                        out.push_str("\n      snapshot mismatch (--snapshot-update re-records):");
+                        for line in diff.lines() {
+                            out.push_str("\n      ");
+                            out.push_str(line);
+                        }
+                    }
+                    Some(SnapshotStatus::Missing) => {
+                        out.push_str(
+                            "\n      no snapshot recorded; run with --snapshot-update to record the expectation",
+                        );
+                    }
+                    _ => {}
+                }
             }
+        }
+
+        // Snapshot activity, when snapshotting ran: what the run verified,
+        // recorded, or refused. A silent snapshot mode would leave a reader
+        // unable to tell "compared clean" from "never compared".
+        let mut snap_counts = [0usize; 4];
+        for o in &self.outcomes {
+            match o.snapshot {
+                Some(SnapshotStatus::Matched) => snap_counts[0] += 1,
+                Some(SnapshotStatus::Created) => snap_counts[1] += 1,
+                Some(SnapshotStatus::Updated) => snap_counts[2] += 1,
+                Some(SnapshotStatus::Mismatched(_) | SnapshotStatus::Missing) => {
+                    snap_counts[3] += 1;
+                }
+                None => {}
+            }
+        }
+        if snap_counts.iter().sum::<usize>() > 0 {
+            let _ = write!(
+                out,
+                "\n\nsnapshots: {} matched, {} created, {} updated, {} need attention",
+                snap_counts[0], snap_counts[1], snap_counts[2], snap_counts[3]
+            );
         }
 
         out
@@ -1276,6 +1788,17 @@ fn tap_single_line(s: &str) -> String {
 /// `pub(crate)`: the renderers are the only callers, and a caller outside this crate would be a
 /// second opinion about a test's fate, which is the thing this function exists to prevent.
 pub(crate) fn failure_message(outcome: &OutcomeReport) -> String {
+    let mut parts = Vec::new();
+    match outcome.snapshot {
+        Some(SnapshotStatus::Mismatched(_)) => parts.push(
+            "snapshot mismatch: output differs from tests/snapshots; review the diff or re-record with --snapshot-update"
+                .to_owned(),
+        ),
+        Some(SnapshotStatus::Missing) => parts.push(
+            "no snapshot recorded: run with --snapshot-update to record the expectation".to_owned(),
+        ),
+        _ => {}
+    }
     if outcome.nondeterministic {
         let trials = outcome
             .divergent_trials
@@ -1283,16 +1806,17 @@ pub(crate) fn failure_message(outcome: &OutcomeReport) -> String {
             .map(|i| (i + 1).to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        format!(
+        parts.push(format!(
             "nondeterministic: {} of {} trials passed, and trial(s) {} diverged from trial 1",
             outcome.trials_passed, outcome.trials, trials
-        )
-    } else {
-        format!(
+        ));
+    } else if parts.is_empty() {
+        parts.push(format!(
             "{} of {} trials passed",
             outcome.trials_passed, outcome.trials
-        )
+        ));
     }
+    parts.join("; ")
 }
 
 /// Milliseconds as seconds, for a format that expresses duration in seconds.
@@ -1377,6 +1901,7 @@ fn reported(output: &TestOutput, outcome: &OutcomeReport) -> Reported {
 ///         nondeterministic: false,
 ///         divergent_trials: Vec::new(),
 ///         duration_ms: 5,
+///         snapshot: None,
 ///     }],
 /// };
 ///
@@ -1480,6 +2005,7 @@ pub fn to_junit(output: &TestOutput) -> String {
 ///         nondeterministic: false,
 ///         divergent_trials: Vec::new(),
 ///         duration_ms: 5,
+///         snapshot: None,
 ///     }],
 /// };
 ///
@@ -1604,6 +2130,17 @@ benches::throughput: benchmark
 
         assert_eq!(unit[0].file, "src/app.rs");
         assert_eq!(integration[0].file, "tests/smoke.rs");
+    }
+
+    /// A duplicated listing line collapses to one test: the per-binary dedup
+    /// keys on (file, name) so same-named tests in *different* files never
+    /// collapse into one. (Cross-binary same names are covered end-to-end:
+    /// two files each declaring `fn smoke` must each gain a snapshot.)
+    #[test]
+    fn duplicated_listing_lines_collapse_to_one_test() {
+        let tests = parse_libtest_list("smoke: test\nsmoke: test\n", "tests/a.rs", Path::new("b"));
+        assert_eq!(tests.len(), 1);
+        assert_eq!(tests[0].name, "smoke");
     }
 
     /// A benchmark entry must not become a test.
@@ -2040,6 +2577,7 @@ benches::throughput: benchmark
                     nondeterministic: false,
                     divergent_trials: Vec::new(),
                     duration_ms: 1,
+                    snapshot: None,
                 },
                 OutcomeReport {
                     name: "a::flaky".to_owned(),
@@ -2050,6 +2588,7 @@ benches::throughput: benchmark
                     nondeterministic: true,
                     divergent_trials: vec![2],
                     duration_ms: 5,
+                    snapshot: None,
                 },
             ],
         }
@@ -2144,6 +2683,7 @@ benches::throughput: benchmark
                 nondeterministic: false,
                 divergent_trials: Vec::new(),
                 duration_ms: 1,
+                snapshot: None,
             }],
             ..sample_output(0, 0)
         };
@@ -2208,6 +2748,7 @@ benches::throughput: benchmark
                 nondeterministic,
                 divergent_trials: divergent,
                 duration_ms: 1500,
+                snapshot: None,
             }],
         }
     }
@@ -2384,6 +2925,7 @@ mod cr22_tests {
                 Vec::new()
             },
             duration_ms: 5,
+            snapshot: None,
         }
     }
 
@@ -2494,5 +3036,366 @@ mod cr22_tests {
             "TAP agrees with JUnit: {tap}"
         );
         assert_eq!(tap.matches("\nok ").count(), 1, "{tap}");
+    }
+
+    // -- TEST-011: snapshot testing ----------------------------------------
+
+    fn snap_dir(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("qqq-snap-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("create temp dir");
+        p
+    }
+
+    /// The recording for a test, addressed the way the runner addresses it.
+    ///
+    /// Tests go through [`snapshot_path`] rather than hard-coding the escaped
+    /// name, so they exercise the real join; one test below pins the exact
+    /// escaping.
+    fn snap_file(dir: &std::path::Path) -> std::path::PathBuf {
+        snapshot_path(dir, "src/lib.rs", "adding_works")
+    }
+
+    /// Recording a new snapshot stores the exact bytes and reports creation.
+    #[test]
+    fn snapshot_update_records_new_output() {
+        let dir = snap_dir("record");
+        let status = check_snapshot(
+            &dir,
+            "src/lib.rs",
+            "adding_works",
+            "ok\n",
+            SnapshotMode::Update,
+        )
+        .expect("record");
+        assert_eq!(status, SnapshotStatus::Created);
+        assert_eq!(std::fs::read(snap_file(&dir)).expect("read snap"), b"ok\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Identical output compares clean.
+    #[test]
+    fn snapshot_compare_matches_identical_output() {
+        let dir = snap_dir("match");
+        let snap = snap_file(&dir);
+        std::fs::create_dir_all(snap.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&snap, b"ok\n").expect("seed");
+        let status = check_snapshot(
+            &dir,
+            "src/lib.rs",
+            "adding_works",
+            "ok\n",
+            SnapshotMode::Compare,
+        )
+        .expect("compare");
+        assert_eq!(status, SnapshotStatus::Matched);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Changed output fails with a reviewable unified diff naming both sides.
+    #[test]
+    fn snapshot_mismatch_shows_a_unified_diff() {
+        let dir = snap_dir("mismatch");
+        let snap = snap_file(&dir);
+        std::fs::create_dir_all(snap.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&snap, "answer: 42\n").expect("seed");
+        let status = check_snapshot(
+            &dir,
+            "src/lib.rs",
+            "adding_works",
+            "answer: 43\n",
+            SnapshotMode::Compare,
+        )
+        .expect("compare runs");
+        let SnapshotStatus::Mismatched(diff) = status else {
+            panic!("a changed output must mismatch, got {status:?}");
+        };
+        assert!(
+            diff.contains("-answer: 42") && diff.contains("+answer: 43"),
+            "the diff must show the removed and added lines: {diff}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Comparing without a stored snapshot reports `Missing` rather than
+    /// erroring: a missing expectation fails *that test* while the rest of the
+    /// run still reports, which is what makes one missing file distinguishable
+    /// from a broken run. Auto-creating on compare would bless an unreviewed
+    /// expectation, so `Missing` fails the test and names the recording
+    /// command in the summary.
+    #[test]
+    fn snapshot_compare_reports_a_missing_snapshot_as_a_failure() {
+        let dir = snap_dir("missing");
+        let status = check_snapshot(
+            &dir,
+            "src/lib.rs",
+            "adding_works",
+            "ok\n",
+            SnapshotMode::Compare,
+        )
+        .expect("compare runs");
+        assert_eq!(status, SnapshotStatus::Missing);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Updating an existing snapshot refreshes the bytes and reports it.
+    #[test]
+    fn snapshot_update_refreshes_changed_output() {
+        let dir = snap_dir("refresh");
+        let snap = snap_file(&dir);
+        std::fs::create_dir_all(snap.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&snap, b"old\n").expect("seed");
+        let status = check_snapshot(
+            &dir,
+            "src/lib.rs",
+            "adding_works",
+            "new\n",
+            SnapshotMode::Update,
+        )
+        .expect("update");
+        assert_eq!(status, SnapshotStatus::Updated);
+        assert_eq!(std::fs::read(&snap).expect("read snap"), b"new\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Re-recording identical bytes is a no-op that reports itself: the file
+    /// is not touched, so unchanged expectations do not churn mtimes.
+    #[test]
+    fn snapshot_update_leaves_identical_output_alone() {
+        let dir = snap_dir("nochange");
+        let snap = snap_file(&dir);
+        std::fs::create_dir_all(snap.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&snap, b"same\n").expect("seed");
+        let status = check_snapshot(
+            &dir,
+            "src/lib.rs",
+            "adding_works",
+            "same\n",
+            SnapshotMode::Update,
+        )
+        .expect("update");
+        assert_eq!(status, SnapshotStatus::Matched);
+        assert_eq!(std::fs::read(&snap).expect("read snap"), b"same\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A non-file at the recording path is refused rather than followed:
+    /// writing through it could land outside the snapshots directory, and
+    /// reading through it could come from outside it. A directory exercises
+    /// this on every platform; symlinks get their own test below.
+    #[test]
+    fn snapshot_refuses_a_non_file_at_the_snapshot_path() {
+        let dir = snap_dir("notfile");
+        let snap = snap_file(&dir);
+        std::fs::create_dir_all(&snap).expect("plant directory");
+        assert!(
+            check_snapshot(
+                &dir,
+                "src/lib.rs",
+                "adding_works",
+                "ok\n",
+                SnapshotMode::Update
+            )
+            .is_err(),
+            "an update must not write through a non-file"
+        );
+        assert!(
+            check_snapshot(
+                &dir,
+                "src/lib.rs",
+                "adding_works",
+                "ok\n",
+                SnapshotMode::Compare
+            )
+            .is_err(),
+            "a compare must not read through a non-file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink planted where a recording lives is refused rather than
+    /// followed — in both directions, so neither a write escapes the
+    /// directory nor a read comes from outside it. Unix-only: creating a
+    /// symlink on Windows needs a privilege the gate does not grant, and the
+    /// check itself (`symlink_metadata`) behaves identically on both.
+    #[test]
+    #[cfg(unix)]
+    fn snapshot_refuses_a_planted_symlink() {
+        let dir = snap_dir("symlink");
+        let snap = snap_file(&dir);
+        std::fs::create_dir_all(snap.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink("/etc/hostname", &snap).expect("plant link");
+        assert!(
+            check_snapshot(
+                &dir,
+                "src/lib.rs",
+                "adding_works",
+                "ok\n",
+                SnapshotMode::Update
+            )
+            .is_err(),
+            "an update must not write through a planted link"
+        );
+        assert!(
+            check_snapshot(
+                &dir,
+                "src/lib.rs",
+                "adding_works",
+                "ok\n",
+                SnapshotMode::Compare
+            )
+            .is_err(),
+            "a compare must not read through a planted link"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Non-UTF8 bytes round-trip without an empty diff: lossy rendering can
+    /// merge distinct bytes into one replacement character, so equal lines
+    /// fall back to byte counts rather than showing nothing.
+    #[test]
+    fn snapshot_mismatch_names_bytes_when_lines_look_equal() {
+        let dir = snap_dir("nonutf8");
+        let snap = snap_file(&dir);
+        std::fs::create_dir_all(snap.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&snap, b"\xff\n").expect("seed non-UTF8");
+        let status = check_snapshot(
+            &dir,
+            "src/lib.rs",
+            "adding_works",
+            "\u{fffd}\n",
+            SnapshotMode::Compare,
+        )
+        .expect("compare runs");
+        let SnapshotStatus::Mismatched(diff) = status else {
+            panic!("non-UTF8 bytes must mismatch, got {status:?}");
+        };
+        assert!(
+            diff.contains("2 recorded bytes") && diff.contains("4 actual bytes"),
+            "the diff must fall back to byte counts: {diff}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CRLF is bytes, not formatting: a `\r\n` recording round-trips exactly.
+    #[test]
+    fn snapshot_is_byte_exact_over_line_endings() {
+        let dir = snap_dir("crlf");
+        let snap = snap_file(&dir);
+        std::fs::create_dir_all(snap.parent().expect("parent")).expect("mkdir");
+        let status = check_snapshot(
+            &dir,
+            "src/lib.rs",
+            "adding_works",
+            "answer: 42\r\n",
+            SnapshotMode::Update,
+        )
+        .expect("record");
+        assert_eq!(status, SnapshotStatus::Created);
+        let status = check_snapshot(
+            &dir,
+            "src/lib.rs",
+            "adding_works",
+            "answer: 42\r\n",
+            SnapshotMode::Compare,
+        )
+        .expect("compare");
+        assert_eq!(status, SnapshotStatus::Matched);
+        assert_eq!(std::fs::read(&snap).expect("read snap"), b"answer: 42\r\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Snapshot file names escape injectively and flatly: no separators
+    /// survive (so no traversal), and distinct tests never share a file —
+    /// even same-named tests in different files, because the key is
+    /// `name\0file`, not the name alone.
+    #[test]
+    fn snapshot_names_escape_safely_and_injectively() {
+        let key = |file: &str, name: &str| format!("{name}\0{file}");
+        assert_ne!(
+            escape_snapshot_name(&key("a.rs", "t")),
+            escape_snapshot_name(&key("a.rs", "t%00")),
+            "a literal %00 must not collide with the separator"
+        );
+        assert_ne!(
+            escape_snapshot_name(&key("a/b.rs", "t")),
+            escape_snapshot_name(&key("a%2Fb.rs", "t")),
+            "an escaped separator must not collide with a literal one"
+        );
+        assert_ne!(
+            escape_snapshot_name(&key("a.rs", "t")),
+            escape_snapshot_name(&key("b.rs", "t")),
+            "same-named tests in different files must not share a snapshot"
+        );
+        assert_ne!(
+            escape_snapshot_name(&key("a.rs", "t")),
+            escape_snapshot_name(&key("a.rs", "u")),
+            "different tests in one file must not share a snapshot"
+        );
+        for key in [
+            key("a/b.rs", "t"),
+            "a%b\0c".to_owned(),
+            "..\\evil\0..".to_owned(),
+        ] {
+            let escaped = escape_snapshot_name(&key);
+            assert!(
+                !escaped.contains('/') && !escaped.contains('\\'),
+                "no separators may survive: {escaped}"
+            );
+            assert!(!escaped.contains(".."), "no parent escapes: {escaped}");
+            assert!(
+                std::path::Path::new(&escaped)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("snap")),
+                "snapshots keep the .snap extension: {escaped}"
+            );
+        }
+        assert_eq!(
+            escape_snapshot_name("adding_works\0src/lib.rs"),
+            "adding_works%00src%2Flib%2Ers.snap"
+        );
+    }
+
+    /// Long identities truncate with a hash suffix instead of overflowing
+    /// path limits — and the truncation never splits a `%XX` escape.
+    #[test]
+    fn snapshot_names_truncate_long_identities() {
+        let long = format!("{}:{}", "t".repeat(200), "f".repeat(200));
+        let escaped = escape_snapshot_name(&long);
+        assert!(escaped.len() <= 120 + ".snap".len(), "{escaped}");
+        assert!(
+            !escaped.contains("%\0") && !escaped.ends_with('%'),
+            "no dangling escape: {escaped}"
+        );
+        assert_ne!(
+            escape_snapshot_name(&format!("{long}a")),
+            escaped,
+            "the hash suffix must distinguish long names"
+        );
+        assert!(
+            escape_snapshot_name(&long).starts_with(&"t".repeat(100)),
+            "the readable prefix survives: {escaped}"
+        );
+    }
+
+    /// A snapshot failure and a determinism failure are reported together:
+    /// hiding either would send the reader to the wrong half of the problem.
+    #[test]
+    fn failure_message_names_both_snapshot_and_divergence() {
+        let outcome = OutcomeReport {
+            name: "a".to_owned(),
+            file: "src/a.rs".to_owned(),
+            passed: false,
+            trials: 3,
+            trials_passed: 2,
+            nondeterministic: true,
+            divergent_trials: vec![1],
+            duration_ms: 5,
+            snapshot: Some(SnapshotStatus::Mismatched("--- snapshot\n".to_owned())),
+        };
+        let msg = failure_message(&outcome);
+        assert!(msg.contains("snapshot mismatch"), "{msg}");
+        assert!(msg.contains("trial(s) 2"), "{msg}");
     }
 }

@@ -1,0 +1,20 @@
+Final TEST-011 diff check ÔÇö verifying fixes and scanning new code.
+
+Fixes look plausible ÔÇö now inspecting snapshot internals and new tests.
+
+Diff renderer is sound ÔÇö now running the snapshot tests empirically.
+
+All green. Now close-reading the new unit tests for boundary coverage.
+
+Unit coverage checks out. One last empirical check on the diff-line shape.
+
+Everything is resolved ÔÇö no remaining bugs found.
+
+**Verification of the 2 prior leftovers:**
+- **(a) (file,name) keys** ÔÇö fixed in both places (`test.rs:466-471` in `discover`, `test.rs:583` in `parse_libtest_list`; both use stable `sort_by` + `dedup_by` on `(file, name)`). Proven end-to-end: `test_snapshot_keeps_same_named_tests_in_different_files` passes ÔÇö two `fn smoke` in different files each get their own snapshot with distinct bytes, and compare passes. Within-file order is alphabetical (deterministic, no data loss ÔÇö not a bug).
+- **(b) CLI diff expectation** ÔÇö verified empirically, not just by reading: `test_snapshot_compare_fails_on_changed_output` passes, confirming the `--- snapshot` / `+++ actual` / `@@` / `-` / `+` assertions match `render_hunks` output and real libtest `--nocapture` captured text.
+
+**Re-scan of new code ÔÇö all clean:** flag conflict errors in both orders and is idempotent on repeats (`main.rs`); NUL-separator injectivity holds (`%` is escaped, literal-`%00`/`%2F` non-collision tested); truncation is ASCII-safe with escape-boundary backtrack (over-strips at most, hash keeps uniqueness) and deterministic FNV-1a; symlink/dir refused in both modes and directions; update-identical returns `Matched` without touching the file; `failure_message` correctly combines snapshot + divergence parts; empty-diff fallback is reachable only via lossy non-UTF8 collision and is tested alongside CRLF byte-exactness.
+
+**Evidence:** `cargo test -p qqq-run --lib test_runner` ÔÇö 69 passed; `cargo test -p qqq-run --test cli test_snapshot` ÔÇö 11 passed; snapshot unit tests ÔÇö 14 passed.
+

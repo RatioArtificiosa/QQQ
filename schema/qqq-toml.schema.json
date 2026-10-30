@@ -756,6 +756,17 @@
           },
           "type": "array"
         },
+        "tenants": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TenantHosts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[server.tenants]` — host-to-tenant attribution, absent meaning the peer address stays the tenant."
+        },
         "tls": {
           "anyOf": [
             {
@@ -842,6 +853,22 @@
         "name"
       ],
       "title": "qqq-toml#SqlCapability",
+      "type": "object"
+    },
+    "TenantHosts": {
+      "$id": "https://qqq.codes/schema/qqq-toml#TenantHosts",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `TenantHosts` table.",
+      "properties": {
+        "hosts": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Host name to tenant label, e.g. `{ \"shop.example.com\" = \"shop\" }`. Keys must be bare lowercase hosts — no `:port`, trailing dot, whitespace, or brackets — and…",
+          "type": "object"
+        }
+      },
+      "title": "qqq-toml#TenantHosts",
       "type": "object"
     },
     "TenantLimit": {

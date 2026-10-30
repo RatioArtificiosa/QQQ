@@ -156,8 +156,10 @@ pub trait Transport: Send + Sync {
     ///
     /// The ALPN default keys off this: a transport that answers `false`
     /// must never be offered `h2`, which is what makes the
-    /// `f16_default_alpn_does_not_advertise_h2_without_the_h2_loop`
-    /// property structural rather than conventional.
+    /// `f16_default_alpn_prefers_h2_with_http11_fallback`
+    /// property structural rather than conventional — the production
+    /// listener offers `h2` exactly because its accept loop routes
+    /// negotiated `h2` to a driver that serves it.
     fn serves_h2(&self) -> bool;
 }
 

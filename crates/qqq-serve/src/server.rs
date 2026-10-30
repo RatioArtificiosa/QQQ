@@ -187,6 +187,15 @@ pub struct ServerConfig {
     /// `[server.tls]`; a handshake failure refuses the connection rather than
     /// serving cleartext by accident.
     pub tls: Option<Arc<rustls::ServerConfig>>,
+    /// Host-to-tenant attribution, or `None` for peer-derived tenants.
+    ///
+    /// From the manifest's `[server.tenants]` hosts table: a request whose
+    /// `Host` matches is attributed to the mapped tenant in access records,
+    /// metrics, and audit, and a request whose host matches nothing is
+    /// refused with 421. `None` (the default) keeps the previous behaviour —
+    /// every request is attributed to the peer-derived tenant — so a config
+    /// without the table behaves exactly as before.
+    pub tenant_hosts: Option<Arc<std::collections::BTreeMap<String, String>>>,
 }
 
 impl ServerConfig {
@@ -226,6 +235,8 @@ impl ServerConfig {
             accept_limit: None,
             // Cleartext by default: see `ServerConfig::tls`.
             tls: None,
+            // Peer-derived tenants by default: no manifest table, no mapping.
+            tenant_hosts: None,
         }
     }
 }
@@ -668,6 +679,8 @@ struct Shared {
     auth: Option<Arc<crate::auth::AuthPolicy>>,
     /// The bounded set of tenant labels every connection shares.
     tenant_labels: Arc<crate::metrics::TenantLabels>,
+    /// The host-to-tenant map, or `None` for peer-derived tenants.
+    tenant_hosts: Option<Arc<std::collections::BTreeMap<String, String>>>,
     /// Where records go.
     logger: Arc<Logger>,
     /// The WebSocket policy every connection enforces (`F-14`).
@@ -726,6 +739,9 @@ fn shared_for(config: &ServerConfig, logger: Logger) -> Shared {
     // collapsed, so the same tenant could appear under two labels depending on which
     // connection served it.
     let tenant_labels = Arc::new(crate::metrics::TenantLabels::new());
+    // Cloned, not copied: one table shared by every connection, so no two
+    // connections can disagree about which host belongs to which tenant.
+    let tenant_hosts = config.tenant_hosts.clone();
     // Shared into each connection task. An `Arc` rather than a per-connection
     // clone: the logger is one configuration every connection reads, and a copy
     // per connection would be a value that could drift from the others.
@@ -749,6 +765,7 @@ fn shared_for(config: &ServerConfig, logger: Logger) -> Shared {
         global_connections,
         auth,
         tenant_labels,
+        tenant_hosts,
         logger,
         ws: config.ws.clone(),
         loopback_only: config.addr.is_loopback(),
@@ -828,6 +845,38 @@ async fn close_refused(mut stream: TcpStream, tls: bool) {
         drain_for_refusal(&mut stream).await;
     } else {
         let _ = close_immediately(stream, 503).await;
+    }
+}
+
+/// Serve one accepted stream on the negotiated transport.
+///
+/// HTTP/2 on negotiated ALPN (`SRV-023`) runs the hyper H2 driver with the
+/// same table, dispatch, limits, and tenant context as every other
+/// connection — the accept loop (ledger admission, per-tenant ceilings,
+/// metrics, drain) is transport-agnostic and runs unchanged. Cleartext
+/// stays in-house HTTP/1.1; an H2c preface on cleartext is answered 400
+/// downstream (production H2 requires negotiated TLS, not blind trust).
+///
+/// Extracted from `serve` because the accept loop is at its line budget.
+async fn serve_negotiated_stream(
+    stream: ConnStream,
+    table: std::sync::Arc<RouteTable>,
+    dispatch: Dispatch,
+    connection_config: std::sync::Arc<crate::conn::ConnectionConfig>,
+    ctx: &ConnectionContext<'_>,
+) -> Served {
+    match stream {
+        ConnStream::Tls(tls) if tls.get_ref().1.alpn_protocol() == Some(b"h2".as_slice()) => {
+            crate::serve_hyper::serve_hyper_h2(
+                *tls,
+                table,
+                dispatch,
+                crate::transport::hyper_limits_for(&connection_config),
+                ctx,
+            )
+            .await
+        }
+        stream => serve_connection(stream, &table, &dispatch, &connection_config, ctx).await,
     }
 }
 
@@ -1003,15 +1052,16 @@ pub async fn serve(
                     loopback_only: shared.loopback_only,
                     ws_buffer: &shared.ws_buffer,
                     tenant_labels: &shared.tenant_labels,
+                    tenant_hosts: shared.tenant_hosts.as_ref(),
                 };
-                let served = serve_connection(
+                // HTTP/2 on negotiated ALPN (`SRV-023`): same table,
+                // dispatch, limits, and tenant context; the accept loop
+                // above is transport-agnostic. See `serve_negotiated_stream`.
+                let served = serve_negotiated_stream(
                     stream,
-                    &table,
-                    &dispatch,
-                    // Dereferenced from the `Arc`: the function borrows the
-                    // config, and passing the `Arc` would force it to know about
-                    // how the caller shares it.
-                    connection_config.as_ref(),
+                    table.clone(),
+                    dispatch.clone(),
+                    std::sync::Arc::clone(&connection_config),
                     &ctx,
                 )
                 .await;
@@ -1122,6 +1172,82 @@ pub const MANIFEST_REV_UNKNOWN: &str = "unknown";
 /// headers are ignored entirely until the trust set lands with the rule.
 fn tenant_of(peer: SocketAddr) -> TenantKey {
     tenant_key(peer.ip())
+}
+
+/// Whether a `Host` names a configured tenant: operator-approved names
+/// pass the loopback allow-list, because the rebinding that list stops
+/// uses unapproved names.
+///
+/// Kept separate from [`resolve_request_tenant`] (which answers *which*
+/// tenant) because the loopback gate only needs the boolean — and
+/// because answering it without allocating keeps the hot path free of
+/// a string it would immediately drop.
+#[must_use]
+pub(crate) fn is_tenant_mapped(
+    hosts: Option<&std::collections::BTreeMap<String, String>>,
+    host: Option<&str>,
+) -> bool {
+    let Some(hosts) = hosts else {
+        return false;
+    };
+    if hosts.is_empty() {
+        return false;
+    }
+    let Some(name) = host else {
+        return false;
+    };
+    hosts.contains_key(&crate::ws::host_name(name))
+}
+
+/// How a request's `Host` header maps to a tenant label.
+///
+/// The connection's tenant key stays peer-derived (admission happens before
+/// the first byte is read, so a client-controlled header can never gate
+/// it). This resolves only the *label* used for access records, metrics,
+/// audit, and handler attribution on requests the gate already admitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TenantResolution<'a> {
+    /// The host is mapped: attribute the request to this tenant.
+    Resolved(String),
+    /// No hosts table is configured: keep the peer-derived label, borrowed
+    /// rather than cloned — the common path allocates nothing here.
+    Fallback(&'a str),
+    /// A hosts table is configured but names no such host: refuse the
+    /// request rather than serving it under a guessed tenant.
+    Unknown(String),
+}
+
+/// Resolve a request's tenant from its `Host` header.
+///
+/// `hosts` is the manifest's `[server.tenants]` map (or `None` when the
+/// section is absent); `fallback` is the connection's peer-derived label.
+/// Matching is case-insensitive with any `:port` suffix stripped, because
+/// `Host: SHOP.EXAMPLE.COM:8443` and `shop.example.com` name the same
+/// deployment — and a table that matched only one spelling would refuse
+/// the other, which reads as an outage rather than a policy.
+#[must_use]
+pub fn resolve_request_tenant<'a>(
+    hosts: Option<&std::collections::BTreeMap<String, String>>,
+    host_header: Option<&str>,
+    fallback: &'a str,
+) -> TenantResolution<'a> {
+    let Some(hosts) = hosts else {
+        return TenantResolution::Fallback(fallback);
+    };
+    if hosts.is_empty() {
+        return TenantResolution::Fallback(fallback);
+    }
+    let raw = host_header.unwrap_or("").trim();
+    // Same split as the loopback allow-list (`ws::host_name`): one rule
+    // for what a port is, or the two matchers disagree about the host.
+    let normalized = crate::ws::host_name(raw);
+    if normalized.is_empty() {
+        return TenantResolution::Unknown(raw.to_owned());
+    }
+    match hosts.get(&normalized) {
+        Some(label) => TenantResolution::Resolved(label.clone()),
+        None => TenantResolution::Unknown(normalized),
+    }
 }
 
 /// The `QQQ-XXXX` code carried in a response's body, if it has one.
@@ -2070,6 +2196,11 @@ pub struct ConnectionContext<'a> {
     /// metric label space rather than of whether metrics are recorded, and threading it
     /// conditionally would make the recording site depend on two options agreeing.
     pub tenant_labels: &'a Arc<crate::metrics::TenantLabels>,
+    /// The host-to-tenant map, or `None` for peer-derived tenants.
+    ///
+    /// Borrowed like every other field here: one shared table means no two
+    /// connections can disagree about which host belongs to which tenant.
+    pub tenant_hosts: Option<&'a Arc<std::collections::BTreeMap<String, String>>>,
 }
 
 /// Allocates a trace id per accepted connection.
@@ -2179,6 +2310,70 @@ impl ConnectionId {
     }
 }
 
+/// Dispatch one ordinary request: drain the body, run the handler off-thread,
+/// record the access log span and metrics, and write the flat response.
+///
+/// Returns `Some` when the connection must return (body refusal or a
+/// connection-closing response) and `None` to keep the keep-alive loop
+/// reading. Extracted from `serve_connection` because the loop is at its
+/// line budget.
+#[allow(clippy::too_many_arguments)]
+async fn serve_flat_request(
+    stream: &mut ConnStream,
+    buf: &mut Vec<u8>,
+    head: &RequestHead,
+    path: &str,
+    table: &RouteTable,
+    dispatch: &Dispatch,
+    ctx: &ConnectionContext<'_>,
+    conn: &mut Connection,
+    tenant: &str,
+    span_seq: &mut u64,
+    request_started: std::time::Instant,
+) -> Option<Served> {
+    let Some((body, body_bytes)) = drain_body(stream, buf, head).await else {
+        if let Some(m) = ctx.metrics {
+            let label = ctx.tenant_labels.label(tenant);
+            m.record_body_limit(label.as_str());
+        }
+        return Some(reject_body(stream, head).await);
+    };
+
+    let route_started = std::time::Instant::now();
+    let response = dispatch_off_thread(table, dispatch, head, path, &body, tenant).await;
+    let host_failed = false;
+    emit_span(
+        ctx,
+        tenant,
+        3,
+        *span_seq,
+        u64::try_from(route_started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        host_failed,
+    );
+
+    let response = apply_cors(response, head, ctx.cors);
+
+    *span_seq += 1;
+    emit_record(
+        ctx.logger,
+        access_record(head, path, &response, tenant, ctx.id.trace, *span_seq),
+    );
+
+    if let Some(metrics) = ctx.metrics {
+        record_metrics(
+            metrics,
+            ctx.tenant_labels,
+            head,
+            &response,
+            request_started,
+            tenant,
+            body_bytes,
+        );
+    }
+
+    write_flat_response(stream, conn, head, &response).await
+}
+
 /// Serve one connection until it closes, for any reason.
 ///
 /// The config is taken by reference and cloned into the `Connection`, which owns
@@ -2208,6 +2403,12 @@ async fn serve_connection(
     // visible at the top of the loop rather than at each of twenty uses.
     let tenant_key = ctx.id.tenant;
     let tenant: &str = &ctx.id.tenant_label;
+
+    // The manifest's host table, if any: tenant resolution happens per
+    // request (the `Host` header is only known here, after the head), while
+    // admission stays peer-keyed — see `resolve_request_tenant`.
+    // `Copy` (`Option<&_>`): every iteration reads the same table.
+    let tenant_hosts = ctx.tenant_hosts;
 
     loop {
         // Which action does the state machine want? `act_on_poll` holds the rule that
@@ -2241,6 +2442,33 @@ async fn serve_connection(
         let (path, _query) = split_target(&head.target);
         let client_wants_keep_alive = wants_keep_alive(&head);
         conn.on_request_parsed(client_wants_keep_alive);
+
+        // --- Tenant: resolve the Host header against the manifest map ----
+        //
+        // Identity before policy: every gate below (loopback allow-list,
+        // budgets, limits, auth) and every record after it must agree on
+        // whose request this is, so resolution happens once, here, before
+        // any of them runs. The connection-level admission already ran on
+        // the peer key and is unaffected — a client-controlled header can
+        // never gate admission, only attribute an admitted request or
+        // refuse it. An unmapped host with a configured table is refused
+        // with 421 rather than served under a guessed tenant.
+        let mapped_tenant: Option<String>;
+        let tenant: &str = match resolve_request_tenant(
+            tenant_hosts.map(AsRef::as_ref),
+            head.header("host"),
+            tenant,
+        ) {
+            TenantResolution::Resolved(label) => {
+                mapped_tenant = Some(label);
+                mapped_tenant.as_deref().unwrap_or(tenant)
+            }
+            TenantResolution::Fallback(label) => label,
+            TenantResolution::Unknown(host) => {
+                span_seq += 1;
+                return refuse_unknown_host(&mut stream, &head, path, &host, ctx, span_seq).await;
+            }
+        };
 
         // The instant the head finished parsing, which is where the service-time clock
         // starts. **After** the head, deliberately: the time spent waiting for a slow
@@ -2325,78 +2553,22 @@ async fn serve_connection(
         // --- The body, now that the request is known to be an ordinary one ------
         //
         // **Consume the body before dispatching.** `reject_body` states why the ordering
-        // is the rule rather than a preference.
-        //
-        // The count is kept for the metric: `body_bytes` must be the bytes that crossed the
-        // socket, not the head's declared length. `reject_body` records the refusal itself,
-        // because a body over the cap is precisely the case `SRV-020` wants counted and no
-        // response is produced for it here.
-        let Some((body, body_bytes)) = drain_body(&mut stream, &mut buf, &head).await else {
-            if let Some(m) = ctx.metrics {
-                // The refusal is counted because a body over the cap is exactly the case
-                // `SRV-020` asks about, and no `record_request` runs for it: the connection
-                // closes without a completed request.
-                let label = ctx.tenant_labels.label(tenant);
-                m.record_body_limit(label.as_str());
-            }
-            return reject_body(&mut stream, &head).await;
-        };
-
-        let route_started = std::time::Instant::now();
-        let response = dispatch_off_thread(table, dispatch, &head, path, &body, tenant).await;
-        // **`false`, because this path has no host failure to report** -- `CodeRabbit` finding #23.
-        //
-        // This used to be `response.status >= 500`, and `response` is the GUEST's answer: a guest that
-        // returned 500 could force its span to be recorded, which is the influence `emit_span`'s own
-        // doc comment says a guest must not have. The status is still recorded -- `emit_record` a few
-        // lines below reads it -- so nothing about observability is lost; what is lost is the guest's
-        // vote in a host sampling decision.
-        let host_failed = false;
-        emit_span(
+        // is the rule rather than a preference. See `serve_flat_request`.
+        if let Some(served) = serve_flat_request(
+            &mut stream,
+            &mut buf,
+            &head,
+            path,
+            table,
+            dispatch,
             ctx,
+            &mut conn,
             tenant,
-            3,
-            span_seq,
-            u64::try_from(route_started.elapsed().as_micros()).unwrap_or(u64::MAX),
-            host_failed,
-        );
-
-        let response = apply_cors(response, &head, ctx.cors);
-
-        // --- One record per request, `SRV-013` -----------------------------
-        //
-        // Emitted **after** the handler and **before** the response is written:
-        // the status is known by then, and a write failure is reported by the
-        // return code rather than by a missing log line. Logging first would mean
-        // a record for a request whose response never left the server.
-        span_seq += 1;
-        emit_record(
-            ctx.logger,
-            access_record(&head, path, &response, tenant, ctx.id.trace, span_seq),
-        );
-
-        // --- The same request, as a metric --------------------------------
-        //
-        // `record_metrics` holds the reasoning: why it sits beside the access record, and
-        // why the label is bounded rather than the tenant itself.
-        if let Some(metrics) = ctx.metrics {
-            record_metrics(
-                metrics,
-                ctx.tenant_labels,
-                &head,
-                &response,
-                request_started,
-                tenant,
-                body_bytes,
-            );
-        }
-
-        // `None` means the connection may be reused, so the loop reads the next
-        // request. The body was consumed **before** the handler ran, so the connection
-        // is already positioned at it — there is deliberately no drain here, because a
-        // second consumer of the same body would either read the next request as this
-        // request's body or block on bytes already accounted for.
-        if let Some(served) = write_flat_response(&mut stream, &mut conn, &head, &response).await {
+            &mut span_seq,
+            request_started,
+        )
+        .await
+        {
             return served;
         }
     }
@@ -2613,7 +2785,13 @@ async fn refuse_before_reading(
     // this: their names are the operator's, not the loopback set's.
     if ctx.loopback_only {
         let host = head.header("host").unwrap_or("");
-        if !loopback_host_allowed(host, &ctx.ws.extra_hosts) {
+        // An operator-mapped name is approved traffic, not a rebinding
+        // probe: the tenant table names exactly which hosts the deployment
+        // serves, so a mapped host passes this loopback allow-list.
+        // Unmapped hosts keep the terse refusal, which names nothing.
+        let mapped_hosts = ctx.tenant_hosts.map(AsRef::as_ref);
+        let mapped = is_tenant_mapped(mapped_hosts, Some(host));
+        if !mapped && !loopback_host_allowed(host, &ctx.ws.extra_hosts) {
             *span_seq += 1;
             return Some(refuse_host(stream, head, path, tenant, ctx, *span_seq).await);
         }
@@ -2812,6 +2990,43 @@ async fn refuse_host(
     emit_record(
         ctx.logger,
         access_record(head, path, &response, tenant, ctx.id.trace, span),
+    );
+
+    let bytes = response::write_response(&response, head.version, false, is_head(head));
+    if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+        return Served::ClientClosed;
+    }
+    Served::Refused
+}
+
+/// Refuse a request whose `Host` matches no `[server.tenants]` entry.
+///
+/// 421 naming the host: the deployment declares which names it serves, so an
+/// unmapped name is an operator-visible fact (a typo'd `Host`, a missing
+/// table entry), not an attack to stay silent about — unlike the loopback
+/// rebinding case above, where naming served names teaches the attacker.
+/// Recorded under the peer-derived tenant, since no mapped tenant exists;
+/// the response names the host so the fix (add the mapping) is evident.
+async fn refuse_unknown_host(
+    stream: &mut ConnStream,
+    head: &RequestHead,
+    path: &str,
+    host: &str,
+    ctx: &ConnectionContext<'_>,
+    span: u64,
+) -> Served {
+    let response = response::misdirected(host);
+
+    emit_record(
+        ctx.logger,
+        access_record(
+            head,
+            path,
+            &response,
+            &ctx.id.tenant_label,
+            ctx.id.trace,
+            span,
+        ),
     );
 
     let bytes = response::write_response(&response, head.version, false, is_head(head));
@@ -3426,6 +3641,53 @@ mod tests {
             Version::Http10,
             &[("Connection", "keep-alive")]
         )));
+    }
+
+    /// A mapped host resolves to its tenant; nothing configured means
+    /// the peer-derived label stands; an unmapped host with a configured
+    /// table resolves to refusal, never to a guess.
+    #[test]
+    fn tenant_resolution_follows_the_hosts_table() {
+        use std::collections::BTreeMap;
+        let hosts: BTreeMap<String, String> =
+            BTreeMap::from([("shop.example.com".to_owned(), "shop".to_owned())]);
+        assert_eq!(
+            resolve_request_tenant(Some(&hosts), Some("shop.example.com"), "127.0.0.1"),
+            TenantResolution::Resolved("shop".to_owned())
+        );
+        // Port suffixes and case do not change the deployment named.
+        assert_eq!(
+            resolve_request_tenant(Some(&hosts), Some("SHOP.EXAMPLE.COM:8443"), "127.0.0.1"),
+            TenantResolution::Resolved("shop".to_owned())
+        );
+        assert_eq!(
+            resolve_request_tenant(Some(&hosts), Some("unknown.example.com"), "127.0.0.1"),
+            TenantResolution::Unknown("unknown.example.com".to_owned())
+        );
+        // An empty or missing host with a configured table is unmapped, not
+        // the peer: silently falling back would serve the request under a
+        // tenant the table never named.
+        assert_eq!(
+            resolve_request_tenant(Some(&hosts), None, "127.0.0.1"),
+            TenantResolution::Unknown(String::new())
+        );
+        // IPv6 literals keep their brackets out of the match.
+        assert_eq!(
+            resolve_request_tenant(Some(&hosts), Some("[::1]:8080"), "127.0.0.1"),
+            TenantResolution::Unknown("[::1]".to_owned())
+        );
+        assert_eq!(
+            resolve_request_tenant(None, Some("shop.example.com"), "127.0.0.1"),
+            TenantResolution::Fallback("127.0.0.1")
+        );
+        assert_eq!(
+            resolve_request_tenant(
+                Some(&BTreeMap::new()),
+                Some("shop.example.com"),
+                "127.0.0.1"
+            ),
+            TenantResolution::Fallback("127.0.0.1")
+        );
     }
 
     /// The header name and value are matched case-insensitively.

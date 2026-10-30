@@ -107,6 +107,72 @@ fn validate_tls(tls: &crate::manifest::ServerTls) -> Result<(), ManifestError> {
     Ok(())
 }
 
+/// Check a `[server.tenants]` table: no dead keys, no empty labels.
+///
+/// A key the matcher can never produce is dead configuration reading as
+/// policy: empty, non-lowercase, carrying a `:port` (stripped from requests
+/// before lookup), a trailing dot (requests arrive undotted), whitespace,
+/// or brackets. An empty map is the same mistake at the table level — a
+/// `[server.tenants]` section that maps nothing behaves as absent, so it
+/// is refused rather than silently switching the feature off.
+fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), ManifestError> {
+    if tenants.hosts.is_empty() {
+        return Err(ManifestError::InvalidField {
+            field: "server.tenants.hosts".to_owned(),
+            reason: "the hosts table is empty and behaves as absent; remove \
+                     `[server.tenants]` or map at least one host"
+                .to_owned(),
+        });
+    }
+    for (host, label) in &tenants.hosts {
+        if host.trim().is_empty() {
+            return Err(ManifestError::InvalidField {
+                field: "server.tenants.hosts".to_owned(),
+                reason: "a host key must not be empty; an empty key never matches".to_owned(),
+            });
+        }
+        // Matching lowercases the request's host, so a mixed-case key would
+        // never match: reject it here with the spelling to use, the way
+        // non-canonical per-tenant addresses are refused, rather than
+        // letting a deployment silently serve every host as unmapped.
+        if host != &host.to_ascii_lowercase() {
+            return Err(ManifestError::InvalidField {
+                field: "server.tenants.hosts".to_owned(),
+                reason: format!(
+                    "host keys must be lowercase; `{host}` never matches because \
+                     requests are compared lowercased — write `{}`",
+                    host.to_ascii_lowercase()
+                ),
+            });
+        }
+        // The request side strips any `:port` before lookup (`ws::host_name`),
+        // so a key that still carries one — or a trailing dot, whitespace,
+        // or brackets — can never equal a normalized request host.
+        if host.contains(':')
+            || host.ends_with('.')
+            || host.chars().any(char::is_whitespace)
+            || host.contains('[')
+            || host.contains(']')
+        {
+            return Err(ManifestError::InvalidField {
+                field: "server.tenants.hosts".to_owned(),
+                reason: format!(
+                    "host key `{host}` can never match: write the bare \
+                     lowercased host without port, trailing dot, whitespace, \
+                     or brackets, as it arrives after normalization"
+                ),
+            });
+        }
+        if label.trim().is_empty() {
+            return Err(ManifestError::InvalidField {
+                field: "server.tenants.hosts".to_owned(),
+                reason: format!("the tenant for host `{host}` must not be empty"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Check a `[server.websocket]` table (`F-14`).
 ///
 /// Origins admit the literal `"*"` (the explicit any-origin opt-in, which
@@ -280,6 +346,13 @@ impl Server {
         // `validate_tls`): the files are read where the server runs.
         if let Some(tls) = &self.tls {
             validate_tls(tls)?;
+        }
+
+        // `[server.tenants]` — host-to-tenant attribution. Dead keys and
+        // empty labels or maps are refused here rather than becoming dead
+        // configuration that reads as policy.
+        if let Some(tenants) = &self.tenants {
+            validate_tenants(tenants)?;
         }
 
         Ok(())
@@ -548,6 +621,7 @@ mod tests {
             limits: None,
             websocket: None,
             tls: None,
+            tenants: None,
         };
         let open_routes = s.unauthenticated_routes();
         assert_eq!(open_routes.len(), 1);
@@ -924,6 +998,15 @@ allow_origins = ["https://app.example.com"]
             tls: Some(ServerTls {
                 cert_file: "certs/server.pem".to_owned(),
                 key_file: "certs/server.key".to_owned(),
+            }),
+            // Populated for the same reason: the tenants table must survive
+            // a round trip, or a deployment would lose its host mapping on
+            // rewrite.
+            tenants: Some(crate::manifest::TenantHosts {
+                hosts: std::collections::BTreeMap::from([(
+                    "shop.example.com".to_owned(),
+                    "shop".to_owned(),
+                )]),
             }),
         };
         let text = toml::to_string(&s).expect("serializes");

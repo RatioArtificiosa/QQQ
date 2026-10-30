@@ -239,6 +239,7 @@ impl TlsServer {
                 loopback_only: pieces.loopback_only,
                 ws_buffer: &pieces.ws_buffer,
                 tenant_labels: &pieces.tenant_labels,
+                tenant_hosts: None,
             };
             serve_hyper_tls(stream, tls, Arc::clone(&table), dispatch, limits, &ctx).await
         });

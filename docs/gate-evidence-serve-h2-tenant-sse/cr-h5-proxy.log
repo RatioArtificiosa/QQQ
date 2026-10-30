@@ -1,0 +1,33 @@
+Fixing your review ÔÇö auditing uncommitted changes for bugs and invariant breaks.
+
+Got the change map ÔÇö now digging into tenant, H2, and policy code.
+
+Core evidence reviewed ÔÇö now inspecting the implementation for correctness.
+
+Key paths mapped ÔÇö now checking edge cases and cross-driver consistency.
+
+Transport internals checked ÔÇö now verifying project invariants and edge cases.
+
+Review of uncommitted diff + `sse-event.wat`, `h2_production.rs`, `tenant_hosts.rs`, gate notes. Overall direction is right (admission stays peer-keyed; header only attributes). Issues below, severest first.
+
+**Findings (severity ordered)**
+
+| Sev | File:line | Issue | Fix |
+|---|---|---|---|
+| HIGH | `server.rs:1229`, `serve_hyper.rs:1671`, `response.rs:850` | Attacker `Host`/`:authority` reflected verbatim into 421 body (`misdirected(host)`) and `check_extended_connect_protocol` reflects `:protocol` (`serve_hyper.rs:1308`). Unbounded, unsanitized log+body reflection (log injection, amplification). | Truncate (e.g. 64 chars, cf. `truncate_head`) + strip CRLF/control chars before formatting; test with 8KB/garbage host. |
+| HIGH | `server.rs:1260` (`TenantResolution::Unknown(raw)`) | Empty/missing host returns `Unknown(raw)` carrying raw input into refusal path; same reflection sink as above. | Return `Unknown(normalized)` (already lowercased) or a fixed token for empty. |
+| MED | `tls.rs:1279`, `server.rs:861` | Default ALPN flipped to offer `h2` first ÔÇö new hyper-H2 surface on by default; prior default was H1-only conservative. No threat-model update; `transport.rs:serves_h2` gate now vacuous for prod listener. | Keep H2 opt-in (`with_alpn`) until H2 hardening lands, or document + update threat model; add test that default-offer matches `serves_h2`. |
+| MED | `manifest.rs:1833`, `server.rs:115`, `schema:TenantHosts` | Dead-config gaps: keys with `:port`, trailing dot, surrounding whitespace, `[::1]:8080`-style never match after `host_name` normalization, but only empty/mixed-case rejected. Empty `hosts={}` passes schema+parse yet behaves as absent (Fallback). Schema allows empty strings/uppercase, no `minLength`/`pattern`/`minProperties`. | Validate keys through `ws::host_name` at parse: reject keys containing `:`-port, trailing `.`, whitespace, or that normalize differently; reject empty map; tighten schema (`minLength:1`, lowercase pattern). |
+| MED | `server.rs:2458`, `serve_hyper.rs:1754` | Tenant gate correctly placed before policy in both drivers, and limits correctly stay peer-keyed ÔÇö but **no test pins** that limits/admission stay peer-keyed (rotating mapped `Host` from one IP must not grant fresh buckets) nor that access records carry mapped label. `cli.rs` live test asserts only path presence in logs. | Add test: one peer ├ù N mapped hosts shares one rate bucket; assert `tenant":"shop"` in access log for mapped, peer label for 421. |
+| MED | `serve_hyper.rs:2181` | H2 `host` vs `:authority` compare is case-sensitive (`v != authority`); legitimate case-differing pair 400s. In-house path similar. Fail-closed so safe, but availability wart. | Compare case-insensitively. |
+| LOW | `h2_production.rs:Server::start`, `tenant_hosts.rs:Server::start` | Bind-then-drop-then-rebind race + fixed 200ms sleep readiness (README itself notes 2├ù 60s timeout flakes, "cause undetermined"). Weak gate evidence. | Pass bound `Listener` into `serve` or retry-bind; poll readiness like `wait_tls_serving` instead of sleep. |
+| LOW | `server.rs:2466` | `match mapped_tenant.as_deref(){Some(v)=>v,None=>tenant}` is dead-branch noise after unconditional `Some`. | `mapped_tenant.as_deref().unwrap_or(tenant)`. |
+| LOW | `cli.rs:cli_h2_frame` | Doesn't mask reserved bit (`stream.to_be_bytes()`); siblings do (`& 0x7fff_ffff`). Test-only. | Mask consistently. |
+| LOW | `serve_hyper.rs:answer` + `refuse_early` + `render_recorded` | Same head resolved 3├ù per request; consistent today but triple authority to drift. | Resolve once in `answer`, thread `tenant` into `refuse_early`/`render_recorded`. |
+| INFO | `server.rs:2795`, `serve_hyper.rs:806` comment | "passes allow-list on any listener" overstates: bypass only runs under `loopback_only`. | Reword comment. |
+
+**What's correct (don't change):** peer-keyed `tenant_key` for ledger/limits in both drivers; 421 (not 404/serve-guess) on unknown host; H1/H2 both gate before dispatch; `answer_h2` strips `Connection: close` (no H2 violation); fixtures generate (not commit) certs; `forbid(unsafe_code)` intact; no secrets in diff.
+
+**Suggested minimal fixes:** sanitize `misdirected`/`check_extended_connect_protocol` inputs; normalize+reject dead host keys and empty map; tighten schema; add peer-keyed-limits + mapped-label log assertions; fix readiness race before gating on this evidence.
+
+

@@ -356,6 +356,7 @@ impl HyperH2 {
                             loopback_only: pieces.loopback_only,
                             ws_buffer: &pieces.ws_buffer,
                             tenant_labels: &pieces.tenant_labels,
+                            tenant_hosts: None,
                         };
                         last = serve_hyper_h2(
                             stream,
@@ -1618,6 +1619,7 @@ async fn hyper_h2_serves_a_non_tcp_stream() {
         loopback_only: pieces.loopback_only,
         ws_buffer: &pieces.ws_buffer,
         tenant_labels: &pieces.tenant_labels,
+        tenant_hosts: None,
     };
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
     // Cloned before the context borrows `pieces`: the client arm

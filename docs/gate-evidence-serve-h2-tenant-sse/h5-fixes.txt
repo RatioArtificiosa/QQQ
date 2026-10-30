@@ -1,0 +1,61 @@
+# h5 review disposition: proxy findings on the h3+h4 diff, and what changed.
+
+Review: Meta Muse proxy via the Copilot CLI (`muse-spark-1.3-contributor`,
+subscription path quota-exhausted). Raw output: `cr-h5-proxy.log`.
+Every finding was verified against the code before acting.
+
+## Fixed in-tree (with regression coverage)
+
+- HIGH host/`:protocol` reflection: `response::misdirected` and
+  `check_extended_connect_protocol` interpolated unbounded
+  client-controlled bytes into the 421/501 bodies. Added
+  `response::sanitize_reflected` (64 chars, control characters stripped)
+  at both sinks; new test `misdirected_sanitizes_a_hostile_host`
+  (8KB + CRLF/NUL/bell → truncated, clean, still 421 + marker).
+  The access log never records the host, so the body was the only sink.
+- MED dead host keys: `validate_tenants` now rejects keys carrying `:port`,
+  trailing dots, whitespace, or brackets, and an empty map; extended
+  `tenant_hosts_reject_dead_keys` (8 shapes). The `hosts` schema
+  description now states the key rules (regenerated + `--check` green);
+  full patterns stay parse-time per project convention (`allowed_origins`
+  is schema-plain + parse-strict the same way).
+- MED H2 `host` vs `:authority` case: `map_head_h2` now compares
+  case-insensitively (RFC 9110 §7.2); added the mixed-case agreement
+  case to `h2_authority_synthesis_and_conflicts`. The in-house H1 path
+  has no `:authority`, so its `DuplicateHost` (two `Host` headers) is a
+  different, correctly strict check — no change there.
+- MED peer-keyed limits: new `rotating_mapped_hosts_shares_one_rate_bucket`
+  (2 mapped hosts, one peer, allowance 2 → third request 429s on either
+  name). Limits were already peer-keyed in both drivers; now it is pinned.
+- LOW test readiness: `h2_production.rs` replaces the fixed 200ms sleep
+  with a TLS-handshake poll (`try_connect_tls`); `tenant_hosts.rs`
+  already polled. The bind-then-serve pattern matches the repo's
+  `free_addr` convention, so it stays.
+- LOW dead branch: `mapped_tenant.as_deref().unwrap_or(tenant)`
+  replaces the match (no panic path; `unwrap_or` is not `unwrap_used`).
+- LOW reserved bit: `cli_h2_frame` masks the stream to 31 bits like the
+  reader and the sibling helper.
+- INFO comment: both loopback-bypass comments now say "this loopback
+  allow-list" instead of "any listener".
+- MED mapped-label log: `production_serve_h2_tenant_sse_live` now also
+  asserts `"tenant":"shop"` on the `/events` access line (was: path only).
+
+## Rejected with reason (no change)
+
+- MED ALPN-default opt-in: the `h2`-first default is the product decision
+  under test here (SRV-023 serve-H2), pinned by `f16` + `alpn_prefers_h2`,
+  documented on `ALPN_ALL`/`TlsConfig::new`, narrowable per deployment
+  with `with_alpn`, and served by hyper with identical gates. Reverting
+  to opt-in would un-serve what this slice proves.
+- LOW single tenant resolution per request: `resolve_tenant` is a pure
+  function of the same inputs at all three call sites with one source;
+  threading one `&str` through `refuse_early`/`render_recorded` adds
+  lifetime complexity for no behavioral gain.
+
+## Verification after fixes
+
+`cargo fmt --check` clean; `cargo clippy --workspace --all-targets
+--all-features -- -D warnings` clean; `qqq-serve` lib 592/592,
+`qqq-cap` lib 326/326, `cli production_serve_` 3/3,
+`serve_policy` 18/18, `tenant_hosts` 5/5, `h2_production` 2/2 —
+all green on the final tree before the full gate (h6).

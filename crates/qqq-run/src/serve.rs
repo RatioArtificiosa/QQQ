@@ -757,6 +757,12 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // policy, not an absence.
     config.ws = build_ws(server)?;
 
+    // The host-to-tenant map, or `None` when `[server.tenants]` is absent —
+    // which keeps peer-derived tenants, a different statement from "the
+    // server forgot to install the mapping". Manifest validation already
+    // refused empty hosts and labels, so what arrives here is well-formed.
+    config.tenant_hosts = build_tenant_hosts(server);
+
     // The TLS identity, or `None` for cleartext (`SRV-021`).
     //
     // Extracted from `prepare` rather than inlined, because `prepare` is at
@@ -937,6 +943,19 @@ fn build_ws(server: &qqq_cap::manifest::Server) -> Result<qqq_serve::ws::WsConfi
             .unwrap_or_default(),
         limits,
     })
+}
+
+/// The host-to-tenant map for `ServerConfig`, or `None` when the manifest
+/// declares no `[server.tenants]` table.
+///
+/// No validation here: `Manifest::parse` already refused empty hosts and
+/// labels, so by the time `prepare` runs the table is well-formed. This
+/// only moves it into the shared `Arc` the accept loop clones per
+/// connection.
+fn build_tenant_hosts(
+    server: &qqq_cap::manifest::Server,
+) -> Option<Arc<std::collections::BTreeMap<String, String>>> {
+    server.tenants.as_ref().map(|t| Arc::new(t.hosts.clone()))
 }
 
 /// Attach the TLS identity the flag and the section agree on (`SRV-021`).

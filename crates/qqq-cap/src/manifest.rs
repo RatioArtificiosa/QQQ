@@ -1803,6 +1803,41 @@ pub struct Server {
     /// `qqqai check` accepts paths that only exist where the server runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<ServerTls>,
+    /// `[server.tenants]` — host-to-tenant attribution, absent meaning the
+    /// peer address stays the tenant.
+    ///
+    /// When present, a request whose `Host` matches a key is attributed to
+    /// the mapped tenant in access records, metrics, and audit; a request
+    /// whose host matches nothing is refused with 421 rather than served
+    /// under a wrong name. The connection-level gates (ledger admission,
+    /// per-tenant ceilings and request limits) stay keyed by the peer
+    /// address — the host header arrives after admission, and a tenant
+    /// derived from client-controlled bytes must never gate admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenants: Option<TenantHosts>,
+}
+
+/// `[server.tenants]` — which request host belongs to which tenant.
+///
+/// The map keys are host names as they appear in the HTTP `Host` header
+/// (compared case-insensitively, without any `:port` suffix). The values
+/// are tenant labels: opaque names that appear in access records, metrics,
+/// and audit rows. A request that arrives with an unmapped host is not
+/// served under a guessed tenant — it is refused with 421.
+///
+/// [`Server::validate`] rejects dead keys at parse time: empty, non-lowercase,
+/// carrying a `:port`, a trailing dot, whitespace, or brackets — and an empty
+/// map, which would behave as absent. A mapping that can never match (or that
+/// labels nothing) is dead configuration reading as policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantHosts {
+    /// Host name to tenant label, e.g. `{ "shop.example.com" = "shop" }`.
+    /// Keys must be bare lowercase hosts — no `:port`, trailing dot,
+    /// whitespace, or brackets — and the map must not be empty; dead keys
+    /// and empty maps or labels are refused at parse time.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hosts: BTreeMap<String, String>,
 }
 
 /// `[server.limits]` — the per-tenant **request** limits.
@@ -2394,6 +2429,59 @@ allow_origins = ["https://app.example.com"]
             assert!(
                 back.contains(&format!("kind = \"{spelling}\"")),
                 "the marker must survive a round trip: {back}"
+            );
+        }
+    }
+
+    /// `[server.tenants]` maps request hosts to tenant labels: absent means
+    /// the peer address stays the tenant, present means the table decides.
+    #[test]
+    fn tenant_hosts_parse_and_validate() {
+        let m = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = { \"shop.example.com\" = \"shop\" }\n",
+        )
+        .expect("tenants table must parse");
+        let tenants = m.server.tenants.expect("tenants must be present");
+        assert_eq!(
+            tenants.hosts.get("shop.example.com"),
+            Some(&"shop".to_owned()),
+            "the host mapping must survive parsing"
+        );
+        // Absent table: no mapping, peer-derived tenant (legacy shape).
+        let bare = Manifest::parse("[package]\nname = \"a\"\nversion = \"0.1.0\"\n")
+            .expect("bare manifest must parse");
+        assert!(
+            bare.server.tenants.is_none(),
+            "no table means no mapping, not an empty one"
+        );
+    }
+
+    /// A host key the matcher can never produce fails closed naming the
+    /// field: empty, non-lowercase, carrying a `:port`, a trailing dot,
+    /// whitespace, or brackets — and an empty map, which behaves as absent.
+    /// Dead configuration that reads as policy is the control-believed-live
+    /// defect.
+    #[test]
+    fn tenant_hosts_reject_dead_keys() {
+        for (hosts, field) in [
+            ("{}", "empty map"),
+            ("{ \"\" = \"shop\" }", "host"),
+            ("{ \"shop.example.com\" = \"\" }", "tenant"),
+            ("{ \"SHOP.example.com\" = \"shop\" }", "case"),
+            ("{ \"shop.example.com:8443\" = \"shop\" }", "port"),
+            ("{ \"shop.example.com.\" = \"shop\" }", "trailing dot"),
+            ("{ \"shop .example.com\" = \"shop\" }", "whitespace"),
+            ("{ \"[::1]\" = \"shop\" }", "brackets"),
+        ] {
+            let text = format!(
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [server.tenants]\nhosts = {hosts}\n"
+            );
+            let err = Manifest::parse(&text).expect_err(&format!("dead {field} must be refused"));
+            assert!(
+                err.to_string().contains("server.tenants"),
+                "the error must name the table: {err}"
             );
         }
     }

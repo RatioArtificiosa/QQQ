@@ -1071,3 +1071,290 @@ fn tls_without_a_section_refuses_at_startup() {
         "the refusal must name the missing section:\n{output}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tenant host mapping (`[server.tenants]`)
+// ---------------------------------------------------------------------------
+
+/// A manifest with one mapped host and one public route, unbuilt on
+/// purpose: tenant resolution happens before dispatch, so the guest is
+/// irrelevant to these verdicts — and asserting a 200 would fail against
+/// a correct server with no built component.
+const TENANT_MANIFEST: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+    [server]\ndefault_auth = \"none\"\n\
+    [[server.routes]]\npath = \"/healthz\"\nmethods = [\"GET\"]\nhandler = \"health\"\n\
+    [server.tenants]\nhosts = { \"shop.example.com\" = \"shop\" }\n";
+
+/// An unmapped host is refused with 421 naming the table, not served
+/// under a guessed tenant and not routed, limited, or authenticated.
+#[test]
+fn tenant_unknown_host_is_refused_with_421() {
+    let s = Sandbox::new("tenant-unknown");
+    s.write("qqq.toml", TENANT_MANIFEST);
+
+    let serving = start(&s, "tenant-unknown", 1, &[]);
+    let response = request(
+        serving.port,
+        "GET /healthz HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        status(&response),
+        421,
+        "an unmapped host must be refused: {response:?}"
+    );
+    assert!(
+        response.contains("tenant-unknown-host"),
+        "the refusal must name the tenant table, not the route: {response:?}"
+    );
+}
+
+/// A mapped host reaches the dispatcher: the 503 below is the unbuilt
+/// guest answering, which is only reachable past the tenant gate, the
+/// loopback allow-list, and routing — a refusal anywhere earlier would
+/// answer 421 or 403 instead.
+#[test]
+fn tenant_mapped_host_reaches_the_dispatcher() {
+    let s = Sandbox::new("tenant-mapped");
+    s.write("qqq.toml", TENANT_MANIFEST);
+
+    let serving = start(&s, "tenant-mapped", 1, &[]);
+    let response = request(
+        serving.port,
+        "GET /healthz HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        status(&response),
+        503,
+        "a mapped host must be served (here: by the unbuilt dispatcher): {response:?}"
+    );
+    assert!(
+        response.contains("X-QQQ-Error"),
+        "a routed answer carries the dispatcher's marker, proving the tenant gate passed: {response:?}"
+    );
+}
+
+/// An H2 client over TLS with ALPN `h2` is served by the HTTP/2 driver
+/// on the production listener — not refused, not downgraded, not hung.
+///
+/// The guest is unbuilt on purpose (see above): the verdict is a served
+/// H2 response (503 from the dispatcher), which proves the production
+/// accept loop routed the negotiated protocol to the H2 driver.
+#[test]
+fn h2_upgrades_over_tls_alpn_on_the_production_listener() {
+    let dir = Sandbox::new("h2-alpn");
+    let (cert, key, der) = write_tls_fixture(&dir);
+    dir.write(
+        "qqq.toml",
+        &format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[server]\ndefault_auth = \"none\"\n\
+             [[server.routes]]\npath = \"/healthz\"\nmethods = [\"GET\"]\nhandler = \"health\"\n\
+             [server.tls]\ncert_file = '{cert}'\nkey_file = '{key}'\n"
+        ),
+    );
+
+    let serving = start(&dir, "h2-alpn", 1, &["--tls"]);
+    let (negotiated, status) = h2_get(serving.port, &der);
+    assert_eq!(
+        negotiated.as_deref(),
+        Some("h2"),
+        "the server must negotiate h2 when the client offers it"
+    );
+    // 503, not 200: the fixture guest is unbuilt on purpose (see the
+    // tenant tests above), so reaching the dispatcher answers with the
+    // unbuilt-guest refusal — through the H2 driver, which is the point.
+    assert_eq!(
+        status,
+        Some(503),
+        "an H2 request must be served through the production dispatcher"
+    );
+}
+
+/// H2 over cleartext stays refused: production H2 requires negotiated TLS.
+/// (The h2c preface on cleartext answers HTTP/1.1 400; see
+/// `production_serve_live_transcript` in `cli.rs` for the transcript.)
+#[test]
+fn h2c_without_tls_is_not_served() {
+    let dir = Sandbox::new("h2c-cleartext");
+    dir.write(
+        "qqq.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[server]\ndefault_auth = \"none\"\n\
+         [[server.routes]]\npath = \"/healthz\"\nmethods = [\"GET\"]\nhandler = \"health\"\n",
+    );
+
+    let serving = start(&dir, "h2c-cleartext", 1, &[]);
+    let response = request(serving.port, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "a cleartext H2 preface must draw an explicit 400, not an upgrade: {response:?}"
+    );
+    assert!(
+        !response.contains("101"),
+        "cleartext must never upgrade to H2: {response:?}"
+    );
+}
+
+/// GET over TLS with ALPN `h2`: handshake, preface, SETTINGS, one HEADERS,
+/// then read the response to `END_STREAM`, decoding headers as they arrive.
+fn h2_get(port: u16, der: &[u8]) -> (Option<String>, Option<u16>) {
+    use qqq_serve::h2::hpack::{Decoder, Encoder, HeaderField};
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the H2 client")
+        .block_on(async {
+            use tokio::io::AsyncWriteExt;
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(rustls::pki_types::CertificateDer::from(der.to_vec()))
+                .expect("server cert is a root here");
+            let mut config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            config.alpn_protocols = vec![b"h2".to_vec()];
+            let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect");
+            let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+            let mut stream = connector.connect(name, tcp).await.expect("handshake");
+            let negotiated = stream
+                .get_ref()
+                .1
+                .alpn_protocol()
+                .map(|p| String::from_utf8_lossy(p).into_owned());
+
+            // Client preface: magic, empty SETTINGS, then acknowledge the
+            // server's.
+            stream
+                .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+                .await
+                .expect("preface sends");
+            stream
+                .write_all(&h2_frame(0x4, 0x0, 0, &[]))
+                .await
+                .expect("settings send");
+            let mut encoder = Encoder::new();
+            let mut decoder = Decoder::new();
+            loop {
+                let frame = h2_read(&mut stream).await.expect("server settings");
+                if frame.ftype == 0x4 && frame.flags & 0x1 == 0 {
+                    stream
+                        .write_all(&h2_frame(0x4, 0x1, 0, &[]))
+                        .await
+                        .expect("settings ack");
+                    break;
+                }
+            }
+            let block = encoder.encode(&[
+                HeaderField::new(":method", "GET"),
+                HeaderField::new(":path", "/healthz"),
+                HeaderField::new(":scheme", "https"),
+                HeaderField::new(":authority", "localhost"),
+            ]);
+            // END_STREAM: GET has no body, so the response ends the stream.
+            stream
+                .write_all(&h2_frame(0x1, 0x4 | 0x1, 1, &block))
+                .await
+                .expect("headers send");
+            let mut status = None;
+            loop {
+                let frame = h2_read(&mut stream).await.expect("response frame");
+                // Connection-level frames interleave with the response:
+                // ACK the server's SETTINGS and PINGs, ignore window
+                // accounting, and only interpret stream-1 frames below.
+                if frame.stream == 0 {
+                    if frame.ftype == 0x4 && frame.flags & 0x1 == 0 {
+                        stream
+                            .write_all(&h2_frame(0x4, 0x1, 0, &[]))
+                            .await
+                            .expect("settings ack");
+                    } else if frame.ftype == 0x6 && frame.flags & 0x1 == 0 {
+                        stream
+                            .write_all(&h2_frame(0x6, 0x1, 0, &frame.payload))
+                            .await
+                            .expect("ping ack");
+                    } else if frame.ftype == 0x7 {
+                        break;
+                    }
+                    continue;
+                }
+                assert_eq!(
+                    frame.stream, 1,
+                    "response frames must arrive on stream 1: {frame:?}"
+                );
+                if frame.ftype == 0x1 {
+                    for field in decoder.decode(&frame.payload).expect("decode head") {
+                        if field.name == ":status" {
+                            status = field.value.parse::<u16>().ok();
+                        }
+                    }
+                    if frame.flags & 0x1 != 0 {
+                        break;
+                    }
+                }
+                if frame.ftype == 0x0 && frame.flags & 0x1 != 0 {
+                    break;
+                }
+                if frame.ftype == 0x7 {
+                    break;
+                }
+            }
+            (negotiated, status)
+        })
+}
+
+/// One HTTP/2 frame: 9-byte header plus payload.
+fn h2_frame(ftype: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(payload.len()).expect("test frames are small");
+    let mut out = Vec::with_capacity(9 + payload.len());
+    out.push(u8::try_from(len >> 16).expect("length fits 24 bits"));
+    out.push(u8::try_from((len >> 8) & 0xff).expect("length fits 24 bits"));
+    out.push(u8::try_from(len & 0xff).expect("length fits 24 bits"));
+    out.push(ftype);
+    out.push(flags);
+    out.extend_from_slice(&stream.to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Read one HTTP/2 frame, or `None` on timeout (a hung server reads as a
+/// red test, not a hung suite).
+async fn h2_read<S>(stream: &mut S) -> Option<H2Frame>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+    let mut hdr = [0u8; 9];
+    if tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut hdr))
+        .await
+        .is_err()
+    {
+        return None;
+    }
+    let len = ((u32::from(hdr[0]) << 16) | (u32::from(hdr[1]) << 8) | u32::from(hdr[2])) as usize;
+    if len > 1_000_000 {
+        return None;
+    }
+    let mut payload = vec![0u8; len];
+    if tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut payload))
+        .await
+        .is_err()
+    {
+        return None;
+    }
+    Some(H2Frame {
+        ftype: hdr[3],
+        flags: hdr[4],
+        stream: u32::from_be_bytes([hdr[5], hdr[6], hdr[7], hdr[8]]) & 0x7fff_ffff,
+        payload,
+    })
+}
+
+#[derive(Debug)]
+struct H2Frame {
+    ftype: u8,
+    flags: u8,
+    stream: u32,
+    payload: Vec<u8>,
+}

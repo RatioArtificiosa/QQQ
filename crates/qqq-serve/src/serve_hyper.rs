@@ -462,6 +462,11 @@ pub(crate) struct OwnedCtx {
     pub loopback_only: bool,
     /// The bounded tenant labels for metrics.
     pub tenant_labels: Arc<TenantLabels>,
+    /// The host-to-tenant map, or `None` for peer-derived tenants.
+    ///
+    /// Cloned like every other `Arc` here: one table shared by every
+    /// connection, so no two requests disagree.
+    pub tenant_hosts: Option<Arc<std::collections::BTreeMap<String, String>>>,
     /// The peer's socket address, for upgraded-connection records.
     ///
     /// Flat responses never name it (the access record carries the
@@ -496,6 +501,7 @@ impl OwnedCtx {
             ws_extra_hosts: ctx.ws.extra_hosts.clone(),
             loopback_only: ctx.loopback_only,
             tenant_labels: Arc::clone(ctx.tenant_labels),
+            tenant_hosts: ctx.tenant_hosts.cloned(),
             peer: ctx.id.peer,
             ws: ctx.ws.clone(),
             ws_buffer: Arc::clone(ctx.ws_buffer),
@@ -794,7 +800,12 @@ fn refuse_early(
     let ctx = &state.ctx;
     if ctx.loopback_only {
         let host = head.header("host").unwrap_or("");
-        if !loopback_host_allowed(host, &ctx.ws_extra_hosts) {
+        // Same rule as in-house `refuse_before_reading`: operator-mapped
+        // names pass this loopback allow-list; unmapped hosts keep
+        // the terse refusal, which names nothing.
+        let mapped_hosts = ctx.tenant_hosts.as_ref().map(AsRef::as_ref);
+        let mapped = crate::server::is_tenant_mapped(mapped_hosts, Some(host));
+        if !mapped && !loopback_host_allowed(host, &ctx.ws_extra_hosts) {
             let response = Response::text(421, "misdirected request");
             return Some(close_after(render_recorded(
                 state,
@@ -864,7 +875,10 @@ fn refuse_tenant_limits(
 ) -> Option<hyper::Response<WatchBody>> {
     let ctx = &state.ctx;
     let tenant_key = ctx.tenant;
-    let tenant: &str = &ctx.tenant_label;
+    // Resolved like `answer` does: the labels below must agree with the
+    // access record, and only the mapped tenant does that.
+    let mapped_tenant = resolve_tenant(ctx, head);
+    let tenant: &str = mapped_tenant.as_deref().unwrap_or(&ctx.tenant_label);
     let limits = ctx.limits.as_ref()?;
     if let Some(declared) = head.content_length
         && limits.check_body(tenant_key, declared).is_err()
@@ -907,7 +921,9 @@ fn refuse_auth_policy(
     started: Instant,
 ) -> Option<hyper::Response<WatchBody>> {
     let ctx = &state.ctx;
-    let tenant: &str = &ctx.tenant_label;
+    // Same resolution as `answer`: labels here must agree with the record.
+    let mapped_tenant = resolve_tenant(ctx, head);
+    let tenant: &str = mapped_tenant.as_deref().unwrap_or(&ctx.tenant_label);
     let policy = ctx.auth.as_ref()?;
     let matched = state.table.match_route(head.method, path)?;
     let policy_started = Instant::now();
@@ -1207,9 +1223,13 @@ async fn serve_upgrade(
                     hyper::Response::new(WatchBody::new(Bytes::new(), &state.watch))
                 })
         });
+    // The mapped tenant travels into the socket's lifetime: per-message
+    // audit below must attribute the guest calls, not the handshake alone.
+    let mapped_tenant = resolve_tenant(&state.ctx, &head);
+    let tenant: &str = mapped_tenant.as_deref().unwrap_or(&state.ctx.tenant_label);
     let ws_ctx = crate::ws_conn::WsContext {
         peer: state.ctx.peer,
-        tenant: state.ctx.tenant_label.clone(),
+        tenant: tenant.to_owned(),
         logger: state.ctx.logger.clone(),
         trace: state.ctx.trace,
         span,
@@ -1280,6 +1300,34 @@ fn spawn_ws_loop(
 /// carries only `Sec-WebSocket-Accept`: `Upgrade`/`Connection`
 /// would fail the stream, and the subprotocol policy matches h1
 /// (none selected).
+/// Gate the extended-CONNECT `:protocol`: only `websocket` bootstraps.
+///
+/// Returns the refusal `(status, message)` for anything else. A recognized
+/// mechanism this server does not implement is 501, never a silent 400 —
+/// and a missing `:protocol` is proxying, not bootstrapping (400).
+fn check_extended_connect_protocol(
+    request: &hyper::Request<Incoming>,
+) -> Result<(), (u16, String)> {
+    let protocol = request
+        .extensions()
+        .get::<hyper::ext::Protocol>()
+        .map(|protocol| protocol.as_str().to_owned());
+    match protocol.as_deref() {
+        Some("websocket") => Ok(()),
+        Some(other) => Err((
+            501,
+            format!(
+                "extended-CONNECT protocol `{}` is not implemented",
+                crate::response::sanitize_reflected(other)
+            ),
+        )),
+        None => Err((
+            400,
+            "CONNECT without `:protocol` is proxying, not a WebSocket handshake".to_owned(),
+        )),
+    }
+}
+
 async fn serve_h2_connect(
     state: &State,
     request: hyper::Request<Incoming>,
@@ -1310,35 +1358,15 @@ async fn serve_h2_connect(
         return Ok(refuse_special_body(state, request, &head, started).await);
     }
     // The mechanism gate: only websocket bootstrapping is served.
-    // A recognized mechanism this server does not implement is
-    // 501, never a silent 400 — and a missing `:protocol` is
-    // proxying, not bootstrapping, which is a 400.
-    let protocol = request
-        .extensions()
-        .get::<hyper::ext::Protocol>()
-        .map(|protocol| protocol.as_str().to_owned());
-    match protocol.as_deref() {
-        Some("websocket") => {}
-        Some(other) => {
-            return Ok(upgrade_refusal(
-                state,
-                &head,
-                501,
-                &format!("extended-CONNECT protocol `{other}` is not implemented"),
-                &[],
-                started,
-            ));
-        }
-        None => {
-            return Ok(upgrade_refusal(
-                state,
-                &head,
-                400,
-                "CONNECT without `:protocol` is proxying, not a WebSocket handshake",
-                &[],
-                started,
-            ));
-        }
+    if let Err((status, message)) = check_extended_connect_protocol(&request) {
+        return Ok(upgrade_refusal(
+            state,
+            &head,
+            status,
+            &message,
+            &[],
+            started,
+        ));
     }
     // Origin before the handshake: past the `200` the stream
     // speaks frames, and a refusal must not arrive framed.
@@ -1388,9 +1416,13 @@ async fn serve_h2_connect(
                     hyper::Response::new(WatchBody::new(Bytes::new(), &state.watch))
                 })
         });
+    // The mapped tenant travels into the socket's lifetime: per-message
+    // audit below must attribute the guest calls, not the handshake alone.
+    let mapped_tenant = resolve_tenant(&state.ctx, &head);
+    let tenant: &str = mapped_tenant.as_deref().unwrap_or(&state.ctx.tenant_label);
     let ws_ctx = crate::ws_conn::WsContext {
         peer: state.ctx.peer,
-        tenant: state.ctx.tenant_label.clone(),
+        tenant: tenant.to_owned(),
         logger: state.ctx.logger.clone(),
         trace: state.ctx.trace,
         span,
@@ -1521,7 +1553,12 @@ async fn serve_streaming_hyper(
         Protocol::H1 => close_after(response),
         Protocol::H2 => response,
     };
-    let tenant = state.ctx.tenant_label.clone();
+    // Resolved like `answer`: the stream record must attribute the
+    // mapped tenant, not the peer the connection arrived on.
+    let tenant = resolve_tenant(&state.ctx, &head).map_or_else(
+        || state.ctx.tenant_label.clone(),
+        std::borrow::Cow::into_owned,
+    );
     let peer = state.ctx.peer;
     let trace = state.ctx.trace;
     let logger = state.ctx.logger.clone();
@@ -1627,6 +1664,52 @@ async fn answer_h2(
     Ok(response)
 }
 
+/// Resolve the request's tenant label for recording and dispatch.
+///
+/// The same rule as the in-house path (`server::resolve_request_tenant`):
+/// a mapped host is attributed to its tenant, no table means the
+/// peer-derived label, and an unmapped host with a configured table
+/// resolves to refusal. `None` is the refusals the caller answers with
+/// 421 rather than serving under a guessed tenant.
+fn resolve_tenant<'a>(ctx: &'a OwnedCtx, head: &RequestHead) -> Option<std::borrow::Cow<'a, str>> {
+    use std::borrow::Cow;
+    match crate::server::resolve_request_tenant(
+        ctx.tenant_hosts.as_ref().map(AsRef::as_ref),
+        head.header("host"),
+        &ctx.tenant_label,
+    ) {
+        crate::server::TenantResolution::Resolved(label) => Some(Cow::Owned(label)),
+        crate::server::TenantResolution::Fallback(label) => Some(Cow::Borrowed(label)),
+        crate::server::TenantResolution::Unknown(_) => None,
+    }
+}
+
+/// Map the hyper head to the in-house taxonomy.
+///
+/// No access record on the error path, mirroring `reject_parse_error`:
+/// an unreadable head has no method or path worth logging.
+fn map_request_head(
+    state: &State,
+    request: &hyper::Request<Incoming>,
+) -> Result<RequestHead, String> {
+    let mapped = match state.protocol {
+        Protocol::H1 => map_head(request),
+        Protocol::H2 => map_head_h2(request),
+    };
+    mapped.map_err(|error| error.to_string())
+}
+
+/// Answer an unmapped host with 421, naming it rather than serving guesswork.
+fn misdirected_refusal(
+    state: &State,
+    head: &RequestHead,
+    path: &str,
+    started: Instant,
+) -> hyper::Response<WatchBody> {
+    let response = crate::response::misdirected(head.header("host").unwrap_or(""));
+    render_refusal(state, head, path, &response, started)
+}
+
 /// Answer one request: the QQQ pipeline, ending in a hyper response.
 ///
 /// Recording (access log, metrics, spans) happens inside, at the same
@@ -1644,7 +1727,6 @@ async fn answer(
     // cancelling a reset stream mid-answer.
     let _flight = state.watch.hold();
     let ctx = &state.ctx;
-    let tenant: &str = &ctx.tenant_label;
     let request_started = Instant::now();
 
     // The per-connection ceiling first, mirroring `Connection`'s
@@ -1657,18 +1739,10 @@ async fn answer(
     }
 
     // --- The head, mapped to the in-house taxonomy ----------------------
-    //
-    // No access record on this path, mirroring `reject_parse_error`: an
-    // unreadable head has no method or path worth logging.
-    let mapped = match state.protocol {
-        Protocol::H1 => map_head(&request),
-        Protocol::H2 => map_head_h2(&request),
-    };
-    let head = match mapped {
+    let head = match map_request_head(state, &request) {
         Ok(head) => head,
-        Err(error) => {
-            let response =
-                response::from_error(&response::parse_error_response(&error.to_string()));
+        Err(message) => {
+            let response = response::from_error(&response::parse_error_response(&message));
             return Ok(close_after(render_validated(
                 &response,
                 false,
@@ -1680,7 +1754,18 @@ async fn answer(
     let (path, _query) = split_target(&head.target);
     let span = state.served.load(Ordering::SeqCst);
 
-    // --- The gates that must run before anything is read -----------------
+    // --- Tenant: resolve the Host header ---------------------------------
+    //
+    // Same rule as the in-house path: a mapped host is attributed to its
+    // tenant everywhere below, and an unmapped host with a configured table
+    // is refused with 421 naming it rather than served under a guess.
+    let mapped_tenant;
+    let tenant: &str = if let Some(resolved) = resolve_tenant(ctx, &head) {
+        mapped_tenant = resolved;
+        &mapped_tenant
+    } else {
+        return Ok(misdirected_refusal(state, &head, path, request_started));
+    };
     //
     // Same order as `refuse_before_reading`: loopback `Host`, process
     // budget, tenant limits, auth. Same shapes, same records.
@@ -1794,7 +1879,12 @@ fn render_recorded(
     started: Instant,
 ) -> hyper::Response<WatchBody> {
     let ctx = &state.ctx;
-    let tenant: &str = &ctx.tenant_label;
+    // Resolved per request like the in-house path: a mapped host is
+    // attributed to its tenant (or refused upstream when unmapped), and
+    // anything else falls back to the peer-derived label.
+    let mapped_tenant: Option<std::borrow::Cow<'_, str>> =
+        known.and_then(|(head, _)| resolve_tenant(ctx, head));
+    let tenant: &str = mapped_tenant.as_deref().unwrap_or(&ctx.tenant_label);
     // Resolved BEFORE recording: the record must describe the wire
     // bytes, so a handler 200 past the body budget is recorded as the
     // 500 the client receives, never as a success. Recording the
@@ -2093,9 +2183,12 @@ fn map_head_h2<B>(request: &hyper::Request<B>) -> Result<RequestHead, ParseError
     // which is what `DuplicateHost` already means.
     if let Some(authority) = request.uri().authority() {
         let authority = authority.as_str();
+        // Case-insensitive: `SHOP.example.com` and `shop.example.com` name
+        // the same host (RFC 9110 §7.2), and a legitimate client that
+        // capitalizes one spelling must not draw a 400 for it.
         if headers
             .iter()
-            .any(|(k, v)| k.eq_ignore_ascii_case("host") && v != authority)
+            .any(|(k, v)| k.eq_ignore_ascii_case("host") && !v.eq_ignore_ascii_case(authority))
         {
             return Err(ParseError::DuplicateHost);
         }
@@ -2529,6 +2622,17 @@ mod tests {
             map_head_h2(&h2_get("http://localhost/hello", &[("host", "other")]),),
             Err(ParseError::DuplicateHost)
         ));
+        // Case alone is not disagreement: the same host capitalized two
+        // ways is one host, and refusing it would 400 legitimate clients.
+        let cased = map_head_h2(&h2_get(
+            "http://SHOP.example.com/hello",
+            &[("host", "shop.example.com")],
+        ))
+        .expect("case-differing host agrees");
+        assert_eq!(
+            cased.headers.first(),
+            Some(&("host".to_owned(), "SHOP.example.com".to_owned()))
+        );
     }
 
     /// The shared target rules hold on h2: over-long refuses, and a

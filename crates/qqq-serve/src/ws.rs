@@ -523,7 +523,12 @@ pub fn loopback_host_allowed(host: &str, extra: &[String]) -> bool {
 /// stripped, so `devbox.local:8080` matches an extra written with or without
 /// its port. A non-numeric or empty port is not a port at all: the whole
 /// value compares, and fails closed.
-fn host_name(value: &str) -> String {
+///
+/// Shared with tenant resolution (`server::resolve_request_tenant`), which
+/// must split hosts exactly the way the allow-list does — two matchers
+/// that disagree on what a port is would route a request the other
+/// refuses, or refuse one the other routes.
+pub(crate) fn host_name(value: &str) -> String {
     let lower = value.to_ascii_lowercase();
     // Brackets first: `[::1]:8080` splits on the wrong colon with a naive
     // `rsplit`.

@@ -138,6 +138,7 @@ impl ServeTask {
             loopback_only: false,
             ws_buffer: &self.ws_buffer,
             tenant_labels: &self.tenant_labels,
+            tenant_hosts: None,
         };
         let _ = serve_hyper_h2(
             self.stream,

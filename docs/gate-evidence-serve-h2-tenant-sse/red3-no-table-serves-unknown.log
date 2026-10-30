@@ -1,0 +1,14 @@
+
+---- production_serve_h2_tenant_sse_live stdout ----
+
+thread 'production_serve_h2_tenant_sse_live' (423412) panicked at crates\qqq-run\tests\cli.rs:3670:9:
+TLS GET / never answered 200 within 60s
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    production_serve_h2_tenant_sse_live
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 141 filtered out; finished in 60.12s
+
+error: test failed, to rerun pass `-p qqq-run --test cli`

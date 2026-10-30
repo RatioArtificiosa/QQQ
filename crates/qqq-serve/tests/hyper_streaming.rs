@@ -171,6 +171,7 @@ impl Hyper {
                             loopback_only: pieces.loopback_only,
                             ws_buffer: &pieces.ws_buffer,
                             tenant_labels: &pieces.tenant_labels,
+                        tenant_hosts: None,
                         };
                         last = serve_hyper_h1(
                             stream,
@@ -474,6 +475,7 @@ fn h2_conn_ctx<'a>(pieces: &'a Pieces, id: &'a ConnectionId) -> ConnectionContex
         loopback_only: pieces.loopback_only,
         ws_buffer: &pieces.ws_buffer,
         tenant_labels: &pieces.tenant_labels,
+        tenant_hosts: None,
     }
 }
 

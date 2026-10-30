@@ -132,6 +132,7 @@ impl HyperWs {
                             loopback_only: pieces.loopback_only,
                             ws_buffer: &pieces.ws_buffer,
                             tenant_labels: &pieces.tenant_labels,
+                            tenant_hosts: None,
                         };
                         last = serve_hyper_h1(
                             stream,

@@ -187,6 +187,7 @@ impl Hyper {
                             loopback_only: pieces.loopback_only,
                             ws_buffer: &pieces.ws_buffer,
                             tenant_labels: &pieces.tenant_labels,
+                            tenant_hosts: None,
                         };
                         last = serve_hyper_h1(
                             stream,
@@ -1505,6 +1506,7 @@ async fn hyper_h1_serves_a_non_tcp_stream() {
         loopback_only: pieces.loopback_only,
         ws_buffer: &pieces.ws_buffer,
         tenant_labels: &pieces.tenant_labels,
+        tenant_hosts: None,
     };
     let (mut client, server_io) = tokio::io::duplex(65536);
     let serving = serve_hyper_h1(

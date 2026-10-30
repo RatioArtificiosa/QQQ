@@ -2835,10 +2835,18 @@ struct Serving {
 
 impl Serving {
     fn spawn(sandbox: &Sandbox, addr: &std::net::SocketAddr) -> Self {
+        Self::spawn_with(sandbox, addr, &[])
+    }
+
+    /// Spawn `qqqai serve` with extra argv (e.g. `--tls`).
+    fn spawn_with(sandbox: &Sandbox, addr: &std::net::SocketAddr, extra: &[&str]) -> Self {
         use std::io::BufRead as _;
 
+        let listen = addr.to_string();
+        let mut args = vec!["serve", "--listen", listen.as_str()];
+        args.extend(extra.iter().copied());
         let mut child = qqqai()
-            .args(["serve", "--listen", &addr.to_string()])
+            .args(args)
             .current_dir(&sandbox.path)
             .env("CARGO_TARGET_DIR", target_dir_for(&sandbox.path))
             .stdout(Stdio::piped())
@@ -3083,13 +3091,42 @@ fn write_live_probe_project(s: &Sandbox) {
 /// `wat` is a main dependency of `qqq-run`, so the test assembles with the
 /// same toolchain the tree builds with rather than shelling out.
 fn write_live_probe_artifact(s: &Sandbox) {
-    let bytes = wat::parse_str(include_str!("fixtures/echo-http.wat"))
-        .expect("the echo fixture must assemble");
+    write_artifact_wat(s, include_str!("fixtures/echo-http.wat"));
+}
+
+/// Assemble any WAT guest fixture to the artifact the server loads.
+///
+/// The package name (`live-probe` → `live_probe.wasm`) is fixed by the
+/// probe projects below; only the guest bytes vary.
+fn write_artifact_wat(s: &Sandbox, wat_source: &str) {
+    let bytes = wat::parse_str(wat_source).expect("the fixture must assemble");
     let dir = target_dir_for(&s.path)
         .join("wasm32-wasip2")
         .join("release");
     std::fs::create_dir_all(&dir).expect("artifact dir must create");
     std::fs::write(dir.join("live_probe.wasm"), &bytes).expect("artifact must write");
+}
+
+/// A generated certificate and key, written as PEM into the sandbox.
+///
+/// Generated, never committed: a checked-in fixture expires. The SAN is
+/// `localhost`, matching what the test client verifies.
+fn write_cli_tls_fixture(sandbox: &Sandbox) -> (String, String, Vec<u8>) {
+    let params =
+        rcgen::CertificateParams::new(vec!["localhost".to_owned()]).expect("rcgen accepts the SAN");
+    let key = rcgen::KeyPair::generate().expect("rcgen generates a key");
+    let cert = params
+        .self_signed(&key)
+        .expect("rcgen self-signs with the generated key");
+    sandbox.write("cert.pem", &cert.pem());
+    sandbox.write("key.pem", &key.serialize_pem());
+    let der = cert.der().to_vec();
+    let prefix = sandbox.path.display().to_string();
+    (
+        format!("{prefix}/cert.pem"),
+        format!("{prefix}/key.pem"),
+        der,
+    )
 }
 
 /// Poll `GET /` until it answers 200 or the bound elapses: binding the
@@ -3161,6 +3198,16 @@ fn probe_ws_echo(addr: &std::net::SocketAddr) -> std::net::TcpStream {
     let (opcode, body) = read_server_frame(&mut ws);
     assert_eq!(opcode, 0x1, "the guest echo must come back as text");
     assert_eq!(&body, b"hello-ws", "the guest echo must round-trip");
+    // A second, distinct message: a handler that answers once and then
+    // replays would pass a single exchange, so the probe speaks twice to
+    // prove every message reaches the guest.
+    write_masked_text(&mut ws, b"second-message");
+    let (opcode, body) = read_server_frame(&mut ws);
+    assert_eq!(opcode, 0x1, "the second echo must come back as text");
+    assert_eq!(
+        &body, b"second-message",
+        "each message must reach the guest, not a replay"
+    );
     ws
 }
 
@@ -3335,6 +3382,412 @@ fn production_serve_without_ws_kind_does_not_upgrade() {
         "without a ws kind marker the production dispatch must not upgrade: {head:?}"
     );
     let _ = serving.finish();
+}
+
+/// One HTTP/2 frame: 9-byte header plus payload.
+fn cli_h2_frame(ftype: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(payload.len()).expect("test frames are small");
+    let mut out = Vec::with_capacity(9 + payload.len());
+    out.push(u8::try_from(len >> 16).expect("length fits 24 bits"));
+    out.push(u8::try_from((len >> 8) & 0xff).expect("length fits 24 bits"));
+    out.push(u8::try_from(len & 0xff).expect("length fits 24 bits"));
+    out.push(ftype);
+    out.push(flags);
+    // The reserved bit is never set on the wire (RFC 9113 §6); the
+    // companion reader masks it on receipt, and the writer must not
+    // produce what the reader has to forgive.
+    out.extend_from_slice(&(stream & 0x7fff_ffff).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Read one HTTP/2 frame with a bound; `None` is a hung server, i.e. red.
+async fn cli_h2_read<S>(stream: &mut S) -> Option<(u8, u8, u32, Vec<u8>)>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+    let mut hdr = [0u8; 9];
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read_exact(&mut hdr),
+    )
+    .await
+    .is_err()
+    {
+        return None;
+    }
+    let len = ((u32::from(hdr[0]) << 16) | (u32::from(hdr[1]) << 8) | u32::from(hdr[2])) as usize;
+    if len > 1_000_000 {
+        return None;
+    }
+    let mut payload = vec![0u8; len];
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read_exact(&mut payload),
+    )
+    .await
+    .is_err()
+    {
+        return None;
+    }
+    Some((
+        hdr[3],
+        hdr[4],
+        u32::from_be_bytes([hdr[5], hdr[6], hdr[7], hdr[8]]) & 0x7fff_ffff,
+        payload,
+    ))
+}
+
+/// H1 over TLS against the real binary: the handshake plus one raw request.
+fn cli_tls_get(port: u16, der: &[u8], raw: &str) -> (String, String) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the TLS client")
+        .block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(rustls::pki_types::CertificateDer::from(der.to_vec()))
+                .expect("server cert is a root here");
+            let mut config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect");
+            let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+            let mut stream = connector.connect(name, tcp).await.expect("handshake");
+            let version = format!("{:?}", stream.get_ref().1.negotiated_cipher_suite());
+            stream
+                .write_all(raw.as_bytes())
+                .await
+                .expect("request sends");
+            let mut out = Vec::new();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                stream.read_to_end(&mut out),
+            )
+            .await;
+            (version, String::from_utf8_lossy(&out).into_owned())
+        })
+}
+
+/// H2 over TLS with ALPN `h2` against the real binary: handshake, preface,
+/// SETTINGS, one HEADERS; returns (negotiated, status, body).
+///
+/// Connection-level frames interleave with the answer: the client's
+/// The `SETTINGS` frame is `ACKed` and `PING` frames are answered, exactly like a real client.
+/// Open H2 over TLS: handshake, preface, `SETTINGS` exchange.
+///
+/// Returns the stream plus the negotiated ALPN protocol. Extracted from
+/// `cli_h2_request` because the setup plus the read loop exceed the line
+/// budget together, while neither does alone.
+async fn cli_h2_connect(
+    port: u16,
+    der: &[u8],
+) -> (
+    tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    Option<String>,
+) {
+    use tokio::io::AsyncWriteExt;
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(der.to_vec()))
+        .expect("server cert is a root here");
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let mut stream = connector.connect(name, tcp).await.expect("handshake");
+    let negotiated = stream
+        .get_ref()
+        .1
+        .alpn_protocol()
+        .map(|p| String::from_utf8_lossy(p).into_owned());
+
+    stream
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        .await
+        .expect("preface sends");
+    stream
+        .write_all(&cli_h2_frame(0x4, 0x0, 0, &[]))
+        .await
+        .expect("settings send");
+    loop {
+        let (ftype, flags, _, _) = cli_h2_read(&mut stream).await.expect("server settings");
+        if ftype == 0x4 && flags & 0x1 == 0 {
+            stream
+                .write_all(&cli_h2_frame(0x4, 0x1, 0, &[]))
+                .await
+                .expect("settings ack");
+            break;
+        }
+    }
+    (stream, negotiated)
+}
+
+fn cli_h2_request(
+    port: u16,
+    der: &[u8],
+    authority: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> (Option<String>, Option<u16>, Vec<u8>) {
+    use qqq_serve::h2::hpack::{Decoder, Encoder, HeaderField};
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the H2 client")
+        .block_on(async {
+            use tokio::io::AsyncWriteExt;
+            let (mut stream, negotiated) = cli_h2_connect(port, der).await;
+            let mut encoder = Encoder::new();
+            let mut decoder = Decoder::new();
+            let method = if body.is_some() { "POST" } else { "GET" };
+            let mut fields = vec![
+                HeaderField::new(":method", method),
+                HeaderField::new(":path", path),
+                HeaderField::new(":scheme", "https"),
+                HeaderField::new(":authority", authority),
+            ];
+            if body.is_some() {
+                fields.push(HeaderField::new(
+                    "content-length",
+                    body.map_or(0, <[u8]>::len).to_string(),
+                ));
+            }
+            let block = encoder.encode(&fields);
+            // GET ends the stream with HEADERS; POST follows with DATA.
+            let head_flags = if body.is_some() { 0x4 } else { 0x4 | 0x1 };
+            stream
+                .write_all(&cli_h2_frame(0x1, head_flags, 1, &block))
+                .await
+                .expect("headers send");
+            if let Some(data) = body {
+                stream
+                    .write_all(&cli_h2_frame(0x0, 0x1, 1, data))
+                    .await
+                    .expect("data sends");
+            }
+            let mut status = None;
+            let mut answer = Vec::new();
+            loop {
+                let Some((ftype, flags, stream_id, payload)) = cli_h2_read(&mut stream).await
+                else {
+                    break;
+                };
+                if stream_id == 0 {
+                    if ftype == 0x4 && flags & 0x1 == 0 {
+                        stream
+                            .write_all(&cli_h2_frame(0x4, 0x1, 0, &[]))
+                            .await
+                            .expect("settings ack");
+                    } else if ftype == 0x6 && flags & 0x1 == 0 {
+                        stream
+                            .write_all(&cli_h2_frame(0x6, 0x1, 0, &payload))
+                            .await
+                            .expect("ping ack");
+                    } else if ftype == 0x7 {
+                        break;
+                    }
+                    continue;
+                }
+                assert_eq!(
+                    stream_id, 1,
+                    "response frames must arrive on stream 1, not {stream_id}"
+                );
+                if ftype == 0x1 {
+                    for field in decoder.decode(&payload).expect("decode head") {
+                        if field.name == ":status" {
+                            status = field.value.parse::<u16>().ok();
+                        }
+                    }
+                    if flags & 0x1 != 0 {
+                        break;
+                    }
+                }
+                if ftype == 0x0 {
+                    answer.extend_from_slice(&payload);
+                    if flags & 0x1 != 0 {
+                        break;
+                    }
+                }
+                if ftype == 0x7 {
+                    break;
+                }
+            }
+            (negotiated, status, answer)
+        })
+}
+
+/// The H2/tenant/SSE probe project: TLS identity, one tenant host, the
+/// sse route plus a flat route, all served by the static event-stream
+/// guest. Returns the sandbox and the CA bytes the client trusts.
+///
+/// Extracted from `production_serve_h2_tenant_sse_live` because the
+/// manifest plus the readiness wait exceed the line budget with the
+/// probes, while neither does alone.
+fn write_h2_sse_project() -> (Sandbox, Vec<u8>) {
+    let s = Sandbox::new("test-serve-h2-tenant-sse");
+    let (cert, key, der) = write_cli_tls_fixture(&s);
+    s.write(
+        "qqq.toml",
+        &format!(
+            "[package]\nname = \"live-probe\"\nversion = \"0.1.0\"\n\
+             [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n\
+             [capabilities.http]\nserver = true\n\
+             [server]\ndefault_auth = \"none\"\nroutes = [\n\
+             \x20 {{ path = \"/events\", methods = [\"GET\"], handler = \"feed\", kind = \"sse\", auth = \"none\" }},\n\
+             \x20 {{ path = \"/\", methods = [\"GET\", \"POST\"], handler = \"echo\", auth = \"none\" }},\n\
+             ]\n\
+             [server.tenants]\nhosts = {{ \"shop.example.com\" = \"shop\" }}\n\
+             [server.tls]\ncert_file = '{cert}'\nkey_file = '{key}'\n"
+        ),
+    );
+    write_artifact_wat(&s, include_str!("fixtures/sse-event.wat"));
+    (s, der)
+}
+
+/// Readiness over TLS: the `listening on` announcement is binding, not
+/// serving, and only a served request proves the listener answers.
+fn wait_tls_serving(port: u16, der: &[u8]) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let (_, response) = cli_tls_get(
+            port,
+            der,
+            "GET / HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n",
+        );
+        if response.starts_with("HTTP/1.1 200") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "TLS GET / never answered 200 within 60s",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// H2 + tenant-resolve + SSE on the production listener, through a real guest.
+///
+/// One boot of the real `qqqai serve` binary with TLS, a tenant host table,
+/// and the static event-stream guest; then:
+/// 1. H2 negotiates via ALPN and serves a real guest answer (200 +
+///    the guest's `data:` body) — the H2 driver on the production accept
+///    loop, not a refusal or a downgrade.
+/// 2. The same guest answer arrives over H1 — one dispatcher, two protocols.
+/// 3. A mapped host is served on both protocols; an unmapped host is
+///    refused 421 naming the tenant table on both — tenant-resolve runs
+///    before dispatch in each driver.
+/// 4. The SSE route's answer carries `text/event-stream` plus the framing
+///    headers the SSE bridge adds — a served stream, not the 502 the echo
+///    guest (no event content type) correctly draws in
+///    `production_serve_live_transcript`.
+#[test]
+fn production_serve_h2_tenant_sse_live() {
+    let (s, der) = write_h2_sse_project();
+
+    let addr = free_addr();
+    let port = addr.port();
+    let mut serving = Serving::spawn_with(&s, &addr, &["--tls"]);
+    serving.wait_for("listening on", 120);
+    wait_tls_serving(port, &der);
+
+    // 1. H2 serves the real guest: negotiated `h2`, status 200, guest body.
+    let (negotiated, status, answer) =
+        cli_h2_request(port, &der, "shop.example.com", "/events", None);
+    assert_eq!(
+        negotiated.as_deref(),
+        Some("h2"),
+        "the production listener must negotiate h2 over TLS"
+    );
+    assert_eq!(
+        status,
+        Some(200),
+        "an H2 request must reach the guest dispatcher, not a refusal; body was {:?}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert_eq!(
+        answer, b"data: hello\n\n",
+        "the H2 answer must be the guest's event body"
+    );
+
+    // 2. The same guest answer over H1: one dispatcher, two protocols.
+    let (_, h1) = cli_tls_get(
+        port,
+        &der,
+        "GET /events HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        h1.starts_with("HTTP/1.1 200"),
+        "the SSE route must answer 200 over H1: {h1:?}"
+    );
+    assert!(
+        h1.contains("text/event-stream"),
+        "the SSE answer must carry the event-stream content type: {h1:?}"
+    );
+    assert!(
+        h1.contains("data: hello"),
+        "the H1 answer must carry the guest's event body: {h1:?}"
+    );
+    assert!(
+        h1.to_ascii_lowercase().contains("cache-control: no-store"),
+        "the SSE bridge must add the no-store framing header: {h1:?}"
+    );
+
+    // 3. Tenant-resolve on both drivers: mapped serves, unmapped names 421.
+    let (_, mapped) = cli_tls_get(
+        port,
+        &der,
+        "GET / HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        mapped.starts_with("HTTP/1.1 200"),
+        "a mapped host must be served: {mapped:?}"
+    );
+    let (_, unmapped) = cli_tls_get(
+        port,
+        &der,
+        "GET / HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        unmapped.starts_with("HTTP/1.1 421"),
+        "an unmapped host must be refused, not served: {unmapped:?}"
+    );
+    assert!(
+        unmapped.contains("tenant-unknown-host"),
+        "the 421 must name the tenant table: {unmapped:?}"
+    );
+    let (_, h2_unmapped_status, _) =
+        cli_h2_request(port, &der, "evil.example.com", "/events", None);
+    assert_eq!(
+        h2_unmapped_status,
+        Some(421),
+        "tenant-resolve must refuse on the H2 driver too, not only H1"
+    );
+
+    // 4. The access log recorded the served exchanges on this listener.
+    let out = serving.finish();
+    assert!(
+        out.lines().any(|l| l.contains("/events")),
+        "the access log must record the served SSE exchange: {out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.contains("/events") && l.contains("\"tenant\":\"shop\"")),
+        "a mapped host must be attributed to its tenant, not the peer: {out}"
+    );
 }
 
 /// Two files declaring the same test name are two tests: discovery keys on

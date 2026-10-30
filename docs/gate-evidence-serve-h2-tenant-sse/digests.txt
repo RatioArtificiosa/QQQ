@@ -1,0 +1,5 @@
+h1-sse-200 sha256=49afd2021ca4cb74ce8cd7e7535f289b3061c6bf23012258e3126538dc01db75
+h1-tenant-mapped-200 sha256=a59b11c91a2cceb31ffe4443a3ed7ef719da82fb7657c8adc7ede389437c1290
+h1-tenant-unknown-421 sha256=4634a5991ac89749dfd030d4f059f6b9c14fa11c6b77fc3cc91503326c5c387b
+h2-sse-200-body sha256=2caab218b37f6dcd699177d2e18c7f78347dc52ecd7f60ee1b19dee66aa6803b
+h2-negotiated-alpn=h2 h2-sse-200-status=200 h2-tenant-unknown-status=421

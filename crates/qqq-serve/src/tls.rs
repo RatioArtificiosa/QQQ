@@ -246,15 +246,16 @@ pub const CIPHER_SUITES: &[SupportedCipherSuite] = &[
 /// Order is preference, and `h2` is first: a client that offers both gets
 /// HTTP/2, which is the point of negotiating at all.
 ///
-/// # Why the default does not advertise `h2`
+/// # Why the default advertises `h2` first
 ///
-/// The default stays HTTP/1.1-only so existing deployments negotiate
-/// nothing new by surprise — and `serve_hyper_tls` routes an
-/// explicitly offered `h2` to the HTTP/2 driver, so the opt-in
-/// reaches a real loop. The mechanism was built before the loop
-/// existed so that wiring it would be one constant, not a protocol
-/// change; that wiring has since landed, and the default's reason
-/// is now conservatism, not absence.
+/// The production accept loop routes a negotiated `h2` to the HTTP/2
+/// driver with the same gates as every other connection, so the default
+/// offers what the server actually serves. The mechanism was built before
+/// the loop existed so that wiring it would be one constant, not a protocol
+/// change; that constant is flipped now that the production path routes it.
+/// Deployments that must not negotiate H2 narrow the offer explicitly with
+/// [`TlsConfig::with_alpn`] — for example HTTP/1.1-only behind a proxy
+/// that terminates TLS itself.
 pub const ALPN_H2: &[u8] = b"h2";
 /// The HTTP/1.1 ALPN protocol identifier.
 pub const ALPN_HTTP11: &[u8] = b"http/1.1";
@@ -1256,13 +1257,13 @@ pub struct TlsConfig {
 impl TlsConfig {
     /// A configuration from a certificate source, with the documented policy.
     ///
-    /// `NONE` client auth and HTTP/1.1-only ALPN — the conservative
-    /// default: an explicit [`Self::with_alpn`] is what offers more,
-    /// and `serve_hyper_tls` routes an offered `h2` to the HTTP/2
-    /// driver, so the opt-in reaches a real loop. (An earlier
-    /// revision tied the default to the loop's absence; the loop
-    /// has since landed on the hyper path, and the default's reason
-    /// is now least-surprise, not absence.)
+    /// `NONE` client auth and `h2`-first ALPN: the production accept loop
+    /// routes a negotiated `h2` to the HTTP/2 driver with the same gates as
+    /// every other connection, so advertising `h2` reaches a real loop
+    /// (`serve_hyper_tls` already routed an explicitly offered `h2` there).
+    /// An explicit [`Self::with_alpn`] still narrows the offer — e.g. to
+    /// HTTP/1.1-only behind a proxy that terminates TLS itself, where no
+    /// ALPN response tells the client to fall back.
     ///
     /// # Why this is not `Default`
     ///
@@ -1275,7 +1276,7 @@ impl TlsConfig {
             certificate,
             versions: PROTOCOL_VERSIONS,
             cipher_suites: CIPHER_SUITES,
-            alpn: vec![ALPN_HTTP11.to_vec()],
+            alpn: vec![ALPN_H2.to_vec(), ALPN_HTTP11.to_vec()],
             client_auth: ClientAuth::None,
         }
     }
@@ -1888,26 +1889,22 @@ mod tests {
         assert_eq!(ALPN_HTTP11, b"http/1.1");
     }
 
-    /// **F-16: the default config stays HTTP/1.1-only; `h2` is an explicit opt-in.**
+    /// **F-16: the default config offers `h2` first, then HTTP/1.1.**
     ///
-    /// The default offers HTTP/1.1 only so existing deployments
-    /// negotiate nothing new by surprise; [`ALPN_ALL`] documents
-    /// the full set, and [`TlsConfig::with_alpn`] is the explicit
-    /// opt-in — which now reaches a real loop, since
-    /// `serve_hyper_tls` routes ALPN `h2` to the HTTP/2 driver.
-    /// Pre-fix this fails: `new` defaults to the full `ALPN_ALL` list.
+    /// The production accept loop routes a negotiated `h2` to the HTTP/2
+    /// driver with the same gates as every other connection, so the
+    /// default offers what the server actually serves. Narrowing stays
+    /// explicit: [`TlsConfig::with_alpn`] with exactly
+    /// [`ALPN_HTTP11`] is the HTTP/1.1-only deployment (e.g. behind a
+    /// proxy that terminates TLS itself).
     #[test]
-    fn f16_default_alpn_stays_http11_h2_is_an_explicit_opt_in() {
+    fn f16_default_alpn_prefers_h2_with_http11_fallback() {
         let c = TlsConfig::new(CertificateSource::files("cert.pem", "key.pem"));
-        assert!(
-            !c.alpn.iter().any(|p| p == ALPN_H2),
-            "the default must not offer h2, offers {:?}",
-            c.alpn
-        );
         assert_eq!(
             c.alpn,
-            vec![ALPN_HTTP11.to_vec()],
-            "the default offers exactly http/1.1"
+            vec![ALPN_H2.to_vec(), ALPN_HTTP11.to_vec()],
+            "the default offers h2 first, http/1.1 as fallback: {:?}",
+            c.alpn
         );
     }
 

@@ -1,0 +1,14 @@
+
+thread 'production_serve_h2_tenant_sse_live' (424952) panicked at crates\qqq-run\tests\cli.rs:3712:5:
+assertion `left == right` failed: an H2 request must reach the guest dispatcher, not a refusal; body was "no tenant is configured for host `evil.example.com`\n"
+  left: Some(421)
+ right: Some(200)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    production_serve_h2_tenant_sse_live
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 141 filtered out; finished in 0.14s
+
+error: test failed, to rerun pass `-p qqq-run --test cli`

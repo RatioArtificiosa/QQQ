@@ -840,6 +840,37 @@ pub fn not_found() -> Response {
     Response::text(404, "not found\n")
 }
 
+/// Sanitize a client-controlled value reflected into a response body.
+///
+/// Truncates to 64 chars and strips control characters (including CR/LF):
+/// a `Host` or `:protocol` header is attacker-controlled and bounded only
+/// by the header caps, so reflecting it verbatim is log injection and
+/// response amplification. The refusal still names the host — the fix for
+/// an unmapped host is evident — just never more than 64 clean chars of it.
+#[must_use]
+pub fn sanitize_reflected(value: &str) -> String {
+    value.chars().filter(|c| !c.is_control()).take(64).collect()
+}
+
+/// Build the response for a request whose host no tenant mapping covers.
+///
+/// 421 (RFC 9110 §15.5.21) names the actual condition: the server is not
+/// configured for the host, so there is no tenant to attribute the request
+/// to. A 404 would send the operator to check their routes, which is the
+/// wrong tree — the routes are fine, the host is unknown.
+#[must_use]
+pub fn misdirected(host: &str) -> Response {
+    let mut r = Response::text(
+        421,
+        format!(
+            "no tenant is configured for host `{}`\n",
+            sanitize_reflected(host)
+        ),
+    );
+    r.set_header("X-QQQ-Error", "tenant-unknown-host");
+    r
+}
+
 /// Build the response for a path that exists under other methods.
 ///
 /// The `Allow` header is required by RFC 9110 §15.5.6, and it is the part that
@@ -967,6 +998,54 @@ mod tests {
         assert_eq!(status, "HTTP/1.1 200 OK");
         assert_eq!(header(&headers, "Content-Length"), Some("6"));
         assert_eq!(body, b"hello\n");
+    }
+
+    /// An unmapped host is refused by name: the status, the marker header,
+    /// and the body all name the tenant table decision, so the operator
+    /// knows what to add rather than which route to fix.
+    #[test]
+    fn misdirected_names_the_host_and_the_table() {
+        let r = super::misdirected("evil.example.com");
+        assert_eq!(r.status, 421);
+        let bytes = write_response(&r, Version::Http11, true, false);
+        let (status, headers, body) = parse_response(&bytes);
+        assert_eq!(status, "HTTP/1.1 421 Misdirected Request");
+        assert_eq!(header(&headers, "X-QQQ-Error"), Some("tenant-unknown-host"));
+        assert!(
+            String::from_utf8_lossy(&body).contains("evil.example.com"),
+            "the body must name the unmapped host: {body:?}"
+        );
+    }
+
+    /// A hostile host is truncated and stripped, not reflected: 8KB of
+    /// header plus CR/LF/control bytes must not become log injection or
+    /// response amplification — the refusal still 421s with the marker.
+    #[test]
+    fn misdirected_sanitizes_a_hostile_host() {
+        let hostile = format!(
+            "evil.example.com\r\nX-Injected: 1\x00\x07{}",
+            "x".repeat(8192)
+        );
+        let r = super::misdirected(&hostile);
+        assert_eq!(r.status, 421);
+        let body = String::from_utf8_lossy(&r.body).into_owned();
+        let reflected = body
+            .strip_suffix('\n')
+            .expect("the refusal ends with one newline");
+        assert!(
+            !reflected.contains('\r') && !reflected.contains('\n') && !reflected.contains('\0'),
+            "no control bytes may survive into the refusal: {body:?}"
+        );
+        assert!(
+            body.len() <= 128,
+            "the reflected host must be truncated, not echoed: len={}",
+            body.len()
+        );
+        assert!(
+            body.contains("evil.example.com"),
+            "the usable prefix must survive sanitizing: {body:?}"
+        );
+        assert_eq!(r.header("X-QQQ-Error"), Some("tenant-unknown-host"));
     }
 
     /// **The framing rule.** A response with neither `Content-Length` nor

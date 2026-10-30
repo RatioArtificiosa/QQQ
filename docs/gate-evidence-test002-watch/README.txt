@@ -6,7 +6,7 @@ Red (proves the tests fail without the shipped code):
 - test002-watch-review-red.log — new incompatibility tests (`cannot be combined`)
   red without the `test_options` validation (0 passed / 3 failed), green with it.
 
-Green (current HEAD 6a26ccb, `cargo test -p qqq-run`):
+Green (refreshed on HEAD 4800e1d after audit fix; code HEAD 6a26ccb first green, then audit guard added; `cargo test -p qqq-run`):
 - lib 705 passed, doctests 116 passed, cli 139 passed (8 watch).
 - gate-fmt.log, gate-clippy.log, gate-deny.log, gate-machete.log — fast gates exit 0.
 - gate-test.log — `cargo test --workspace --all-features` exit 0.

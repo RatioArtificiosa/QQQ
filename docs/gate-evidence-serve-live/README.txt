@@ -37,3 +37,14 @@ is over the exact response bytes, which are precisely the concatenation
 of the hex dump — reparse and rehash to verify. All five were checked
 byte-identical after capture, and every digest reproduced unchanged
 across three separate production runs.
+
+Review (Meta Muse proxy; Copilot subscription quota-exhausted):
+cr-serve-live-review.log — scoped on-topic review of the two new tests
+plus helpers: CLEAN. (Two earlier rounds returned stale-mixed outputs
+framing an older TEST-018 diff; their actionable cli.rs items —
+WouldBlock-only arms, overbroad 101 scan, tenant assertion satisfiable
+by readiness polls, missing write timeouts, stale comment — were each
+verified against the code and fixed in-tree before commit: TimedOut
+arms, write timeouts on all sockets, graceful WS close before asserting
+the access line, same-line /ws+tenant assertion, starts_with status
+checks. The committed tests plus this log are the honest record.)

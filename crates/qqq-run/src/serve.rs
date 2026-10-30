@@ -1848,11 +1848,12 @@ mod tests {
     ///
     /// Not merely `is_some`: the assertion reads the built configuration's
     /// ALPN list, proving the manifest's files reached the rustls policy
-    /// rather than a placeholder. `http/1.1`-only is `TlsConfig::new`'s
-    /// conservative default — the in-house loop has no h2 driver, so an
-    /// offered `h2` would advertise a loop that does not exist (`SRV-022`).
+    /// rather than a placeholder. `h2`-first is `TlsConfig::new`'s default —
+    /// the production loop routes negotiated `h2` to the hyper H2 driver
+    /// with identical gates, so the offer reaches a loop that exists
+    /// (`SRV-022` FLIP, `SRV-023` PROMOTE).
     #[test]
-    fn build_tls_with_generated_files_builds_http11_only() {
+    fn build_tls_with_generated_files_builds_h2_first() {
         let dir = tls_fixture_dir("build-ok");
         let (cert, key) = write_tls_fixture(&dir, "ok");
         let server = manifest_server(&format!(
@@ -1865,8 +1866,8 @@ mod tests {
             .expect("a section must produce a configuration");
         assert_eq!(
             config.alpn_protocols,
-            vec![b"http/1.1".to_vec()],
-            "the built policy must offer exactly HTTP/1.1"
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            "the built policy must offer h2 first with http/1.1 fallback"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

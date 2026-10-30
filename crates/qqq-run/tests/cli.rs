@@ -3289,9 +3289,10 @@ fn production_serve_live_transcript() {
         "the 502 must name the required content type: {sse_all:?}"
     );
 
-    // 4. H2c prior knowledge: the in-house loop is HTTP/1.1-only, so the
-    // preface must draw an explicit H1 response — never an upgrade, never
-    // a hang. This pins the narrowed H2 behavior on the production path.
+    // 4. H2c prior knowledge: production H2 requires negotiated TLS, so a
+    // cleartext preface must draw an explicit H1 response — never an
+    // upgrade, never a hang. This pins the narrowed H2 behavior on the
+    // production path.
     let h2_resp = probe_h2c(&addr);
     assert!(
         h2_resp.starts_with(b"HTTP/1.1 400"),

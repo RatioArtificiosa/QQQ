@@ -2237,8 +2237,9 @@ pub struct Cors {
 /// variant an operator can write down (`Files`): ACME issuance is refused
 /// elsewhere by name (`SRV-013`), and a platform key the manifest cannot
 /// see cannot be named in it. ALPN is deliberately not modelled: the
-/// in-house accept loop is HTTP/1.1-only (`SRV-022`), so an `alpn` knob
-/// could advertise a loop that does not exist on this path.
+/// default already offers `h2` first with `http/1.1` fallback (`SRV-022`
+/// FLIP), and a manifest knob could only narrow what the production loop
+/// already serves — narrowing stays code-level (`TlsConfig::with_alpn`).
 ///
 /// ```
 /// use qqq_cap::manifest::ServerTls;

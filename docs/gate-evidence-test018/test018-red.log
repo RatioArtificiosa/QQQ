@@ -1,0 +1,4 @@
+CI EXAMPLES FAILED -- problems in examples/ci/:
+  - github-actions.yml: missing (TEST-018 requires github-actions.yml, gitlab-ci.yml, circleci.yml)
+  - gitlab-ci.yml: missing (TEST-018 requires github-actions.yml, gitlab-ci.yml, circleci.yml)
+  - circleci.yml: missing (TEST-018 requires github-actions.yml, gitlab-ci.yml, circleci.yml)

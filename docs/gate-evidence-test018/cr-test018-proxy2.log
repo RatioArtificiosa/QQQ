@@ -1,0 +1,11 @@
+Fix check on the CI gate ÔÇö reviewing the diff.
+
+Verified the gate logic ÔÇö now confirming the self-test.
+
+CLEAN ÔÇö `tools/check_ci_examples.py` diff only.
+
+* Gate fixed at 69-70: requires `"qqqai test"` substring, no bare-`qqqai` fallback.
+* Self-test covers it at 177-187: replaces `qqqai test` with `qqqai --version` (bare mention remains) and expects `must show 'qqqai test'` failure.
+* Verified: `--self-test` and live check both `OK` (Rust 1.98), exit 0.
+
+

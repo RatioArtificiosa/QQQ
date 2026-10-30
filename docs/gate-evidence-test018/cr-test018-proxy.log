@@ -1,0 +1,11 @@
+Checking your CI examples for YAML, pins, and wiring.
+
+Files look good ÔÇö now verifying pins, YAML, and gates.
+
+Findings (checker OK, self-test OK, all 3 YAML parse):
+
+* CLEAN: examples/ci/*.yml valid YAML, pin 1.98 matches live rust-toolchain.toml channel; xtask main.rs:324 (Par) / :617 (Seq) correctly placed; no secrets.
+* tools/check_ci_examples.py:70 ÔÇö qqqai gate weakened: `and "qqqai" not in text` lets bare `qqqai` pass without `test`; keep only first clause.
+* Self-test untested branch: no no-qqqai fixture, so above gap uncovered.
+
+

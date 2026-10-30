@@ -258,8 +258,9 @@ cast_sign_loss = "warn"
 broken_intra_doc_links = "warn"
 private_intra_doc_links = "warn"
 
-# Vendored wasmtime-internal-cache 48.0.7: identical upstream sources except the
+# Vendored wasmtime-internal-cache 48.0.8: identical upstream sources except the
 # zstd requirement (0.13 -> 0.14) to resolve RUSTSEC-2026-0391/0398/0403/0410.
+# Re-vendored 48.0.7 -> 48.0.8 for RUSTSEC-2026-0420 (wasip3 UDP).
 # Rationale, verification, and exit plan: docs/dependency-decisions/zstd-cache.md
 [patch.crates-io]
 wasmtime-internal-cache = { path = "vendor/wasmtime-internal-cache" }

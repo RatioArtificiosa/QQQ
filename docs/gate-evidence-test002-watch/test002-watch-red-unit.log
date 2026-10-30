@@ -1,0 +1,9 @@
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+error[E0425]: cannot find function `test_watch_rules` in this scope
+    --> crates\qqq-run\src\test.rs:3638:21
+     |
+3638 |         let rules = test_watch_rules();
+     |                     ^^^^^^^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `qqq-run` (lib test) due to 1 previous error

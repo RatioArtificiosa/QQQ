@@ -1,0 +1,8 @@
+Checking your diff against the 9 prior findings.
+
+All nine fixes look present ÔÇö now probing for gaps.
+
+CLEAN ÔÇö all 9 prior findings are fixed in this diff and it compiles (`cargo check -p qqq-run` passes).
+
+Verified: foreign-format rejection, flaky rejection, and dry-run rejection in `test_options` with dedicated CLI tests; in-tree history relativized/ignored (unit + integration tests); dev-before vs test-after baseline policy documented in `watch_loop`; `finish()` uses bounded `recv_timeout` drain; "three arms" comment updated; `.cargo-target` ignore justified; `watch_limit` rejects 0 and `reruns` uses `checked_add`.
+

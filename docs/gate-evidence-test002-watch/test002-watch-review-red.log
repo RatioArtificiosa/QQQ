@@ -1,0 +1,59 @@
+   Compiling qqq-run v0.1.1 (E:\QQQ\crates\qqq-run)
+    Finished `test` profile [optimized + debuginfo] target(s) in 5.08s
+     Running tests\cli.rs (target\debug\deps\cli-5eea4757785ed60f.exe)
+
+running 3 tests
+
+thread 'test_watch_rejects_dry_run' (392676) panicked at crates\qqq-run\tests\cli.rs:221:9:
+output must contain "cannot be combined"
+stdout:
+error[QQQ-7001]: unknown flag `--watch` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_watch_rejects_dry_run ... FAILED
+
+thread 'test_watch_rejects_foreign_format' (402292) panicked at crates\qqq-run\tests\cli.rs:221:9:
+output must contain "cannot be combined"
+stdout:
+error[QQQ-7001]: unknown flag `--watch` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+test test_watch_rejects_foreign_format ... FAILED
+
+thread 'test_watch_rejects_flaky' (386144) panicked at crates\qqq-run\tests\cli.rs:221:9:
+output must contain "cannot be combined"
+stdout:
+error[QQQ-7001]: unknown flag `--watch` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+test test_watch_rejects_flaky ... FAILED
+
+failures:
+
+failures:
+    test_watch_rejects_dry_run
+    test_watch_rejects_flaky
+    test_watch_rejects_foreign_format
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.55s
+
+error: test failed, to rerun pass `-p qqq-run --test cli`

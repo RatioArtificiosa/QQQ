@@ -1,0 +1,60 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.73s
+     Running tests\cli.rs (target\debug\deps\cli-5eea4757785ed60f.exe)
+
+running 4 tests
+test test_watch_limit_needs_a_value ... ok
+test test_watch_limit_zero_is_a_usage_error ... FAILED
+test test_watch_stays_quiet_without_changes ... FAILED
+test test_watch_reruns_on_changed_source ... FAILED
+
+failures:
+
+---- test_watch_limit_zero_is_a_usage_error stdout ----
+
+thread 'test_watch_limit_zero_is_a_usage_error' (395336) panicked at crates\qqq-run\tests\cli.rs:221:9:
+output must contain "--watch-limit"
+stdout:
+error[QQQ-7001]: unknown flag `--watch` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+stderr:
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_watch_stays_quiet_without_changes stdout ----
+
+thread 'test_watch_stays_quiet_without_changes' (315580) panicked at crates\qqq-run\tests\cli.rs:2637:73:
+the child exited without printing "2 passed"; output so far:
+error[QQQ-7001]: unknown flag `--watch` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+
+---- test_watch_reruns_on_changed_source stdout ----
+
+thread 'test_watch_reruns_on_changed_source' (406292) panicked at crates\qqq-run\tests\cli.rs:2637:73:
+the child exited without printing "2 passed"; output so far:
+error[QQQ-7001]: unknown flag `--watch` for `test`
+
+  ÔåÆ `test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --format, --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest
+
+  Docs: https://qqq.codes/errors/QQQ-7001
+
+
+
+
+failures:
+    test_watch_limit_zero_is_a_usage_error
+    test_watch_reruns_on_changed_source
+    test_watch_stays_quiet_without_changes
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p qqq-run --test cli`

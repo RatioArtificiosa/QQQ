@@ -1,0 +1,25 @@
+Checking your uncommitted changes for bugs and risks.
+
+Found the watch-mode changes ÔÇö now digging into the implementation details.
+
+Initial scan looks sound ÔÇö now checking edge cases and test coverage.
+
+I've mapped the main risks ÔÇö now verifying them against the project's stated rules.
+
+Review of uncommitted `test --watch` slice (`lib.rs`, `main.rs`, `test.rs`, `tests/cli.rs`). No secrets/symlink issues ÔÇö `Snapshot::take` uses `symlink_metadata`, no follow.
+
+| # | Sev | File:Line | Issue | Fix |
+|---|---|-----------|-------|-----|
+| 1 | ­ƒƒá HIGH | `main.rs:emit_test_report` + watch branch | `--watch --format junit/tap` prints N concatenated XML/TAP docs on one stdout ÔÇö invalid per `TEST-003` raw-document invariant. | Reject: `if opts.watch && opts.format.is_foreign() ÔåÆ USAGE error`. Add CLI test. |
+| 2 | ­ƒƒá HIGH | `main.rs:dispatch_test` flaky early-return | `--flaky ÔÇª --watch/--watch-limit` silently drops watch, exits 0 once. | Usage error if `opts.flaky.is_some() && (opts.watch\|\|watch_limit.is_some())`. |
+| 3 | ­ƒƒí MED | `test.rs:watch_loop/test_watch_rules` | `--history <in-tree-path> --watch` self-triggers: every rerun appends ÔåÆ change ÔåÆ rerun. Snapshots ignored, history not. | Thread `opts.history` into `test_watch_rules()` and `.ignoring()` it (relativized). Test it. |
+| 4 | ­ƒƒí MED | `test.rs:watch_loop` vs `dev.rs:watch` | Edits made *during* a run are absorbed (re-baseline after run); `dev` baselines *before* rebuild to preserve them. Contradicts "shared ÔÇª cannot disagree". | Snapshot before `execute` too; diff against pre-run baseline, or keep documented gap with a test. |
+| 5 | ­ƒƒí MED | `tests/cli.rs:Watching::finish` | `try_recv` drain after `kill/wait` races pump thread ÔÇö can miss 2nd `2 passed`, flaky count. | Drain with `recv_timeout(2s)` loop until timeout/disconnect after `wait`. |
+| 6 | ÔÜ¬ LOW | `tests/cli.rs:Watching::spawn` | Stale comment "share one pipe reader" ÔÇö pipes are separate, stderr drained to void. | Fix comment; assert stderr marker `watch: re-running` is captured or explicitly discarded. |
+| 7 | ÔÜ¬ LOW | `main.rs:test_exec_flag` + `test.rs:execute` | `--dry-run --watch` loops forever re-emitting identical dry-run. `--watch-limit 0` rejected at CLI but `Some(0)` allowed via API. | Reject `watch+dry_run`; document `Some(0)=0 reruns` or normalize. |
+| 8 | ÔÜ¬ LOW | `test.rs:test_watch_rules` | Ships test-harness path `.cargo-target` in prod ignore rules. | Derive from `CARGO_TARGET_DIR` basename or drop; keep `target/` only + history-path fix. |
+| 9 | ÔÜ¬ LOW | `test.rs:watch_loop` | `reruns: u32` + `== Some(reruns)` never overflows in practice but unbounded loop panics in debug after 2┬│┬▓; API allows `watch_loop` with `watch=false`. | Use `u64`/`checked_add`; `debug_assert!(opts.watch)`. |
+
+Missing tests: no `--watch` + foreign-format rejection, `--flaky+--watch`, `--history`-in-tree no-loop, or `watch_loop` limit/error-path unit test ÔÇö only `watch_ignores_recordings_but_watches_sources` exists.
+
+

@@ -1822,6 +1822,13 @@ pub fn watch_loop(
         opts.watch,
         "watch_loop with watch=false loops once and exits; call execute instead"
     );
+    // Release builds ignore `debug_assert`: without this guard, calling with
+    // `watch=false` and no limit would wait forever instead of running once.
+    if !opts.watch {
+        let output = execute(project_dir, language, opts)?;
+        emit(output);
+        return Ok(0);
+    }
     let rules = test_watch_rules_for(project_dir, opts.history.as_deref());
     let mut debouncer = Debouncer::with_default_window();
     let mut reruns = 0u32;

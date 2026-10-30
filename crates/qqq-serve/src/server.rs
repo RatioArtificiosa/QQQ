@@ -2341,6 +2341,10 @@ async fn serve_flat_request(
 
     let route_started = std::time::Instant::now();
     let response = dispatch_off_thread(table, dispatch, head, path, &body, tenant).await;
+    // **`false`: the guest's answer must not vote in host sampling.**
+    // `emit_span`'s contract says a guest cannot influence sampling, and
+    // `response.status >= 500` would let a failing guest force its span to
+    // be recorded. The status is still recorded in the access record below.
     let host_failed = false;
     emit_span(
         ctx,

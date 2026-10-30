@@ -1,0 +1,9 @@
+# Full workspace test counts on the final tree (comment-only delta over 8f82565).
+
+Command: `cargo test --workspace --all-features`
+Result: 4007 passed, 0 failed, 15 ignored, 0 suites red.
+Per-suite lines: see the gate log `gate-xtask-ci-152.log` (xtask `test` step)
+and the full-suite capture summarized here; the single grep hit for
+"failed" in the raw capture is a streaming test's own access-log line
+(`stream":"handler_failed"`, asserted Error-level by design), not a test
+failure — every `test result:` line reads ok with 0 failed.

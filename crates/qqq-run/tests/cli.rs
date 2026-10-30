@@ -2821,6 +2821,522 @@ fn test_watch_ignores_in_tree_history() {
     );
 }
 
+/// A child `qqqai serve` whose stdout is consumed while it runs.
+///
+/// The same shape as [`Watching`]: the server never exits on its own, so
+/// the test thread only ever `recv_timeout`s (the lesson of `§O-309`). The
+/// access log rides on stdout, which is also where the tenant attribution
+/// lands — the loopback peer resolves to its own address as tenant label.
+struct Serving {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+    collected: String,
+}
+
+impl Serving {
+    fn spawn(sandbox: &Sandbox, addr: &std::net::SocketAddr) -> Self {
+        use std::io::BufRead as _;
+
+        let mut child = qqqai()
+            .args(["serve", "--listen", &addr.to_string()])
+            .current_dir(&sandbox.path)
+            .env("CARGO_TARGET_DIR", target_dir_for(&sandbox.path))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn qqqai serve");
+        let out = std::io::BufReader::new(child.stdout.take().expect("piped stdout"));
+        let err = child.stderr.take().expect("piped stderr");
+        let (tx, lines) = std::sync::mpsc::channel();
+        // Access lines arrive on stdout; stderr is drained so a verbose
+        // child can never block filling it while the test reads stdout.
+        let pump_tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in out.lines().map_while(Result::ok) {
+                if pump_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut sink = Vec::new();
+            let _ = std::io::BufReader::new(err).read_to_end(&mut sink);
+        });
+        drop(tx);
+        Self {
+            child,
+            lines,
+            collected: String::new(),
+        }
+    }
+
+    /// Read lines until one contains `needle` or `secs` elapse. A timeout
+    /// fails loudly with everything seen so far.
+    fn wait_for(&mut self, needle: &str, secs: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.lines.recv_timeout(remaining) {
+                Ok(line) => {
+                    self.collected.push_str(&line);
+                    self.collected.push('\n');
+                    if line.contains(needle) {
+                        return;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                    "timed out after {secs}s waiting for {needle:?}; output so far:\n{}",
+                    self.collected
+                ),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!(
+                    "the server exited without printing {needle:?}; output so far:\n{}",
+                    self.collected
+                ),
+            }
+        }
+    }
+
+    /// Stop the child and return everything it printed on stdout.
+    fn finish(mut self) -> String {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        while let Ok(line) = self.lines.recv_timeout(std::time::Duration::from_secs(2)) {
+            self.collected.push_str(&line);
+            self.collected.push('\n');
+        }
+        std::mem::take(&mut self.collected)
+    }
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+/// A free loopback port: bound to prove it is free, released, then handed
+/// to the server. No retry loop: if another process wins the race, the
+/// server fails to bind, `wait_for` times out loudly, and the test is red
+/// rather than silently probing a stranger.
+fn free_addr() -> std::net::SocketAddr {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("a free loopback port must bind");
+    let addr = listener
+        .local_addr()
+        .expect("a bound socket has an address");
+    drop(listener);
+    addr
+}
+
+/// Connect with both timeouts set: a stalled peer must fail the test,
+/// not hang the suite (the `§O-309` rule applies to writes too — a full
+/// socket buffer blocks `write_all` exactly like a missing read blocks
+/// `read`).
+fn connect(addr: &std::net::SocketAddr) -> std::net::TcpStream {
+    let stream = std::net::TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("timeouts must set");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("timeouts must set");
+    stream
+}
+
+/// Read one response head (through the blank line) with a bound.
+fn read_head(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    use std::io::Read as _;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("timeouts must set");
+    let mut buf = Vec::new();
+    let mut one = [0u8; 1];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server must answer the head, not hang: got {buf:?}"
+        );
+        match stream.read(&mut one) {
+            Ok(0) => break,
+            Ok(_) => buf.push(one[0]),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => panic!("the head must read: {e}"),
+        }
+    }
+    buf
+}
+
+/// Read until the peer closes or the bound elapses.
+fn read_rest(stream: &mut std::net::TcpStream, secs: u64) -> Vec<u8> {
+    use std::io::Read as _;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(secs)))
+        .expect("timeouts must set");
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break;
+            }
+            Err(e) => panic!("the body must read: {e}"),
+        }
+        if buf.len() > 1_000_000 {
+            break;
+        }
+    }
+    buf
+}
+
+/// Write one masked client text frame, per RFC 6455 §5.3.
+fn write_masked_text(stream: &mut std::net::TcpStream, body: &[u8]) {
+    use std::io::Write as _;
+    assert!(body.len() < 126, "the probe frame stays short");
+    let mask = [0x11u8, 0x22, 0x33, 0x44];
+    // FIN + text, masked (0x81 already has the FIN bit; the mask bit is ORed in).
+    let mut frame = vec![
+        0x81,
+        u8::try_from(body.len()).expect("the probe frame stays short") | 0x80,
+    ];
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        body.iter()
+            .enumerate()
+            .map(|(i, b)| b ^ mask[i % mask.len()]),
+    );
+    stream.write_all(&frame).expect("the frame must send");
+    stream.flush().expect("the frame must flush");
+}
+
+/// Send a masked empty close frame and read the server's close echo.
+fn close_ws(stream: &mut std::net::TcpStream) {
+    use std::io::Write as _;
+    stream
+        .write_all(&[0x88, 0x80, 0xAA, 0xBB, 0xCC, 0xDD])
+        .expect("the close frame must send");
+    stream.flush().expect("the close frame must flush");
+    let (opcode, _) = read_server_frame(stream);
+    assert_eq!(opcode, 0x8, "the server must answer close with close");
+}
+
+/// Read one server frame header plus payload (payloads here stay short).
+fn read_server_frame(stream: &mut std::net::TcpStream) -> (u8, Vec<u8>) {
+    use std::io::Read as _;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("timeouts must set");
+    let mut hdr = [0u8; 2];
+    let mut got = 0;
+    while got < 2 {
+        match stream.read(&mut hdr[got..]) {
+            Ok(0) => panic!("the server frame must arrive, not EOF"),
+            Ok(n) => got += n,
+            Err(e) => panic!("the server frame must read: {e}"),
+        }
+    }
+    let opcode = hdr[0] & 0x0f;
+    let len = (hdr[1] & 0x7f) as usize;
+    assert!(len < 126, "the echo stays a short frame");
+    assert!(
+        hdr[1] & 0x80 == 0,
+        "a server frame is never masked: {hdr:02x?}"
+    );
+    let mut body = vec![0u8; len];
+    let mut read = 0;
+    while read < len {
+        match stream.read(&mut body[read..]) {
+            Ok(0) => panic!("the server frame body must arrive, not EOF"),
+            Ok(n) => read += n,
+            Err(e) => panic!("the server frame body must read: {e}"),
+        }
+    }
+    (opcode, body)
+}
+
+/// A `qqq.toml` serving `/` (http), `/ws` (ws) and `/events` (sse) with
+/// auth off, for the echo guest below.
+fn write_live_probe_project(s: &Sandbox) {
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"live-probe\"\nversion = \"0.1.0\"\n\
+         [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n\
+         [capabilities.http]\nserver = true\n\
+         [server]\nroutes = [\n\
+         \x20 { path = \"/\", methods = [\"GET\"], handler = \"echo\", auth = \"none\" },\n\
+         \x20 { path = \"/ws\", methods = [\"GET\"], handler = \"chat\", kind = \"ws\", auth = \"none\" },\n\
+         \x20 { path = \"/events\", methods = [\"GET\"], handler = \"feed\", kind = \"sse\", auth = \"none\" },\n\
+         ]\n",
+    );
+}
+
+/// The echo guest, assembled to a component and placed where
+/// `find_artifact` looks: `<target>/wasm32-wasip2/release/<pkg>.wasm`.
+/// `wat` is a main dependency of `qqq-run`, so the test assembles with the
+/// same toolchain the tree builds with rather than shelling out.
+fn write_live_probe_artifact(s: &Sandbox) {
+    let bytes = wat::parse_str(include_str!("fixtures/echo-http.wat"))
+        .expect("the echo fixture must assemble");
+    let dir = target_dir_for(&s.path)
+        .join("wasm32-wasip2")
+        .join("release");
+    std::fs::create_dir_all(&dir).expect("artifact dir must create");
+    std::fs::write(dir.join("live_probe.wasm"), &bytes).expect("artifact must write");
+}
+
+/// Poll `GET /` until it answers 200 or the bound elapses: binding the
+/// port is not serving yet, and only a served request proves readiness.
+/// Available server lines are drained into the transcript as they arrive,
+/// so a readiness failure reports what the server said, not just silence.
+fn wait_serving(serving: &mut Serving, addr: &std::net::SocketAddr, secs: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        while let Ok(line) = serving.lines.try_recv() {
+            serving.collected.push_str(&line);
+            serving.collected.push('\n');
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "GET / never answered 200 within {secs}s; server said:\n{}",
+            serving.collected
+        );
+        match std::net::TcpStream::connect(addr) {
+            Ok(mut stream) => {
+                use std::io::Write as _;
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(3)));
+                if stream
+                    .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    .is_err()
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
+                let head = read_head(&mut stream);
+                if head.starts_with(b"HTTP/1.1 200") {
+                    return;
+                }
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// One probe: plain HTTP through the guest; returns the response head.
+fn probe_h1(addr: &std::net::SocketAddr) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut stream = connect(addr);
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .expect("send");
+    read_head(&mut stream)
+}
+
+/// One probe: WebSocket upgrade plus guest echo; returns the open socket
+/// so the caller closes it after the remaining probes.
+fn probe_ws_echo(addr: &std::net::SocketAddr) -> std::net::TcpStream {
+    use std::io::Write as _;
+    let mut ws = connect(addr);
+    ws.write_all(
+        b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n\
+          Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+          Sec-WebSocket-Version: 13\r\n\r\n",
+    )
+    .expect("send");
+    let head = read_head(&mut ws);
+    assert!(
+        head.starts_with(b"HTTP/1.1 101"),
+        "GET /ws must upgrade to 101 through production dispatch: {head:?}"
+    );
+    write_masked_text(&mut ws, b"hello-ws");
+    let (opcode, body) = read_server_frame(&mut ws);
+    assert_eq!(opcode, 0x1, "the guest echo must come back as text");
+    assert_eq!(&body, b"hello-ws", "the guest echo must round-trip");
+    ws
+}
+
+/// One probe: SSE for a guest that answers no event stream; returns the
+/// whole 502 response.
+fn probe_sse(addr: &std::net::SocketAddr) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut sse = connect(addr);
+    sse.write_all(
+        b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+          Accept: text/event-stream\r\nConnection: close\r\n\r\n",
+    )
+    .expect("send");
+    let head = read_head(&mut sse);
+    let rest = read_rest(&mut sse, 5);
+    [head, rest].concat()
+}
+
+/// One probe: H2c prior knowledge; returns whatever the loop answers.
+fn probe_h2c(addr: &std::net::SocketAddr) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut h2 = connect(addr);
+    h2.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        .expect("send");
+    h2.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).expect("send");
+    read_rest(&mut h2, 10)
+}
+
+/// One probe: an Upgrade on a plain-HTTP route; returns the response head.
+fn probe_plain_upgrade(addr: &std::net::SocketAddr) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut flat = connect(addr);
+    flat.write_all(
+        b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n\
+          Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+          Sec-WebSocket-Version: 13\r\n\r\n",
+    )
+    .expect("send");
+    read_head(&mut flat)
+}
+
+/// The production `qqqai serve` binary, driven live over a real socket.
+///
+/// One boot serves five probes through the manifest/dispatched path: plain
+/// HTTP, a guest-backed WebSocket echo, the specified SSE refusal for a
+/// guest that answers no event stream, the explicit H2c refusal, and the
+/// flat fallthrough for an upgrade on a plain-HTTP route. The access log
+/// on stdout attributes the served exchange to the loopback tenant, which
+/// is the tenant dispatch this path implements.
+#[test]
+fn production_serve_live_transcript() {
+    let s = Sandbox::new("test-serve-live");
+    write_live_probe_project(&s);
+    write_live_probe_artifact(&s);
+
+    let addr = free_addr();
+    let mut serving = Serving::spawn(&s, &addr);
+    serving.wait_for("listening on", 120);
+    wait_serving(&mut serving, &addr, 60);
+
+    // 1. Plain HTTP through the guest.
+    let root = probe_h1(&addr);
+    assert!(
+        root.starts_with(b"HTTP/1.1 200"),
+        "GET / must answer 200 through the production dispatch: {root:?}"
+    );
+
+    // 2. WebSocket upgrade answered by the guest, per manifest kind.
+    let mut ws = probe_ws_echo(&addr);
+
+    // 3. SSE for a guest that answers no event stream: the specified 502.
+    let sse_all = probe_sse(&addr);
+    assert!(
+        sse_all.starts_with(b"HTTP/1.1 502"),
+        "a non-event answer on an sse route must fail closed with 502: {sse_all:?}"
+    );
+    assert!(
+        sse_all.windows(17).any(|w| w == b"text/event-stream"),
+        "the 502 must name the required content type: {sse_all:?}"
+    );
+
+    // 4. H2c prior knowledge: the in-house loop is HTTP/1.1-only, so the
+    // preface must draw an explicit H1 response — never an upgrade, never
+    // a hang. This pins the narrowed H2 behavior on the production path.
+    let h2_resp = probe_h2c(&addr);
+    assert!(
+        h2_resp.starts_with(b"HTTP/1.1 400"),
+        "an H2c preface must draw an explicit 400, not silence: {h2_resp:?}"
+    );
+    assert!(
+        !h2_resp.starts_with(b"HTTP/1.1 101"),
+        "the production listener must not upgrade cleartext H2: {h2_resp:?}"
+    );
+
+    // 5. An upgrade on a plain-HTTP route falls through flat: 200, not 101.
+    let flat_resp = probe_plain_upgrade(&addr);
+    assert!(
+        flat_resp.starts_with(b"HTTP/1.1 200"),
+        "an upgrade on a plain route must fall through flat: {flat_resp:?}"
+    );
+
+    // Close gracefully so the server writes the exchange's access line:
+    // an access log that only appears after a kill proves nothing about
+    // the served exchange.
+    close_ws(&mut ws);
+    drop(ws);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        while let Ok(line) = serving.lines.try_recv() {
+            serving.collected.push_str(&line);
+            serving.collected.push('\n');
+        }
+        if serving
+            .collected
+            .lines()
+            .any(|l| l.contains("/ws") && l.contains("127.0.0.1"))
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the access log must attribute the /ws exchange to the loopback tenant: {}",
+            serving.collected
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let out = serving.finish();
+    assert!(
+        out.lines()
+            .any(|l| l.contains("/ws") && l.contains("127.0.0.1")),
+        "the access log must attribute the /ws exchange to the loopback tenant: {out}"
+    );
+}
+
+/// The control: without `kind` markers the same upgrade must not switch.
+/// If this ever yields 101, the main transcript's 101 proves the test
+/// client rather than the manifest-driven production dispatch.
+#[test]
+fn production_serve_without_ws_kind_does_not_upgrade() {
+    let s = Sandbox::new("test-serve-live-flat");
+    s.write(
+        "qqq.toml",
+        "[package]\nname = \"live-probe\"\nversion = \"0.1.0\"\n\
+         [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n\
+         [capabilities.http]\nserver = true\n\
+         [server]\nroutes = [\n\
+         \x20 { path = \"/\", methods = [\"GET\"], handler = \"echo\", auth = \"none\" },\n\
+         \x20 { path = \"/ws\", methods = [\"GET\"], handler = \"chat\", auth = \"none\" },\n\
+         ]\n",
+    );
+    write_live_probe_artifact(&s);
+
+    let addr = free_addr();
+    let mut serving = Serving::spawn(&s, &addr);
+    serving.wait_for("listening on", 120);
+    wait_serving(&mut serving, &addr, 60);
+
+    let mut ws = connect(&addr);
+    {
+        use std::io::Write as _;
+        ws.write_all(
+            b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n\
+              Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+              Sec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .expect("send");
+    }
+    let head = read_head(&mut ws);
+    assert!(
+        !head.starts_with(b"HTTP/1.1 101"),
+        "without a ws kind marker the production dispatch must not upgrade: {head:?}"
+    );
+    let _ = serving.finish();
+}
+
 /// Two files declaring the same test name are two tests: discovery keys on
 /// (file, name), and each recording lands in its own snapshot file. Deduping
 /// by name alone would silently drop one — a green run for work that did

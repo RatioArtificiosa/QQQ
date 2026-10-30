@@ -1,0 +1,13 @@
+# h1-get-root: H1 GET / through production dispatch (expect 200, empty echo body)
+# sha256=44ad2a18185d8a6504b531521ce4a9608a2ab2941568aaaf03111df87ffee6b9 length=57
+# --- decoded (utf-8, replace) ---
+HTTP/1.1 200 OK
+Content-Length: 0
+Connection: close
+
+
+# --- hex ---
+0000  48 54 54 50 2f 31 2e 31 20 32 30 30 20 4f 4b 0d
+0010  0a 43 6f 6e 74 65 6e 74 2d 4c 65 6e 67 74 68 3a
+0020  20 30 0d 0a 43 6f 6e 6e 65 63 74 69 6f 6e 3a 20
+0030  63 6c 6f 73 65 0d 0a 0d 0a

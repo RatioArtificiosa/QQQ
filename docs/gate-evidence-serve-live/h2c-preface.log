@@ -1,0 +1,19 @@
+# h2c-preface: H2c prior-knowledge preface: explicit H1 response, no upgrade, no hang
+# sha256=964f077a8f5efdc14ed164a1519c1deb80a7b0ce456981f781d22f52daebdc71 length=120
+# --- decoded (utf-8, replace) ---
+HTTP/1.1 400 Bad Request
+Content-Type: text/plain; charset=utf-8
+Content-Length: 12
+Connection: close
+
+Bad Request
+
+# --- hex ---
+0000  48 54 54 50 2f 31 2e 31 20 34 30 30 20 42 61 64
+0010  20 52 65 71 75 65 73 74 0d 0a 43 6f 6e 74 65 6e
+0020  74 2d 54 79 70 65 3a 20 74 65 78 74 2f 70 6c 61
+0030  69 6e 3b 20 63 68 61 72 73 65 74 3d 75 74 66 2d
+0040  38 0d 0a 43 6f 6e 74 65 6e 74 2d 4c 65 6e 67 74
+0050  68 3a 20 31 32 0d 0a 43 6f 6e 6e 65 63 74 69 6f
+0060  6e 3a 20 63 6c 6f 73 65 0d 0a 0d 0a 42 61 64 20
+0070  52 65 71 75 65 73 74 0a

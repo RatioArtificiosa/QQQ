@@ -1,0 +1,5 @@
+Final diff check — verifying those two test fixes.
+
+Diff adds ~516 lines with `wait_serving` setting `set_write_timeout` (10s top-level, 3s probe) and H2C/no-upgrade guards using `!starts_with(b"HTTP/1.1 101")` plus `starts_with` for 200/400/502/101 positives, with no remaining `== b"HTTP…"` or `contains(101)` asserts.
+
+Verdict: CLEAN

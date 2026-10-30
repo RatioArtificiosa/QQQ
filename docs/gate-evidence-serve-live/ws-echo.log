@@ -1,0 +1,19 @@
+# ws-echo: WS upgrade on manifest ws route: 101 + masked hello-ws echoed unmasked
+# sha256=757dbcb138ee9cc11bc72e20faa83b34765bbfa390095ed63a9caf42a08bafac length=139
+# --- decoded (utf-8, replace) ---
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+
+�hello-ws
+# --- hex ---
+0000  48 54 54 50 2f 31 2e 31 20 31 30 31 20 53 77 69
+0010  74 63 68 69 6e 67 20 50 72 6f 74 6f 63 6f 6c 73
+0020  0d 0a 55 70 67 72 61 64 65 3a 20 77 65 62 73 6f
+0030  63 6b 65 74 0d 0a 43 6f 6e 6e 65 63 74 69 6f 6e
+0040  3a 20 55 70 67 72 61 64 65 0d 0a 53 65 63 2d 57
+0050  65 62 53 6f 63 6b 65 74 2d 41 63 63 65 70 74 3a
+0060  20 73 33 70 50 4c 4d 42 69 54 78 61 51 39 6b 59
+0070  47 7a 7a 68 5a 52 62 4b 2b 78 4f 6f 3d 0d 0a 0d
+0080  0a 81 08 68 65 6c 6c 6f 2d 77 73

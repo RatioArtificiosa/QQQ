@@ -1,0 +1,11 @@
+# ws-fallthrough: WS upgrade on plain-HTTP route: flat fallthrough, no 101
+# sha256=c1cd0d06b3083293e0a44494a5e4b11e2e65e48fd28c7f87c2646e4a4d9157c1 length=38
+# --- decoded (utf-8, replace) ---
+HTTP/1.1 200 OK
+Content-Length: 0
+
+
+# --- hex ---
+0000  48 54 54 50 2f 31 2e 31 20 32 30 30 20 4f 4b 0d
+0010  0a 43 6f 6e 74 65 6e 74 2d 4c 65 6e 67 74 68 3a
+0020  20 30 0d 0a 0d 0a

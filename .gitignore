@@ -167,6 +167,7 @@ fuzz/corpus/*/
 !docs/gate-evidence-test002-watch/*.log
 !docs/gate-evidence-test018/*.log
 !docs/gate-evidence-verify-04d23d7/*.log
+!docs/gate-evidence-serve-live/*.log
 !docs/gate-evidence-test011/*.log
 !docs/gate-evidence-pkg001/*.log
 !docs/gate-evidence-pkg014/*.log

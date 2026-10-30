@@ -1,0 +1,29 @@
+# sse-events: SSE route with non-event guest answer: specified 502 naming text/event-stream
+# sha256=4c967fb35ef79477f0fe67d803b58971da67593fc96318800d8227c6e78f8a93 length=278
+# --- decoded (utf-8, replace) ---
+HTTP/1.1 502 Bad Gateway
+Content-Type: text/plain; charset=utf-8
+X-QQQ-Error: sse-content-type
+Content-Length: 138
+Connection: close
+
+route /events is declared `sse` but the guest answered content-type `(absent)`; an event stream requires `Content-Type: text/event-stream`
+# --- hex ---
+0000  48 54 54 50 2f 31 2e 31 20 35 30 32 20 42 61 64
+0010  20 47 61 74 65 77 61 79 0d 0a 43 6f 6e 74 65 6e
+0020  74 2d 54 79 70 65 3a 20 74 65 78 74 2f 70 6c 61
+0030  69 6e 3b 20 63 68 61 72 73 65 74 3d 75 74 66 2d
+0040  38 0d 0a 58 2d 51 51 51 2d 45 72 72 6f 72 3a 20
+0050  73 73 65 2d 63 6f 6e 74 65 6e 74 2d 74 79 70 65
+0060  0d 0a 43 6f 6e 74 65 6e 74 2d 4c 65 6e 67 74 68
+0070  3a 20 31 33 38 0d 0a 43 6f 6e 6e 65 63 74 69 6f
+0080  6e 3a 20 63 6c 6f 73 65 0d 0a 0d 0a 72 6f 75 74
+0090  65 20 2f 65 76 65 6e 74 73 20 69 73 20 64 65 63
+00a0  6c 61 72 65 64 20 60 73 73 65 60 20 62 75 74 20
+00b0  74 68 65 20 67 75 65 73 74 20 61 6e 73 77 65 72
+00c0  65 64 20 63 6f 6e 74 65 6e 74 2d 74 79 70 65 20
+00d0  60 28 61 62 73 65 6e 74 29 60 3b 20 61 6e 20 65
+00e0  76 65 6e 74 20 73 74 72 65 61 6d 20 72 65 71 75
+00f0  69 72 65 73 20 60 43 6f 6e 74 65 6e 74 2d 54 79
+0100  70 65 3a 20 74 65 78 74 2f 65 76 65 6e 74 2d 73
+0110  74 72 65 61 6d 60

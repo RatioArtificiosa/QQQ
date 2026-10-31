@@ -37,7 +37,9 @@ use qqq_serve::h2::hpack::{Decoder, Encoder, HeaderField};
 use qqq_serve::metrics::TenantLabels;
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::serve_hyper::serve_hyper_tls;
-use qqq_serve::server::{ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch};
+use qqq_serve::server::{
+    ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, TenantDispatch,
+};
 use qqq_serve::tls::{
     ALPN_H2, ALPN_HTTP11, CIPHER_SUITES, PROTOCOL_VERSIONS, PeerIdentity, TlsConfig,
 };
@@ -215,6 +217,7 @@ impl TlsServer {
         pieces: Pieces,
         peer: SocketAddr,
     ) -> Self {
+        let dispatch = TenantDispatch::new(dispatch);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
@@ -240,6 +243,7 @@ impl TlsServer {
                 ws_buffer: &pieces.ws_buffer,
                 tenant_labels: &pieces.tenant_labels,
                 tenant_hosts: None,
+                peer_identity: None,
             };
             serve_hyper_tls(stream, tls, Arc::clone(&table), dispatch, limits, &ctx).await
         });
@@ -488,6 +492,56 @@ async fn tls_alpn_http11_routes_to_the_h1_driver() {
         done.negotiated.alpn.as_deref(),
         Some("http/1.1"),
         "ALPN http/1.1 reported"
+    );
+}
+
+/// mTLS fail-closed: without a client certificate no application bytes
+/// flow. TLS 1.3 completes the client's flight before the server's alert
+/// arrives, so `connect` alone cannot prove the refusal — the proof is
+/// the first read failing with the alert and zero response bytes, which
+/// is also exactly what the CLI readiness probe asserts on.
+#[tokio::test]
+async fn tls_required_client_auth_refuses_uncertified_clients() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server_cert = ServerCert::generate();
+    let client_cert = ClientCert::generate();
+    let tls = TlsConfig::new(server_cert.source())
+        .with_alpn(&[ALPN_HTTP11])
+        .with_required_client_auth(client_cert.cert.clone())
+        .build()
+        .expect("policy builds");
+    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
+    let server = TlsServer::start(
+        tls,
+        table_with(&[(Method::Get, "/hello", "h")]),
+        Dispatch::flat(hello_handler()),
+        default_limits(),
+        Pieces::bare(),
+        peer,
+    )
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.expect("connect");
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(
+            server_cert.der.clone(),
+        ))
+        .expect("root");
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let mut stream = connector.connect(name, tcp).await.expect("connect sends");
+    stream
+        .write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("request sends");
+    let mut buf = vec![0u8; 64];
+    let read = stream.read(&mut buf).await;
+    assert!(
+        read.is_err(),
+        "the server must abort before any application bytes: {read:?}"
     );
 }
 

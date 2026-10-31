@@ -31,7 +31,9 @@ use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::metrics::TenantLabels;
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::serve_hyper::serve_hyper_h2;
-use qqq_serve::server::{ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served};
+use qqq_serve::server::{
+    ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served, TenantDispatch,
+};
 use qqq_serve::transport::{HyperLimits, hyper_limits_for};
 use qqq_serve::ws::WsConfig;
 use qqq_serve::ws_conn::Echo;
@@ -111,6 +113,7 @@ fn h2_conn_ctx<'a>(pieces: &'a Pieces, id: &'a ConnectionId) -> ConnectionContex
         ws_buffer: &pieces.ws_buffer,
         tenant_labels: &pieces.tenant_labels,
         tenant_hosts: None,
+        peer_identity: None,
     }
 }
 
@@ -316,13 +319,14 @@ async fn ws_read_frame(io: &mut tokio::io::DuplexStream) -> (u8, Vec<u8>) {
     }
 }
 
-fn ws_routes() -> (Arc<RouteTable>, Dispatch) {
+fn ws_routes() -> (Arc<RouteTable>, TenantDispatch) {
     let table = Arc::new(table_with(&[
         (Method::Connect, "/ws", "ws"),
         (Method::Get, "/ws", "ws"),
         (Method::Get, "/flat", "flat"),
     ]));
-    let dispatch = Dispatch::flat(flat_handler()).with_websocket("ws", Arc::new(Echo));
+    let dispatch =
+        TenantDispatch::new(Dispatch::flat(flat_handler()).with_websocket("ws", Arc::new(Echo)));
     (table, dispatch)
 }
 

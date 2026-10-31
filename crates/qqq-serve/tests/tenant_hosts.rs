@@ -26,7 +26,7 @@ use tokio::net::{TcpListener, TcpStream};
 use qqq_io::listener::Shutdown;
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method, Route, RouteTable};
-use qqq_serve::server::{Dispatch, Handler, RouteMatch, ServerConfig, serve};
+use qqq_serve::server::{Dispatch, Handler, RouteMatch, ServerConfig, TenantDispatch, serve};
 use qqq_serve::{RequestHead, Response};
 
 fn table() -> RouteTable {
@@ -61,7 +61,7 @@ impl Server {
         config.tenant_hosts = tenants.map(Arc::new);
         config.limits = limits;
         let table = table();
-        let dispatch = Dispatch::flat(flat_handler());
+        let dispatch = TenantDispatch::new(Dispatch::flat(flat_handler()));
         let logger = Logger::new(Format::Human, Level::Error);
         let probe = tokio::spawn(async move {
             if let Err(e) = serve(config, table, dispatch, local, logger).await {
@@ -128,6 +128,66 @@ async fn get(addr: SocketAddr, host: &str) -> (String, Vec<u8>) {
         None => (text.clone(), Vec::new()),
     };
     (head, body)
+}
+
+/// Selection is exact and safe: a mapped tenant gets its own component
+/// dispatcher, while everything else — an unmapped label, a peer-derived
+/// fallback, a CN the manifest never mapped — gets the default component.
+/// Unmapped never means another tenant's component (that would be cross-
+/// tenant serving) and never means a refusal (refusal is the 421 the
+/// resolver already answers for unknown hosts, not this layer's job).
+///
+/// A CN-less client identity falls back to its fingerprint as its tenant
+/// label, so pinning a fingerprint as a components key selects that one
+/// device's component — and only when the operator explicitly maps it.
+/// Anything unmapped lands on the default, which is also what keeps the
+/// strengthened rotation test green: different mapped hosts without a
+/// components table share one component and one rate bucket.
+#[test]
+fn tenant_dispatch_selects_mapped_tenants_and_defaults_the_rest() {
+    use qqq_serve::BodyHandler;
+    use qqq_serve::server::TenantDispatch;
+
+    fn marker(body: &'static str) -> BodyHandler {
+        Arc::new(move |_, _, _| Response::text(200, body))
+    }
+    // Kept beside the registration: `body_for` hands back the stored
+    // `Arc`, so identity against the registered clone proves *which*
+    // dispatcher's entry a tenant resolves — no request head needed.
+    let default_marker = marker("default");
+    let shop_marker = marker("shop");
+    let pinned_marker = marker("pinned");
+    let dispatch = TenantDispatch::new(
+        Dispatch::flat(flat_handler()).with_body("marker", default_marker.clone()),
+    )
+    .with_tenant(
+        "shop",
+        Dispatch::flat(flat_handler()).with_body("marker", shop_marker.clone()),
+    )
+    .with_tenant(
+        "deadbeef-device",
+        Dispatch::flat(flat_handler()).with_body("marker", pinned_marker.clone()),
+    );
+    assert!(dispatch.has_tenants(), "a mapped table must report itself");
+    assert!(
+        !TenantDispatch::new(Dispatch::flat(flat_handler())).has_tenants(),
+        "a single-component dispatcher reports no tenants"
+    );
+    for (tenant, expected) in [
+        ("shop", &shop_marker),
+        ("buyer", &default_marker),
+        ("127.0.0.1", &default_marker),
+        ("deadbeef-device", &pinned_marker),
+    ] {
+        let entry = dispatch
+            .for_tenant(tenant)
+            .body_for("marker")
+            .expect("the marker must resolve in every dispatcher");
+        assert!(
+            Arc::ptr_eq(entry, expected),
+            "tenant `{tenant}` resolved to the wrong component dispatcher"
+        );
+    }
 }
 
 /// An unmapped host with a configured table is refused with 421 naming

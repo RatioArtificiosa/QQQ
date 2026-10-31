@@ -34,7 +34,7 @@ use tokio::net::TcpStream;
 use qqq_io::listener::{ListenAddr, Shutdown};
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method, Route, RouteTable};
-use qqq_serve::server::{Dispatch, Handler, ServerConfig, serve};
+use qqq_serve::server::{Dispatch, Handler, ServerConfig, TenantDispatch, serve};
 use qqq_serve::ws_conn::{Echo, WebSocketHandler, WsSender};
 use qqq_serve::ws_message::Message;
 use qqq_serve::{RequestHead, Response, RouteMatch};
@@ -72,6 +72,7 @@ impl Server {
     /// Factored so the flat-only variant below shares the retry loop rather
     /// than duplicating sixteen attempts of port-race handling.
     async fn start_with(dispatch: Dispatch) -> Self {
+        let dispatch = TenantDispatch::new(dispatch);
         // Retried, because between `free_addr` dropping its listener and `serve` binding the
         // port, another test in this process -- or another process on the runner -- can take
         // it. That happened in CI: `could not bind 127.0.0.1:57009`, after 405 seconds of
@@ -676,7 +677,7 @@ async fn a_route_without_a_websocket_handler_uses_the_flat_one() {
         let _ = serve(
             config,
             t,
-            Dispatch::flat(flat_handler()),
+            TenantDispatch::new(Dispatch::flat(flat_handler())),
             local,
             Logger::new(Format::Json, Level::Error),
         )

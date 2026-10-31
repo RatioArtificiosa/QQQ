@@ -35,7 +35,7 @@ use qqq_serve::Response;
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::h2::hpack::{Decoder, Encoder, HeaderField};
 use qqq_serve::route::{Method, Route, RouteTable};
-use qqq_serve::server::{Dispatch, Handler, RouteMatch, serve};
+use qqq_serve::server::{Dispatch, Handler, RouteMatch, TenantDispatch, serve};
 use qqq_serve::tls::{ALPN_H2, ALPN_HTTP11, CIPHER_SUITES, PROTOCOL_VERSIONS, TlsConfig};
 
 // -- wire constants (RFC 9113 §6) ------------------------------------------
@@ -172,7 +172,7 @@ impl Server {
             .expect("insert");
         let handler: Handler =
             Arc::new(|_head: &RequestHead, _m: &RouteMatch| Response::text(200, "hello-h2"));
-        let dispatch = Dispatch::flat(handler);
+        let dispatch = TenantDispatch::new(Dispatch::flat(handler));
         let logger = Logger::new(Format::Human, Level::Error);
         tokio::spawn(async move {
             let _ = serve(config, table, dispatch, local, logger).await;

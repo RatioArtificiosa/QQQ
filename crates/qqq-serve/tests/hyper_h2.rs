@@ -43,7 +43,9 @@ use qqq_serve::h2::hpack::{Decoder, Encoder, HeaderField};
 use qqq_serve::metrics::TenantLabels;
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::serve_hyper::serve_hyper_h2;
-use qqq_serve::server::{ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served};
+use qqq_serve::server::{
+    ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served, TenantDispatch,
+};
 use qqq_serve::transport::{HyperLimits, hyper_limits_for};
 use qqq_serve::ws::WsConfig;
 use qqq_serve::{ConnectionConfig, Response};
@@ -327,6 +329,7 @@ impl HyperH2 {
         limits: HyperLimits,
         pieces: Pieces,
     ) -> Self {
+        let dispatch = TenantDispatch::new(dispatch);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
@@ -357,6 +360,7 @@ impl HyperH2 {
                             ws_buffer: &pieces.ws_buffer,
                             tenant_labels: &pieces.tenant_labels,
                             tenant_hosts: None,
+                            peer_identity: None,
                         };
                         last = serve_hyper_h2(
                             stream,
@@ -456,6 +460,7 @@ async fn h2_interleaved_responses_sort_by_stream() {
         streaming: Arc::new(std::collections::BTreeMap::new()),
         websocket: Arc::new(std::collections::BTreeMap::new()),
         body: Arc::new(body_map),
+        sse: Arc::new(std::collections::BTreeMap::new()),
     };
     let hyper = HyperH2::start(
         table_with(&[(Method::Get, "/slow", "slow"), (Method::Get, "/fast", "h")]),
@@ -604,6 +609,7 @@ async fn h2_body_without_length_streams_to_cap() {
         streaming: Arc::new(std::collections::BTreeMap::new()),
         websocket: Arc::new(std::collections::BTreeMap::new()),
         body: Arc::new(body_map),
+        sse: Arc::new(std::collections::BTreeMap::new()),
     };
     let hyper = HyperH2::start(
         table_with(&routes),
@@ -1601,8 +1607,7 @@ async fn read_duplex_frame(stream: &mut tokio::io::DuplexStream) -> Option<(u8, 
 async fn hyper_h2_serves_a_non_tcp_stream() {
     let table = Arc::new(table_with(&[(Method::Get, "/hello", "h")]));
     let pieces = Pieces::bare();
-    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
-    let id = ConnectionId::new(peer, 1);
+    let id = ConnectionId::new("127.0.0.1:9".parse().expect("loopback peer"), 1);
     let ctx = ConnectionContext {
         id: &id,
         shutdown: &pieces.shutdown,
@@ -1620,6 +1625,7 @@ async fn hyper_h2_serves_a_non_tcp_stream() {
         ws_buffer: &pieces.ws_buffer,
         tenant_labels: &pieces.tenant_labels,
         tenant_hosts: None,
+        peer_identity: None,
     };
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
     // Cloned before the context borrows `pieces`: the client arm
@@ -1636,7 +1642,7 @@ async fn hyper_h2_serves_a_non_tcp_stream() {
     let serve = serve_hyper_h2(
         server_io,
         Arc::clone(&table),
-        Dispatch::flat(hello_handler()),
+        TenantDispatch::new(Dispatch::flat(hello_handler())),
         limits,
         &ctx,
     );

@@ -1838,6 +1838,18 @@ pub struct TenantHosts {
     /// and empty maps or labels are refused at parse time.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub hosts: BTreeMap<String, String>,
+    /// Tenant label to artifact package name, e.g. `{ "shop" = "shop-app" }`.
+    ///
+    /// Present means that tenant is served by its own component: the
+    /// request is dispatched to the named artifact instead of the
+    /// project's default one. Absent (or empty) means one component serves
+    /// every tenant — the default architecture, and the only one available
+    /// without an authenticated identity (see `validate_tenants`).
+    /// Keys are tenant labels exactly as resolved (verified client
+    /// identity first, then the hosts table, then the peer); values are
+    /// package names resolved exactly like the default artifact.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub components: BTreeMap<String, String>,
 }
 
 /// `[server.limits]` — the per-tenant **request** limits.
@@ -2247,6 +2259,7 @@ pub struct Cors {
 /// let tls = ServerTls {
 ///     cert_file: "certs/server.pem".to_owned(),
 ///     key_file: "certs/server.key".to_owned(),
+///     client_ca_file: None,
 /// };
 /// assert_eq!(tls.cert_file, "certs/server.pem");
 /// assert_eq!(tls.key_file, "certs/server.key");
@@ -2258,6 +2271,18 @@ pub struct ServerTls {
     pub cert_file: String,
     /// The PEM private key file.
     pub key_file: String,
+    /// The PEM client-CA bundle file, when present.
+    ///
+    /// Present means the server requests a client certificate and requires
+    /// one that chains to this bundle (`ClientAuth::Required`): connections
+    /// without a verified client identity never reach dispatch. Absent
+    /// means no client certificate is requested and every connection is
+    /// unattested. There is deliberately no optional mode at this layer —
+    /// an "optional" identity silently splits the deployment into
+    /// authenticated and unattested tenants under one policy, which is a
+    /// second identity model hiding inside the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ca_file: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2456,6 +2481,47 @@ allow_origins = ["https://app.example.com"]
             bare.server.tenants.is_none(),
             "no table means no mapping, not an empty one"
         );
+    }
+
+    /// `[server.tenants.components]` maps tenant labels to artifact package
+    /// names: present means that tenant is served by its own component,
+    /// absent (or empty) means the shared default component serves.
+    #[test]
+    fn tenant_components_parse_and_validate() {
+        let m = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = { \"shop.example.com\" = \"shop\" }\n\
+             [server.tenants.components]\nshop = \"shop-app\"\n",
+        )
+        .expect("tenants components table must parse");
+        let tenants = m.server.tenants.expect("tenants must be present");
+        assert_eq!(
+            tenants.components.get("shop"),
+            Some(&"shop-app".to_owned()),
+            "the component mapping must survive parsing"
+        );
+        // An empty label or artifact names nothing to serve: dead config.
+        // A padded or spaced key can never equal a resolved tenant label,
+        // so it would read as policy while the default serves: dead too.
+        for (key, value) in [
+            ("", "shop-app"),
+            ("shop", ""),
+            (" shop", "shop-app"),
+            ("shop ", "shop-app"),
+            ("sh op", "shop-app"),
+            ("shop", " shop-app"),
+        ] {
+            let text = format!(
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [server.tenants]\nhosts = {{ \"shop.example.com\" = \"shop\" }}\n\
+                 [server.tenants.components]\n\"{key}\" = \"{value}\"\n"
+            );
+            let err = Manifest::parse(&text).expect_err("a dead component mapping must be refused");
+            assert!(
+                err.to_string().contains("server.tenants.components"),
+                "the error must name the table: {err}"
+            );
+        }
     }
 
     /// A host key the matcher can never produce fails closed naming the

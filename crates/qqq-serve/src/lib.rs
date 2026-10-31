@@ -143,8 +143,12 @@ pub use response::{
 pub use route::{
     MAX_PARAMS, MAX_ROUTES, Match, Method, Params, Route, RouteTable, RouterError, WILDCARD,
 };
-pub use server::{Dispatch, Handler, RouteMatch, Served, ServerConfig, serve};
+pub use server::{
+    Dispatch, Handler, RouteMatch, Served, ServerConfig, SseHandlers, TenantDispatch,
+    TenantResolution, TenantSources, serve,
+};
 pub use stream::{
-    StreamError, StreamOutcome, StreamRecord, StreamWriter, StreamingHandler, emit_stream_record,
+    StreamError, StreamOutcome, StreamRecord, StreamStart, StreamWriter, StreamingHandler,
+    emit_stream_record,
 };
 pub use ws::{Handshake, HandshakeError, accept_for};

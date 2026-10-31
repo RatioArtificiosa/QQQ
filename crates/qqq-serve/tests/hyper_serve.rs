@@ -43,7 +43,8 @@ use qqq_serve::metrics::{HttpMetrics, TenantLabels};
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::serve_hyper::serve_hyper_h1;
 use qqq_serve::server::{
-    ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served, ServerConfig, serve,
+    ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served, ServerConfig,
+    TenantDispatch, serve,
 };
 use qqq_serve::transport::{HyperLimits, hyper_limits_for};
 use qqq_serve::ws::WsConfig;
@@ -84,7 +85,8 @@ impl Inhouse {
         let local = shutdown.clone();
         tokio::spawn(async move {
             let logger = Logger::new(Format::Json, Level::Error);
-            if let Err(e) = serve(config, table, Dispatch::flat(handler), local, logger).await {
+            let dispatch = TenantDispatch::new(Dispatch::flat(handler));
+            if let Err(e) = serve(config, table, dispatch, local, logger).await {
                 eprintln!("server stopped early: {}", e.render());
             }
         });
@@ -158,6 +160,7 @@ impl Hyper {
         limits: HyperLimits,
         pieces: Pieces,
     ) -> Self {
+        let dispatch = TenantDispatch::new(dispatch);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
@@ -188,6 +191,7 @@ impl Hyper {
                             ws_buffer: &pieces.ws_buffer,
                             tenant_labels: &pieces.tenant_labels,
                             tenant_hosts: None,
+                            peer_identity: None,
                         };
                         last = serve_hyper_h1(
                             stream,
@@ -1507,12 +1511,13 @@ async fn hyper_h1_serves_a_non_tcp_stream() {
         ws_buffer: &pieces.ws_buffer,
         tenant_labels: &pieces.tenant_labels,
         tenant_hosts: None,
+        peer_identity: None,
     };
     let (mut client, server_io) = tokio::io::duplex(65536);
     let serving = serve_hyper_h1(
         server_io,
         Arc::clone(&table),
-        Dispatch::flat(hello_handler()),
+        TenantDispatch::new(Dispatch::flat(hello_handler())),
         default_limits(),
         &ctx,
     );

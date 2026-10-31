@@ -702,6 +702,11 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
         .with_remediation("add at least one `[[server.routes]]` entry to `[server]`"));
     }
 
+    // Component routing without an authenticated identity would serve the
+    // wrong tenant's component on a spoofed Host — so it is refused here,
+    // unconditionally like the metrics-path check above.
+    check_tenant_components_require_mtls(server, opts.tls)?;
+
     // Parsing the address here rather than at bind time means a typo fails before
     // a socket is opened -- and names the flag the typo was in.
     let addr: ListenAddr = ListenAddr::parse(&opts.listen).map_err(|e| {
@@ -798,6 +803,7 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
         guest_loaded: built.guest_loaded,
         pool_capacity: built.pool_capacity,
         live: built.live,
+        tenant_live: built.tenant_live,
         loopback,
         deterministic: built.deterministic,
     })
@@ -1018,8 +1024,57 @@ fn build_tls(server: &qqq_cap::manifest::Server) -> Result<Option<Arc<rustls::Se
         return Ok(None);
     };
     let source = qqq_serve::tls::CertificateSource::files(&tls.cert_file, &tls.key_file);
-    let config = qqq_serve::tls::TlsConfig::new(source).build()?;
+    let mut config = qqq_serve::tls::TlsConfig::new(source);
+    // A client CA turns the handshake into required mutual TLS: the peer
+    // must present a certificate chaining to this bundle, so a connection
+    // without a verified identity never reaches dispatch. Without it no
+    // client certificate is requested and every connection is unattested.
+    if let Some(ca) = tls.client_ca_file.as_deref() {
+        config = config.with_required_client_auth(ca);
+    }
+    let config = config.build()?;
     Ok(Some(config))
+}
+
+/// Refuse component routing without an authenticated identity.
+///
+/// `[server.tenants.components]` routes tenants to different components.
+/// A `Host` header is client-controlled, so selecting a component by Host
+/// alone would serve tenant B's component to anyone naming B's host —
+/// tenant isolation decided by the attacker. The mapping therefore
+/// requires verified client certificates (`[server.tls] client_ca_file`
+/// plus `--tls`, i.e. required mutual TLS): connections without one never
+/// reach dispatch, so the selected component always answers an
+/// authenticated tenant. Without both, startup refuses rather than
+/// serving the wrong component quietly.
+fn check_tenant_components_require_mtls(
+    server: &qqq_cap::manifest::Server,
+    tls_flag: bool,
+) -> Result<()> {
+    let empty = server
+        .tenants
+        .as_ref()
+        .is_none_or(|t| t.components.is_empty());
+    if empty {
+        return Ok(());
+    }
+    let mtls = tls_flag
+        && server
+            .tls
+            .as_ref()
+            .is_some_and(|t| t.client_ca_file.is_some());
+    if mtls {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::ManifestSchemaViolation,
+        "this project maps tenants to components, which requires verified client certificates",
+    )
+    .with_remediation(
+        "add `[server.tls] client_ca_file` with the PEM CA bundle that issues tenant certificates \
+         and serve with `--tls`, so every connection carries a verified identity before dispatch \
+         selects its component; without it a spoofed Host header would reach another tenant's component",
+    ))
 }
 
 /// A server that is ready to bind.
@@ -1031,7 +1086,17 @@ pub struct Prepared {
     /// The route table built from the manifest.
     pub table: qqq_serve::route::RouteTable,
     /// The dispatcher: the guest if there is one, a clear refusal otherwise.
-    pub dispatch: Dispatch,
+    ///
+    /// Tenant-aware: a request is answered by the resolved tenant's own
+    /// component when `[server.tenants] components` maps one, and by the
+    /// default component otherwise.
+    pub dispatch: qqq_serve::TenantDispatch,
+    /// The tenant components' controllers, kept alive with the server.
+    ///
+    /// `dev` replacement covers the default component only: rebuilding
+    /// swaps the default while tenant routes keep serving the generation
+    /// they started with. Restart to reload tenant components.
+    pub tenant_live: Vec<crate::live::LiveApp>,
     /// How many routes the manifest declares.
     pub routes: usize,
     /// Whether a guest component was found.
@@ -1075,10 +1140,26 @@ pub struct Prepared {
 /// a five-element tuple is five answers with no names, and the report must
 /// not mix up "the mode installed" with "the capacity installed".
 struct BuiltDispatch {
-    dispatch: Dispatch,
+    dispatch: qqq_serve::TenantDispatch,
     guest_loaded: bool,
     pool_capacity: Option<u64>,
     live: Option<crate::live::LiveApp>,
+    /// The tenant components' controllers, kept alive with the server.
+    ///
+    /// Handler closures hold their own `LiveApp` clones, so serving would
+    /// work without this — but a controller with no owner is a handle
+    /// nobody can replace or inspect, and the next reader would conclude
+    /// the tenant apps leak by accident rather than live by design.
+    tenant_live: Vec<crate::live::LiveApp>,
+    /// The installed clock mode, read from the app — never the flag.
+    deterministic: bool,
+}
+
+/// One loaded component: its controller plus the facts the report states.
+struct ComponentBuilt {
+    live: crate::live::LiveApp,
+    /// The installed pool capacity, read from the app — never the flag.
+    capacity: u64,
     /// The installed clock mode, read from the app — never the flag.
     deterministic: bool,
 }
@@ -1123,39 +1204,48 @@ fn install_shared_backends(
     app.set_crypto(crate::crypto::view_for_manifest(manifest));
 }
 
-fn build_dispatch(
-    loaded: &LoadedManifest,
-    opts: &ServeOptions,
-    routes: &crate::serve_routes::ServerRoutes,
-) -> Result<BuiltDispatch> {
-    let Some(artifact) = find_artifact(
-        project_dir(loaded),
-        "release",
-        "wasm32-wasip2",
-        loaded.name(),
-    ) else {
-        // No component means no `GuestApp` and therefore **no pool**. `None` rather than
-        // `Some(0)`: `0` would read as "a pool with no capacity", which is a different
-        // and false statement about a project that simply has not been built.
-        // No guest also means no randomness at all, deterministic or otherwise.
-        return Ok(BuiltDispatch {
-            dispatch: Dispatch::flat(unbuilt(loaded.name())),
-            guest_loaded: false,
-            pool_capacity: None,
-            live: None,
-            deterministic: false,
-        });
+/// Load one component's bytes, naming the package when absent.
+///
+/// Extracted from `build_dispatch` because the default and every tenant
+/// component load the same way, and two copies of the refusal would be
+/// two chances to disagree about which package is missing.
+fn read_component_bytes(project: &std::path::Path, package: &str) -> Result<Vec<u8>> {
+    let Some(artifact) = find_artifact(project, "release", "wasm32-wasip2", package) else {
+        return Err(Error::new(
+            ErrorCode::InvalidComponentArtifact,
+            format!("the component package `{package}` is not built"),
+        )
+        .with_remediation(
+            "run `qqqai build` to produce it — a mapped tenant \
+             is served by its own component, so the artifact must exist",
+        ));
     };
-
-    let bytes = std::fs::read(&artifact).map_err(|e| {
+    std::fs::read(&artifact).map_err(|e| {
         Error::new(
             ErrorCode::InvalidComponentArtifact,
             format!("could not read the component `{}`", artifact.display()),
         )
         .with_cause(e.to_string())
         .with_remediation("run `qqqai build` to produce it again")
-    })?;
+    })
+}
 
+/// Build one component's guest: pool, views, backends, and audit.
+///
+/// The same grants, limits, secrets, environment, and backends serve every
+/// component — the manifest describes one deployment, and per-component
+/// policy would be a second manifest hiding inside the first. `attach_audit`
+/// is true only for the default component: the `--audit-log` file carries
+/// one hash-chained history, and two writers resuming the same file would
+/// fork the chain — so tenant rows live in their own in-memory streams
+/// (visible via snapshot) while the file persists the default's chain.
+fn build_component_app(
+    engine: &wasmtime::Engine,
+    loaded: &LoadedManifest,
+    opts: &ServeOptions,
+    bytes: &[u8],
+    attach_audit: bool,
+) -> Result<ComponentBuilt> {
     // No debug_info: the server serves an untrusted artifact, and a source line
     // is not going to be read by anyone. run.rs sets it for exactly the opposite
     // reason -- see its comment there.
@@ -1163,34 +1253,16 @@ fn build_dispatch(
         opts.aot_cache.as_deref(),
         &GrantSet::from_manifest(&loaded.manifest),
     )?;
-    // Deterministic serving runs the deterministic engine preset: without it
-    // `--deterministic` would be a flag that changes the refusal surface but
-    // not the randomness, and the guest would read OS bytes while the
-    // operator believed the run reproducible. Reachable only through the
-    // loopback-or-explicit gate above.
-    let cfg = if opts.deterministic {
-        EngineConfig::deterministic()
-    } else {
-        EngineConfig::default()
-    };
-    let mut wasmtime_cfg = cfg.to_wasmtime_config()?;
-    crate::aot::configure(&mut wasmtime_cfg, opts.aot_cache.as_deref())?;
-    let engine = wasmtime::Engine::new(&wasmtime_cfg).map_err(|e| {
-        Error::new(
-            ErrorCode::InternalInvariantViolated,
-            "could not construct the wasm engine",
-        )
-        .with_cause(e.to_string())
-    })?;
     let grants = GrantSet::from_manifest(&loaded.manifest);
     let limits = LimitSet::from_manifest(&loaded.manifest.limits)?;
 
     // `--workers` sizes the pool that bounds concurrent guest instances. This is the
     // seam the flag was missing: it was parsed, capped and reported with nothing to act
-    // on, and the number now reaches the component that enforces it.
+    // on, and the number now reaches the component that enforces it. Each
+    // component carries its own pool, so tenants never contend for slots.
     let mut app = GuestApp::with_capacity(
-        engine,
-        &bytes,
+        engine.clone(),
+        bytes,
         grants,
         limits,
         opts.listen.clone(),
@@ -1215,67 +1287,189 @@ fn build_dispatch(
         std::env::var_os(name).map(|v| v.as_os_str().as_encoded_bytes().to_vec())
     }));
     install_shared_backends(&mut app, &loaded.manifest);
-
-    // A metrics path that collides with a declared route would silently shadow one of them, and
-    // neither failure is visible from outside -- so it is refused here, where the operator can act.
-    // `--audit-log` attaches the persisted capability-use record, **loading and verifying any
-    // history before a single request is served**. A malformed or chain-broken file refuses the
-    // start here rather than being absorbed, because a server that began serving and then
-    // discovered its evidence file was unusable would have already produced records it cannot
-    // keep.
-    if let Some(path) = &opts.audit_log {
-        // The chain key travels by file, never by flag value: a secret on a
-        // command line is visible in the process table. Absent means unkeyed
-        // rows, and the attach says so loudly.
-        let key = match &opts.audit_hmac_key_file {
-            Some(key_path) => {
-                let hex = std::fs::read_to_string(key_path).map_err(|e| {
-                    usage(format!(
-                        "`--audit-hmac-key-file {key_path}` could not be read: {e}"
-                    ))
-                    .with_remediation(
-                        "point it at a file holding 64 hex characters, or remove the flag \
-                         for an unkeyed chain",
-                    )
-                })?;
-                Some(
-                    qqq_host::audit::ChainKey::from_hex(hex.trim()).map_err(|e| {
-                        usage(format!(
-                            "`--audit-hmac-key-file {key_path}` is unusable: {e}"
-                        ))
-                        .with_remediation("the file must hold exactly 64 hex characters")
-                    })?,
-                )
-            }
-            None => None,
-        };
-        app.attach_audit_file_with_key(std::path::Path::new(path), key)?;
-    }
-
     let capacity = app.capacity();
-    // The installed mode, like the installed capacity above: read from the
-    // app rather than echoed from the flag, so the report cannot describe a
-    // deterministic server whose setter never ran.
+    if attach_audit {
+        attach_audit_log(&mut app, opts)?;
+    }
     let deterministic = app.is_deterministic();
-    let app = crate::live::LiveApp::new(app)?;
-    // Captured before the `Arc` is moved into the dispatcher closures, so the report can
-    // name the capacity that is actually installed.
+    let live = crate::live::LiveApp::new(app)?;
+    Ok(ComponentBuilt {
+        live,
+        capacity,
+        deterministic,
+    })
+}
 
+/// Attach `--audit-log` to one component, verifying history first.
+///
+/// Extracted from `build_dispatch` because the component loop attaches at
+/// most once (the default), and the refusal semantics deserve one home:
+/// **loading and verifying any history before a single request is served**.
+/// A malformed or chain-broken file refuses the start here rather than
+/// being absorbed, because a server that began serving and then discovered
+/// its evidence file was unusable would have already produced records it
+/// cannot keep.
+fn attach_audit_log(app: &mut GuestApp, opts: &ServeOptions) -> Result<()> {
+    let Some(path) = &opts.audit_log else {
+        return Ok(());
+    };
+    // The chain key travels by file, never by flag value: a secret on a
+    // command line is visible in the process table. Absent means unkeyed
+    // rows, and the attach says so loudly. A metrics path that collides
+    // with a declared route is refused in `prepare` before this runs, so
+    // the file here can only ever be the operator's explicit request.
+    let key = match &opts.audit_hmac_key_file {
+        Some(key_path) => {
+            let hex = std::fs::read_to_string(key_path).map_err(|e| {
+                usage(format!(
+                    "`--audit-hmac-key-file {key_path}` could not be read: {e}"
+                ))
+                .with_remediation(
+                    "point it at a file holding 64 hex characters, or remove the flag \
+                         for an unkeyed chain",
+                )
+            })?;
+            Some(
+                qqq_host::audit::ChainKey::from_hex(hex.trim()).map_err(|e| {
+                    usage(format!(
+                        "`--audit-hmac-key-file {key_path}` is unusable: {e}"
+                    ))
+                    .with_remediation("the file must hold exactly 64 hex characters")
+                })?,
+            )
+        }
+        None => None,
+    };
+    app.attach_audit_file_with_key(std::path::Path::new(path), key)?;
+    Ok(())
+}
+
+/// Assemble one component's dispatcher: flat default, route bodies,
+/// then the stateful kinds — the registration the old `build_dispatch`
+/// body performed inline for the single component, now shared by the
+/// default and every tenant component so the two cannot diverge.
+fn assemble_dispatch(
+    app: &crate::live::LiveApp,
+    manifest_routes: &[qqq_cap::manifest::Route],
+    kinds: &RouteKinds,
+    limits: Option<&std::sync::Arc<qqq_serve::limits::TenantLimits>>,
+) -> Dispatch {
     // The flat handler stays the default, so a route with no entry behaves as it did.
     let dispatch = Dispatch::flat(app.dispatch());
-    let dispatch = register_flat_routes(dispatch, &app, &loaded.manifest.server.routes);
+    let dispatch = register_flat_routes(dispatch, app, manifest_routes);
 
     // Guest-backed WebSocket routes: one guest call per message, answered as
     // the route's path. Registered from the manifest's `kind` markers, so a
     // route the manifest did not mark `ws` can never upgrade into frame mode
     // with nobody answering — the fallthrough that `start_flat` pins.
-    let dispatch = register_stateful_routes(dispatch, &app, &routes.kinds, routes.limits.as_ref());
+    register_stateful_routes(dispatch, app, kinds, limits)
+}
+
+fn build_dispatch(
+    loaded: &LoadedManifest,
+    opts: &ServeOptions,
+    routes: &crate::serve_routes::ServerRoutes,
+) -> Result<BuiltDispatch> {
+    let project = project_dir(loaded);
+    let components = loaded
+        .manifest
+        .server
+        .tenants
+        .as_ref()
+        .map(|t| t.components.clone())
+        .unwrap_or_default();
+
+    // Deterministic serving runs the deterministic engine preset: without it
+    // `--deterministic` would be a flag that changes the refusal surface but
+    // not the randomness, and the guest would read OS bytes while the
+    // operator believed the run reproducible. One engine serves every
+    // component — the preset is a deployment property, not a per-tenant one.
+    let cfg = if opts.deterministic {
+        EngineConfig::deterministic()
+    } else {
+        EngineConfig::default()
+    };
+    let mut wasmtime_cfg = cfg.to_wasmtime_config()?;
+    crate::aot::configure(&mut wasmtime_cfg, opts.aot_cache.as_deref())?;
+    let engine = wasmtime::Engine::new(&wasmtime_cfg).map_err(|e| {
+        Error::new(
+            ErrorCode::InternalInvariantViolated,
+            "could not construct the wasm engine",
+        )
+        .with_cause(e.to_string())
+    })?;
+
+    let default_bytes = match read_component_bytes(project, loaded.name()) {
+        Ok(bytes) => bytes,
+        Err(_) if components.is_empty() => {
+            // No component means no `GuestApp` and therefore **no pool**. `None` rather than
+            // `Some(0)`: `0` would read as "a pool with no capacity", which is a different
+            // and false statement about a project that simply has not been built.
+            // No guest also means no randomness at all, deterministic or otherwise.
+            return Ok(BuiltDispatch {
+                dispatch: qqq_serve::TenantDispatch::new(Dispatch::flat(unbuilt(loaded.name()))),
+                guest_loaded: false,
+                pool_capacity: None,
+                live: None,
+                tenant_live: Vec::new(),
+                deterministic: false,
+            });
+        }
+        Err(missing) => {
+            return Err(missing.with_remediation(
+                "unmapped tenants are served by the default component, so its artifact \
+                 must exist even when tenants map elsewhere",
+            ));
+        }
+    };
+    let default_built = build_component_app(&engine, loaded, opts, &default_bytes, true)?;
+    // The installed mode and capacity, read from the app rather than echoed
+    // from the flag, so the report cannot describe a server whose setters
+    // never ran.
+    let capacity = default_built.capacity;
+    let deterministic = default_built.deterministic;
+    let mut dispatch = qqq_serve::TenantDispatch::new(assemble_dispatch(
+        &default_built.live,
+        &loaded.manifest.server.routes,
+        &routes.kinds,
+        routes.limits.as_ref(),
+    ));
+
+    // Tenant components: each mapped label gets its own guest, pool, and
+    // dispatcher, selected per request by the resolved tenant. A missing
+    // artifact fails the start naming the tenant and package — serving the
+    // tenant from the default while the manifest promises its own component
+    // would be the dead-config-with-a-security-shape `validate_tenants`
+    // exists to prevent.
+    let mut tenant_live = Vec::new();
+    for (label, package) in &components {
+        let bytes = read_component_bytes(project, package).map_err(|e| {
+            Error::new(
+                ErrorCode::InvalidComponentArtifact,
+                format!("tenant `{label}` maps to package `{package}`, which is not built"),
+            )
+            .with_cause(e.message.clone())
+            .with_remediation("run `qqqai build` to produce it, or remove the mapping")
+        })?;
+        let built = build_component_app(&engine, loaded, opts, &bytes, false)?;
+        dispatch = dispatch.with_tenant(
+            label.clone(),
+            assemble_dispatch(
+                &built.live,
+                &loaded.manifest.server.routes,
+                &routes.kinds,
+                routes.limits.as_ref(),
+            ),
+        );
+        tenant_live.push(built.live);
+    }
 
     Ok(BuiltDispatch {
         dispatch,
         guest_loaded: true,
         pool_capacity: Some(capacity),
-        live: Some(app),
+        live: Some(default_built.live),
+        tenant_live,
         deterministic,
     })
 }
@@ -1293,6 +1487,13 @@ fn register_flat_routes(
     routes: &[qqq_cap::manifest::Route],
 ) -> Dispatch {
     for route in routes {
+        // Non-HTTP kinds register their own handlers below: a flat entry
+        // for a `ws`/`sse` name would be dead (the kind branch wins), and
+        // a dead entry that answers with the wrong framing is the defect
+        // the sse gate exists to prevent.
+        if route.kind != qqq_cap::manifest::RouteKind::Http {
+            continue;
+        }
         dispatch = dispatch.with_body(route.handler.clone(), app.dispatch_with_body());
     }
     dispatch
@@ -1325,9 +1526,11 @@ fn register_stateful_routes(
                 );
             }
             qqq_cap::manifest::RouteKind::Sse => {
-                dispatch = dispatch.with_body(
+                let guest = app.dispatch_with_body();
+                dispatch = dispatch.with_sse(
                     name.clone(),
-                    crate::guest_sse::sse_handler(&app.dispatch_with_body(), path),
+                    crate::guest_sse::sse_handler(&guest, path),
+                    crate::guest_sse::StreamBridge::for_route(&guest, path).factory(),
                 );
             }
         }
@@ -1872,7 +2075,82 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// **`prepare` with `--tls` and a section attaches the identity.**
+    /// **A client CA in the manifest is applied, not ignored.**
+    ///
+    /// `build_tls` must read `client_ca_file` into a required-client-cert
+    /// policy: a knob the builder accepts and drops would advertise mutual
+    /// TLS while handshaking without it. A missing CA file fails naming
+    /// the file (serve-time existence, like the identity files); a present
+    /// one builds a configuration rather than ignoring the field.
+    #[test]
+    fn build_tls_with_a_client_ca_builds_required_client_auth() {
+        let dir = tls_fixture_dir("client-ca");
+        let (cert, key) = write_tls_fixture(&dir, "ok");
+        let missing = manifest_server(&format!(
+            "[server.tls]\ncert_file = '{}'\nkey_file = '{}'\nclient_ca_file = 'no/such/ca.pem'\n",
+            cert.display(),
+            key.display()
+        ));
+        let err = build_tls(&missing).expect_err("a missing client CA must be refused");
+        assert!(
+            err.to_string().contains("no/such/ca.pem"),
+            "the refusal must name the CA file: {err}"
+        );
+        // A present CA bundle (a self-signed PEM is a valid trust anchor
+        // here) must build: the field reaches the rustls policy instead of
+        // being accepted and dropped.
+        let (ca, _) = write_tls_fixture(&dir, "ca");
+        let present = manifest_server(&format!(
+            "[server.tls]\ncert_file = '{}'\nkey_file = '{}'\nclient_ca_file = '{}'\n",
+            cert.display(),
+            key.display(),
+            ca.display()
+        ));
+        assert!(
+            build_tls(&present)
+                .expect("a present client CA must build")
+                .is_some(),
+            "a present client CA must produce a TLS configuration"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **Component routing without an authenticated identity is refused.**
+    ///
+    /// A `Host` header is client-controlled, so selecting a component by
+    /// Host alone would serve tenant B's component to anyone naming B's
+    /// host. The mapping therefore requires verified client certificates
+    /// (`client_ca_file` plus `--tls`, i.e. required mutual TLS); without
+    /// both, startup refuses rather than serving the wrong component
+    /// quietly.
+    #[test]
+    fn tenant_components_without_mtls_are_refused() {
+        let server = manifest_server(
+            "[server.tenants]\nhosts = { \"shop.example.com\" = \"shop\" }\n\
+             [server.tenants.components]\nshop = \"shop-app\"\n",
+        );
+        for tls_flag in [false, true] {
+            let err = check_tenant_components_require_mtls(&server, tls_flag)
+                .expect_err("unattested component routing must be refused");
+            assert!(
+                err.message.contains("components"),
+                "the refusal must name the mapping: {}",
+                err.message
+            );
+        }
+        let mut mtkind = server.clone();
+        mtkind.tls = Some(qqq_cap::manifest::ServerTls {
+            cert_file: "certs/server.pem".to_owned(),
+            key_file: "certs/server.key".to_owned(),
+            client_ca_file: Some("certs/client-ca.pem".to_owned()),
+        });
+        check_tenant_components_require_mtls(&mtkind, true)
+            .expect("required mTLS admits component routing");
+        // And a bare manifest with no components never reaches the gate.
+        let bare = manifest_server("");
+        check_tenant_components_require_mtls(&bare, false)
+            .expect("no components means no requirement");
+    }
     ///
     /// The full decision path without a socket: flag plus section plus
     /// readable files yields a `Prepared` whose server configuration carries
@@ -2272,8 +2550,8 @@ mod tests {
             "a ws-marked handler must upgrade"
         );
         assert!(
-            dispatch.body_for("feed").is_some(),
-            "an sse-marked handler must answer bodies"
+            dispatch.sse_for("feed").is_some(),
+            "an sse-marked handler must register its gate plus stream loop"
         );
         assert!(
             dispatch.websocket_for("order").is_none(),

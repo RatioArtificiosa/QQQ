@@ -32,7 +32,9 @@ use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::metrics::TenantLabels;
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::serve_hyper::serve_hyper_h1;
-use qqq_serve::server::{ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served};
+use qqq_serve::server::{
+    ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served, TenantDispatch,
+};
 use qqq_serve::transport::{HyperLimits, hyper_limits_for};
 use qqq_serve::ws::WsConfig;
 use qqq_serve::ws_conn::Echo;
@@ -102,7 +104,9 @@ struct HyperWs {
 impl HyperWs {
     async fn start(pieces: Pieces) -> Self {
         let table = Arc::new(table_with(&[(Method::Get, "/ws", "ws")]));
-        let dispatch = Dispatch::flat(flat_handler()).with_websocket("ws", Arc::new(Echo));
+        let dispatch = TenantDispatch::new(
+            Dispatch::flat(flat_handler()).with_websocket("ws", Arc::new(Echo)),
+        );
         let limits = default_limits();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -133,6 +137,7 @@ impl HyperWs {
                             ws_buffer: &pieces.ws_buffer,
                             tenant_labels: &pieces.tenant_labels,
                             tenant_hosts: None,
+                            peer_identity: None,
                         };
                         last = serve_hyper_h1(
                             stream,

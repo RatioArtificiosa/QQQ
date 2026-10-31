@@ -77,9 +77,9 @@ use crate::metrics::{HttpMetrics, TenantLabels};
 use crate::response::{self, Response, validate_outbound};
 use crate::route::{Method, RouteTable};
 use crate::server::{
-    ConnectionContext, Dispatch, RouteMatch, Served, apply_cors, config_max_request_bytes,
-    dispatch_off_thread, emit_record, emit_span_sampled, is_head, micros_since, record_metrics,
-    split_target,
+    ConnectionContext, Dispatch, RouteMatch, Served, TenantDispatch, apply_cors,
+    config_max_request_bytes, dispatch_off_thread, emit_record, emit_span_sampled, is_head,
+    micros_since, record_metrics, split_target,
 };
 use crate::span::Sampler;
 use crate::transport::HyperLimits;
@@ -148,7 +148,7 @@ pub async fn serve_hyper_tls(
     stream: tokio::net::TcpStream,
     tls: Arc<rustls::ServerConfig>,
     table: Arc<RouteTable>,
-    dispatch: Dispatch,
+    dispatch: TenantDispatch,
     limits: HyperLimits,
     ctx: &ConnectionContext<'_>,
 ) -> std::io::Result<TlsServed> {
@@ -183,7 +183,7 @@ pub async fn serve_hyper_tls(
 pub async fn serve_hyper_h1<S>(
     stream: S,
     table: Arc<RouteTable>,
-    dispatch: Dispatch,
+    dispatch: TenantDispatch,
     limits: HyperLimits,
     ctx: &ConnectionContext<'_>,
 ) -> Served
@@ -349,7 +349,7 @@ async fn drain_ws_tasks(state: &State, base: Served) -> Served {
 pub async fn serve_hyper_h2<S>(
     stream: S,
     table: Arc<RouteTable>,
-    dispatch: Dispatch,
+    dispatch: TenantDispatch,
     limits: HyperLimits,
     ctx: &ConnectionContext<'_>,
 ) -> Served
@@ -467,6 +467,11 @@ pub(crate) struct OwnedCtx {
     /// Cloned like every other `Arc` here: one table shared by every
     /// connection, so no two requests disagree.
     pub tenant_hosts: Option<Arc<std::collections::BTreeMap<String, String>>>,
+    /// The verified client identity, or `None` when the handshake produced
+    /// none. Copied per connection like the peer address: the handshake
+    /// belongs to the connection, and sharing it would attribute one
+    /// client's identity to another's requests.
+    pub peer_identity: Option<crate::tls::PeerIdentity>,
     /// The peer's socket address, for upgraded-connection records.
     ///
     /// Flat responses never name it (the access record carries the
@@ -502,6 +507,7 @@ impl OwnedCtx {
             loopback_only: ctx.loopback_only,
             tenant_labels: Arc::clone(ctx.tenant_labels),
             tenant_hosts: ctx.tenant_hosts.cloned(),
+            peer_identity: ctx.peer_identity.clone(),
             peer: ctx.id.peer,
             ws: ctx.ws.clone(),
             ws_buffer: Arc::clone(ctx.ws_buffer),
@@ -515,7 +521,7 @@ impl OwnedCtx {
 #[derive(Clone)]
 struct State {
     table: Arc<RouteTable>,
-    dispatch: Dispatch,
+    dispatch: TenantDispatch,
     limits: HyperLimits,
     ctx: OwnedCtx,
     served: Arc<AtomicU64>,
@@ -1097,6 +1103,7 @@ impl tokio::io::AsyncWrite for HyperUpgraded {
 /// handshake that follows it.
 fn upgrade_route(
     state: &State,
+    dispatch: &Dispatch,
     head: &RequestHead,
     path: &str,
 ) -> Option<Arc<dyn crate::ws_conn::WebSocketHandler>> {
@@ -1104,7 +1111,7 @@ fn upgrade_route(
         return None;
     }
     let matched = state.table.match_route(head.method, path)?;
-    state.dispatch.websocket_for(&matched.handler).cloned()
+    dispatch.websocket_for(&matched.handler).cloned()
 }
 
 /// The extended-CONNECT route, if this request targets one on HTTP/2.
@@ -1118,6 +1125,7 @@ fn upgrade_route(
 /// route whose h1 twin answers `400`: a fork wearing a 200.
 fn connect_route(
     state: &State,
+    dispatch: &Dispatch,
     head: &RequestHead,
     path: &str,
 ) -> Option<Arc<dyn crate::ws_conn::WebSocketHandler>> {
@@ -1125,7 +1133,7 @@ fn connect_route(
         return None;
     }
     let matched = state.table.match_route(head.method, path)?;
-    state.dispatch.websocket_for(&matched.handler).cloned()
+    dispatch.websocket_for(&matched.handler).cloned()
 }
 
 /// Serve a WebSocket upgrade on HTTP/1: validate, answer `101`, run
@@ -1528,17 +1536,34 @@ async fn serve_streaming_hyper(
     head: RequestHead,
     matched: RouteMatch,
     stream_handler: crate::stream::StreamingHandler,
+    tenant: &str,
     span: u64,
+    start: crate::stream::StreamStart,
 ) -> Result<hyper::Response<WatchBody>, hyper::Error> {
     use crate::stream::{StreamError, StreamOutcome};
     if crate::server::special_route_has_body(&head) {
         return Ok(refuse_special_body(state, request, &head, Instant::now()).await);
     }
     let (mut writer, rx) = crate::stream::StreamWriter::channel();
-    let builder = hyper::Response::builder().status(hyper::StatusCode::OK);
-    // No content headers: hyper owns framing, and a declared
-    // length would disagree with a body whose end only the
-    // handler's return provides.
+    // The head the gate committed (status plus the event-stream framing),
+    // minus the framing hyper owns: hyper sets length and connection
+    // semantics itself, and a declared `Content-Length` would disagree
+    // with a body whose end only the handler's return provides.
+    let mut builder = hyper::Response::builder().status(start.head.status);
+    for (name, value) in &start.head.headers {
+        if name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("connection")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+        {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            hyper::header::HeaderName::from_bytes(name.as_bytes()),
+            hyper::header::HeaderValue::from_str(value),
+        ) {
+            builder = builder.header(name, value);
+        }
+    }
     let response = builder
         .body(WatchBody::streaming(rx, &state.watch))
         .unwrap_or_else(|_| {
@@ -1553,19 +1578,31 @@ async fn serve_streaming_hyper(
         Protocol::H1 => close_after(response),
         Protocol::H2 => response,
     };
-    // Resolved like `answer`: the stream record must attribute the
-    // mapped tenant, not the peer the connection arrived on.
-    let tenant = resolve_tenant(&state.ctx, &head).map_or_else(
-        || state.ctx.tenant_label.clone(),
-        std::borrow::Cow::into_owned,
-    );
+    // The gated tenant from `answer`, not a re-resolution: the stream
+    // record must attribute the same tenant the gates ran under, and a
+    // second verdict site here could disagree (peer-label fallback where
+    // the first site 421'd). Owned because the record fires in the task
+    // below, after this stack returns.
+    let tenant = tenant.to_owned();
     let peer = state.ctx.peer;
     let trace = state.ctx.trace;
     let logger = state.ctx.logger.clone();
+    let status = start.head.status;
+    let first = start.first;
     let (path, _query) = split_target(&head.target);
     let path = path.to_owned();
     let task = tokio::spawn(async move {
-        let handler_result = stream_handler(&head, &matched, &mut writer).await;
+        // The gate's first event goes on the wire before the poll loop
+        // starts, so the loop never executes the guest twice for it. A
+        // closed receiver here is a client that left during the head.
+        let handler_result = if first.is_empty() {
+            stream_handler(&head, &matched, &mut writer).await
+        } else {
+            match writer.write(&first).await {
+                Ok(()) => stream_handler(&head, &matched, &mut writer).await,
+                Err(_) => Err(StreamError::Transport("client gone".to_owned())),
+            }
+        };
         let outcome = match handler_result {
             Ok(()) => match writer.finish().await {
                 Ok(()) => StreamOutcome::Completed,
@@ -1580,7 +1617,7 @@ async fn serve_streaming_hyper(
             &crate::stream::StreamRecord {
                 head: &head,
                 path: &path,
-                status: 200,
+                status,
                 outcome,
                 written,
                 tenant: &tenant,
@@ -1667,20 +1704,46 @@ async fn answer_h2(
 /// Resolve the request's tenant label for recording and dispatch.
 ///
 /// The same rule as the in-house path (`server::resolve_request_tenant`):
-/// a mapped host is attributed to its tenant, no table means the
-/// peer-derived label, and an unmapped host with a configured table
-/// resolves to refusal. `None` is the refusals the caller answers with
-/// 421 rather than serving under a guessed tenant.
+/// a verified identity wins, then a mapped host is attributed to its
+/// tenant, no table means the peer-derived label, and an unmapped host
+/// with a configured table resolves to refusal. `None` is the refusals
+/// the caller answers with 421 rather than serving under a guessed tenant.
 fn resolve_tenant<'a>(ctx: &'a OwnedCtx, head: &RequestHead) -> Option<std::borrow::Cow<'a, str>> {
     use std::borrow::Cow;
-    match crate::server::resolve_request_tenant(
-        ctx.tenant_hosts.as_ref().map(AsRef::as_ref),
-        head.header("host"),
-        &ctx.tenant_label,
-    ) {
+    match crate::server::resolve_request_tenant(crate::server::TenantSources {
+        hosts: ctx.tenant_hosts.as_ref().map(AsRef::as_ref),
+        host: head.header("host"),
+        fallback: &ctx.tenant_label,
+        identity: ctx.peer_identity.as_ref(),
+    }) {
         crate::server::TenantResolution::Resolved(label) => Some(Cow::Owned(label)),
         crate::server::TenantResolution::Fallback(label) => Some(Cow::Borrowed(label)),
         crate::server::TenantResolution::Unknown(_) => None,
+    }
+}
+
+/// Map the hyper head to the in-house taxonomy, or answer the refusal.
+///
+/// No access record on the error path, mirroring `reject_parse_error`:
+/// an unreadable head has no method or path worth logging. Extracted
+/// from `answer` for the line budget: the mapping plus its refusal read
+/// as one step with a name, and the error arm borrows only, so falling
+/// through moves nothing.
+fn map_head_or_refuse(
+    state: &State,
+    request: &hyper::Request<Incoming>,
+) -> Result<RequestHead, Box<hyper::Response<WatchBody>>> {
+    match map_request_head(state, request) {
+        Ok(head) => Ok(head),
+        Err(message) => {
+            let response = response::from_error(&response::parse_error_response(&message));
+            Err(Box::new(close_after(render_validated(
+                &response,
+                false,
+                &state.limits,
+                &state.watch,
+            ))))
+        }
     }
 }
 
@@ -1708,6 +1771,119 @@ fn misdirected_refusal(
 ) -> hyper::Response<WatchBody> {
     let response = crate::response::misdirected(head.header("host").unwrap_or(""));
     render_refusal(state, head, path, &response, started)
+}
+
+/// The SSE arm when the table and dispatch agree: the matched route names
+/// a handler the dispatch registered an SSE gate plus stream loop for.
+/// Returns the handler pair when this request is an SSE route, `None`
+/// otherwise — the caller falls through to the generic streaming arm and
+/// then the flat path. The owned `RouteMatch` plus the borrowed handlers
+/// split what the old inline block did: taking only `method` keeps the
+/// request and head with the caller, so falling through moves nothing.
+/// Extracted from `answer` for the line budget.
+fn sse_arm<'s>(
+    state: &'s State,
+    dispatch: &'s Dispatch,
+    method: crate::route::Method,
+    path: &str,
+) -> Option<(&'s crate::server::SseHandlers, crate::server::RouteMatch)> {
+    let matched = state.table.match_route(method, path)?;
+    let sse = dispatch.sse_for(&matched.handler)?;
+    Some((sse, crate::server::route_match_of(&matched)))
+}
+
+/// Answer one server-sent-events request: gate pre-head, then stream.
+///
+/// The gate runs off the executor thread like every other guest call: a
+/// guest that answers anything but `200` plus `text/event-stream` is
+/// refused with the gate's 502 before the 200 commits, exactly as the
+/// one-shot path did. On a pass the gate's answer is the stream's first
+/// event, so the guest is never executed twice for it.
+///
+/// Extracted from `answer` the way `serve_upgrade` and `serve_h2_connect`
+/// are: one named function per route kind, because the pipeline is at its
+/// line budget without them.
+#[allow(clippy::too_many_arguments)]
+async fn answer_sse(
+    state: &State,
+    request: hyper::Request<Incoming>,
+    head: RequestHead,
+    matched: RouteMatch,
+    sse: &crate::server::SseHandlers,
+    tenant: &str,
+    span: u64,
+    request_started: Instant,
+) -> Result<hyper::Response<WatchBody>, hyper::Error> {
+    let (path, _query) = split_target(&head.target);
+    // The tenant arrives from `gated_tenant` in `answer`, which refused
+    // unmapped hosts with 421 before dispatch: re-resolving here would add
+    // a second verdict site that could disagree (peer-label fallback where
+    // the first site refused), so the one resolved tenant serves the gate,
+    // the poll loop, and the record alike.
+    // Bound before the gate consumes it: the stream's per-event guest
+    // calls must attribute to the same tenant the gate ran under.
+    let stream_handler = (sse.stream)(tenant);
+    let tenant = tenant.to_owned();
+    let gate = sse.gate.clone();
+    let gate_head = head.clone();
+    let gate_tenant = tenant.clone();
+    let gate = tokio::task::spawn_blocking(move || {
+        gate(
+            &gate_head,
+            &crate::body_bytes::BodyBytes::Absent,
+            &gate_tenant,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| crate::response::handler_panicked());
+    if gate.status != 200 {
+        return Ok(render_refusal(state, &head, path, &gate, request_started));
+    }
+    let mut gate = gate;
+    let first = std::mem::take(&mut gate.body);
+    serve_streaming_hyper(
+        state,
+        request,
+        head,
+        matched,
+        stream_handler,
+        &tenant,
+        span,
+        crate::stream::StreamStart { head: gate, first },
+    )
+    .await
+}
+
+/// Resolve the tenant and run the pre-read gates: loopback `Host`
+/// allow-list, process budget, tenant limits, auth.
+///
+/// One function so the hyper path cannot reorder what the in-house path
+/// fixes in `refuse_before_reading`: resolve first, then the gates, with
+/// the 421 naming the table rather than a guessed tenant. Returns the
+/// tenant or the refusal, so the caller handles both in one place.
+fn gated_tenant<'a>(
+    state: &'a State,
+    head: &RequestHead,
+    path: &str,
+    span: u64,
+    request_started: Instant,
+) -> Result<std::borrow::Cow<'a, str>, Box<hyper::Response<WatchBody>>> {
+    use std::borrow::Cow;
+    let tenant: Cow<'_, str> = match resolve_tenant(&state.ctx, head) {
+        Some(resolved) => resolved,
+        None => {
+            return Err(Box::new(misdirected_refusal(
+                state,
+                head,
+                path,
+                request_started,
+            )));
+        }
+    };
+    if let Some(refusal) = refuse_early(state, head, path, span, request_started) {
+        return Err(Box::new(refusal));
+    }
+    Ok(tenant)
 }
 
 /// Answer one request: the QQQ pipeline, ending in a hyper response.
@@ -1739,41 +1915,30 @@ async fn answer(
     }
 
     // --- The head, mapped to the in-house taxonomy ----------------------
-    let head = match map_request_head(state, &request) {
+    let head = match map_head_or_refuse(state, &request) {
         Ok(head) => head,
-        Err(message) => {
-            let response = response::from_error(&response::parse_error_response(&message));
-            return Ok(close_after(render_validated(
-                &response,
-                false,
-                &state.limits,
-                &state.watch,
-            )));
-        }
+        Err(refusal) => return Ok(*refusal),
     };
     let (path, _query) = split_target(&head.target);
     let span = state.served.load(Ordering::SeqCst);
 
-    // --- Tenant: resolve the Host header ---------------------------------
+    // --- Tenant plus the gates that must run before anything is read ----
     //
-    // Same rule as the in-house path: a mapped host is attributed to its
-    // tenant everywhere below, and an unmapped host with a configured table
-    // is refused with 421 naming it rather than served under a guess.
-    let mapped_tenant;
-    let tenant: &str = if let Some(resolved) = resolve_tenant(ctx, &head) {
-        mapped_tenant = resolved;
-        &mapped_tenant
-    } else {
-        return Ok(misdirected_refusal(state, &head, path, request_started));
+    // Same rule and order as in-house `refuse_before_reading`: resolve the
+    // tenant (unmapped hosts with a configured table refuse with 421),
+    // then loopback `Host`, process budget, tenant limits, auth.
+    let tenant = match gated_tenant(state, &head, path, span, request_started) {
+        Ok(tenant) => tenant,
+        Err(refusal) => return Ok(*refusal),
     };
-    //
-    // Same order as `refuse_before_reading`: loopback `Host`, process
-    // budget, tenant limits, auth. Same shapes, same records.
-    if let Some(refusal) = refuse_early(state, &head, path, span, request_started) {
-        return Ok(refusal);
-    }
+    let tenant: &str = &tenant;
+    // The component answers the resolved tenant: select its dispatcher
+    // here, where the label is known, so every arm below (upgrade,
+    // connect, SSE, stream, flat) resolves handler names in the tenant's
+    // own registry rather than the default one.
+    let dispatch: &Dispatch = state.dispatch.for_tenant(tenant);
 
-    // --- Metrics path, preflight, upgrades: off the flat path ------------
+    // --- Metrics path, preflight, upgrades, streams: off the flat path ----
     //
     // WebSocket upgrades on HTTP/1 take the upgrade arm, which owns
     // the raw request for the handshake handoff; extended-CONNECT on
@@ -1781,23 +1946,46 @@ async fn answer(
     // handoff; streaming routes take the streaming arm, which owns
     // it for the channel handoff; everything else falls through to
     // `serve_special` (metrics, preflight).
-    if let Some(ws_handler) = connect_route(state, &head, path) {
+    if let Some(ws_handler) = connect_route(state, dispatch, &head, path) {
         return serve_h2_connect(state, request, head, ws_handler, span, request_started).await;
     }
-    if let Some(ws_handler) = upgrade_route(state, &head, path) {
+    if let Some(ws_handler) = upgrade_route(state, dispatch, &head, path) {
         return serve_upgrade(state, request, head, ws_handler, span, request_started).await;
     }
+    if let Some((sse, matched)) = sse_arm(state, dispatch, head.method, path) {
+        // The gate runs pre-head so a non-event answer is refused with
+        // 502 rather than truncating a stream that already started.
+        return answer_sse(
+            state,
+            request,
+            head,
+            matched,
+            sse,
+            tenant,
+            span,
+            request_started,
+        )
+        .await;
+    }
     if let Some(matched) = state.table.match_route(head.method, path)
-        && let Some(stream_handler) = state.dispatch.streaming_for(&matched.handler)
+        && let Some(stream_handler) = dispatch.streaming_for(&matched.handler)
     {
-        // Same position as in-house (after the gates, before the
-        // flat path): a streaming route commits the connection to
-        // a body without a length, so it must not reach the
-        // buffered body reader, which would wait for an end that
-        // only the handler's return provides.
+        // A streaming route commits the connection to a body without a
+        // length, so it must not reach the buffered body reader, which
+        // would wait for an end that only the handler's return provides.
         let stream_handler = stream_handler.clone();
         let matched = crate::server::route_match_of(&matched);
-        return serve_streaming_hyper(state, request, head, matched, stream_handler, span).await;
+        return serve_streaming_hyper(
+            state,
+            request,
+            head,
+            matched,
+            stream_handler,
+            tenant,
+            span,
+            crate::stream::StreamStart::flat(),
+        )
+        .await;
     }
     if let Some(special) = serve_special(state, &head, path, request_started) {
         return Ok(special);
@@ -1833,9 +2021,44 @@ async fn answer(
     };
 
     // --- Dispatch, CORS, record, render ------------------------------------
+    // Owned: `path` borrows `head`, and both cross into the flat tail.
+    let path = path.to_owned();
+    return Ok(answer_flat(
+        state,
+        dispatch,
+        head,
+        &path,
+        body,
+        body_bytes,
+        tenant,
+        span,
+        served,
+        request_started,
+    )
+    .await);
+}
+
+/// Dispatch a buffered request, apply CORS, and record the exchange.
+///
+/// The flat tail of `answer`: everything after the body arrives. Extracted
+/// because the pipeline exceeds its line budget with the tail inline, while
+/// neither does alone.
+#[allow(clippy::too_many_arguments)]
+async fn answer_flat(
+    state: &State,
+    dispatch: &Dispatch,
+    head: RequestHead,
+    path: &str,
+    body: crate::body_bytes::BodyBytes,
+    body_bytes: u64,
+    tenant: &str,
+    span: u64,
+    served: u64,
+    request_started: Instant,
+) -> hyper::Response<WatchBody> {
+    let ctx = &state.ctx;
     let route_started = Instant::now();
-    let response =
-        dispatch_off_thread(&state.table, &state.dispatch, &head, path, &body, tenant).await;
+    let response = dispatch_off_thread(&state.table, dispatch, &head, path, &body, tenant).await;
     emit_span_sampled(
         &ctx.logger,
         ctx.sampler,
@@ -1863,9 +2086,9 @@ async fn answer(
     if ceiling_for(served, state.limits.max_requests_per_connection) == Ceiling::Warn
         && state.protocol == Protocol::H1
     {
-        return Ok(close_after(rendered));
+        return close_after(rendered);
     }
-    Ok(rendered)
+    rendered
 }
 
 /// Render a QQQ response for a recorded request: validate, map to hyper,

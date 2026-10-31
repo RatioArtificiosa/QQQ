@@ -104,6 +104,22 @@ fn validate_tls(tls: &crate::manifest::ServerTls) -> Result<(), ManifestError> {
             });
         }
     }
+    // The client CA is optional; when present it follows the same shape
+    // rules — existence stays serve-time, like the identity files.
+    if let Some(ca) = tls.client_ca_file.as_deref() {
+        if ca.trim().is_empty() {
+            return Err(ManifestError::InvalidPath {
+                path: ca.to_owned(),
+                reason: "server.tls.client_ca_file must name a file; an empty path would fail at serve time with a read error, far from the line that is wrong".to_owned(),
+            });
+        }
+        if ca.contains('\0') {
+            return Err(ManifestError::InvalidPath {
+                path: ca.to_owned(),
+                reason: "server.tls.client_ca_file must not contain a NUL byte".to_owned(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -168,6 +184,36 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
                 field: "server.tenants.hosts".to_owned(),
                 reason: format!("the tenant for host `{host}` must not be empty"),
             });
+        }
+    }
+    // Component overrides key on the resolved tenant label: an empty label
+    // or an empty artifact name would route nowhere, which is dead config
+    // with a security shape (a tenant silently served by the wrong
+    // component). An empty map is the single-component default and stays
+    // allowed — unlike hosts, where an empty table disables the feature
+    // the section promises.
+    for (label, artifact) in &tenants.components {
+        if label.trim().is_empty() || artifact.trim().is_empty() {
+            return Err(ManifestError::InvalidField {
+                field: "server.tenants.components".to_owned(),
+                reason: "component keys and artifact names must not be empty; an empty entry routes no tenant to no component".to_owned(),
+            });
+        }
+        // Keys match resolved tenant labels verbatim, so a padded or
+        // spaced key is dead configuration reading as policy: ` Shop `
+        // never equals the `shop` the Host table resolves. Reject the
+        // same way host keys refuse whitespace, rather than serving the
+        // tenant from the default component while the file says otherwise.
+        for (name, value) in [("key", label.as_str()), ("artifact", artifact.as_str())] {
+            if value != value.trim() || value.chars().any(char::is_whitespace) {
+                return Err(ManifestError::InvalidField {
+                    field: "server.tenants.components".to_owned(),
+                    reason: format!(
+                        "component {name} `{value}` carries whitespace and never matches; \
+                         write the bare label or artifact name"
+                    ),
+                });
+            }
         }
     }
     Ok(())
@@ -998,6 +1044,7 @@ allow_origins = ["https://app.example.com"]
             tls: Some(ServerTls {
                 cert_file: "certs/server.pem".to_owned(),
                 key_file: "certs/server.key".to_owned(),
+                client_ca_file: None,
             }),
             // Populated for the same reason: the tenants table must survive
             // a round trip, or a deployment would lose its host mapping on
@@ -1006,6 +1053,10 @@ allow_origins = ["https://app.example.com"]
                 hosts: std::collections::BTreeMap::from([(
                     "shop.example.com".to_owned(),
                     "shop".to_owned(),
+                )]),
+                components: std::collections::BTreeMap::from([(
+                    "shop".to_owned(),
+                    "shop-app".to_owned(),
                 )]),
             }),
         };
@@ -1023,6 +1074,7 @@ allow_origins = ["https://app.example.com"]
         s.tls = Some(ServerTls {
             cert_file: "certs/server.pem".to_owned(),
             key_file: "certs/server.key".to_owned(),
+            client_ca_file: None,
         });
         assert!(s.validate().is_ok());
         assert!(s.tls.is_some(), "absent TLS must stay absent, not default");
@@ -1035,6 +1087,7 @@ allow_origins = ["https://app.example.com"]
         s.tls = Some(ServerTls {
             cert_file: String::new(),
             key_file: "certs/server.key".to_owned(),
+            client_ca_file: None,
         });
         let err = s
             .validate()
@@ -1053,12 +1106,31 @@ allow_origins = ["https://app.example.com"]
         s.tls = Some(ServerTls {
             cert_file: "certs/server.pem".to_owned(),
             key_file: "   ".to_owned(),
+            client_ca_file: None,
         });
         let err = s.validate().expect_err("a blank key path must be refused");
         let text = err.to_string();
         assert!(
             text.contains("server.tls.key_file"),
             "the refusal must name the field: {text}"
+        );
+    }
+
+    /// **An empty `client_ca_file` is refused like an empty `cert_file`.**
+    #[test]
+    fn an_empty_tls_client_ca_file_is_refused() {
+        let mut s = server(vec![route("/orders", &["POST"])]);
+        s.tls = Some(ServerTls {
+            cert_file: "certs/server.pem".to_owned(),
+            key_file: "certs/server.key".to_owned(),
+            client_ca_file: Some("   ".to_owned()),
+        });
+        let err = s
+            .validate()
+            .expect_err("an empty client CA path must be refused");
+        assert!(
+            err.to_string().contains("server.tls.client_ca_file"),
+            "the refusal must name the field: {err}"
         );
     }
 
@@ -1069,6 +1141,7 @@ allow_origins = ["https://app.example.com"]
         s.tls = Some(ServerTls {
             cert_file: "certs/serv\0er.pem".to_owned(),
             key_file: "certs/server.key".to_owned(),
+            client_ca_file: None,
         });
         let err = s.validate().expect_err("a NUL path must be refused");
         assert!(

@@ -56,7 +56,8 @@ use qqq_io::listener::{ListenAddr, Shutdown};
 use qqq_serve::access_log::{Format, Level, Logger, Redactor};
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::server::{
-    Dispatch, Handler, MANIFEST_REV_UNKNOWN, ServerConfig, access_record, level_of, serve,
+    Dispatch, Handler, MANIFEST_REV_UNKNOWN, ServerConfig, TenantDispatch, access_record, level_of,
+    serve,
 };
 use qqq_serve::{RequestHead, Response, RouteMatch, Version};
 
@@ -110,7 +111,7 @@ impl Server {
             if let Err(e) = serve(
                 config,
                 table(),
-                Dispatch::flat(handler),
+                TenantDispatch::new(Dispatch::flat(handler)),
                 local,
                 Logger::new(Format::Json, Level::Error),
             )

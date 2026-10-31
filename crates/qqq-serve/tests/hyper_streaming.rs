@@ -33,7 +33,9 @@ use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::metrics::TenantLabels;
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::serve_hyper::serve_hyper_h1;
-use qqq_serve::server::{ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served};
+use qqq_serve::server::{
+    ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served, TenantDispatch,
+};
 use qqq_serve::sse::Event;
 use qqq_serve::stream::{StreamError, StreamWriter};
 use qqq_serve::transport::{HyperLimits, hyper_limits_for};
@@ -136,6 +138,7 @@ struct Hyper {
 
 impl Hyper {
     async fn start(dispatch: Dispatch, pieces: Pieces) -> Self {
+        let dispatch = TenantDispatch::new(dispatch);
         // GET serves events; POST exists so the chunked-body
         // refusal test routes instead of 404ing.
         let table = Arc::new(table_with(&[
@@ -172,6 +175,7 @@ impl Hyper {
                             ws_buffer: &pieces.ws_buffer,
                             tenant_labels: &pieces.tenant_labels,
                         tenant_hosts: None,
+                        peer_identity: None,
                         };
                         last = serve_hyper_h1(
                             stream,
@@ -476,6 +480,7 @@ fn h2_conn_ctx<'a>(pieces: &'a Pieces, id: &'a ConnectionId) -> ConnectionContex
         ws_buffer: &pieces.ws_buffer,
         tenant_labels: &pieces.tenant_labels,
         tenant_hosts: None,
+        peer_identity: None,
     }
 }
 
@@ -502,7 +507,13 @@ async fn hyper_h2_streaming_delivers_events_as_data() {
         ..default_limits()
     };
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
-    let serve = serve_hyper_h2(server_io, Arc::clone(&table), dispatch, limits, &ctx);
+    let serve = serve_hyper_h2(
+        server_io,
+        Arc::clone(&table),
+        TenantDispatch::new(dispatch),
+        limits,
+        &ctx,
+    );
     let shutdown = pieces.shutdown.clone();
     let client = async move {
         let mut io = client_io;
@@ -581,7 +592,13 @@ async fn hyper_h2_parked_streaming_handler_dies_with_the_connection() {
         ..default_limits()
     };
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
-    let serve = serve_hyper_h2(server_io, Arc::clone(&table), dispatch, limits, &ctx);
+    let serve = serve_hyper_h2(
+        server_io,
+        Arc::clone(&table),
+        TenantDispatch::new(dispatch),
+        limits,
+        &ctx,
+    );
     let shutdown = pieces.shutdown.clone();
     let client = async move {
         let mut io = client_io;
@@ -706,7 +723,13 @@ async fn hyper_h2_streaming_data_without_length_reaches_the_handler() {
         ..default_limits()
     };
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
-    let serve = serve_hyper_h2(server_io, Arc::clone(&table), dispatch, limits, &ctx);
+    let serve = serve_hyper_h2(
+        server_io,
+        Arc::clone(&table),
+        TenantDispatch::new(dispatch),
+        limits,
+        &ctx,
+    );
     let shutdown = pieces.shutdown.clone();
     let client = async move {
         let mut io = client_io;

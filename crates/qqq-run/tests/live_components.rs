@@ -464,7 +464,7 @@ async fn the_same_listener_serves_the_replacement() {
     let task = tokio::spawn(qqq_serve::serve(
         config,
         routes,
-        qqq_serve::Dispatch::flat(live.dispatch()),
+        qqq_serve::TenantDispatch::new(qqq_serve::Dispatch::flat(live.dispatch())),
         shutdown.clone(),
         qqq_serve::access_log::Logger::new(
             qqq_serve::access_log::Format::Json,

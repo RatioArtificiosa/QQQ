@@ -802,6 +802,17 @@
           "description": "The PEM certificate chain file, leaf first.",
           "type": "string"
         },
+        "client_ca_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The PEM client-CA bundle file, when present."
+        },
         "key_file": {
           "description": "The PEM private key file.",
           "type": "string"
@@ -860,6 +871,13 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "The `TenantHosts` table.",
       "properties": {
+        "components": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Tenant label to artifact package name, e.g. `{ \"shop\" = \"shop-app\" }`.",
+          "type": "object"
+        },
         "hosts": {
           "additionalProperties": {
             "type": "string"

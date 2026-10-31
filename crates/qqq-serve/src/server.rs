@@ -302,7 +302,45 @@ pub struct Dispatch {
     /// ``the `id` field is required`` -- the bytes had crossed the socket and been
     /// thrown away. A handler that cannot see the body cannot serve any write request.
     pub body: Arc<std::collections::BTreeMap<String, crate::body_bytes::BodyHandler>>,
+    /// Server-sent-events handlers, by the route's `handler` name.
+    ///
+    /// An SSE route needs two handlers where every other kind needs one: a
+    /// pre-head gate (did the guest answer an event stream at all?) and the
+    /// streaming poll loop (one guest call per event). The gate must run
+    /// before the 200 head commits — both drivers commit 200 before the
+    /// streaming handler runs — so a non-event answer is refused with 502
+    /// rather than truncating a stream that already started.
+    pub sse: Arc<std::collections::BTreeMap<String, SseHandlers>>,
 }
+
+/// The two halves of serving one server-sent-events route.
+///
+/// Split because they run at different times with different contracts: the
+/// gate runs once, pre-head, and its answer decides 502 vs stream; the
+/// poll loop runs after the head commits and must never produce a status.
+/// One struct rather than two map entries so a route cannot end up with a
+/// gate and no loop (or the reverse) — a half-wired SSE route would either
+/// buffer forever or stream without ever checking the content type.
+#[derive(Clone)]
+pub struct SseHandlers {
+    /// The one-shot content gate: 200 plus `text/event-stream` to proceed.
+    /// Its body, when it passes, is the stream's first event.
+    pub gate: crate::body_bytes::BodyHandler,
+    /// Builds the multi-shot poll loop for one stream, bound to that
+    /// request's tenant: the guest calls below must attribute to the
+    /// tenant the serve path resolved, and a bridge built once at
+    /// registration has no request to read it from.
+    pub stream: SseStreamFactory,
+}
+
+/// Builds the per-request poll loop for one SSE stream.
+///
+/// A factory rather than a handler because the loop needs the request's
+/// tenant and the registration site has none: threading the tenant
+/// through the shared [`StreamingHandler`] type would touch every
+/// streaming caller for one route kind's benefit.
+pub type SseStreamFactory =
+    std::sync::Arc<dyn Fn(&str) -> crate::stream::StreamingHandler + Send + Sync>;
 
 impl Dispatch {
     /// A dispatcher with only a flat handler — no streaming routes.
@@ -313,6 +351,7 @@ impl Dispatch {
             streaming: Arc::new(std::collections::BTreeMap::new()),
             websocket: Arc::new(std::collections::BTreeMap::new()),
             body: Arc::new(std::collections::BTreeMap::new()),
+            sse: Arc::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -332,6 +371,30 @@ impl Dispatch {
     #[must_use]
     pub fn streaming_for(&self, name: &str) -> Option<&crate::stream::StreamingHandler> {
         self.streaming.get(name)
+    }
+
+    /// Register the gate plus the poll-loop factory for an SSE route's
+    /// handler name.
+    ///
+    /// Both halves travel together (see [`SseHandlers`]): registering only
+    /// the gate would buffer every stream, and only the loop would stream
+    /// without ever checking the content type.
+    #[must_use]
+    pub fn with_sse(
+        mut self,
+        name: impl Into<String>,
+        gate: crate::body_bytes::BodyHandler,
+        stream: SseStreamFactory,
+    ) -> Self {
+        let sse = Arc::make_mut(&mut self.sse);
+        sse.insert(name.into(), SseHandlers { gate, stream });
+        self
+    }
+
+    /// The SSE handlers for a name, if the route streams events.
+    #[must_use]
+    pub fn sse_for(&self, name: &str) -> Option<&SseHandlers> {
+        self.sse.get(name)
     }
 
     /// Register a WebSocket handler for a route's handler name.
@@ -368,6 +431,55 @@ impl Dispatch {
     #[must_use]
     pub fn body_for(&self, name: &str) -> Option<&crate::body_bytes::BodyHandler> {
         self.body.get(name)
+    }
+}
+
+/// Which component answers a request: one dispatcher per tenant.
+///
+/// The project always serves a default component; `[server.tenants]
+/// components` maps tenant labels to their own components. Selection keys
+/// on the *resolved* tenant — the same label the gates ran under and the
+/// records carry — so dispatch, policy, and attribution cannot disagree
+/// about whose request this is. A tenant with no mapping (including a
+/// peer-derived label, a CN the operator never mapped, or an explicitly
+/// pinned fingerprint the mapping does not name) is served by the
+/// default component: unmapped means default, never another tenant's
+/// component and never a refusal — refusal is the 421 the resolver
+/// already answers for unknown hosts, not this layer's job.
+#[derive(Clone)]
+pub struct TenantDispatch {
+    default: Dispatch,
+    tenants: std::collections::BTreeMap<String, Dispatch>,
+}
+
+impl TenantDispatch {
+    /// A single-component dispatcher: every tenant is served by `default`.
+    #[must_use]
+    pub fn new(default: Dispatch) -> Self {
+        Self {
+            default,
+            tenants: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Register a tenant's own component dispatcher.
+    #[must_use]
+    pub fn with_tenant(mut self, tenant: impl Into<String>, dispatch: Dispatch) -> Self {
+        self.tenants.insert(tenant.into(), dispatch);
+        self
+    }
+
+    /// The dispatcher for a resolved tenant: its own component when the
+    /// manifest mapped one, the default otherwise.
+    #[must_use]
+    pub fn for_tenant(&self, tenant: &str) -> &Dispatch {
+        self.tenants.get(tenant).unwrap_or(&self.default)
+    }
+
+    /// Whether any tenant has its own component.
+    #[must_use]
+    pub fn has_tenants(&self) -> bool {
+        !self.tenants.is_empty()
     }
 }
 
@@ -861,7 +973,7 @@ async fn close_refused(mut stream: TcpStream, tls: bool) {
 async fn serve_negotiated_stream(
     stream: ConnStream,
     table: std::sync::Arc<RouteTable>,
-    dispatch: Dispatch,
+    dispatch: TenantDispatch,
     connection_config: std::sync::Arc<crate::conn::ConnectionConfig>,
     ctx: &ConnectionContext<'_>,
 ) -> Served {
@@ -880,6 +992,22 @@ async fn serve_negotiated_stream(
     }
 }
 
+/// Extract the verified client identity from an accepted stream, if any.
+///
+/// A TLS connection that presented a verified chain carries its identity;
+/// cleartext carries none. Extracted from `serve` because the accept loop
+/// is at its line budget without it — which is what clippy's
+/// `too_many_lines` asked for.
+#[must_use]
+fn peer_identity_of(stream: &ConnStream) -> Option<crate::tls::PeerIdentity> {
+    match stream {
+        ConnStream::Tls(tls) => {
+            crate::tls::PeerIdentity::from_verified(tls.get_ref().1.peer_certificates())
+        }
+        ConnStream::Plain(_) => None,
+    }
+}
+
 /// # Errors
 ///
 /// * `QQQ-6002` — the listener could not bind. The error names the address and
@@ -889,7 +1017,7 @@ async fn serve_negotiated_stream(
 pub async fn serve(
     config: ServerConfig,
     table: RouteTable,
-    dispatch: Dispatch,
+    dispatch: TenantDispatch,
     shutdown: Shutdown,
     logger: Logger,
 ) -> Result<()> {
@@ -1053,6 +1181,12 @@ pub async fn serve(
                     ws_buffer: &shared.ws_buffer,
                     tenant_labels: &shared.tenant_labels,
                     tenant_hosts: shared.tenant_hosts.as_ref(),
+                    // Verified at handshake by rustls against the configured
+                    // roots — a certificate that did not verify aborted the
+                    // handshake, so a value here is an authenticated identity
+                    // and `None` is an unattested connection, never a
+                    // default identity.
+                    peer_identity: peer_identity_of(&stream),
                 };
                 // HTTP/2 on negotiated ALPN (`SRV-023`): same table,
                 // dispatch, limits, and tenant context; the accept loop
@@ -1217,27 +1351,65 @@ pub enum TenantResolution<'a> {
     Unknown(String),
 }
 
-/// Resolve a request's tenant from its `Host` header.
+/// What a request carries beyond the peer address for tenant resolution.
 ///
-/// `hosts` is the manifest's `[server.tenants]` map (or `None` when the
-/// section is absent); `fallback` is the connection's peer-derived label.
-/// Matching is case-insensitive with any `:port` suffix stripped, because
-/// `Host: SHOP.EXAMPLE.COM:8443` and `shop.example.com` name the same
-/// deployment — and a table that matched only one spelling would refuse
-/// the other, which reads as an outage rather than a policy.
+/// One struct rather than three parameters because the precedence rule —
+/// verified identity first, then the `Host` table, then the peer — must
+/// live in exactly one place. A caller passing the three pieces
+/// separately could apply them in any order, and two orders that disagree
+/// about which tenant a request belongs to are a misattribution bug.
+///
+/// Two lifetimes: the looked-up inputs (`hosts`, `host`, `identity`) may
+/// borrow shorter than the peer-derived `fallback`, because the answer
+/// only ever borrows the fallback — a resolved label is owned, and a
+/// refusal names what it saw. Forcing one lifetime would demand the head
+/// outlive the connection context, which no caller can satisfy.
+#[derive(Debug, Clone, Copy)]
+pub struct TenantSources<'h, 'f> {
+    /// The manifest's `[server.tenants]` map, or `None` when absent.
+    pub hosts: Option<&'h std::collections::BTreeMap<String, String>>,
+    /// The request's `Host` header, if it has one.
+    pub host: Option<&'h str>,
+    /// The connection's peer-derived label.
+    pub fallback: &'f str,
+    /// The verified client identity, when the handshake produced one.
+    pub identity: Option<&'h crate::tls::PeerIdentity>,
+}
+
+/// Resolve a request's tenant: verified identity first, then the `Host`
+/// table, then the peer-derived label.
+///
+/// The precedence is the security argument. A client certificate chained
+/// to a trusted CA was verified at handshake; the `Host` header is
+/// client-controlled bytes that arrive after admission. Letting the header
+/// override the identity would let any client claim any tenant, so the
+/// identity wins whenever it exists. Matching is case-insensitive with
+/// any `:port` suffix stripped, because `Host: SHOP.EXAMPLE.COM:8443`
+/// and `shop.example.com` name the same deployment — and a table that
+/// matched only one spelling would refuse the other, which reads as an
+/// outage rather than a policy.
 #[must_use]
-pub fn resolve_request_tenant<'a>(
-    hosts: Option<&std::collections::BTreeMap<String, String>>,
-    host_header: Option<&str>,
-    fallback: &'a str,
-) -> TenantResolution<'a> {
-    let Some(hosts) = hosts else {
-        return TenantResolution::Fallback(fallback);
+pub fn resolve_request_tenant<'f>(sources: TenantSources<'_, 'f>) -> TenantResolution<'f> {
+    // Verified identity first: the certificate chained to a trusted CA at
+    // handshake. The common name names the tenant; a subject without one
+    // falls back to the fingerprint, which is stable and unique where the
+    // name is neither.
+    if let Some(identity) = sources.identity {
+        let label = match identity.subject() {
+            subject if subject == crate::tls::PeerIdentity::UNNAMED_SUBJECT => {
+                identity.fingerprint().to_owned()
+            }
+            subject => subject.to_owned(),
+        };
+        return TenantResolution::Resolved(label);
+    }
+    let Some(hosts) = sources.hosts else {
+        return TenantResolution::Fallback(sources.fallback);
     };
     if hosts.is_empty() {
-        return TenantResolution::Fallback(fallback);
+        return TenantResolution::Fallback(sources.fallback);
     }
-    let raw = host_header.unwrap_or("").trim();
+    let raw = sources.host.unwrap_or("").trim();
     // Same split as the loopback allow-list (`ws::host_name`): one rule
     // for what a port is, or the two matchers disagree about the host.
     let normalized = crate::ws::host_name(raw);
@@ -1821,7 +1993,7 @@ pub(crate) async fn dispatch_off_thread(
         None => flat(&head, &matched),
     })
     .await
-    .unwrap_or_else(|_| Response::text(500, "host handler failed"))
+    .unwrap_or_else(|_| crate::response::handler_panicked())
 }
 
 fn dispatch_flat(
@@ -2017,6 +2189,70 @@ async fn serve_preflight(
     Served::HandlerClosed
 }
 
+/// Serve one request on a server-sent-events route.
+///
+/// The gate runs first, off the executor thread like every other guest
+/// call: a guest that answers anything but `200` plus `text/event-stream`
+/// is refused with the gate's 502 before the 200 commits, exactly as the
+/// one-shot path did. On a pass the gate's answer is the stream's first
+/// event, so the guest is never executed twice for it.
+#[allow(clippy::too_many_arguments)]
+async fn serve_sse_route(
+    stream: &mut ConnStream,
+    head: &RequestHead,
+    path: &str,
+    matched: &RouteMatch,
+    sse: &SseHandlers,
+    ctx: &ConnectionContext<'_>,
+    tenant: &str,
+    span: u64,
+) -> Served {
+    let gate = sse.gate.clone();
+    let gate_head = head.clone();
+    let gate_tenant = tenant.to_owned();
+    let gate = tokio::task::spawn_blocking(move || {
+        gate(
+            &gate_head,
+            &crate::body_bytes::BodyBytes::Absent,
+            &gate_tenant,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| crate::response::handler_panicked());
+    // The gate's contract: 200 means an event stream whose first event is
+    // the body. Anything else is the specified fail-closed, written like
+    // every other special-route refusal: access-recorded, then closed.
+    if gate.status != 200 {
+        emit_record(
+            ctx.logger,
+            access_record(head, path, &gate, tenant, ctx.id.trace, span),
+        );
+        let bytes = response::write_response(&gate, head.version, false, is_head(head));
+        if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+            return Served::ClientClosed;
+        }
+        let _ = stream.shutdown().await;
+        return Served::HandlerClosed;
+    }
+    let mut gate = gate;
+    // The body travels as the first event, not in the head: framing a
+    // declared length on a stream whose end is unknown would desynchronise
+    // the connection, which is why `write_stream_head` refuses one.
+    let first = std::mem::take(&mut gate.body);
+    serve_streaming(
+        stream,
+        &(sse.stream)(tenant),
+        head,
+        path,
+        matched,
+        ctx,
+        tenant,
+        span,
+        crate::stream::StreamStart { head: gate, first },
+    )
+    .await
+}
+
 /// Serve one request through a streaming handler.
 ///
 /// # Why this is separate from `serve_connection`
@@ -2043,17 +2279,25 @@ async fn serve_streaming(
     ctx: &ConnectionContext<'_>,
     tenant: &str,
     span: u64,
+    start: crate::stream::StreamStart,
 ) -> Served {
     // The status is not on the wire until the handler writes a head, so a handler that
     // fails before `begin` could still produce an error response. `begin` is the commit.
-    let streaming_response = Response::status(200);
+    // A generic stream opens flat (200, no headers, no first bytes); an SSE
+    // stream opens from its gate answer (200 plus the event-stream
+    // headers, first event already in hand).
     let Ok(mut writer) =
-        crate::stream::StreamWriter::begin(stream, &streaming_response, head.version).await
+        crate::stream::StreamWriter::begin(stream, &start.head, head.version).await
     else {
         // The client was already gone, or the socket failed before anything was
         // committed. Nothing to log beyond the connection outcome.
         return Served::ClientClosed;
     };
+    if !start.first.is_empty() && writer.write(&start.first).await.is_err() {
+        // The client went away between the head and the first event: the
+        // stream never started, so this is a disconnect, not a failure.
+        return Served::ClientClosed;
+    }
 
     // Scoped so the mutable borrow of `writer` ends before `finish` needs it.
     // `StreamingHandler` takes `&'s mut StreamWriter<'w>` and returns a future borrowing
@@ -2074,7 +2318,7 @@ async fn serve_streaming(
         &crate::stream::StreamRecord {
             head,
             path,
-            status: streaming_response.status,
+            status: start.head.status,
             outcome,
             written,
             tenant,
@@ -2201,6 +2445,15 @@ pub struct ConnectionContext<'a> {
     /// Borrowed like every other field here: one shared table means no two
     /// connections can disagree about which host belongs to which tenant.
     pub tenant_hosts: Option<&'a Arc<std::collections::BTreeMap<String, String>>>,
+    /// The verified client identity, or `None` when the handshake produced
+    /// none (cleartext, or mTLS that did not request a certificate).
+    ///
+    /// Owned: extracted once from the connection's own TLS session at
+    /// accept time, so every request on the connection attributes to the
+    /// same principal without re-reading the handshake. `None` is not an
+    /// anonymous identity — it means unattested, and tenant resolution
+    /// treats it as no identity rather than a default one.
+    pub peer_identity: Option<crate::tls::PeerIdentity>,
 }
 
 /// Allocates a trace id per accepted connection.
@@ -2387,7 +2640,7 @@ async fn serve_flat_request(
 async fn serve_connection(
     mut stream: ConnStream,
     table: &RouteTable,
-    dispatch: &Dispatch,
+    dispatch: &TenantDispatch,
     config: &ConnectionConfig,
     ctx: &ConnectionContext<'_>,
 ) -> Served {
@@ -2447,22 +2700,25 @@ async fn serve_connection(
         let client_wants_keep_alive = wants_keep_alive(&head);
         conn.on_request_parsed(client_wants_keep_alive);
 
-        // --- Tenant: resolve the Host header against the manifest map ----
+        // --- Tenant: resolve the verified identity, else the Host header ----
         //
         // Identity before policy: every gate below (loopback allow-list,
         // budgets, limits, auth) and every record after it must agree on
         // whose request this is, so resolution happens once, here, before
-        // any of them runs. The connection-level admission already ran on
-        // the peer key and is unaffected — a client-controlled header can
-        // never gate admission, only attribute an admitted request or
+        // any of them runs. A verified client identity outranks the Host
+        // table — the certificate chained at handshake, while the header
+        // is client-controlled. The connection-level admission already ran
+        // on the peer key and is unaffected — a client-controlled header
+        // can never gate admission, only attribute an admitted request or
         // refuse it. An unmapped host with a configured table is refused
         // with 421 rather than served under a guessed tenant.
         let mapped_tenant: Option<String>;
-        let tenant: &str = match resolve_request_tenant(
-            tenant_hosts.map(AsRef::as_ref),
-            head.header("host"),
-            tenant,
-        ) {
+        let tenant: &str = match resolve_request_tenant(TenantSources {
+            hosts: tenant_hosts.map(AsRef::as_ref),
+            host: head.header("host"),
+            fallback: tenant,
+            identity: ctx.peer_identity.as_ref(),
+        }) {
             TenantResolution::Resolved(label) => {
                 mapped_tenant = Some(label);
                 mapped_tenant.as_deref().unwrap_or(tenant)
@@ -2538,6 +2794,11 @@ async fn serve_connection(
         // * A body-bearing special route is rejected below before its handler or
         //   protocol transition. These routes have no HTTP body contract, so
         //   refusing them keeps the framing unambiguous.
+        // The component answers the resolved tenant: select its
+        // dispatcher here, where the label is known, so every lookup
+        // below (upgrade, stream, flat) resolves handler names in the
+        // tenant's own registry rather than the default one.
+        let dispatch = dispatch.for_tenant(tenant);
         if let Some(served) = serve_special_route(
             &mut stream,
             &head,
@@ -2652,10 +2913,22 @@ async fn serve_special_route(
 
     if special_route_has_body(head)
         && (dispatch.websocket_for(&m.handler).is_some()
-            || dispatch.streaming_for(&m.handler).is_some())
+            || dispatch.streaming_for(&m.handler).is_some()
+            || dispatch.sse_for(&m.handler).is_some())
     {
         *span_seq += 1;
         return Some(reject_special_route_body(stream, head).await);
+    }
+
+    // Server-sent events: the gate runs here, before the 200 commits, so
+    // a guest that answers no event stream is refused with 502 rather
+    // than truncating a stream that already started.
+    if let Some(sse) = dispatch.sse_for(&m.handler) {
+        *span_seq += 1;
+        let matched = route_match_of(&m);
+        return Some(
+            serve_sse_route(stream, head, path, &matched, sse, ctx, tenant, *span_seq).await,
+        );
     }
 
     if let Some(ws_handler) = dispatch.websocket_for(&m.handler) {
@@ -2692,6 +2965,7 @@ async fn serve_special_route(
                 ctx,
                 tenant,
                 *span_seq,
+                crate::stream::StreamStart::flat(),
             )
             .await,
         );
@@ -3656,42 +3930,120 @@ mod tests {
         let hosts: BTreeMap<String, String> =
             BTreeMap::from([("shop.example.com".to_owned(), "shop".to_owned())]);
         assert_eq!(
-            resolve_request_tenant(Some(&hosts), Some("shop.example.com"), "127.0.0.1"),
+            resolve_with(Some(&hosts), Some("shop.example.com"), "127.0.0.1"),
             TenantResolution::Resolved("shop".to_owned())
         );
         // Port suffixes and case do not change the deployment named.
         assert_eq!(
-            resolve_request_tenant(Some(&hosts), Some("SHOP.EXAMPLE.COM:8443"), "127.0.0.1"),
+            resolve_with(Some(&hosts), Some("SHOP.EXAMPLE.COM:8443"), "127.0.0.1"),
             TenantResolution::Resolved("shop".to_owned())
         );
         assert_eq!(
-            resolve_request_tenant(Some(&hosts), Some("unknown.example.com"), "127.0.0.1"),
+            resolve_with(Some(&hosts), Some("unknown.example.com"), "127.0.0.1"),
             TenantResolution::Unknown("unknown.example.com".to_owned())
         );
         // An empty or missing host with a configured table is unmapped, not
         // the peer: silently falling back would serve the request under a
         // tenant the table never named.
         assert_eq!(
-            resolve_request_tenant(Some(&hosts), None, "127.0.0.1"),
+            resolve_with(Some(&hosts), None, "127.0.0.1"),
             TenantResolution::Unknown(String::new())
         );
         // IPv6 literals keep their brackets out of the match.
         assert_eq!(
-            resolve_request_tenant(Some(&hosts), Some("[::1]:8080"), "127.0.0.1"),
+            resolve_with(Some(&hosts), Some("[::1]:8080"), "127.0.0.1"),
             TenantResolution::Unknown("[::1]".to_owned())
         );
         assert_eq!(
-            resolve_request_tenant(None, Some("shop.example.com"), "127.0.0.1"),
+            resolve_with(None, Some("shop.example.com"), "127.0.0.1"),
             TenantResolution::Fallback("127.0.0.1")
         );
         assert_eq!(
-            resolve_request_tenant(
+            resolve_with(
                 Some(&BTreeMap::new()),
                 Some("shop.example.com"),
                 "127.0.0.1"
             ),
             TenantResolution::Fallback("127.0.0.1")
         );
+    }
+
+    /// The unattested-host leg of [`resolve_request_tenant`], factored out
+    /// so the precedence test above stays about the table and the identity
+    /// test below stays about the certificate: an item after statements
+    /// would read as part of the test, not as the shared rule.
+    fn resolve_with<'h, 'f>(
+        hosts: Option<&'h std::collections::BTreeMap<String, String>>,
+        host: Option<&'h str>,
+        fallback: &'f str,
+    ) -> TenantResolution<'f> {
+        resolve_request_tenant(TenantSources {
+            hosts,
+            host,
+            fallback,
+            identity: None,
+        })
+    }
+
+    /// A verified client identity outranks the Host table: the certificate
+    /// chained to a trusted CA at handshake, while the Host header is
+    /// client-controlled bytes. Without an identity the Host rules stand —
+    /// unmapped hosts with a configured table still refuse with 421.
+    #[test]
+    fn tenant_resolution_prefers_verified_identity_over_host() {
+        use std::collections::BTreeMap;
+        let hosts: BTreeMap<String, String> =
+            BTreeMap::from([("shop.example.com".to_owned(), "shop".to_owned())]);
+        let id = peer_identity_with_cn("tenant-c");
+        // Identity wins even when the Host maps to a different tenant.
+        assert_eq!(
+            resolve_request_tenant(TenantSources {
+                hosts: Some(&hosts),
+                host: Some("shop.example.com"),
+                fallback: "127.0.0.1",
+                identity: Some(&id),
+            }),
+            TenantResolution::Resolved("tenant-c".to_owned())
+        );
+        // And when the Host is unmapped: no 421 for an authenticated client.
+        assert_eq!(
+            resolve_request_tenant(TenantSources {
+                hosts: Some(&hosts),
+                host: Some("evil.example.com"),
+                fallback: "127.0.0.1",
+                identity: Some(&id),
+            }),
+            TenantResolution::Resolved("tenant-c".to_owned())
+        );
+        // No identity: the Host table decides exactly as before.
+        assert_eq!(
+            resolve_request_tenant(TenantSources {
+                hosts: Some(&hosts),
+                host: Some("evil.example.com"),
+                fallback: "127.0.0.1",
+                identity: None,
+            }),
+            TenantResolution::Unknown("evil.example.com".to_owned())
+        );
+    }
+
+    /// A real client certificate with the given common name, for identity
+    /// precedence tests: `PeerIdentity` reports what rustls verified, so
+    /// the fixture must be genuinely verifiable structure, not hand bytes.
+    #[cfg(test)]
+    fn peer_identity_with_cn(cn: &str) -> crate::tls::PeerIdentity {
+        let mut params =
+            rcgen::CertificateParams::new(vec![cn.to_owned()]).expect("rcgen accepts the SAN");
+        params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, cn);
+            dn
+        };
+        let key = rcgen::KeyPair::generate().expect("rcgen generates a key");
+        let cert = params.self_signed(&key).expect("rcgen self-signs");
+        let der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
+        crate::tls::PeerIdentity::from_verified(Some(std::slice::from_ref(&der)))
+            .expect("a present certificate is an identity")
     }
 
     /// The header name and value are matched case-insensitively.

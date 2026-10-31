@@ -381,6 +381,37 @@ impl<'a> StreamWriter<'a> {
     }
 }
 
+/// The opening of a streaming response: the head to commit plus the
+/// first body bytes.
+///
+/// A generic streaming route starts flat: status 200, no headers, no
+/// first bytes. An SSE route starts from its gate answer: status 200
+/// plus the event-stream headers, and the gate's body as the first
+/// event — so the gate's guest execution is the stream's first event,
+/// not a rehearsal for it. One struct rather than two parameters so the
+/// head and the first bytes cannot disagree about which response opened
+/// the stream.
+#[derive(Debug, Clone)]
+pub struct StreamStart {
+    /// The response whose status and headers go on the wire. The body, if
+    /// any, is ignored here — framing a declared length on a stream whose
+    /// end is unknown would desynchronise the connection.
+    pub head: Response,
+    /// Bytes written immediately after the head, before the handler runs.
+    pub first: Vec<u8>,
+}
+
+impl StreamStart {
+    /// A flat start: 200, no headers, no first bytes.
+    #[must_use]
+    pub fn flat() -> Self {
+        Self {
+            head: Response::status(200),
+            first: Vec::new(),
+        }
+    }
+}
+
 /// A handler that streams its response.
 ///
 /// Takes `&mut StreamWriter` rather than returning one, for the reason `Handler` takes

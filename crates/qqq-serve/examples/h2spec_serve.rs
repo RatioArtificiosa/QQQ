@@ -19,7 +19,9 @@ use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::metrics::TenantLabels;
 use qqq_serve::route::{Method, Route, RouteTable};
 use qqq_serve::serve_hyper::serve_hyper_h2;
-use qqq_serve::server::{ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch};
+use qqq_serve::server::{
+    ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, TenantDispatch,
+};
 use qqq_serve::transport::{HyperLimits, hyper_limits_for};
 use qqq_serve::ws::WsConfig;
 use qqq_serve::{ConnectionConfig, RequestHead, Response};
@@ -57,10 +59,10 @@ async fn main() {
         die("route table rejected the route");
     }
     let table = Arc::new(table);
-    let dispatch: Dispatch = Dispatch::flat({
+    let dispatch: TenantDispatch = TenantDispatch::new(Dispatch::flat({
         let h: Handler = Arc::new(hello);
         h
-    });
+    }));
     let shutdown = Shutdown::new();
     let logger = Logger::new(Format::Json, Level::Error);
     let ws = WsConfig::default();
@@ -108,7 +110,7 @@ async fn main() {
 
 struct ServeTask {
     table: Arc<RouteTable>,
-    dispatch: Dispatch,
+    dispatch: TenantDispatch,
     shutdown: Shutdown,
     logger: Logger,
     ws: WsConfig,
@@ -139,6 +141,7 @@ impl ServeTask {
             ws_buffer: &self.ws_buffer,
             tenant_labels: &self.tenant_labels,
             tenant_hosts: None,
+            peer_identity: None,
         };
         let _ = serve_hyper_h2(
             self.stream,

@@ -42,7 +42,7 @@ use tokio::net::TcpStream;
 use qqq_io::listener::{ListenAddr, Shutdown};
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method, Route, RouteTable};
-use qqq_serve::server::{Dispatch, Handler, ServerConfig, serve};
+use qqq_serve::server::{Dispatch, Handler, ServerConfig, TenantDispatch, serve};
 use qqq_serve::tls::{CertificateSource, TlsConfig};
 use qqq_serve::{Response, RouteMatch};
 
@@ -170,7 +170,7 @@ impl TlsServer {
             if let Err(e) = serve(
                 config,
                 table(),
-                Dispatch::flat(hello_handler()),
+                TenantDispatch::new(Dispatch::flat(hello_handler())),
                 local,
                 Logger::new(Format::Json, Level::Error),
             )

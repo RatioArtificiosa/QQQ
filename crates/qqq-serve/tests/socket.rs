@@ -45,7 +45,7 @@ use qqq_io::listener::{ListenAddr, Shutdown};
 
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method, Route, RouteTable};
-use qqq_serve::server::{Dispatch, Handler, ServerConfig, serve};
+use qqq_serve::server::{Dispatch, Handler, ServerConfig, TenantDispatch, serve};
 use qqq_serve::{Response, RouteMatch};
 
 /// A running server, stopped when dropped.
@@ -93,7 +93,15 @@ impl Server {
             // the test harness output. Errors still surface, because a test that
             // hides a server-side 500 is a test that passes for the wrong reason.
             let logger = Logger::new(Format::Json, Level::Error);
-            if let Err(e) = serve(config, table, Dispatch::flat(handler), local, logger).await {
+            if let Err(e) = serve(
+                config,
+                table,
+                TenantDispatch::new(Dispatch::flat(handler)),
+                local,
+                logger,
+            )
+            .await
+            {
                 // Printed rather than swallowed: a bind failure would otherwise
                 // surface as "connection refused" in every assertion below,
                 // with nothing saying why.

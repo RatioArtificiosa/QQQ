@@ -366,7 +366,7 @@ mod tests {
             let _ = qqq_serve::server::serve(
                 qqq_serve::server::ServerConfig::for_addr(listen),
                 table,
-                dispatch,
+                qqq_serve::server::TenantDispatch::new(dispatch),
                 local,
                 qqq_serve::access_log::Logger::new(
                     qqq_serve::access_log::Format::Json,

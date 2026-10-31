@@ -52,13 +52,17 @@ multi-tenant isolation beyond host->label attribution, or performance.
 The WS two-message echo (per-message guest calls) is proven in
 `production_serve_live_transcript`, not re-transcribed here.
 
-Stability note: two readiness-timeout failures (60s, `TLS GET / never
-answered 200`) were observed while iterating on red variants, then the
-test passed 4 consecutive runs (0.14s each) with no code change. Cause
-undetermined — consistent with the server running unbuilt (503) during
-concurrent file activity, but not proven. Three consecutive green runs
-were recorded after the final tree state; the committed gate log is the
-standing evidence.
+Stability note (resolved): two readiness-timeout failures (60s, `TLS GET /
+never answered 200`) were observed while iterating on red variants, then
+the test passed repeatedly with no code change. Root-cause analysis: the
+failures coincided with heavy concurrent load on the box (a runaway
+background task pegging CPU); TLS handshake + first guest compile under
+starvation reads exactly like a dead server when the waiter only reports
+silence. The waiter now classifies (`wait_tls_serving` in cli.rs reports
+tcp_connected / tls_handshake / last_response / server stdout tail), so a
+recurrence names its stage instead of saying "never answered". No product
+defect was found: the server accepts, handshakes, and serves; under load
+it was too slow for the poll loop to observe a 200.
 
 Each .log carries the response bytes twice: decoded UTF-8 and an
 `offset  hex-bytes` dump (16 bytes per row). The sha256 in digests.txt

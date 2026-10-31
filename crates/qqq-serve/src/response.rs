@@ -871,6 +871,20 @@ pub fn misdirected(host: &str) -> Response {
     r
 }
 
+/// Build the response for a guest call that never returned: the task was
+/// cancelled or the guest panicked across the blocking boundary.
+///
+/// 502, not 500: the guest is the upstream, and 500 would read as a host
+/// defect in the access record. The body stays generic — a panic payload
+/// can carry guest internals that do not belong on the wire — while the
+/// `X-QQQ-Error` header names the shape for scripts and the record.
+#[must_use]
+pub fn handler_panicked() -> Response {
+    let mut r = Response::text(502, "host handler failed");
+    r.set_header("X-QQQ-Error", "handler-panicked");
+    r
+}
+
 /// Build the response for a path that exists under other methods.
 ///
 /// The `Allow` header is required by RFC 9110 §15.5.6, and it is the part that

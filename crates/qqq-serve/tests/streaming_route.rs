@@ -43,7 +43,7 @@ use tokio::sync::oneshot;
 
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method, Route, RouteTable};
-use qqq_serve::server::{Dispatch, Handler, RouteMatch, ServerConfig, serve};
+use qqq_serve::server::{Dispatch, Handler, RouteMatch, ServerConfig, TenantDispatch, serve};
 use qqq_serve::stream::{StreamError, StreamWriter};
 use qqq_serve::{BodyBytes, BodyHandler, RequestHead, Response};
 
@@ -74,6 +74,7 @@ struct Server {
 
 impl Server {
     async fn start_with_limits(dispatch: Dispatch, limits: TenantLimits) -> Self {
+        let dispatch = TenantDispatch::new(dispatch);
         let addr = free_addr();
         let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
         let shutdown = Shutdown::new();
@@ -100,6 +101,7 @@ impl Server {
     }
 
     async fn start(dispatch: Dispatch) -> Self {
+        let dispatch = TenantDispatch::new(dispatch);
         let addr = free_addr();
         let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
         let shutdown = Shutdown::new();

@@ -3099,12 +3099,20 @@ fn write_live_probe_artifact(s: &Sandbox) {
 /// The package name (`live-probe` → `live_probe.wasm`) is fixed by the
 /// probe projects below; only the guest bytes vary.
 fn write_artifact_wat(s: &Sandbox, wat_source: &str) {
+    write_named_artifact_wat(s, "live-probe", wat_source);
+}
+
+/// Assemble a WAT fixture as a named package's artifact, for projects
+/// that serve more than one component: the file name is what
+/// `find_artifact` resolves a `[server.tenants] components` value to.
+fn write_named_artifact_wat(s: &Sandbox, package: &str, wat_source: &str) {
     let bytes = wat::parse_str(wat_source).expect("the fixture must assemble");
     let dir = target_dir_for(&s.path)
         .join("wasm32-wasip2")
         .join("release");
     std::fs::create_dir_all(&dir).expect("artifact dir must create");
-    std::fs::write(dir.join("live_probe.wasm"), &bytes).expect("artifact must write");
+    let file = format!("{}.wasm", package.replace('-', "_"));
+    std::fs::write(dir.join(file), &bytes).expect("artifact must write");
 }
 
 /// A generated certificate and key, written as PEM into the sandbox.
@@ -3441,6 +3449,38 @@ where
 }
 
 /// H1 over TLS against the real binary: the handshake plus one raw request.
+/// H1 over TLS with a client certificate: the same handshake plus raw
+/// request as `cli_tls_get`, presenting `identity`. Returns the response
+/// text. Extracted for the components proof, where the server requires
+/// client auth and the tenant follows the certificate's common name.
+fn cli_tls_post_auth(port: u16, der: &[u8], identity: ClientIdentity<'_>, raw: &str) -> String {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the TLS client")
+        .block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let config = cli_client_config(der, Some(identity), &[b"http/1.1"]);
+            let connector = tokio_rustls::TlsConnector::from(config);
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect");
+            let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+            let mut stream = connector.connect(name, tcp).await.expect("handshake");
+            stream
+                .write_all(raw.as_bytes())
+                .await
+                .expect("request sends");
+            let mut out = Vec::new();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                stream.read_to_end(&mut out),
+            )
+            .await;
+            String::from_utf8_lossy(&out).into_owned()
+        })
+}
+
 fn cli_tls_get(port: u16, der: &[u8], raw: &str) -> (String, String) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -3448,15 +3488,8 @@ fn cli_tls_get(port: u16, der: &[u8], raw: &str) -> (String, String) {
         .expect("a runtime for the TLS client")
         .block_on(async {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut roots = rustls::RootCertStore::empty();
-            roots
-                .add(rustls::pki_types::CertificateDer::from(der.to_vec()))
-                .expect("server cert is a root here");
-            let mut config = rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+            let config = cli_client_config(der, None, &[b"http/1.1"]);
+            let connector = tokio_rustls::TlsConnector::from(config);
             let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .expect("connect");
@@ -3490,20 +3523,14 @@ fn cli_tls_get(port: u16, der: &[u8], raw: &str) -> (String, String) {
 async fn cli_h2_connect(
     port: u16,
     der: &[u8],
+    identity: Option<ClientIdentity<'_>>,
 ) -> (
     tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
     Option<String>,
 ) {
     use tokio::io::AsyncWriteExt;
-    let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(rustls::pki_types::CertificateDer::from(der.to_vec()))
-        .expect("server cert is a root here");
-    let mut config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec()];
-    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    let config = cli_client_config(der, identity, &[b"h2"]);
+    let connector = tokio_rustls::TlsConnector::from(config);
     let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("connect");
@@ -3542,6 +3569,7 @@ fn cli_h2_request(
     authority: &str,
     path: &str,
     body: Option<&[u8]>,
+    identity: Option<ClientIdentity<'_>>,
 ) -> (Option<String>, Option<u16>, Vec<u8>) {
     use qqq_serve::h2::hpack::{Decoder, Encoder, HeaderField};
 
@@ -3551,7 +3579,7 @@ fn cli_h2_request(
         .expect("a runtime for the H2 client")
         .block_on(async {
             use tokio::io::AsyncWriteExt;
-            let (mut stream, negotiated) = cli_h2_connect(port, der).await;
+            let (mut stream, negotiated) = cli_h2_connect(port, der, identity).await;
             let mut encoder = Encoder::new();
             let mut decoder = Decoder::new();
             let method = if body.is_some() { "POST" } else { "GET" };
@@ -3638,8 +3666,8 @@ fn cli_h2_request(
 /// Extracted from `production_serve_h2_tenant_sse_live` because the
 /// manifest plus the readiness wait exceed the line budget with the
 /// probes, while neither does alone.
-fn write_h2_sse_project() -> (Sandbox, Vec<u8>) {
-    let s = Sandbox::new("test-serve-h2-tenant-sse");
+fn write_h2_sse_project(tag: &str) -> (Sandbox, Vec<u8>) {
+    let s = Sandbox::new(tag);
     let (cert, key, der) = write_cli_tls_fixture(&s);
     s.write(
         "qqq.toml",
@@ -3659,22 +3687,165 @@ fn write_h2_sse_project() -> (Sandbox, Vec<u8>) {
     (s, der)
 }
 
+/// What one TLS readiness probe observed. Each stage is reported rather
+/// than panicked on, so a timeout can say which one never succeeded.
+struct TlsProbe {
+    connected: bool,
+    handshake: bool,
+    response: String,
+}
+
+/// One TLS readiness probe that reports instead of panicking.
+///
+/// `connect` and the handshake are each fallible here (unlike
+/// `cli_tls_get`, which unwraps because the server under test is
+/// already known to serve): a readiness timeout must distinguish "the
+/// port never accepted" from "the handshake never completed" from "the
+/// server answered something other than 200", or an overloaded
+/// environment reads exactly like a dead server.
+/// A client identity for mTLS tests: the certificate DER plus the
+/// private key DER the handshake presents. `None` (no certificate) is
+/// itself a probe — a server that requires client auth must fail it.
+type ClientIdentity<'a> = (&'a [u8], &'a [u8]);
+
+/// One client configuration for every TLS probe below: the server DER
+/// as the only root, the optional client identity, and the ALPN offer.
+/// A single constructor so the H1/H2, authed/authed-less variants cannot
+/// disagree about roots or protocol versions — only about ALPN and
+/// identity, which are the parameters under test.
+fn cli_client_config(
+    der: &[u8],
+    identity: Option<ClientIdentity<'_>>,
+    alpn: &[&[u8]],
+) -> std::sync::Arc<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(der.to_vec()))
+        .expect("server cert is a root here");
+    let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
+    let mut config = match identity {
+        Some((cert_der, key_der)) => {
+            let chain = vec![rustls::pki_types::CertificateDer::from(cert_der.to_vec())];
+            let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+                rustls::pki_types::PrivatePkcs8KeyDer::from(key_der.to_vec()),
+            );
+            builder
+                .with_client_auth_cert(chain, key)
+                .expect("the client identity must be usable")
+        }
+        None => builder.with_no_client_auth(),
+    };
+    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    std::sync::Arc::new(config)
+}
+
+fn cli_tls_probe(
+    port: u16,
+    der: &[u8],
+    identity: Option<ClientIdentity<'_>>,
+    raw: &str,
+) -> TlsProbe {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the TLS client")
+        .block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let config = cli_client_config(der, identity, &[b"http/1.1"]);
+            let connector = tokio_rustls::TlsConnector::from(config);
+            let Ok(tcp) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else {
+                return TlsProbe {
+                    connected: false,
+                    handshake: false,
+                    response: String::new(),
+                };
+            };
+            let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+            let Ok(mut stream) = connector.connect(name, tcp).await else {
+                return TlsProbe {
+                    connected: true,
+                    handshake: false,
+                    response: String::new(),
+                };
+            };
+            // A failed write is a dead connection, not a completed
+            // handshake: the client never even sent its request.
+            if stream.write_all(raw.as_bytes()).await.is_err() {
+                return TlsProbe {
+                    connected: true,
+                    handshake: false,
+                    response: String::new(),
+                };
+            }
+            let mut out = Vec::new();
+            let read = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                stream.read_to_end(&mut out),
+            )
+            .await;
+            // TLS 1.3 completes the client's flight before the server's
+            // alert arrives: `connect` can succeed while the server aborts
+            // (e.g. `CertificateRequired` for a cert-less client), and the
+            // failure surfaces on first read. Zero application bytes plus a
+            // read error therefore means no handshake completed; anything
+            // that flowed — or a clean close, or mere silence — means it did.
+            let completed = !matches!(read, Ok(Err(_)) if out.is_empty());
+            TlsProbe {
+                connected: true,
+                handshake: completed,
+                response: String::from_utf8_lossy(&out).into_owned(),
+            }
+        })
+}
+
 /// Readiness over TLS: the `listening on` announcement is binding, not
 /// serving, and only a served request proves the listener answers.
-fn wait_tls_serving(port: u16, der: &[u8]) {
+///
+/// A timeout classifies instead of reporting silence: whether TCP ever
+/// connected, whether the handshake ever completed, and what the server
+/// last answered (plus its own stdout tail) distinguish an overloaded
+/// environment from a dead server — the two read identically as "never
+/// answered 200" and only one of them is a product defect.
+fn wait_tls_serving(
+    serving: &mut Serving,
+    port: u16,
+    der: &[u8],
+    identity: Option<ClientIdentity<'_>>,
+) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut saw_connect = false;
+    let mut saw_handshake = false;
+    let mut last: String;
     loop {
-        let (_, response) = cli_tls_get(
+        while let Ok(line) = serving.lines.try_recv() {
+            serving.collected.push_str(&line);
+            serving.collected.push('\n');
+        }
+        let probe = cli_tls_probe(
             port,
             der,
+            identity,
             "GET / HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n",
         );
-        if response.starts_with("HTTP/1.1 200") {
+        saw_connect = saw_connect || probe.connected;
+        saw_handshake = saw_handshake || probe.handshake;
+        last = probe.response;
+        if last.starts_with("HTTP/1.1 200") {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "TLS GET / never answered 200 within 60s",
+            "TLS GET / never answered 200 within 60s: tcp_connected={saw_connect} \
+             tls_handshake={saw_handshake} last_response={:?} server_output_tail={:?}",
+            last.chars().take(200).collect::<String>(),
+            serving
+                .collected
+                .char_indices()
+                .rev()
+                .find_map(|(i, _)| {
+                    (serving.collected.len() - i > 2000).then_some(&serving.collected[i..])
+                })
+                .unwrap_or(&serving.collected),
         );
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -3695,19 +3866,16 @@ fn wait_tls_serving(port: u16, der: &[u8]) {
 ///    headers the SSE bridge adds — a served stream, not the 502 the echo
 ///    guest (no event content type) correctly draws in
 ///    `production_serve_live_transcript`.
-#[test]
-fn production_serve_h2_tenant_sse_live() {
-    let (s, der) = write_h2_sse_project();
-
-    let addr = free_addr();
-    let port = addr.port();
-    let mut serving = Serving::spawn_with(&s, &addr, &["--tls"]);
-    serving.wait_for("listening on", 120);
-    wait_tls_serving(port, &der);
-
-    // 1. H2 serves the real guest: negotiated `h2`, status 200, guest body.
+// H2 serves the real guest: negotiated `h2`, status 200, guest body.
+//
+// The bridge is multi-shot: the stream never ends on its own, so a
+// read-to-END_STREAM client would fill flow control and stall. Read
+// until three guest events arrive, then stop — fewer than three means
+// the stream ended early. Extracted from
+// `production_serve_h2_tenant_sse_live` for the line budget.
+fn assert_h2_serves_guest_events(port: u16, der: &[u8]) {
     let (negotiated, status, answer) =
-        cli_h2_request(port, &der, "shop.example.com", "/events", None);
+        cli_h2_events(port, der, "shop.example.com", "/events", 3, None);
     assert_eq!(
         negotiated.as_deref(),
         Some("h2"),
@@ -3719,16 +3887,22 @@ fn production_serve_h2_tenant_sse_live() {
         "an H2 request must reach the guest dispatcher, not a refusal; body was {:?}",
         String::from_utf8_lossy(&answer)
     );
-    assert_eq!(
-        answer, b"data: hello\n\n",
-        "the H2 answer must be the guest's event body"
+    assert!(
+        has_events(&answer, 3),
+        "the H2 stream must carry guest events, not a refusal: {:?}",
+        String::from_utf8_lossy(&answer)
     );
+}
 
-    // 2. The same guest answer over H1: one dispatcher, two protocols.
-    let (_, h1) = cli_tls_get(
+// The same guest answer over H1: one dispatcher, two protocols.
+//
+// Extracted from `production_serve_h2_tenant_sse_live` for the line budget.
+fn assert_h1_serves_guest_events(port: u16, der: &[u8]) {
+    let h1 = cli_tls_events(
         port,
-        &der,
+        der,
         "GET /events HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n",
+        3,
     );
     assert!(
         h1.starts_with("HTTP/1.1 200"),
@@ -3746,6 +3920,55 @@ fn production_serve_h2_tenant_sse_live() {
         h1.to_ascii_lowercase().contains("cache-control: no-store"),
         "the SSE bridge must add the no-store framing header: {h1:?}"
     );
+}
+
+// Wait until the access log holds a healthy shop-attributed SSE line.
+//
+// Stream records land when each server-side stream notices the client
+// is gone — a poll cycle after the drop, not in lockstep with the
+// client's last read — so the caller waits instead of asserting the
+// instant the client stops reading. The match requires a healthy end
+// (`client_closed` is the normal end of a stream the test client drops;
+// `completed` is an orderly guest end): a truncated `handler_failed`
+// record satisfies "an /events line exists" while proving the opposite
+// of served.
+fn wait_for_shop_sse_line(serving: &mut Serving) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        while let Ok(line) = serving.lines.try_recv() {
+            serving.collected.push_str(&line);
+            serving.collected.push('\n');
+        }
+        if serving.collected.lines().any(|l| {
+            l.contains("/events")
+                && l.contains("\"tenant\":\"shop\"")
+                && (l.contains("\"client_closed\"") || l.contains("\"completed\""))
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the access log must record the served SSE exchange attributed to shop"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn production_serve_h2_tenant_sse_live() {
+    let (s, der) = write_h2_sse_project("test-serve-h2-tenant-sse");
+
+    let addr = free_addr();
+    let port = addr.port();
+    let mut serving = Serving::spawn_with(&s, &addr, &["--tls"]);
+    serving.wait_for("listening on", 120);
+    wait_tls_serving(&mut serving, port, &der, None);
+
+    // 1. H2 serves the real guest through the multi-shot bridge.
+    assert_h2_serves_guest_events(port, &der);
+
+    // 2. The same guest answer over H1: one dispatcher, two protocols.
+    assert_h1_serves_guest_events(port, &der);
 
     // 3. Tenant-resolve on both drivers: mapped serves, unmapped names 421.
     let (_, mapped) = cli_tls_get(
@@ -3771,7 +3994,7 @@ fn production_serve_h2_tenant_sse_live() {
         "the 421 must name the tenant table: {unmapped:?}"
     );
     let (_, h2_unmapped_status, _) =
-        cli_h2_request(port, &der, "evil.example.com", "/events", None);
+        cli_h2_request(port, &der, "evil.example.com", "/events", None, None);
     assert_eq!(
         h2_unmapped_status,
         Some(421),
@@ -3779,6 +4002,7 @@ fn production_serve_h2_tenant_sse_live() {
     );
 
     // 4. The access log recorded the served exchanges on this listener.
+    wait_for_shop_sse_line(&mut serving);
     let out = serving.finish();
     assert!(
         out.lines().any(|l| l.contains("/events")),
@@ -3788,6 +4012,404 @@ fn production_serve_h2_tenant_sse_live() {
         out.lines()
             .any(|l| l.contains("/events") && l.contains("\"tenant\":\"shop\"")),
         "a mapped host must be attributed to its tenant, not the peer: {out}"
+    );
+}
+
+/// Read SSE bytes on one H1 stream until `want` events arrive: the
+/// multi-shot shape. Returns everything read. Stops early on close —
+/// fewer than `want` `data:` lines means the stream ended early.
+fn cli_tls_events(port: u16, der: &[u8], raw: &str, want: usize) -> String {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the TLS client")
+        .block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let config = cli_client_config(der, None, &[b"http/1.1"]);
+            let connector = tokio_rustls::TlsConnector::from(config);
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect");
+            let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+            let mut stream = connector.connect(name, tcp).await.expect("handshake");
+            stream
+                .write_all(raw.as_bytes())
+                .await
+                .expect("request sends");
+            let mut out = Vec::new();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => out.extend_from_slice(&chunk[..n]),
+                    }
+                    if has_events(&out, want) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            String::from_utf8_lossy(&out).into_owned()
+        })
+}
+
+/// Whether `bytes` already hold `want` SSE events: `data:` lines, the
+/// framing the guest owns, not any one fixture's payload.
+fn has_events(bytes: &[u8], want: usize) -> bool {
+    bytes.windows(5).filter(|w| *w == b"data:").count() >= want
+}
+
+/// Read SSE bytes on one H2 stream until `want` events arrive.
+///
+/// Connection-level frames are `ACKed` like a real client; stream-1 DATA
+/// payloads accumulate until `want` events are seen, `END_STREAM` arrives,
+/// or the deadline passes — fewer than `want` means the stream ended
+/// early. Returns (negotiated, status, raw bytes).
+fn cli_h2_events(
+    port: u16,
+    der: &[u8],
+    authority: &str,
+    path: &str,
+    want: usize,
+    identity: Option<ClientIdentity<'_>>,
+) -> (Option<String>, Option<u16>, Vec<u8>) {
+    use qqq_serve::h2::hpack::{Decoder, Encoder, HeaderField};
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the H2 client")
+        .block_on(async {
+            use tokio::io::AsyncWriteExt;
+            let (mut stream, negotiated) = cli_h2_connect(port, der, identity).await;
+            let mut encoder = Encoder::new();
+            let mut decoder = Decoder::new();
+            let block = encoder.encode(&[
+                HeaderField::new(":method", "GET"),
+                HeaderField::new(":path", path),
+                HeaderField::new(":scheme", "https"),
+                HeaderField::new(":authority", authority),
+            ]);
+            stream
+                .write_all(&cli_h2_frame(0x1, 0x4 | 0x1, 1, &block))
+                .await
+                .expect("headers send");
+            let mut status = None;
+            let mut answer = Vec::new();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    let Some((ftype, flags, stream_id, payload)) = cli_h2_read(&mut stream).await
+                    else {
+                        break;
+                    };
+                    if stream_id == 0 {
+                        if ftype == 0x4 && flags & 0x1 == 0 {
+                            stream
+                                .write_all(&cli_h2_frame(0x4, 0x1, 0, &[]))
+                                .await
+                                .expect("settings ack");
+                        } else if ftype == 0x6 && flags & 0x1 == 0 {
+                            stream
+                                .write_all(&cli_h2_frame(0x6, 0x1, 0, &payload))
+                                .await
+                                .expect("ping ack");
+                        } else if ftype == 0x7 {
+                            break;
+                        }
+                        continue;
+                    }
+                    if ftype == 0x1 {
+                        for field in decoder.decode(&payload).expect("decode head") {
+                            if field.name == ":status" {
+                                status = field.value.parse::<u16>().ok();
+                            }
+                        }
+                        if flags & 0x1 != 0 {
+                            break;
+                        }
+                    }
+                    if ftype == 0x0 {
+                        answer.extend_from_slice(&payload);
+                        if flags & 0x1 != 0 || has_events(&answer, want) {
+                            break;
+                        }
+                    }
+                    if ftype == 0x7 {
+                        break;
+                    }
+                }
+            })
+            .await;
+            (negotiated, status, answer)
+        })
+}
+
+/// One SSE stream, many guest executions, on the production listener.
+///
+/// The same project as `production_serve_h2_tenant_sse_live`: one stream
+/// must carry several events before any close, over H1 and over H2. A
+/// one-shot bridge serves one event and closes — fewer than three
+/// `data:` lines means the stream ended early.
+#[test]
+fn production_serve_sse_multishot_live() {
+    let (s, der) = write_h2_sse_project("test-serve-sse-multishot");
+
+    let addr = free_addr();
+    let port = addr.port();
+    let mut serving = Serving::spawn_with(&s, &addr, &["--tls"]);
+    serving.wait_for("listening on", 120);
+    wait_tls_serving(&mut serving, port, &der, None);
+
+    let h1 = cli_tls_events(
+        port,
+        &der,
+        "GET /events HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n",
+        3,
+    );
+    assert!(
+        h1.starts_with("HTTP/1.1 200"),
+        "the SSE stream must open 200 over H1: {h1:?}"
+    );
+    assert!(
+        has_events(h1.as_bytes(), 3),
+        "one H1 stream must carry three guest events, not one-and-close: {h1:?}"
+    );
+
+    let (negotiated, status, answer) =
+        cli_h2_events(port, &der, "shop.example.com", "/events", 3, None);
+    assert_eq!(
+        negotiated.as_deref(),
+        Some("h2"),
+        "the production listener must negotiate h2 over TLS"
+    );
+    assert_eq!(
+        status,
+        Some(200),
+        "the SSE stream must open 200 over H2: {:?}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(
+        has_events(&answer, 3),
+        "one H2 stream must carry three guest events, not one-and-close: {:?}",
+        String::from_utf8_lossy(&answer)
+    );
+
+    // The stream record lands when the server-side stream notices the
+    // client is gone — a poll cycle after the drop — and it must be a
+    // healthy end, not a truncation that merely mentions /events.
+    wait_for_shop_sse_line(&mut serving);
+
+    let out = serving.finish();
+    assert!(
+        out.lines().any(|l| l.contains("/events")),
+        "the access log must record the served SSE exchange: {out}"
+    );
+}
+
+// A client identity for mTLS tests: a self-signed certificate the server
+// trusts directly (its PEM joins the server's `client_ca_file` bundle),
+// with the common name tenant resolution reads. Returns the certificate
+// DER, the key DER, and the PEM text for the bundle.
+fn write_client_identity(s: &Sandbox, name: &str, cn: &str) -> (Vec<u8>, Vec<u8>, String) {
+    let mut params =
+        rcgen::CertificateParams::new(vec![cn.to_owned()]).expect("rcgen accepts the SAN");
+    let mut dn = rcgen::DistinguishedName::new();
+    dn.push(rcgen::DnType::CommonName, cn);
+    params.distinguished_name = dn;
+    let key = rcgen::KeyPair::generate().expect("rcgen generates a key");
+    let cert = params.self_signed(&key).expect("rcgen self-signs");
+    let pem = cert.pem();
+    s.write(&format!("{name}.pem"), pem.as_str());
+    s.write(&format!("{name}.key"), key.serialize_pem().as_str());
+    (cert.der().to_vec(), key.serialize_der(), pem)
+}
+
+/// The tenant-components probe project: one flat route, one tenant host,
+/// that tenant mapped to its own component, and required client auth so
+/// the mapping is attested. Returns the sandbox, the server DER, and the
+/// two client identities (certificate DER plus key DER): `shop` (mapped)
+/// and `other` (authenticated but unmapped, proving unmapped means the
+/// default component, never another tenant's).
+/// One client's identity, owned: the certificate DER plus the key DER.
+type ClientIdentityOwned = (Vec<u8>, Vec<u8>);
+
+fn write_components_project() -> (Sandbox, Vec<u8>, ClientIdentityOwned, ClientIdentityOwned) {
+    let s = Sandbox::new("test-serve-tenant-components");
+    let (cert, key, der) = write_cli_tls_fixture(&s);
+    let (shop_der, shop_key, shop_pem) = write_client_identity(&s, "shop-client", "shop");
+    let (other_der, other_key, other_pem) = write_client_identity(&s, "other-client", "other");
+    s.write("client-ca.pem", &format!("{shop_pem}{other_pem}"));
+    let prefix = s.path.display().to_string();
+    s.write(
+        "qqq.toml",
+        &format!(
+            "[package]\nname = \"live-probe\"\nversion = \"0.1.0\"\n\
+             [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n\
+             [capabilities.http]\nserver = true\n\
+             [server]\ndefault_auth = \"none\"\nroutes = [\n\
+             \x20 {{ path = \"/\", methods = [\"GET\", \"POST\"], handler = \"echo\", auth = \"none\" }},\n\
+             ]\n\
+             [server.tenants]\nhosts = {{ \"shop.example.com\" = \"shop\" }}\n\
+             [server.tenants.components]\nshop = \"shop-app\"\n\
+             [server.tls]\ncert_file = '{cert}'\nkey_file = '{key}'\n\
+             client_ca_file = '{prefix}/client-ca.pem'\n"
+        ),
+    );
+    write_named_artifact_wat(&s, "live-probe", include_str!("fixtures/echo-http.wat"));
+    write_named_artifact_wat(&s, "shop-app", include_str!("fixtures/sse-event.wat"));
+    (s, der, (shop_der, shop_key), (other_der, other_key))
+}
+
+// Wait until the access log holds a line attributed to `tenant`: flat
+// records land at response time, so this is a drain, not a poll-cycle
+// wait — but the pump thread may still hold the line when the client
+// stops reading, hence the bound.
+fn wait_for_tenant_access_line(serving: &mut Serving, tenant: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        while let Ok(line) = serving.lines.try_recv() {
+            serving.collected.push_str(&line);
+            serving.collected.push('\n');
+        }
+        if serving
+            .collected
+            .lines()
+            .any(|l| l.contains(&format!("\"tenant\":\"{tenant}\"")))
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the access log must record a request attributed to {tenant}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+// The same H1 POST through the tenant-component server with both
+// identities: the shop certificate must reach the shop component while
+// another valid certificate reaches the default one. Extracted from
+// `production_serve_tenant_components_live` for the line budget.
+fn assert_h1_selects_components(
+    port: u16,
+    der: &[u8],
+    shop: ClientIdentity<'_>,
+    other: ClientIdentity<'_>,
+) {
+    let request = "POST / HTTP/1.1\r\nHost: shop.example.com\r\nContent-Length: 10\r\n\
+                   Connection: close\r\n\r\nprobe-body";
+    let shop_answer = cli_tls_post_auth(port, der, shop, request);
+    assert!(
+        shop_answer.starts_with("HTTP/1.1 200"),
+        "the shop identity must be served: {shop_answer:?}"
+    );
+    assert!(
+        shop_answer.contains("data: hello"),
+        "the shop certificate must reach the shop component, got: {shop_answer:?}"
+    );
+    let other_answer = cli_tls_post_auth(port, der, other, request);
+    assert!(
+        other_answer.starts_with("HTTP/1.1 200"),
+        "another valid identity must be served: {other_answer:?}"
+    );
+    assert!(
+        other_answer.contains("probe-body"),
+        "an unmapped identity must reach the default component, which echoes: {other_answer:?}"
+    );
+    assert!(
+        !other_answer.contains("data: hello"),
+        "the default component must not serve the shop bytes: {other_answer:?}"
+    );
+    // Identity selects the tenant, not the listener's names: a hostile
+    // Host with the shop certificate is still refused 421 — on a loopback
+    // listener the `Host` allow-list (`F-14` rebinding defense) runs after
+    // tenant resolution and refuses unmapped names even for authenticated
+    // clients. Identity outranks Host for *attribution* (proven above: the
+    // `other` certificate reaches the default component despite the mapped
+    // Host); it does not authorize new listener names. The terse body
+    // (naming nothing) is the loopback gate's, not the tenant table's.
+    let hostile = cli_tls_post_auth(
+        port,
+        der,
+        shop,
+        "POST / HTTP/1.1\r\nHost: evil.example.com\r\nContent-Length: 10\r\n\
+         Connection: close\r\n\r\nprobe-body",
+    );
+    assert!(
+        hostile.starts_with("HTTP/1.1 421") && hostile.contains("misdirected request"),
+        "an unmapped Host stays refused on loopback even when authenticated: {hostile:?}"
+    );
+}
+
+/// Tenant-to-component routing on the production listener, attested by mTLS.
+///
+/// One boot with `components = { shop = "shop-app" }` plus required client
+/// auth; then the same POST proves the selection: the `shop` certificate
+/// is answered by the shop component, another valid certificate by the
+/// default component — identity outranks `Host` for attribution — while an
+/// unmapped `Host` stays refused 421 on loopback even when authenticated.
+/// A certificate-less handshake fails outright. H1 and H2 both, through the
+/// manifest/dispatched path — the per-request selection both drivers share.
+#[test]
+fn production_serve_tenant_components_live() {
+    let (s, der, (shop_der, shop_key), (other_der, other_key)) = write_components_project();
+    let shop: ClientIdentity<'_> = (&shop_der, &shop_key);
+    let other: ClientIdentity<'_> = (&other_der, &other_key);
+
+    let addr = free_addr();
+    let port = addr.port();
+    let mut serving = Serving::spawn_with(&s, &addr, &["--tls"]);
+    serving.wait_for("listening on", 120);
+    wait_tls_serving(&mut serving, port, &der, Some(shop));
+
+    // A client without a certificate fails the handshake: required mTLS
+    // fails closed before any dispatch exists to be confused.
+    let refused = cli_tls_probe(
+        port,
+        &der,
+        None,
+        "GET / HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n",
+    );
+    assert!(refused.connected, "TCP must still accept");
+    assert!(
+        !refused.handshake,
+        "without a client certificate the handshake must fail"
+    );
+
+    // H1: the same request, two identities, two components.
+    assert_h1_selects_components(port, &der, shop, other);
+
+    // H2: the shop certificate reaches the shop component over h2 too.
+    let (negotiated, status, body) = cli_h2_request(
+        port,
+        &der,
+        "shop.example.com",
+        "/",
+        Some(b"probe-body"),
+        Some(shop),
+    );
+    assert_eq!(
+        negotiated.as_deref(),
+        Some("h2"),
+        "the production listener must negotiate h2 over TLS"
+    );
+    assert_eq!(
+        status,
+        Some(200),
+        "the shop identity must be served over H2"
+    );
+    assert_eq!(
+        body, b"data: hello\n\n",
+        "the H2 answer must be the shop component's bytes"
+    );
+
+    wait_for_tenant_access_line(&mut serving, "shop");
+    let out = serving.finish();
+    assert!(
+        out.lines()
+            .any(|l| l.contains("\"tenant\":\"shop\"") && l.contains("\"status\":\"200\"")),
+        "a mapped tenant must be served and attributed, not refused: {out}"
     );
 }
 

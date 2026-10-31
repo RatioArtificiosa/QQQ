@@ -57,7 +57,7 @@ use tokio::net::TcpStream;
 use qqq_io::listener::{ListenAddr, Shutdown};
 use qqq_serve::access_log::{Format, Level, Logger};
 use qqq_serve::route::{Method as RouteMethod, Route, RouteTable};
-use qqq_serve::server::{Dispatch, Handler, ServerConfig, serve};
+use qqq_serve::server::{Dispatch, Handler, ServerConfig, TenantDispatch, serve};
 use qqq_serve::{RequestHead, Response, RouteMatch};
 
 /// A port nobody is using, for the reason `tests/socket.rs` documents.
@@ -136,7 +136,7 @@ impl Server {
                 if let Err(e) = serve(
                     config,
                     table(),
-                    Dispatch::flat(handler()),
+                    TenantDispatch::new(Dispatch::flat(handler())),
                     local,
                     Logger::new(Format::Json, Level::Error),
                 )

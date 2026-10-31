@@ -1230,6 +1230,22 @@ fn read_component_bytes(project: &std::path::Path, package: &str) -> Result<Vec<
     })
 }
 
+/// Refuse a tenant whose component was never built, naming the mapping.
+///
+/// Extracted from `build_dispatch` so the tenant branch cannot drift from
+/// the contract the test pins: the stable artifact code, both sides of
+/// the `label = package` entry, and the build as the remediation. Serving
+/// the default component while the manifest promises the tenant its own
+/// would be silent cross-tenant substitution.
+fn tenant_artifact_missing(label: &str, package: &str, cause: &str) -> Error {
+    Error::new(
+        ErrorCode::InvalidComponentArtifact,
+        format!("tenant `{label}` maps to package `{package}`, which is not built"),
+    )
+    .with_cause(cause.to_owned())
+    .with_remediation("run `qqqai build` to produce it, or remove the mapping")
+}
+
 /// Build one component's guest: pool, views, backends, and audit.
 ///
 /// The same grants, limits, secrets, environment, and backends serve every
@@ -1443,14 +1459,8 @@ fn build_dispatch(
     // exists to prevent.
     let mut tenant_live = Vec::new();
     for (label, package) in &components {
-        let bytes = read_component_bytes(project, package).map_err(|e| {
-            Error::new(
-                ErrorCode::InvalidComponentArtifact,
-                format!("tenant `{label}` maps to package `{package}`, which is not built"),
-            )
-            .with_cause(e.message.clone())
-            .with_remediation("run `qqqai build` to produce it, or remove the mapping")
-        })?;
+        let bytes = read_component_bytes(project, package)
+            .map_err(|e| tenant_artifact_missing(label, package, &e.message))?;
         let built = build_component_app(&engine, loaded, opts, &bytes, false)?;
         dispatch = dispatch.with_tenant(
             label.clone(),
@@ -2161,6 +2171,7 @@ mod tests {
         let dir = tls_fixture_dir("artifacts-absent");
         let err = read_component_bytes(dir.as_path(), "shop-app")
             .expect_err("an unbuilt package must be refused");
+        assert_eq!(err.code, ErrorCode::InvalidComponentArtifact);
         assert!(
             err.message.contains("shop-app"),
             "the refusal must name the package: {}",
@@ -2174,6 +2185,35 @@ mod tests {
             err.remediation
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **A missing tenant artifact refuses naming both sides of the mapping.**
+    ///
+    /// The tenant branch of `build_dispatch` wraps the store error with the
+    /// tenant label and the package name: serving the default component
+    /// while the manifest promises the tenant its own would be silent
+    /// cross-tenant substitution, so the refusal must carry the stable
+    /// artifact code and name the mapping entry that failed.
+    #[test]
+    fn tenant_artifact_missing_names_label_and_package() {
+        let err = tenant_artifact_missing(
+            "shop",
+            "shop-app",
+            "the component package `shop-app` is not built",
+        );
+        assert_eq!(err.code, ErrorCode::InvalidComponentArtifact);
+        assert!(
+            err.message.contains("shop") && err.message.contains("shop-app"),
+            "the refusal must name the tenant and the package: {}",
+            err.message
+        );
+        assert!(
+            err.remediation
+                .as_deref()
+                .is_some_and(|r| r.contains("qqqai build")),
+            "the fix must be the build: {:?}",
+            err.remediation
+        );
     }
 
     /// **Component routing without an authenticated identity is refused.**

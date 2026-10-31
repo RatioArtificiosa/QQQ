@@ -1834,8 +1834,10 @@ pub struct Server {
 pub struct TenantHosts {
     /// Host name to tenant label, e.g. `{ "shop.example.com" = "shop" }`.
     /// Keys must be bare lowercase hosts — no `:port`, trailing dot,
-    /// whitespace, or brackets — and the map must not be empty; dead keys
-    /// and empty maps or labels are refused at parse time.
+    /// whitespace, or brackets — and an empty map is refused unless
+    /// components are mapped (identity-only resolution needs no `Host`
+    /// mapping); dead keys and empty maps or labels are refused at parse
+    /// time.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub hosts: BTreeMap<String, String>,
     /// Tenant label to artifact package name, e.g. `{ "shop" = "shop-app" }`.
@@ -1848,8 +1850,9 @@ pub struct TenantHosts {
     /// Keys are tenant labels exactly as resolved (verified client
     /// identity first, then the hosts table, then the peer); values are
     /// package names resolved exactly like the default artifact.
-    /// Keys must equal the resolved label verbatim — padded or spaced keys
-    /// never match and are refused at parse time.
+    /// Keys must equal the resolved label verbatim — padded, controlled,
+    /// or non-ASCII keys never match and are refused at parse time, while
+    /// interior ASCII spaces stay legal (`John Doe` matches its key).
     ///
     /// A non-empty table requires verified client certificates
     /// (`[server.tls] client_ca_file` plus `--tls`): without an
@@ -2601,6 +2604,70 @@ allow_origins = ["https://app.example.com"]
                 "the error must name the table: {err}"
             );
         }
+    }
+
+    /// Component artifact names are bare Cargo package names: anything that
+    /// cannot name a built artifact — a control character, a path
+    /// separator, parent navigation, or a file suffix — is dead
+    /// configuration refused at parse time, before the store lookup fails
+    /// at serve time far from the line that is wrong.
+    #[test]
+    fn tenant_components_reject_non_package_artifacts() {
+        for (artifact, why) in [
+            ("shop\\u0001app", "control character"),
+            ("../shop-app", "parent navigation"),
+            ("sub/shop-app", "path separator"),
+            ("shop-app.wasm", "file suffix, not a package name"),
+            ("shop app", "interior space"),
+        ] {
+            let text = format!(
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [server.tenants]\nhosts = {{ \"shop.example.com\" = \"shop\" }}\n\
+                 [server.tenants.components]\nshop = \"{artifact}\"\n"
+            );
+            let err =
+                Manifest::parse(&text).expect_err(&format!("a {why} artifact must be refused"));
+            assert!(
+                err.to_string().contains("server.tenants.components"),
+                "the error must name the table: {err}"
+            );
+        }
+    }
+
+    /// Component keys match resolved labels verbatim: anything that cannot
+    /// appear in a resolved label — a control character or a non-ASCII
+    /// lookalike such as NBSP or a zero-width space — never matches and is
+    /// refused at parse time. Interior ASCII spaces stay allowed: a
+    /// `John Doe` common name matches its key exactly.
+    #[test]
+    fn tenant_component_keys_reject_non_label_characters() {
+        for (key, why) in [
+            ("shop\\u00a0", "nbsp lookalike"),
+            ("shop\\u200b", "zero-width lookalike"),
+            ("shop\\u0001", "control character"),
+        ] {
+            let text = format!(
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [server.tenants]\nhosts = {{ \"shop.example.com\" = \"shop\" }}\n\
+                 [server.tenants.components]\n\"{key}\" = \"shop-app\"\n"
+            );
+            let err = Manifest::parse(&text)
+                .expect_err(&format!("a {why} component key must be refused"));
+            assert!(
+                err.to_string().contains("server.tenants.components"),
+                "the error must name the table: {err}"
+            );
+        }
+        let spaced = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = { \"shop.example.com\" = \"John Doe\" }\n\
+             [server.tenants.components]\n\"John Doe\" = \"shop-app\"\n",
+        )
+        .expect("an interior ASCII space must stay a legal component key");
+        assert_eq!(
+            spaced.server.tenants.expect("tenants").components["John Doe"],
+            "shop-app"
+        );
     }
 
     /// An unknown kind fails closed naming the valid set — a typo like

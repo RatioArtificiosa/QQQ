@@ -201,12 +201,22 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
                 reason: "component keys and artifact names must not be empty; an empty entry routes no tenant to no component".to_owned(),
             });
         }
-        // Keys match resolved tenant labels verbatim, so surrounding
-        // whitespace or control characters are dead configuration reading
-        // as policy: they never equal a resolved label. Interior spaces
-        // are allowed — a `John Doe` common name matches its key exactly —
-        // while artifact names stay bare (package names carry no spaces).
-        if label != label.trim() || label.chars().any(char::is_control) {
+        // Keys match resolved tenant labels verbatim, so anything that
+        // cannot name a tenant is dead configuration reading as policy:
+        // it never equals the label a request resolves to. Servable
+        // labels are ASCII (certificate common names, host names, peer
+        // addresses); a CN that is not a printable string decodes with
+        // replacement characters and must not map either — it falls
+        // through to the default component. Surrounding whitespace,
+        // control characters, and non-ASCII lookalikes (NBSP,
+        // zero-width spaces) are therefore refused. Interior ASCII
+        // spaces stay allowed — a `John Doe` common name matches its
+        // key exactly.
+        if label != label.trim()
+            || label
+                .chars()
+                .any(|c| c.is_control() || (c.is_whitespace() && c != ' ') || !c.is_ascii())
+        {
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.components".to_owned(),
                 reason: format!(
@@ -214,7 +224,17 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
                 ),
             });
         }
-        if artifact != artifact.trim() || artifact.chars().any(char::is_whitespace) {
+        // Artifacts are bare Cargo package names (`[A-Za-z0-9_-]`), resolved
+        // by `find_artifact` as `{package}.wasm` under the build directory.
+        // Anything outside that charset — a control character, whitespace,
+        // a path separator, parent navigation, or a file suffix — can never
+        // name a built artifact, so it is refused here instead of failing
+        // at serve time far from the line that is wrong.
+        if artifact != artifact.trim()
+            || !artifact
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.components".to_owned(),
                 reason: format!(

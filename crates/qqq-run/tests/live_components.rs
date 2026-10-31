@@ -203,7 +203,32 @@ fn native_output_is_real_and_cache_survives_engine_recreation() {
         "{}",
         String::from_utf8_lossy(&child.stderr)
     );
-    assert_eq!(std::fs::read(cache_dir.join("child-hit")).unwrap(), b"hit");
+    // A bare `unwrap` here once hid the cause of a Windows CI failure
+    // (run 41185910150: `NotFound` with a successful child exit). If the
+    // file is ever missing again, the panic now carries the forensics
+    // needed to tell an unwritten file from a removed one: the cache
+    // directory listing plus the child's own output streams.
+    let hit = std::fs::read(cache_dir.join("child-hit")).unwrap_or_else(|e| {
+        let listing: Vec<String> = std::fs::read_dir(&cache_dir).map_or_else(
+            |dir_err| vec![format!("<unlistable: {dir_err}>")],
+            |entries| {
+                entries
+                    .filter_map(|entry| {
+                        entry
+                            .ok()
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    })
+                    .collect()
+            },
+        );
+        panic!(
+            "the cache child must record its hit (read failed: {e}); cache dir: {listing:?}; \
+             child stdout: {:?}; child stderr: {:?}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr),
+        )
+    });
+    assert_eq!(hit, b"hit");
     let misses = cache.cache_misses();
     wasmtime::component::Component::new(&engine, V1.replace("\"v1\"", "\"v2\"")).unwrap();
     assert!(

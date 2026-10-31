@@ -112,6 +112,14 @@ struct TlsFixture {
     der: Vec<u8>,
 }
 
+/// Process-wide fixture sequence: two `#[tokio::test]`s in this file
+/// start on adjacent threads, and wall-clock nanoseconds are NOT unique
+/// across threads — CI proved it (macOS `KeyMismatch`, Windows readiness
+/// timeout, same `qqq-h2-prod-<pid>-<nanos>` dir in both panics). The
+/// counter makes every generated directory unique within the process;
+/// pid and time keep it unique across processes and runs.
+static FIXTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl TlsFixture {
     fn generate() -> Self {
         let mut params =
@@ -122,12 +130,13 @@ impl TlsFixture {
         let key = rcgen::KeyPair::generate().expect("rcgen key");
         let cert = params.self_signed(&key).expect("rcgen self-sign");
         let dir = std::env::temp_dir().join(format!(
-            "qqq-h2-prod-{}-{}",
+            "qqq-h2-prod-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")
-                .as_nanos()
+                .as_nanos(),
+            FIXTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).expect("fixture dir");
         let cert_path = dir.join("server.pem");
@@ -147,6 +156,46 @@ impl TlsFixture {
 impl Drop for TlsFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Concurrent generations never share a directory, and every pair loads.
+///
+/// Red evidence is CI, not this machine: runs 41184506082 (windows
+/// readiness timeout), 41185910150 (macOS `KeyMismatch` in both tests
+/// with the SAME `qqq-h2-prod-<pid>-<nanos>` dir in both panics), and
+/// 41187872729 (windows `h2_upgrades_over_tls_alpn`). Wall-clock
+/// nanoseconds collide across threads starting together; the sequence
+/// counter is what makes the name unique. This test pins the invariant
+/// (8 threads × 25 generations, all dirs distinct, every pair builds)
+/// so a future "simplification" back to time-only names fails here
+/// instead of on CI.
+#[test]
+fn concurrent_fixture_generations_never_share_a_directory() {
+    let fixtures: Vec<TlsFixture> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| s.spawn(|| (0..25).map(|_| TlsFixture::generate()).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("generator thread joins"))
+            .collect()
+    });
+    let mut dirs: Vec<&std::path::Path> = fixtures.iter().map(|f| f.dir.as_path()).collect();
+    dirs.sort_unstable();
+    dirs.dedup();
+    assert_eq!(
+        dirs.len(),
+        fixtures.len(),
+        "every concurrent generation must own its directory"
+    );
+    for fixture in &fixtures {
+        TlsConfig::new(qqq_serve::tls::CertificateSource::files(
+            fixture.cert.clone(),
+            fixture.key.clone(),
+        ))
+        .build()
+        .expect("each generated pair must load as a pair");
     }
 }
 

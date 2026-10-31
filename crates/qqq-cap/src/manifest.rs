@@ -1848,6 +1848,21 @@ pub struct TenantHosts {
     /// Keys are tenant labels exactly as resolved (verified client
     /// identity first, then the hosts table, then the peer); values are
     /// package names resolved exactly like the default artifact.
+    /// Keys must equal the resolved label verbatim — padded or spaced keys
+    /// never match and are refused at parse time.
+    ///
+    /// A non-empty table requires verified client certificates
+    /// (`[server.tls] client_ca_file` plus `--tls`): without an
+    /// authenticated identity the mapping would let a spoofed `Host`
+    /// select another tenant's component, so `prepare` refuses to start.
+    /// Each mapped tenant gets its own guest instance pool (sized by
+    /// `--workers`, like the default), so tenants never contend for
+    /// slots — and capacity planning multiplies: N components hold N
+    /// times `--workers` slots in total. Unmapped tenants — including
+    /// authenticated identities the table never names — are served by the
+    /// default component, never by another tenant's. The `--audit-log`
+    /// file persists the default component's hash chain only; tenant rows
+    /// live in their own in-memory streams.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub components: BTreeMap<String, String>,
 }

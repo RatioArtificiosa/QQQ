@@ -1,0 +1,99 @@
+# Review dispositions: proxy rounds on the multishot + TenantDispatch slices.
+
+Round 1 (proxy, `muse-spark-1.3-contributor` via Copilot CLI — subscription
+quota exhausted; raw output kept in scratch): 12 findings on the
+pre-dispatch tree. Round 2 (same path): 6 findings on the TenantDispatch
+slice. Every finding was verified against the code before acting.
+
+## Round 1 — fixed in-tree (with regression coverage)
+
+- HIGH dead `components` config: parsed, validated, gated — but never
+  used (`build_dispatch` loaded one artifact; every tenant got the default
+  component). Implemented for real instead of deleting: per-tenant
+  `GuestApp` + pool + dispatcher (`TenantDispatch::for_tenant`), mTLS
+  gate kept, live mTLS-attested proof
+  (`production_serve_tenant_components_live`). See s4 below.
+- HIGH unbounded SSE retry: the poll loop retried pool saturation forever.
+  Added `MAX_CONSECUTIVE_RETRIES` (600 x 50ms) with `retry_delay` pin
+  test; fixed interval, no jitter — jitter would be hidden randomness on
+  a path deterministic mode also serves. Exceeding the cap fails the
+  stream so the client reconnects.
+- HIGH hyper double tenant resolve: `answer_sse` re-resolved with a
+  peer-label fallback after `gated_tenant` had already 421'd Unknown.
+  The gated tenant is now threaded into `answer_sse` and
+  `serve_streaming_hyper`; `sse_arm`/`map_head_or_refuse` extractions
+  keep `answer` under the line budget (boxed refusal for
+  `result_large_err`).
+- MED empty-means-Done contract: documented on the classifier; added the
+  live orderly-end test (`a_live_sse_stream_ends_when_the_guest_is_done`
+  with new `sse-empty.wat`) beside the existing classifier pin.
+- MED CN-less fingerprint fallback with a components table: selection is
+  exact-match, so a fingerprint only selects when the operator explicitly
+  maps it (device pinning) — pinned by
+  `tenant_dispatch_selects_mapped_tenants_and_defaults_the_rest`, which
+  also pins unmapped/peer labels to the default.
+- MED components whitespace keys: `validate_tenants` rejects padded/spaced
+  keys and values (6 new cases in
+  `tenant_components_parse_and_validate`); hosts rules unchanged.
+- MED failure detail: `classify_poll` Failed now names status, error
+  marker, and a 120-char body snippet (existing test expectation updated
+  to the new shape).
+- MED wait-for-line matched any outcome: `wait_for_shop_sse_line` now
+  requires a healthy end (`client_closed`/`completed`), shared by both
+  live SSE tests.
+- MED live contention test: skipped (flaky-prone by construction; the
+  retry cap is unit-pinned instead). Client-CA present-build added to
+  `build_tls_with_a_client_ca_builds_required_client_auth`.
+- LOW JoinError taxonomy: new `response::handler_panicked` (502 +
+  `X-QQQ-Error: handler-panicked`, generic body — no guest internals on
+  the wire) at all three `spawn_blocking` join sites.
+- LOW header allowlist: REJECTED — in-house `write_stream_head` forwards
+  guest headers too (pinned by
+  `a_caller_cannot_override_the_streaming_framing`); allowlisting would
+  fork the drivers.
+- LOW per-probe runtime: REJECTED — only slow on the failure path;
+  success does 1-2 probes. Restructuring churn with no product effect.
+- Test-isolation root cause (found live, fixed): both TLS tests shared
+  one sandbox directory, so parallel runs overwrote each other's
+  `cert.pem` — every handshake failed deterministically for 60s and read
+  as load flake. Per-test sandbox names; all four production-serve tests
+  pass in parallel in <1s. The earlier stability note blaming CPU
+  starvation is corrected in the README.
+- TLS 1.3 connect-then-alert: `connect()` can succeed before the
+  server's `CertificateRequired` alert arrives, so `cli_tls_probe` now
+  reports handshake=false when the first read aborts with zero
+  application bytes (fail-closed pin:
+  `tls_required_client_auth_refuses_uncertified_clients` in-process +
+  cert-less live probe).
+
+## Round 2 — fixed in-tree
+
+- LOW per-component pool arithmetic: `each_component_carries_its_own_full_pool`
+  pins workers-per-component (MED-2 total = N x workers); manifest docs
+  state the multiplication for capacity planning.
+- LOW audit-file scope: attach stays default-only by construction
+  (`attach_audit: bool`, one chain per file — two writers would fork it);
+  documented on the components field. No accessor was added for a test
+  probe: API surface for test convenience alone is scope creep.
+
+## Round 2 — rejected with reason (no change)
+
+- MED mTLS for any `hosts` table: labels are explicitly non-security
+  (limits/ledger stay peer-keyed by ratified `F-13`; OBS-015 open).
+  Requiring mTLS for labels would un-ship the documented non-mTLS
+  attribution feature.
+- MED per-component pool cap: documented arithmetic (see above) instead
+  of a new cap; a cap is a policy change needing an owner decision.
+- MED/LOW hyper vs in-house refusal-shape forks (special-route body,
+  ceiling warn, streaming declared-body): pre-existing pinned
+  differentials with dedicated tests asserting the delta — changing them
+  breaks intentional pins and belongs to a fork-alignment slice, not
+  this one.
+
+## Verification after fixes
+
+`cargo fmt --check` clean; `cargo clippy --workspace --all-targets
+--all-features -- -D warnings` clean; `qqq-run` 715+144 green (incl. the
+new components + Done + pool tests), `qqq-serve` suites green,
+`qqq-cap` 328 green, `cargo deny` + `machete` clean on the final tree
+before the full gate.

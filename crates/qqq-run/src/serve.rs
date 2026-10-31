@@ -2115,6 +2115,35 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// **Each component carries its own full pool.**
+    ///
+    /// `--workers 4` with two components holds eight instance slots, not
+    /// four shared ones: tenants never contend for slots because each
+    /// `GuestApp` installs the pool `with_capacity` builds. The total is
+    /// the flag times the component count, so capacity planning must
+    /// multiply — which is what this pins, against a future "sharing"
+    /// optimization that would reintroduce cross-tenant contention.
+    #[test]
+    fn each_component_carries_its_own_full_pool() {
+        let bytes = wat::parse_str(include_str!("../tests/fixtures/echo-http.wat"))
+            .expect("the fixture must assemble");
+        let loaded = loaded_manifest("[capabilities.http]\nserver = true\n");
+        let opts = options(&args(&["--workers", "4"])).expect("--workers parses");
+        let engine = wasmtime::Engine::new(
+            &EngineConfig::default()
+                .to_wasmtime_config()
+                .expect("engine config"),
+        )
+        .expect("engine");
+        let a = build_component_app(&engine, &loaded, &opts, &bytes, false).expect("builds");
+        let b = build_component_app(&engine, &loaded, &opts, &bytes, false).expect("builds");
+        assert_eq!(
+            (a.capacity, b.capacity),
+            (4, 4),
+            "each component installs the full pool, not a share of one"
+        );
+    }
+
     /// **Component routing without an authenticated identity is refused.**
     ///
     /// A `Host` header is client-controlled, so selecting a component by

@@ -1,0 +1,6 @@
+{"level":"info","trace_id":"00000000000000000000000000000000","span_id":"00000000000000000000000000000000","tenant":"-","component":"qqq-serve","manifest_rev":"unknown","msg":"listening on 127.0.0.1:52303"}
+{"level":"info","trace_id":"00000000000000000000000000000001","span_id":"0000000000000001","tenant":"shop","component":"qqq-serve","manifest_rev":"unknown","msg":"GET / 200","method":"GET","path":"/","status":"200"}
+{"level":"info","trace_id":"00000000000000000000000000000002","span_id":"0000000000000001","tenant":"shop","component":"qqq-serve","manifest_rev":"unknown","msg":"POST / 200","method":"POST","path":"/","status":"200"}
+{"level":"info","trace_id":"00000000000000000000000000000003","span_id":"0000000000000001","tenant":"other","component":"qqq-serve","manifest_rev":"unknown","msg":"POST / 200","method":"POST","path":"/","status":"200"}
+{"level":"warn","trace_id":"00000000000000000000000000000004","span_id":"0000000000000001","tenant":"shop","component":"qqq-serve","manifest_rev":"unknown","msg":"POST / 421","method":"POST","path":"/","status":"421"}
+{"level":"info","trace_id":"00000000000000000000000000000005","span_id":"0000000000000001","tenant":"shop","component":"qqq-serve","manifest_rev":"unknown","msg":"POST / 200","method":"POST","path":"/","status":"200"}

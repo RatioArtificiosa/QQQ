@@ -1,0 +1,12 @@
+red-first: tenant-selection test on the pre-TenantDispatch tree (df658c8 worktree)
+
+
+error[E0432]: unresolved import `qqq_serve::server::TenantDispatch`
+29 | use qqq_serve::server::{Dispatch, Handler, RouteMatch, ServerConfig, TenantDispatch, serve};
+   |                                                                      ^^^^^^^^^^^^^^ no `TenantDispatch` in `server`
+error[E0432]: unresolved import `qqq_serve::server::TenantDispatch`
+149 |     use qqq_serve::server::TenantDispatch;
+    |                            no `TenantDispatch` in `server`
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `qqq-serve` (test "tenant_hosts") due to 2 previous errors
+

@@ -1,0 +1,16 @@
+running 1 test
+test production_serve_sse_multishot_live ... FAILED
+
+failures:
+
+---- production_serve_sse_multishot_live stdout ----
+
+thread 'production_serve_sse_multishot_live' (416356) panicked at crates\qqq-run\tests\cli.rs:4057:5:
+one H1 stream must carry three guest events, not one-and-close: "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nCache-Control: no-store\r\nX-Accel-Buffering: no\r\nContent-Length: 13\r\nConnection: close\r\n\r\ndata: hello\n\n"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    production_serve_sse_multishot_live
+
+test result: FAILED

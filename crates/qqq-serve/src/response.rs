@@ -878,6 +878,18 @@ pub fn misdirected(host: &str) -> Response {
 /// defect in the access record. The body stays generic — a panic payload
 /// can carry guest internals that do not belong on the wire — while the
 /// `X-QQQ-Error` header names the shape for scripts and the record.
+///
+/// # Examples
+///
+/// ```
+/// # use qqq_serve::response::handler_panicked;
+/// let response = handler_panicked();
+/// assert_eq!(response.status, 502);
+/// assert_eq!(
+///     response.header("X-QQQ-Error"),
+///     Some("handler-panicked")
+/// );
+/// ```
 #[must_use]
 pub fn handler_panicked() -> Response {
     let mut r = Response::text(502, "host handler failed");

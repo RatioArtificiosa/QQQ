@@ -321,6 +321,30 @@ pub struct Dispatch {
 /// One struct rather than two map entries so a route cannot end up with a
 /// gate and no loop (or the reverse) — a half-wired SSE route would either
 /// buffer forever or stream without ever checking the content type.
+///
+/// # Examples
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use qqq_serve::{BodyBytes, BodyHandler, Response, StreamingHandler};
+/// # use qqq_serve::server::{SseHandlers, SseStreamFactory};
+/// # use qqq_serve::stream::StreamError;
+/// # let gate: BodyHandler = Arc::new(|_, _, _| Response::text(200, "x"));
+/// # let factory: SseStreamFactory = Arc::new(|_| {
+/// #     let noop: StreamingHandler = Arc::new(|_, _, _| {
+/// #         Box::pin(async {
+/// #             Err::<(), StreamError>(StreamError::Transport("closed".to_owned()))
+/// #         })
+/// #     });
+/// #     noop
+/// # });
+/// let handlers = SseHandlers {
+///     gate,
+///     stream: factory.clone(),
+/// };
+/// let together = Arc::ptr_eq(&handlers.stream, &factory);
+/// assert!(together, "both halves travel together by construction");
+/// ```
 #[derive(Clone)]
 pub struct SseHandlers {
     /// The one-shot content gate: 200 plus `text/event-stream` to proceed.
@@ -339,6 +363,25 @@ pub struct SseHandlers {
 /// tenant and the registration site has none: threading the tenant
 /// through the shared [`StreamingHandler`] type would touch every
 /// streaming caller for one route kind's benefit.
+///
+/// # Examples
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use qqq_serve::StreamingHandler;
+/// # use qqq_serve::server::SseStreamFactory;
+/// # use qqq_serve::stream::StreamError;
+/// let factory: SseStreamFactory = Arc::new(|tenant| {
+///     assert!(!tenant.is_empty(), "the serve path always resolves a tenant");
+///     let noop: StreamingHandler = Arc::new(|_, _, _| {
+///         Box::pin(async {
+///             Err::<(), StreamError>(StreamError::Transport("closed".to_owned()))
+///         })
+///     });
+///     noop
+/// });
+/// let _ = factory("shop");
+/// ```
 pub type SseStreamFactory =
     std::sync::Arc<dyn Fn(&str) -> crate::stream::StreamingHandler + Send + Sync>;
 
@@ -379,6 +422,28 @@ impl Dispatch {
     /// Both halves travel together (see [`SseHandlers`]): registering only
     /// the gate would buffer every stream, and only the loop would stream
     /// without ever checking the content type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use qqq_serve::{BodyBytes, BodyHandler, Dispatch, Handler, Response, StreamingHandler};
+    /// # use qqq_serve::server::SseStreamFactory;
+    /// # use qqq_serve::stream::StreamError;
+    /// # let flat: Handler = Arc::new(|_, _| Response::text(200, "default"));
+    /// # let gate: BodyHandler = Arc::new(|_, _, _| Response::text(200, "x"));
+    /// # let factory: SseStreamFactory = Arc::new(|_| {
+    /// #     let noop: StreamingHandler = Arc::new(|_, _, _| {
+    /// #         Box::pin(async {
+    /// #             Err::<(), StreamError>(StreamError::Transport("closed".to_owned()))
+    /// #         })
+    /// #     });
+    /// #     noop
+    /// # });
+    /// let dispatch = Dispatch::flat(flat).with_sse("feed", gate, factory);
+    /// assert!(dispatch.sse_for("feed").is_some());
+    /// assert!(dispatch.sse_for("other").is_none());
+    /// ```
     #[must_use]
     pub fn with_sse(
         mut self,
@@ -392,6 +457,16 @@ impl Dispatch {
     }
 
     /// The SSE handlers for a name, if the route streams events.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use qqq_serve::{Dispatch, Handler, Response};
+    /// # let flat: Handler = Arc::new(|_, _| Response::text(200, "default"));
+    /// let dispatch = Dispatch::flat(flat);
+    /// assert!(dispatch.sse_for("feed").is_none());
+    /// ```
     #[must_use]
     pub fn sse_for(&self, name: &str) -> Option<&SseHandlers> {
         self.sse.get(name)
@@ -446,6 +521,16 @@ impl Dispatch {
 /// default component: unmapped means default, never another tenant's
 /// component and never a refusal — refusal is the 421 the resolver
 /// already answers for unknown hosts, not this layer's job.
+///
+/// # Examples
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use qqq_serve::{Dispatch, Handler, Response, TenantDispatch};
+/// # let flat: Handler = Arc::new(|_, _| Response::text(200, "default"));
+/// let dispatch = TenantDispatch::new(Dispatch::flat(flat));
+/// assert!(!dispatch.has_tenants());
+/// ```
 #[derive(Clone)]
 pub struct TenantDispatch {
     default: Dispatch,
@@ -454,6 +539,16 @@ pub struct TenantDispatch {
 
 impl TenantDispatch {
     /// A single-component dispatcher: every tenant is served by `default`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use qqq_serve::{Dispatch, Handler, Response, TenantDispatch};
+    /// # let flat: Handler = Arc::new(|_, _| Response::text(200, "default"));
+    /// let dispatch = TenantDispatch::new(Dispatch::flat(flat));
+    /// assert!(dispatch.for_tenant("anyone").body_for("x").is_none());
+    /// ```
     #[must_use]
     pub fn new(default: Dispatch) -> Self {
         Self {
@@ -463,6 +558,23 @@ impl TenantDispatch {
     }
 
     /// Register a tenant's own component dispatcher.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use qqq_serve::{BodyBytes, BodyHandler, Dispatch, Handler, Response, TenantDispatch};
+    /// # let flat: Handler = Arc::new(|_, _| Response::text(200, "default"));
+    /// let marker: BodyHandler =
+    ///     Arc::new(|_, _: &BodyBytes, _| Response::text(200, "shop"));
+    /// let dispatch = TenantDispatch::new(Dispatch::flat(flat)).with_tenant(
+    ///     "shop",
+    ///     Dispatch::flat(Arc::new(|_, _| Response::text(200, "flat")))
+    ///         .with_body("marker", marker),
+    /// );
+    /// assert!(dispatch.has_tenants());
+    /// assert!(dispatch.for_tenant("shop").body_for("marker").is_some());
+    /// ```
     #[must_use]
     pub fn with_tenant(mut self, tenant: impl Into<String>, dispatch: Dispatch) -> Self {
         self.tenants.insert(tenant.into(), dispatch);
@@ -471,12 +583,35 @@ impl TenantDispatch {
 
     /// The dispatcher for a resolved tenant: its own component when the
     /// manifest mapped one, the default otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use qqq_serve::{Dispatch, Handler, Response, TenantDispatch};
+    /// # let flat: Handler = Arc::new(|_, _| Response::text(200, "default"));
+    /// # let dispatch = TenantDispatch::new(Dispatch::flat(flat));
+    /// assert!(dispatch.for_tenant("buyer").body_for("missing").is_none());
+    /// ```
     #[must_use]
     pub fn for_tenant(&self, tenant: &str) -> &Dispatch {
         self.tenants.get(tenant).unwrap_or(&self.default)
     }
 
     /// Whether any tenant has its own component.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use qqq_serve::{Dispatch, Handler, Response, TenantDispatch};
+    /// # let flat: Handler = Arc::new(|_, _| Response::text(200, "default"));
+    /// # let shop: Handler = Arc::new(|_, _| Response::text(200, "shop"));
+    /// let single = TenantDispatch::new(Dispatch::flat(flat));
+    /// let multi = single.clone().with_tenant("shop", Dispatch::flat(shop));
+    /// assert!(!single.has_tenants());
+    /// assert!(multi.has_tenants());
+    /// ```
     #[must_use]
     pub fn has_tenants(&self) -> bool {
         !self.tenants.is_empty()
@@ -1364,6 +1499,21 @@ pub enum TenantResolution<'a> {
 /// only ever borrows the fallback — a resolved label is owned, and a
 /// refusal names what it saw. Forcing one lifetime would demand the head
 /// outlive the connection context, which no caller can satisfy.
+///
+/// # Examples
+///
+/// ```
+/// # use std::collections::BTreeMap;
+/// # use qqq_serve::server::TenantSources;
+/// # let hosts = BTreeMap::from([("shop.example.com".to_owned(), "shop".to_owned())]);
+/// let sources = TenantSources {
+///     hosts: Some(&hosts),
+///     host: Some("shop.example.com"),
+///     fallback: "127.0.0.1",
+///     identity: None,
+/// };
+/// assert_eq!(sources.fallback, "127.0.0.1");
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct TenantSources<'h, 'f> {
     /// The manifest's `[server.tenants]` map, or `None` when absent.
@@ -1388,6 +1538,28 @@ pub struct TenantSources<'h, 'f> {
 /// and `shop.example.com` name the same deployment — and a table that
 /// matched only one spelling would refuse the other, which reads as an
 /// outage rather than a policy.
+///
+/// # Examples
+///
+/// ```
+/// # use std::collections::BTreeMap;
+/// # use qqq_serve::server::{TenantResolution, TenantSources, resolve_request_tenant};
+/// # let hosts = BTreeMap::from([("shop.example.com".to_owned(), "shop".to_owned())]);
+/// let mapped = resolve_request_tenant(TenantSources {
+///     hosts: Some(&hosts),
+///     host: Some("SHOP.EXAMPLE.COM:8443"),
+///     fallback: "127.0.0.1",
+///     identity: None,
+/// });
+/// assert_eq!(mapped, TenantResolution::Resolved("shop".to_owned()));
+/// let refused = resolve_request_tenant(TenantSources {
+///     hosts: Some(&hosts),
+///     host: Some("evil.example.com"),
+///     fallback: "127.0.0.1",
+///     identity: None,
+/// });
+/// assert!(matches!(refused, TenantResolution::Unknown(_)));
+/// ```
 #[must_use]
 pub fn resolve_request_tenant<'f>(sources: TenantSources<'_, 'f>) -> TenantResolution<'f> {
     // Verified identity first: the certificate chained to a trusted CA at

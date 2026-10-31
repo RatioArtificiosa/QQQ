@@ -1089,8 +1089,14 @@ jobs:
       # stopped doing so, which red the gate with "PyYAML unavailable"
       # while the tree was innocent. Pin the version like every other tool
       # so the three platforms validate with the same parser.
+      # Both interpreter names: `cargo xtask ci` prefers `python3` and
+      # falls back to `python`, and on macOS those are different
+      # interpreters with separate site packages — installing under only
+      # one leaves the gate's pick without the module.
       - name: Install PyYAML for the Python checkers
-        run: python -m pip install "pyyaml==6.0.3"
+        run: |
+          python3 -m pip install "pyyaml==6.0.3"
+          python -m pip install "pyyaml==6.0.3"
       - name: gate (cargo xtask ci)
         run: cargo xtask ci
 

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "assemblyscript_http_wit_sha256": "da34eb49b49c5ac7b13c50582e956a87fd91a88ee82ae93325d79f757e02d038",
+  "assemblyscript_http_wit_sha256": "591cd20a1abff3d5986137c80b5daf028901240dd3af65f04cc299cbf6d82c23",
   "languages": {
     "assemblyscript": {
       "expected_probe": "passed",

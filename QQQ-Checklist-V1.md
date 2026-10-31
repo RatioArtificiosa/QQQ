@@ -973,7 +973,8 @@ Items are grouped below by **phase**, because dependency order matters more than
     `SO_REUSEPORT`, because the kernel option distributes differently on macOS and Windows; the
     reasoning is in the crate documentation. 8 integration tests bind real sockets and prove the
     loop accepts, carries data, balances across shards, and stops on shutdown.
-- [ ] **ARCH-007** Create all crates listed in the topology with correct names, tiers and empty implementations.
+- [!] **ARCH-007** Create all crates listed in the topology with correct names, tiers and empty implementations. Owner: repo owner/architect (registry half: registry owner; Fabric half: founder, see `LIC-003`/`OQ-008`). Nine of the eleven §4.3 crates exist in this workspace with the listed names (`qqq-core`, `qqq-cap`, `qqq-abi`, `qqq-host`, `qqq-io`, `qqq-serve`, `qqq-pkg`, `qqq-run`, `qqq-debug`; plus `qqq-bench`, `qqq-sys`, `xtask` beyond the table) and implementations far beyond empty. The two missing rows need an owner decision each, not code. `qqq-fabric` is commercial, separate repository and licence per the §4.3 table itself (Beyond V1, `FUT-001`) — creating it here would pre-empt the licensing decision. `qqq-registry`: the item's letter asks only for an *empty* crate, but even an empty crate under that name collides with the external project's same-named crate (verified: `name = "qqq-registry"` in `F:\QQQ-AUDIT\Registry\crates\qqq-registry\Cargo.toml`) and implies a server home that must not exist here — the goal (`G:\Active\QQQ-RUNTIME-COMPLETION-GOAL.md` §5.8 item 11) forbids a competing implementation and offers only a stub-with-explicit-external-note or an amendment, both of which are owner calls. Blocked on: amend the topology to record both rows as externally owned, or charter their return (stub or full, by owner approval).
+  → Tripwire / re-measure (commands a human with access re-runs): `ls E:\QQQ\crates` shows no `qqq-registry`/`qqq-fabric` (12 members); `F:\QQQ-AUDIT\Registry\crates\qqq-registry\Cargo.toml` still names the server crate; the registry still builds against this tree (goal §2). Revisit if the registry merges into `E:\QQQ` or Fabric is chartered. Verified 2026-10-31: neither missing row present here, registry tree untouched by this work.
   → §4.3 Crate topology
 - [x] **ARCH-008** Enforce `#![forbid(unsafe_code)]` on every crate except the three named exceptions.
   → Done: `every_non_exception_crate_forbids_unsafe_code` in
@@ -3882,10 +3883,15 @@ Items are grouped below by **phase**, because dependency order matters more than
     batch of 2026-10-03 added 24). Recording that plainly is the point:
     `§O-219`'s shape is an item that looks done, and this one would look done if the check
     existed and nobody read its number.
-  → `tools/check_api_examples.py` measures the surface and enforces a **ratchet**. `ci.yml` runs
-    it with `--allow 2080`, which is the visible distance to the target: a *regression* — an
-    example lost — fails immediately, and the allowance is lowered as examples land. A check
-    demanding 2,080 new examples in one commit would be red forever, and a permanently red gate is
+    Re-measured 2026-10-31: **2,490 declarations, 558 doctests run** by
+    `cargo test --doc --workspace` — 22.4% (558 compiling fences counted
+    statically, `no_run` column reads 0; failures would fail the gate run,
+    which is green). Outstanding 1,932
+    at allowance 1,932: the ratchet tightened as examples landed, no cliff crossed.
+  → `tools/check_api_examples.py` measures the surface and enforces a **ratchet**. The `xtask`
+    gate runs it with `--allow 1932`, which is the visible distance to the target: a *regression*
+    — an example lost — fails immediately, and the allowance is lowered as examples land. A check
+    demanding 1,932 new examples in one commit would be red forever, and a permanently red gate is
     one people learn to skip.
   → The nine: `qqq-core` carries four (`PackageName` construction, a positioned rejection, why a
     trailing separator is its own error rather than a generic one, and `Version`'s one-directional
@@ -3916,9 +3922,9 @@ Items are grouped below by **phase**, because dependency order matters more than
     made the measurement wrong: `pub const NAME` was missed because `const` sat in the modifier
     group rather than as a keyword, and a **closing** fence counted as an opening one, doubling
     every block. The first reported 1,937 items where the truth is 2,116.
-  → **What remains, stated so the next reader does not have to rediscover it.** 2,080 of 2,332
-    declarations have no example. `qqq-serve` alone holds 718 items with 28 fences; `qqq-host`
-    577 with 121. The highest-value
+  → **What remains, stated so the next reader does not have to rediscover it** (re-measured
+    2026-10-31). 1,932 of 2,490 declarations have no example. `qqq-serve` alone holds 580 items
+    with 94 fences; `qqq-host` 777 with 290. The highest-value
     next targets are the public entry points a Rust embedder calls first — `qqq-host`'s
     `PreparedComponent` / `Instance` / `Linker` construction and `qqq-cap`'s `GrantSet` — rather
     than working down each crate in file order, because an example on an internal helper teaches

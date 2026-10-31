@@ -15,8 +15,8 @@ achievable by assertion:
 
 | Measurement | Value |
 |---|---|
-| public declarations across the 11 crates | **2,318** |
-| doctests `cargo test --doc --workspace` runs | **385** |
+| public declarations across the 11 crates | **2,490** |
+| doctests `cargo test --doc --workspace` runs | **558** |
 
 So the honest state is that the standard is **not met**, and a check that claimed otherwise would
 be the "a diagnostic that cannot fail is not a diagnostic" defect in its most visible form. What
@@ -30,7 +30,7 @@ this check does instead is:
 
 # Why a ratchet and not a hard 100%
 
-Because a check that demands 1,933 new examples turns red and stays red, and a permanently red gate
+Because a check that demands 1,932 new examples turns red and stays red, and a permanently red gate
 is one people learn to ignore - the failure `check_batch_first.py` names as *"paperwork"*. A ratchet
 encodes the same standard while being satisfiable at every commit, and the number in the gate is
 the visible distance to the target.

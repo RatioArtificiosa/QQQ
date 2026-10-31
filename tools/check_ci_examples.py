@@ -25,7 +25,9 @@ for _stream in (sys.stdout, sys.stderr):
 
 try:
     import yaml
-except ImportError:  # pragma: no cover - CI always has PyYAML (6.0.3 here)
+except (
+    ImportError
+):  # pragma: no cover - the CI job installs PyYAML (6.0.3, pinned in ci.yml)
     yaml = None
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent

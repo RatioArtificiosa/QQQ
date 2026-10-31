@@ -128,15 +128,23 @@ re-running captures a different-length prefix of the same infinite
 stream, which is why its digest is a capture pin and its shape is a
 test pin.
 
-Single-occurrence load note (no code change, watch item): one full-gate
-run failed `f16_rapid_reset_cannot_exceed_stream_budget`
-(`hyper_h2.rs`, saw 0 RST_STREAM) while the box ran the whole gate in
-parallel; the same test passed solo three times, in the full
-`hyper_h2` suite, and in the re-run gate. The flood test asserts reset
-counts with no synchronization to the server's processing, so an
-overloaded scheduler can tip it from per-stream RSTs to a bare
-connection close - a timing shape, not a verdict change (the
-concurrency bound it guards was never touched by this slice: selection
-is one map lookup on the shared dispatch path). If it recurs outside a
-loaded gate, harden the test's synchronization rather than the product
-path; do not "fix" it by weakening the assertion.
+Load-flake watch list (no code change; re-open as a residual only if
+either recurs outside a fully parallel gate):
+- `f16_rapid_reset_cannot_exceed_stream_budget` (`hyper_h2.rs`, saw 0
+  RST_STREAM): one full-gate run failed while the box ran the whole
+  gate in parallel; passed solo three times, in the full `hyper_h2`
+  suite, and in the re-run gate. The flood test asserts reset counts
+  with no synchronization to the server's processing, so an overloaded
+  scheduler can tip it from per-stream RSTs to a bare connection close
+  - a timing shape, not a verdict change (the concurrency bound it
+  guards was never touched by this slice).
+- `metrics_wiring` trio (`body_bytes_are_recorded`,
+  `the_peer_ip_is_one_series_key_not_one_per_request`,
+  `latency_is_recorded`): one full-gate run hit `could not bind` on two
+  tests plus an off-by-one count on the third - the repo-documented
+  free-port race (sibling parallel tests hold the port; cross-talk then
+  skews counts). Passing solo and in-suite; no limiter, metric, or
+  dispatch code changed by this slice.
+If either recurs outside a loaded gate, harden the test's
+synchronization (f16) or port allocation (metrics) rather than the
+product path; do not "fix" either by weakening an assertion.

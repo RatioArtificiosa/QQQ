@@ -98,8 +98,13 @@ guest ABI (the bridge polls the one-shot export per event - the
 guest export that holds the socket open remains owner-blocked),
 multi-tenant isolation beyond host/identity->label attribution plus
 per-component dispatch, manifest-rev beyond `unknown`, or performance.
-The WS two-message echo (per-message guest calls) is proven in
-`production_serve_live_transcript`, not re-transcribed here.
+- h1-ws-2echo: the WS two-message echo over the production listener,
+  captured live from the real `qqqai serve` binary (same fixture and
+  client literals as `production_serve_live_transcript`): 101 head
+  with the RFC 6455 canonical accept key, two per-message guest echoes
+  (`hello-ws`, `second-message`, one guest execution each), and the
+  close echo. The digest pins the 159 response bytes (head + 3 server
+  frames); reparse the hex dumps and rehash to verify.
 
 Stability note (root cause found and fixed): the earlier
 readiness-timeout failures (60s, `TLS GET / never answered 200` with

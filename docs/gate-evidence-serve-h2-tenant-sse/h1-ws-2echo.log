@@ -1,0 +1,47 @@
+# WS two-message guest echo over the production listener.
+#
+# Captured by driving the REAL `qqqai serve` binary (debug build of this tree)
+# over real loopback TCP against the live-probe fixture project
+# (qqq.toml with a kind = "ws" /ws route, echo-http.wat guest).
+# Client bytes are fixed literals (same as production_serve_live_transcript):
+# Sec-WebSocket-Key dGhlIHNhbXBsZSBub25jZQ==, masked hello-ws / second-message.
+# The digest pins the server response bytes below: the 101 head plus the
+# three server frames (echo 1, echo 2, close echo), concatenated in order.
+# Reparse the hex dumps and rehash to verify.
+
+### ws-handshake-101-head (129 bytes)
+--- utf8 ---
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+
+
+--- hex ---
+00000000 48 54 54 50 2f 31 2e 31 20 31 30 31 20 53 77 69 
+00000010 74 63 68 69 6e 67 20 50 72 6f 74 6f 63 6f 6c 73 
+00000020 0d 0a 55 70 67 72 61 64 65 3a 20 77 65 62 73 6f 
+00000030 63 6b 65 74 0d 0a 43 6f 6e 6e 65 63 74 69 6f 6e 
+00000040 3a 20 55 70 67 72 61 64 65 0d 0a 53 65 63 2d 57 
+00000050 65 62 53 6f 63 6b 65 74 2d 41 63 63 65 70 74 3a 
+00000060 20 73 33 70 50 4c 4d 42 69 54 78 61 51 39 6b 59 
+00000070 47 7a 7a 68 5a 52 62 4b 2b 78 4f 6f 3d 0d 0a 0d 
+00000080 0a 
+
+### ws-echo-1-hello-ws (10 bytes)
+--- utf8 ---
+´┐¢hello-ws
+--- hex ---
+00000000 81 08 68 65 6c 6c 6f 2d 77 73 
+
+### ws-echo-2-second-message (16 bytes)
+--- utf8 ---
+´┐¢second-message
+--- hex ---
+00000000 81 0e 73 65 63 6f 6e 64 2d 6d 65 73 73 61 67 65 
+
+### ws-close-echo (4 bytes)
+--- utf8 ---
+´┐¢´┐¢
+--- hex ---
+00000000 88 02 03 e8

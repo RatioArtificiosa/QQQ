@@ -8,3 +8,4 @@ h1-components-loopback-421 sha256=78897fda146fa98b09994b845f340ae65bcd71919539cb
 h2-components-shop-200-body sha256=2caab218b37f6dcd699177d2e18c7f78347dc52ecd7f60ee1b19dee66aa6803b
 h2-sse-200-body sha256=2caab218b37f6dcd699177d2e18c7f78347dc52ecd7f60ee1b19dee66aa6803b
 h2-negotiated-alpn=h2 h2-sse-200-status=200 h2-tenant-unknown-status=421
+h1-ws-2echo sha256=42132402d7208d17c2af5b3d3d65a477396bc75a74aaf94374db8c7ca8a8fa8b

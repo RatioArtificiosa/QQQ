@@ -1097,6 +1097,15 @@ jobs:
         run: |
           python3 -m pip install "pyyaml==6.0.3"
           python -m pip install "pyyaml==6.0.3"
+      # The iface probe guests (`qqq-host/tests/iface_*.rs`) build their
+      # fixture with `cargo build --offline` in `examples/iface-probe`,
+      # whose lockfile pins versions the main workspace never downloads
+      # (e.g. `equivalent 1.0.3` vs the workspace's 1.0.2) — hermetic at
+      # test time, so the job warms the shared registry cache first. A
+      # cold cache fails all nine probe suites with "failed to download"
+      # while the tree is innocent (seen on ubuntu + windows runners).
+      - name: Warm the registry cache for the probe guests
+        run: cargo fetch --manifest-path examples/iface-probe/Cargo.toml
       - name: gate (cargo xtask ci)
         run: cargo xtask ci
 

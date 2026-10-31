@@ -56,7 +56,7 @@ fn probe_component() -> Option<Vec<u8>> {
                 .expect("cargo runs");
             assert!(
                 output.status.success(),
-                "probe env guest build failed with the toolchain present: {}",
+                "probe env guest build failed with the toolchain present: {} (on a cold cargo cache this is the probe workspace's uncached dependencies, not the guest: warm once with `cargo fetch --manifest-path examples/iface-probe/Cargo.toml`)",
                 String::from_utf8_lossy(&output.stderr)
             );
             let artifact = workspace.join("target/wasm32-wasip2/release/probe_env.wasm");

@@ -839,6 +839,15 @@ mod tests {
     /// both counters while workers churn acquire/release/discard, and every
     /// sample must satisfy the invariant — including `idle` alone, which a
     /// double-release accounting bug would push past capacity.
+    ///
+    /// Coverage is an overlap witness, not a volume threshold: the sampler
+    /// observes the workers' operation count advance between two of its own
+    /// reads, which proves pool transitions ran concurrently with the
+    /// sampling loop. A bare sample count would pass on samples taken
+    /// entirely before or after the churn (vacuous) and fail on a runner
+    /// that never co-schedules the sampler (a scheduling fact, not a pool
+    /// defect) — both failure modes this shape previously had on loaded
+    /// Windows runners.
     #[test]
     fn concurrent_accounting_never_reports_an_impossible_state() {
         use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -853,9 +862,16 @@ mod tests {
         let churn = Arc::new(Barrier::new(THREADS + 1));
         let done = Arc::new(AtomicBool::new(false));
         let sample_count = Arc::new(AtomicU64::new(0));
+        // Successful worker transitions. The sampler witnesses this counter
+        // advance between two of its own reads, which is the overlap proof:
+        // an operation must have run concurrently with the sampling window.
+        let ops = Arc::new(AtomicU64::new(0));
+        let overlapped = Arc::new(AtomicBool::new(false));
         let sampler_p = Arc::clone(&p);
         let sampler_done = Arc::clone(&done);
         let sampler_samples = Arc::clone(&sample_count);
+        let sampler_ops = Arc::clone(&ops);
+        let sampler_overlapped = Arc::clone(&overlapped);
         let sampler_go = Arc::clone(&go);
         let sampler_churn = Arc::clone(&churn);
         let watcher = std::thread::spawn(move || {
@@ -870,12 +886,21 @@ mod tests {
                 "impossible state observed: in_use {used} + idle {idle} > {CAPACITY}"
             );
             sampler_churn.wait();
-            while !sampler_done.load(Ordering::Relaxed) {
+            let mut previous = sampler_ops.load(Ordering::Acquire);
+            while !sampler_done.load(Ordering::Acquire) {
                 // One joint read: two separate accessor calls could straddle a
                 // transition and report a sum the pool never held, which would
                 // fail the invariant on correct code.
                 let (used, idle) = sampler_p.snapshot();
                 sampler_samples.fetch_add(1, Ordering::Relaxed);
+                // Overlap, not volume: a worker transition ran between two
+                // sampler reads, so the invariant above was exercised under
+                // real contention rather than on a quiet pool.
+                let observed = sampler_ops.load(Ordering::Relaxed);
+                if observed > previous {
+                    sampler_overlapped.store(true, Ordering::Relaxed);
+                }
+                previous = observed;
                 assert!(
                     used.saturating_add(idle) <= CAPACITY,
                     "impossible state observed: in_use {used} + idle {idle} > {CAPACITY}"
@@ -888,6 +913,7 @@ mod tests {
         let mut handles = Vec::new();
         for t in 0..THREADS {
             let p = Arc::clone(&p);
+            let ops = Arc::clone(&ops);
             let go = Arc::clone(&go);
             let churn = Arc::clone(&churn);
             handles.push(std::thread::spawn(move || {
@@ -895,6 +921,9 @@ mod tests {
                 churn.wait();
                 for i in 0..ATTEMPTS {
                     if p.acquire(1000.0).is_ok() {
+                        // Every successful acquire is pool activity the
+                        // sampler can witness; a refused acquire is not.
+                        ops.fetch_add(1, Ordering::Relaxed);
                         if (t + i) % 7 == 0 {
                             p.discard();
                         } else {
@@ -910,12 +939,21 @@ mod tests {
         for h in handles {
             h.join().expect("thread must not panic");
         }
-        done.store(true, Ordering::Relaxed);
+        done.store(true, Ordering::Release);
         watcher.join().expect("sampler must not panic");
 
         assert!(
-            sample_count.load(Ordering::Relaxed) > 100,
-            "too few samples to prove anything; contention never overlapped the sampler"
+            sample_count.load(Ordering::Relaxed) > 0,
+            "the sampler never ran a single read"
+        );
+        assert!(
+            overlapped.load(Ordering::Relaxed),
+            "no worker transition overlapped the sampling window ({} samples, {} worker ops): \
+             the sampler never observed the operation count advance, so the invariant above \
+             was never exercised under contention — a scheduling fact on this runner, not a \
+             pool defect, and no impossible state was observed",
+            sample_count.load(Ordering::Relaxed),
+            ops.load(Ordering::Relaxed)
         );
         assert_eq!(p.in_use(), 0, "every acquire was matched by a release");
     }

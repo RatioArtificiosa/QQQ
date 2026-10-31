@@ -128,11 +128,13 @@ fn validate_tls(tls: &crate::manifest::ServerTls) -> Result<(), ManifestError> {
 /// A key the matcher can never produce is dead configuration reading as
 /// policy: empty, non-lowercase, carrying a `:port` (stripped from requests
 /// before lookup), a trailing dot (requests arrive undotted), whitespace,
-/// or brackets. An empty map is the same mistake at the table level — a
-/// `[server.tenants]` section that maps nothing behaves as absent, so it
-/// is refused rather than silently switching the feature off.
+/// or brackets. An empty hosts map is the same mistake at the table level —
+/// a `[server.tenants]` section that maps nothing behaves as absent, so it
+/// is refused rather than silently switching the feature off — unless
+/// components are mapped: an mTLS-only deployment resolves tenants from
+/// client certificates and needs no `Host` mapping at all.
 fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), ManifestError> {
-    if tenants.hosts.is_empty() {
+    if tenants.hosts.is_empty() && tenants.components.is_empty() {
         return Err(ManifestError::InvalidField {
             field: "server.tenants.hosts".to_owned(),
             reason: "the hosts table is empty and behaves as absent; remove \
@@ -190,8 +192,8 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
     // or an empty artifact name would route nowhere, which is dead config
     // with a security shape (a tenant silently served by the wrong
     // component). An empty map is the single-component default and stays
-    // allowed — unlike hosts, where an empty table disables the feature
-    // the section promises.
+    // allowed — unlike hosts, where an empty table (without components)
+    // disables the feature the section promises.
     for (label, artifact) in &tenants.components {
         if label.trim().is_empty() || artifact.trim().is_empty() {
             return Err(ManifestError::InvalidField {
@@ -199,21 +201,26 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
                 reason: "component keys and artifact names must not be empty; an empty entry routes no tenant to no component".to_owned(),
             });
         }
-        // Keys match resolved tenant labels verbatim, so a padded or
-        // spaced key is dead configuration reading as policy: ` Shop `
-        // never equals the `shop` the Host table resolves. Reject the
-        // same way host keys refuse whitespace, rather than serving the
-        // tenant from the default component while the file says otherwise.
-        for (name, value) in [("key", label.as_str()), ("artifact", artifact.as_str())] {
-            if value != value.trim() || value.chars().any(char::is_whitespace) {
-                return Err(ManifestError::InvalidField {
-                    field: "server.tenants.components".to_owned(),
-                    reason: format!(
-                        "component {name} `{value}` carries whitespace and never matches; \
-                         write the bare label or artifact name"
-                    ),
-                });
-            }
+        // Keys match resolved tenant labels verbatim, so surrounding
+        // whitespace or control characters are dead configuration reading
+        // as policy: they never equal a resolved label. Interior spaces
+        // are allowed — a `John Doe` common name matches its key exactly —
+        // while artifact names stay bare (package names carry no spaces).
+        if label != label.trim() || label.chars().any(char::is_control) {
+            return Err(ManifestError::InvalidField {
+                field: "server.tenants.components".to_owned(),
+                reason: format!(
+                    "component key `{label}` never matches; write the label exactly as resolved"
+                ),
+            });
+        }
+        if artifact != artifact.trim() || artifact.chars().any(char::is_whitespace) {
+            return Err(ManifestError::InvalidField {
+                field: "server.tenants.components".to_owned(),
+                reason: format!(
+                    "component artifact `{artifact}` never resolves; write the bare package name"
+                ),
+            });
         }
     }
     Ok(())

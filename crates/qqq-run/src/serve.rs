@@ -2144,6 +2144,38 @@ mod tests {
         );
     }
 
+    /// **`read_component_bytes` fails closed naming the package.**
+    ///
+    /// A mapped tenant whose artifact was never built must refuse startup:
+    /// serving the default component while the manifest promises the tenant
+    /// its own would be silent cross-tenant substitution. The error names
+    /// the package (the tenant name is added by the caller, which knows
+    /// which mapping entry failed) with the build as the remediation.
+    /// Present bytes load unchanged — which the live components test proves
+    /// end to end, since unit tests cannot stage files where
+    /// `find_artifact` looks (`CARGO_TARGET_DIR` reroutes the lookup to the
+    /// shared build cache, and planting files there would leak into other
+    /// tests' ambiguity cases).
+    #[test]
+    fn read_component_bytes_names_the_missing_package() {
+        let dir = tls_fixture_dir("artifacts-absent");
+        let err = read_component_bytes(dir.as_path(), "shop-app")
+            .expect_err("an unbuilt package must be refused");
+        assert!(
+            err.message.contains("shop-app"),
+            "the refusal must name the package: {}",
+            err.message
+        );
+        assert!(
+            err.remediation
+                .as_deref()
+                .is_some_and(|r| r.contains("qqqai build")),
+            "the fix must be the build: {:?}",
+            err.remediation
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// **Component routing without an authenticated identity is refused.**
     ///
     /// A `Host` header is client-controlled, so selecting a component by

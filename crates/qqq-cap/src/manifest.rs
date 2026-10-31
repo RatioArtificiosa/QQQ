@@ -2516,15 +2516,17 @@ allow_origins = ["https://app.example.com"]
             "the component mapping must survive parsing"
         );
         // An empty label or artifact names nothing to serve: dead config.
-        // A padded or spaced key can never equal a resolved tenant label,
-        // so it would read as policy while the default serves: dead too.
+        // Padded keys and padded or spaced artifact names can never match
+        // or resolve, so they would read as policy while the default
+        // serves: dead too. An interior space in a key is honest — a
+        // `John Doe` common name matches it exactly — and parses.
         for (key, value) in [
             ("", "shop-app"),
             ("shop", ""),
             (" shop", "shop-app"),
             ("shop ", "shop-app"),
-            ("sh op", "shop-app"),
             ("shop", " shop-app"),
+            ("shop", "shop app"),
         ] {
             let text = format!(
                 "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
@@ -2537,6 +2539,39 @@ allow_origins = ["https://app.example.com"]
                 "the error must name the table: {err}"
             );
         }
+        let spaced = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = { \"shop.example.com\" = \"shop\" }\n\
+             [server.tenants.components]\n\"John Doe\" = \"shop-app\"\n",
+        )
+        .expect("an interior space matches a spaced common name exactly");
+        assert_eq!(
+            spaced
+                .server
+                .tenants
+                .expect("tenants must be present")
+                .components
+                .get("John Doe"),
+            Some(&"shop-app".to_owned()),
+            "the spaced key must survive parsing"
+        );
+        // No hosts table with components: an mTLS-only deployment resolves
+        // tenants from client certificates and needs no `Host` mapping.
+        let identity_only = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = {}\n\
+             [server.tenants.components]\nshop = \"shop-app\"\n",
+        )
+        .expect("components without hosts must parse");
+        assert!(
+            identity_only
+                .server
+                .tenants
+                .expect("tenants must be present")
+                .hosts
+                .is_empty(),
+            "no hosts means identity-only resolution, not no mapping"
+        );
     }
 
     /// A host key the matcher can never produce fails closed naming the

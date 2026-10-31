@@ -91,6 +91,11 @@ real runs, then restored byte-identical to green):
   against the pre-`TenantDispatch` tree does not compile (`E0432: no
   TenantDispatch in server`) - two components cannot be expressed
   through one dispatcher.
+- red7 (red7-h1-h2-framing-differs.log): the H1/H2 byte-identity test in
+  its first form compared chunked H1 bytes against de-framed H2 bytes
+  and failed - wire bytes differ by protocol framing while the guest
+  event bytes are identical, which is why the committed test de-chunks
+  H1 and compares whole events only.
 
 What is NOT claimed: trailing-header SSE over H2, a native multi-shot
 guest ABI (the bridge polls the one-shot export per event - the

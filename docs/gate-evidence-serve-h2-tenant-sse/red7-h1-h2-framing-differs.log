@@ -1,0 +1,28 @@
+# red7: a bare H1-vs-H2 byte comparison fails on framing, proving only
+# de-framed guest bytes can be the invariant.
+#
+# The first form of `production_serve_h1_h2_event_bytes_identical` compared
+# the H1 body (with chunk framing) directly against the de-framed H2 answer
+# on the live-probe SSE fixture (`sse-event.wat`, `data: hello` events).
+# It failed as it must: the left side is three bare `data: hello` events
+# (de-framed H2 DATA payloads); the right side interleaves each event with
+# its `d\r\n...\r\n` chunk envelope. Same guest bytes, different wire
+# framing — which is why the committed test de-chunks H1 first and compares
+# event bytes only. A "byte-identical H1 answer" claim at the wire level
+# would be false for every HTTP version pair; at the guest-event level it
+# holds and this test pins it.
+#
+# Captured from a real run against the echo fixture, then the test was
+# fixed (dechunk_prefix + whole-event read) and re-ran green.
+
+---- production_serve_h1_h2_event_bytes_identical stdout ----
+
+thread 'production_serve_h1_h2_event_bytes_identical' panicked at crates\qqq-run\tests\cli.rs:
+assertion `left == right` failed: H1 and H2 event streams must be byte-identical
+  left: [100, 97, 116, 97, 58, 32, 104, 101, 108, 108, 111, 10, 10, 100, 97, 116, 97, 58, 32, 104, 101, 108, 108, 111, 10, 10, 100, 97, 116, 97, 58, 32, 104, 101, 108, 108, 111, 10, 10]
+ right: [100, 13, 10, 100, 97, 116, 97, 58, 32, 104, 101, 108, 108, 111, 10, 10, 13, 10, 100, 13, 10, 100, 97, 116, 97, 58, 32, 104, 101, 108, 108, 111, 10, 10, 13, 10, 100, 13, 10, 100, 97, 116, 97, 58, 32, 104, 101, 108, 108, 111, 10, 10, 13, 10]
+  left decodes to three `data: hello` events with no framing;
+  right shows the same three events each wrapped as `d<CR><LF>...<CR><LF>`
+  (`d` = 13 = len("data: hello\n\n")).
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 144 filtered out; finished in 0.32s

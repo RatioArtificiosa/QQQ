@@ -4207,6 +4207,149 @@ fn production_serve_sse_multishot_live() {
     );
 }
 
+/// H1 and H2 carry byte-identical guest event bytes: the drivers differ
+/// in framing (chunked vs DATA frames) by protocol design, never in
+/// payload. A driver that altered, truncated, or re-encoded the guest's
+/// events fails here.
+#[test]
+fn production_serve_h1_h2_event_bytes_identical() {
+    let (s, der) = write_h2_sse_project("test-serve-h1-h2-identical");
+
+    let addr = free_addr();
+    let port = addr.port();
+    let mut serving = Serving::spawn_with(&s, &addr, &["--tls"]);
+    serving.wait_for("listening on", 120);
+    wait_tls_serving(&mut serving, port, &der, None);
+
+    let (negotiated, status, h2) =
+        cli_h2_events(port, &der, "shop.example.com", "/events", 3, None);
+    assert_eq!(
+        negotiated.as_deref(),
+        Some("h2"),
+        "the production listener must negotiate h2 over TLS"
+    );
+    assert_eq!(status, Some(200), "the SSE stream must open 200 over H2");
+
+    // Compare the de-framed guest event bytes: the H1 body carries chunk
+    // framing (`<hexlen>\r\n<payload>\r\n` per event) while the H2 answer
+    // arrives de-framed, so a bare byte comparison fails (see red7) —
+    // framing differs by protocol, payload must not.
+    let h1_events = cli_tls_decoded_events(port, &der, 3);
+    assert_eq!(
+        h2, h1_events,
+        "de-framed H1 and H2 must carry byte-identical guest events"
+    );
+
+    let _ = serving.finish();
+}
+
+/// Whether `bytes` hold `want` *complete* SSE events: `data:` lines are
+/// not enough, because a `data:` prefix can straddle two reads while the
+/// event is still incomplete. An event is complete at its terminating
+/// blank line, so count `\n\n` instead.
+fn has_complete_events(bytes: &[u8], want: usize) -> bool {
+    bytes.windows(2).filter(|w| *w == b"\n\n").count() >= want
+}
+
+/// Read one H1 SSE stream over TLS until `want` events are fully decoded,
+/// then return the de-chunked event bytes.
+///
+/// `cli_tls_events` stops at the first `data:` substring, which can land
+/// mid-chunk; decoding that prefix would compare a truncation. This reads
+/// until `want` *complete* (blank-line-terminated) events decode, so the
+/// comparison below is whole events or a loud failure — never a racing
+/// prefix. A 15 s deadline that fires on a saturated runner reads as
+/// scheduling, like `wait_tls_serving`'s readiness classes, not as a
+/// product refusal: refusals carry status lines, timeouts do not.
+fn cli_tls_decoded_events(port: u16, der: &[u8], want: usize) -> Vec<u8> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the TLS client")
+        .block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let config = cli_client_config(der, None, &[b"http/1.1"]);
+            let connector = tokio_rustls::TlsConnector::from(config);
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect");
+            let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+            let mut stream = connector.connect(name, tcp).await.expect("handshake");
+            stream
+                .write_all(
+                    b"GET /events HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("request sends");
+            let mut raw = Vec::new();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => raw.extend_from_slice(&chunk[..n]),
+                    }
+                    if has_complete_events(&dechunk_prefix(&raw), want) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            let head_end = raw
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|at| &raw[..at])
+                .expect("the H1 stream must answer a head");
+            assert!(
+                head_end.starts_with(b"HTTP/1.1 200"),
+                "the decoded H1 stream must open 200: {head_end:?}"
+            );
+            let decoded = dechunk_prefix(&raw);
+            assert!(
+                has_complete_events(&decoded, want),
+                "the H1 stream must deliver {want} complete events within 15s; \
+                 got {decoded:?} — on a starved runner this deadline is scheduling"
+            );
+            decoded
+        })
+}
+
+/// De-chunk every *complete* chunk, stopping at a truncated tail.
+///
+/// Complete chunks decode strictly (a malformed length line panics);
+/// a stream that simply ends mid-chunk yields what completed. Callers
+/// assert on the decoded event count, so a short read fails loudly
+/// instead of comparing a prefix.
+fn dechunk_prefix(response: &[u8]) -> Vec<u8> {
+    let Some(head_end) = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|at| at + 4)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut rest = &response[head_end..];
+    while let Some(line_end) = rest.windows(2).position(|w| w == b"\r\n") {
+        let Ok(len_text) = std::str::from_utf8(&rest[..line_end]) else {
+            panic!("chunk lengths are ASCII: {rest:?}");
+        };
+        let Ok(len) = usize::from_str_radix(len_text.trim(), 16) else {
+            panic!("chunk length is hex: {len_text:?}");
+        };
+        if len == 0 {
+            break;
+        }
+        rest = &rest[line_end + 2..];
+        if rest.len() < len + 2 || !rest[len..].starts_with(b"\r\n") {
+            break;
+        }
+        out.extend_from_slice(&rest[..len]);
+        rest = &rest[len + 2..];
+    }
+    out
+}
+
 // A client identity for mTLS tests: a self-signed certificate the server
 // trusts directly (its PEM joins the server's `client_ca_file` bundle),
 // with the common name tenant resolution reads. Returns the certificate

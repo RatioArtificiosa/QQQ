@@ -118,3 +118,17 @@ Evidence commit: `86ec3da` (work `52e5eae`), tree clean, `E:\QQQ`, main branch.
 - Open: the 53-contradiction backlog + DOD duplicates (carried, owners TBD).
 
 Fresh re-run (2026-10-30, clean tree at 414bd6a): steps 2-5 re-executed, all green; fault injector 5/5 DETECTED; logs refreshed in this directory.
+
+Addendum (2026-10-31): §4's "EXPLICITLY NOT served … No live H2/WS/SSE
+transcripts exist" described this report's date (2026-10-29) and is
+superseded, not edited away. Live serving evidence now committed under
+`docs/gate-evidence-serve-h2-tenant-sse/`: H1/H2 200s with guest bytes,
+SSE streams on H1+H2 (tests pin >=3 events per driver; the H1 capture
+holds a 9-event bounded prefix, the H2 entry is the de-framed 3-event
+body), tenant mapped-200/unmapped-421 with full H1 transcripts plus H2
+status/body pins asserting the same verdicts, per-tenant mTLS 200s
+(full H1 transcripts; H2 shop-component body pin), and the WS
+two-message echo transcript (`h1-ws-2echo.log`, digest-pinned) — all
+reproduced by the committed `production_serve_*` tests, 5/5 green
+locally and in CI on every run since. The red-proof logs named in §4
+remain the negative controls.

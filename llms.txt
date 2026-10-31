@@ -24,7 +24,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 - [docs/languages/evidence/matrix.md](docs/languages/evidence/matrix.md) — The generated parity matrix: each language against the HTTP probe vectors, with its gap owners and review dates. Generated from a CI job, so the numbers move with it. (816 B)
 - [docs/runtime-handoff-2026-10-27.md](docs/runtime-handoff-2026-10-27.md) — What changed on the runtime side in the 2026-10-27 round, what the registry owner must re-run, and what stays blocked on owners. (4 KB)
 - [docs/runtime-handoff-2026-10-29.md](docs/runtime-handoff-2026-10-29.md) — Owner handoff dossiers for the three core-runtime blockers: tenant-resolve mapping, H2 on the production listener, and the guest WS/SSE ABI — each with evidence, owner, tripwire, and re-measure command. (6 KB)
-- [docs/gate-evidence-2026-10-29/verify-final-report.md](docs/gate-evidence-2026-10-29/verify-final-report.md) — The §8 final report for the 2026-10-29 Q-Block round: gate table, checklist movement, runtime behavior, handoff, gaps, and contradictions fixed. (6 KB)
+- [docs/gate-evidence-2026-10-29/verify-final-report.md](docs/gate-evidence-2026-10-29/verify-final-report.md) — The §8 final report for the 2026-10-29 Q-Block round: gate table, checklist movement, runtime behavior, handoff, gaps, and contradictions fixed. (7 KB)
 
 ## The machine contracts (for an agent)
 

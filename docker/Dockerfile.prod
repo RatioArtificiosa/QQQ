@@ -81,6 +81,16 @@ COPY crates/ crates/
 # build scaffolding, so they must be present wherever the crate is compiled.
 COPY wit/ wit/
 
+# # Why the top-level `vendor/` directory is copied too
+#
+# `[patch.crates-io] wasmtime-internal-cache = { path = "vendor/..." }` makes the
+# vendored sources a **compile-time input** like `wit/`: omitting them fails the
+# build with `failed to read /src/vendor/wasmtime-internal-cache/Cargo.toml`,
+# which reads like a broken patch section rather than a missing COPY. It lives
+# outside `crates/` so the stub-cleanup `find` below (scoped to `crates/`) can
+# never sweep it away.
+COPY vendor/ vendor/
+
 # Strip everything except the manifests, so `src/` changing does not invalidate the
 # dependency layer. This is the effect the earlier per-file COPY was reaching for,
 # derived from what is actually present rather than from a list someone maintains.

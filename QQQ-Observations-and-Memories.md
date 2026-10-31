@@ -40778,4 +40778,26 @@ commit; a path on disk is not a commit.
 
 `§O-423` measured that `--deterministic` never reached the ambient state on the `run` path, and `§O-409`'s table still marks `DET-002` *"⚠️ partial … tick() is called from tests only"*. The serve path has since been wired: `GuestApp::handle_request` claims the next reading from a shared atomic admission counter (`crates/qqq-run/src/guest_handler.rs:1026-1030`, `det_clock.fetch_add(1, SeqCst) + 1`), threads it through `InstanceOptions::deterministic_initial_ticks`, and `Instance::prepare` applies it via `ambient.set_ticks` (`crates/qqq-host/src/instance.rs:1365`; a fresh store still starts at tick zero). Red-first: with no production tick caller every request read the frozen zero tick (`deterministic_requests_observe_advancing_ticks` failed); after the wiring the second request's reading exceeds the first's. The guarantee is admission order, not contiguity — a request that fails after claiming leaves a gap, exactly like a rolled-back pool slot — so replay must reproduce admission order and the same failures. DET-009 re-run on this tree: 10000/10000 byte-identical, 0 failed, 0 diverged, reference `REFERENCE_SHA256 aed4cd71…` (log committed at `docs/gate-evidence-2026-10-29/det009-full-10000.log`); the pinned guest artifact is unchanged (`ARTIFACT_SHA 2a9c3fb3…`). Scope kept honest: this is the *serve* admission tick; `qqqai run --deterministic` reproducibility still travels the replay path (`DET-007`/`DET-008`), and per-request determinism under concurrency remains `DET-004`'s open design question (async refused with `QQQ-6008`).
 
+## §O-791 — A pool coverage gate that starves on a loaded Windows runner is scheduling, not accounting
+
+CI run 41228734590 failed only `qqq-host`'s
+`pool::tests::concurrent_accounting_never_reports_an_impossible_state` on Windows:
+`sample_count` ≤ 100, "too few samples to prove anything; contention never
+overlapped the sampler". The joint invariant (`in_use + idle ≤ capacity`) never
+fired — 788 passed in the same suite, and the product code is untouched for
+months (last change `c0af6fe`, F-18). The sampler spins `while !done` for the
+whole churn phase, so ≤100 samples in 31 s means the thread was essentially
+unscheduled under the gate's full-parallel load — a coverage assertion tripping,
+not an accounting defect. Same-SHA rerun went fully green (Windows 34m13s,
+PERF-020 green), which per §O-543 is the acquittal: no hot-path mechanism (this
+round's diff is docs/baseline/evidence/tests only), no invariant violation, green
+retry. Do not "fix" this with a lower sample floor — that would enshrine a sick
+scheduler as the new normal — and do not confuse it with the `f01` guard panic
+in the same log, which is the test's own deliberate child panic. Generalisable
+rule: when a concurrency test fails on its coverage count while every invariant
+assert passes, read the scheduler before reading the code — and rerun before
+rewriting.
+`crates/qqq-host/src/pool.rs`, CI runs 41228734590 (attempt 1 red, rerun green),
+41232085024 (green).
+
 *End of `QQQ-Observations-and-Memories.md`.*

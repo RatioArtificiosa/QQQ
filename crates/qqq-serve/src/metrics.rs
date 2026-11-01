@@ -374,6 +374,16 @@ impl TenantLabels {
     /// [`Self::index`]: a read that allocates a slot mutates the cardinality
     /// it reports — a tenant that never sent a byte would appear in the
     /// exposition the first time anyone asked about it.
+    ///
+    /// ```
+    /// use qqq_serve::metrics::TenantLabels;
+    ///
+    /// let labels = TenantLabels::new();
+    /// assert_eq!(labels.lookup_index("nobody"), None);
+    /// assert_eq!(labels.lookup_index("default"), Some(0));
+    /// assert_eq!(labels.index("acme"), 1);
+    /// assert_eq!(labels.lookup_index("acme"), Some(1));
+    /// ```
     #[must_use]
     pub fn lookup_index(&self, name: &str) -> Option<u16> {
         if name.is_empty() || name == "default" {

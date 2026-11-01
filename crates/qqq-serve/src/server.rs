@@ -3959,6 +3959,17 @@ pub(crate) fn config_max_request_bytes() -> u64 {
 /// because a chunked or unframed body has no declared length to check up
 /// front — enforcing only `content_length` would let a tenant's streaming
 /// body bypass its own cap up to the global one.
+///
+/// ```
+/// use qqq_serve::{http1, server::effective_body_cap};
+///
+/// let key = qqq_host::tenant::tenant_key("127.0.0.1".parse().expect("loopback"));
+/// assert_eq!(
+///     effective_body_cap(None, key),
+///     http1::MAX_REQUEST_BYTES,
+///     "with no tenant limits the global ceiling applies"
+/// );
+/// ```
 #[must_use]
 pub fn effective_body_cap(limits: Option<&crate::limits::TenantLimits>, tenant: TenantKey) -> u64 {
     let tenant_cap = limits.map_or(u64::MAX, |l| {

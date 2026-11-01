@@ -566,6 +566,15 @@ pub fn decode_server_frame_with_limit(
 /// Shared with [`crate::ws_conn`]'s close echo: a `Frame` built literally (rather than
 /// decoded) skips [`validate_close_payload`], so the echo filters through this as
 /// defense-in-depth instead of trusting the constructor path.
+///
+/// ```
+/// use qqq_serve::ws_frame::is_valid_close_code;
+///
+/// assert!(is_valid_close_code(1000), "normal closure is sendable");
+/// assert!(is_valid_close_code(4999), "private use is sendable");
+/// assert!(!is_valid_close_code(1005), "reserved codes never appear on the wire");
+/// assert!(!is_valid_close_code(5000), "unassigned codes are not sendable");
+/// ```
 #[must_use]
 pub const fn is_valid_close_code(code: u16) -> bool {
     matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)

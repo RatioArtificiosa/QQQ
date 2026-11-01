@@ -298,6 +298,15 @@ impl Handshake {
 /// tokens may be emitted — anything else splits the response. Checked both
 /// where offers are parsed (`Handshake` keeps the raw strings, verbatim) and
 /// where a selection is written.
+///
+/// ```
+/// use qqq_serve::ws::is_token;
+///
+/// assert!(is_token("chat"));
+/// assert!(!is_token(""), "empty is not a token");
+/// assert!(!is_token("a b"), "a space would split the response line");
+/// assert!(!is_token("a\r\nb"), "a line break would split the response");
+/// ```
 #[must_use]
 pub fn is_token(s: &str) -> bool {
     !s.is_empty()

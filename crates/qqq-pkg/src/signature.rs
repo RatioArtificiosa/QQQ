@@ -154,6 +154,10 @@ impl VerifyingKey {
 pub struct TrustPolicy {
     keys: Vec<VerifyingKey>,
     require_signature: bool,
+    /// `none()` and nothing else sets this: an explicit "check nothing", kept
+    /// distinct from an opportunistic policy that merely *lists* no keys (a
+    /// misconfiguration that must fail loudly rather than verify nothing).
+    no_check: bool,
 }
 
 impl TrustPolicy {
@@ -168,6 +172,7 @@ impl TrustPolicy {
         Self {
             keys,
             require_signature: true,
+            no_check: false,
         }
     }
 
@@ -185,19 +190,30 @@ impl TrustPolicy {
         Self {
             keys,
             require_signature: false,
+            no_check: false,
         }
     }
 
     /// A policy that performs no verification, and says so.
     ///
-    /// An empty policy verifies nothing — including when a signature *is*
-    /// present, which reports `Unsigned` rather than erroring. A policy that
-    /// said "check nothing" but refused a signed artifact would be a refusal
-    /// with no threat model behind it; the signature on an unchecked artifact
-    /// proves nothing either way.
+    /// An explicit no-check: a signature *present* under this policy still
+    /// reports `Unsigned` rather than erroring. A policy that said "check
+    /// nothing" but refused a signed artifact would be a refusal with no
+    /// threat model behind it; the signature on an unchecked artifact proves
+    /// nothing either way.
+    ///
+    /// Distinct from `opportunistic` with an empty key list, which is a
+    /// misconfiguration: "verify when present, against nobody" cannot
+    /// attribute anything, so it errors instead of silently checking nothing
+    /// (see the `no_check` field — the distinction `opportunistic`'s own
+    /// documentation requires).
     #[must_use]
     pub fn none() -> Self {
-        Self::default()
+        Self {
+            keys: Vec::new(),
+            require_signature: false,
+            no_check: true,
+        }
     }
 
     /// Whether a missing signature is a failure.
@@ -207,6 +223,11 @@ impl TrustPolicy {
     }
 
     /// Whether this policy checks anything at all.
+    ///
+    /// `none()` is the only empty shape that verifies nothing *legitimately*:
+    /// every other empty shape (notably `opportunistic` with no keys) is a
+    /// misconfiguration that `verify` refuses rather than silently waving
+    /// through.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty() && !self.require_signature
@@ -373,11 +394,12 @@ pub fn verify(
     signature: Option<&DetachedSignature>,
     policy: &TrustPolicy,
 ) -> Result<Verification, Error> {
-    // An empty policy checks nothing at all — regardless of whether a
-    // signature happens to be attached. Without this, `none()` plus a
-    // present-but-unattributable signature would error, turning "no check"
-    // into a refusal.
-    if policy.is_empty() {
+    // `none()` — and only `none()`, via its own flag — checks nothing at
+    // all, even with a signature present. An opportunistic policy that merely
+    // *lists* no keys is not this: it falls through to the no-keys refusal
+    // below, because "verify when present, against nobody" is a
+    // misconfiguration, not a no-check.
+    if policy.no_check {
         return Ok(Verification::Unsigned);
     }
 
@@ -710,21 +732,20 @@ mod tests {
         );
     }
 
-    /// The same rule for the degenerate opportunistic policy: no keys means
-    /// no check, reported as `Unsigned` — and crucially *not* as `Verified`.
-    /// The failure this guards against is a signature attributed to nobody
-    /// reading as trusted; `Unsigned` cannot read that way, because its state
-    /// says unchecked.
+    /// An opportunistic policy that lists no keys is a misconfiguration, not
+    /// a no-check: a signature it cannot attribute is refused, because
+    /// "verify when present, against nobody" proves nothing about who
+    /// published the artifact. (`none()` is the explicit no-check; it is the
+    /// only policy that reports `Unsigned` for a present signature.)
     #[test]
-    fn a_signature_checked_against_no_keys_is_unsigned_not_verified() {
+    fn a_signature_checked_against_no_keys_is_refused_rather_than_accepted() {
+        // The failure this guards: an empty `keys` list reading as "nothing to check, so
+        // pass". A signature attributed to nobody proves nothing about who published it.
         let sig = sign(b"x", &key(1)).expect("sign");
-        let v = verify(b"x", Some(&sig), &policy_of(&[], false)).expect("no check");
-        assert_eq!(v, Verification::Unsigned);
-        assert_ne!(
-            v.state(),
-            "verified",
-            "unattributed must not read as trusted"
-        );
+        let err = verify(b"x", Some(&sig), &policy_of(&[], false))
+            .expect_err("keys-less policy must not accept a signature");
+        assert_eq!(err.code, ErrorCode::SignatureVerificationFailed);
+        assert!(err.message.contains("no keys"), "{}", err.message);
     }
 
     #[test]

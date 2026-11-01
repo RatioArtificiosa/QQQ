@@ -127,7 +127,7 @@ def catalogue_names() -> dict[str, str]:
         m = HEADING.match(line)
         if not m:
             continue
-        rest = line[m.end():]
+        rest = line[m.end() :]
         n = re.search(r"`([A-Za-z][A-Za-z0-9]*)`", rest)
         if n:
             out.setdefault(m.group(1), n.group(1))
@@ -135,7 +135,7 @@ def catalogue_names() -> dict[str, str]:
 
 
 # The enum DECLARATION names every variant, so it cannot count as a use. Without this exclusion the
-# variant predicate would match all 45 codes and certify nothing -- the same defect in the other
+# variant predicate would match all 46 codes and certify nothing -- the same defect in the other
 # direction, which is why the exclusion is asserted rather than assumed.
 DECLARATION = ROOT / "crates" / "qqq-core" / "src" / "error.rs"
 
@@ -211,12 +211,18 @@ def run_cli_reproducers(binary: pathlib.Path, problems: list[str]) -> int:
     try:
         scaffold = subprocess.run(
             [str(binary), "new", "p", "--language", "rust", "--template", "http"],
-            cwd=work, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=180,
+            cwd=work,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
         )
         proj = work / "p"
         if not (proj / "qqq.toml").is_file():
-            problems.append(f"could not scaffold a project: {scaffold.stderr.strip()[:200]}")
+            problems.append(
+                f"could not scaffold a project: {scaffold.stderr.strip()[:200]}"
+            )
             return 0
         good_toml = (proj / "qqq.toml").read_text(encoding="utf-8")
         # The scaffold names the source after the project (`src/p.rs`), not `lib.rs`. Finding it by
@@ -233,16 +239,26 @@ def run_cli_reproducers(binary: pathlib.Path, problems: list[str]) -> int:
             (proj / "qqq.toml").write_text(good_toml, encoding="utf-8", newline="\n")
             source.write_text(good_lib, encoding="utf-8", newline="\n")
             if setup == "break_toml":
-                (proj / "qqq.toml").write_text("this is not toml [[[\n", encoding="utf-8",
-                                               newline="\n")
+                (proj / "qqq.toml").write_text(
+                    "this is not toml [[[\n", encoding="utf-8", newline="\n"
+                )
             elif setup == "add_unknown_key":
-                with (proj / "qqq.toml").open("a", encoding="utf-8", newline="\n") as fh:
+                with (proj / "qqq.toml").open(
+                    "a", encoding="utf-8", newline="\n"
+                ) as fh:
                     fh.write("unknown_top_level_key = 1\n")
             elif setup == "break_source":
                 source.write_text("this is not rust\n", encoding="utf-8", newline="\n")
             try:
-                p = subprocess.run([str(binary), *args], cwd=proj, capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", timeout=120)
+                p = subprocess.run(
+                    [str(binary), *args],
+                    cwd=proj,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=120,
+                )
             except subprocess.TimeoutExpired:
                 problems.append(f"{code}: the reproducer timed out")
                 continue
@@ -287,6 +303,7 @@ def summary_row_problems(page: str) -> list[str]:
             )
     return problems
 
+
 def classify(
     declared: list[str],
     kinds: dict[str, str],
@@ -318,17 +335,23 @@ def classify(
     missing = [c for c in declared if c not in kinds]
     extra = [c for c in kinds if c not in declared]
     if missing:
-        problems.append(f"declared by the catalogue and absent from the cookbook: {missing}")
+        problems.append(
+            f"declared by the catalogue and absent from the cookbook: {missing}"
+        )
     if extra:
         problems.append(f"in the cookbook and not in the catalogue: {extra}")
 
     # --- the static predicates ---------------------------------------------------------------
     for code, kind in sorted(kinds.items()):
         if kind == "test" and not in_tests.get(code):
-            problems.append(f"{code}: declared `test` and named in no file under crates/*/tests/")
+            problems.append(
+                f"{code}: declared `test` and named in no file under crates/*/tests/"
+            )
         elif kind == "src":
             if not in_src.get(code):
-                problems.append(f"{code}: declared `src` and named in no non-test .rs file")
+                problems.append(
+                    f"{code}: declared `src` and named in no non-test .rs file"
+                )
             if in_tests.get(code):
                 problems.append(
                     f"{code}: declared `src` (no test reproduces it) and a test names it: "
@@ -357,7 +380,9 @@ def check(*, run_cli: bool = True) -> int:
     declared = catalogue_codes()
     kinds = cookbook_kinds()
     if not declared:
-        print("FAIL -- docs/errors.md declares no codes; a scan of nothing certifies nothing")
+        print(
+            "FAIL -- docs/errors.md declares no codes; a scan of nothing certifies nothing"
+        )
         return 1
 
     in_tests, in_src = rust_tree()
@@ -369,8 +394,10 @@ def check(*, run_cli: bool = True) -> int:
     if cli_codes:
         binary = find_binary()
         if binary is None or not run_cli:
-            print("SKIPPED -- the `cli` half needs a built qqqai "
-                  "(cargo build -p qqq-run); the static half ran")
+            print(
+                "SKIPPED -- the `cli` half needs a built qqqai "
+                "(cargo build -p qqq-run); the static half ran"
+            )
         else:
             ran = run_cli_reproducers(binary, problems)
 
@@ -386,7 +413,9 @@ def check(*, run_cli: bool = True) -> int:
             print(f"  FAIL  {p}")
         print(f"\nAGENT COOKBOOK FAILED -- {len(problems)} problem(s)")
         return 1
-    print(f"\nAGENT COOKBOOK OK -- {len(declared)} code(s) classified, {ran} reproducer(s) executed")
+    print(
+        f"\nAGENT COOKBOOK OK -- {len(declared)} code(s) classified, {ran} reproducer(s) executed"
+    )
     return 0
 
 
@@ -397,7 +426,9 @@ def self_test() -> int:
     kinds = cookbook_kinds()
     in_tests, in_src = rust_tree()
 
-    def copies() -> tuple[list[str], dict[str, str], dict[str, set[str]], dict[str, set[str]]]:
+    def copies() -> tuple[
+        list[str], dict[str, str], dict[str, set[str]], dict[str, set[str]]
+    ]:
         # Fresh copies per case, so one mutation cannot leak into the next.
         return (
             list(declared),
@@ -410,14 +441,23 @@ def self_test() -> int:
         """The real data is clean, the mutation is not, and the classifier says so."""
         d, k, t, s = copies()
         clean = classify(d, k, t, s)
-        cases.append((f"the real tree is clean ({name} control)", not clean, f"{clean[:1]}"))
+        cases.append(
+            (f"the real tree is clean ({name} control)", not clean, f"{clean[:1]}")
+        )
         d, k, t, s = copies()
         mutate(d, k, t, s)
         broken = classify(d, k, t, s)
         cases.append((name, bool(broken), broken[0] if broken else "NO PROBLEM RAISED"))
 
-    cases.append(("the catalogue is non-empty", len(declared) == 45, f"{len(declared)}"))
-    cases.append(("every declared code is classified", all(c in kinds for c in declared), ""))
+    # Non-empty, not an exact count: the catalogue grows when codes are issued
+    # (46 after `DebugInfoInvalid`), and pinning the size here would make every
+    # new code fail this self-test. Exact coverage is asserted by the
+    # "every declared code is classified" case below and by the summary-table
+    # check in `classify`.
+    cases.append(("the catalogue is non-empty", len(declared) > 0, f"{len(declared)}"))
+    cases.append(
+        ("every declared code is classified", all(c in kinds for c in declared), "")
+    )
 
     # --- each mutation must produce a problem, and the real tree must not ---------------------
 
@@ -436,13 +476,19 @@ def self_test() -> int:
     def a_missing_catalogue_code(d, k, t, s) -> None:
         k.pop(next(c for c in d if c in k), None)
 
-    fires("a catalogue code absent from the cookbook is reported", a_missing_catalogue_code)
+    fires(
+        "a catalogue code absent from the cookbook is reported",
+        a_missing_catalogue_code,
+    )
 
     def a_code_not_in_the_catalogue(d, k, t, s) -> None:
         k["QQQ-9999"] = "src"
         s["QQQ-9999"] = {"crates/qqq-run/src/injected.rs"}
 
-    fires("a cookbook code absent from the catalogue is reported", a_code_not_in_the_catalogue)
+    fires(
+        "a cookbook code absent from the catalogue is reported",
+        a_code_not_in_the_catalogue,
+    )
 
     def an_unreachable_code_that_is_named(d, k, t, s) -> None:
         # **Synthesised, because the real taxonomy has ZERO `unreachable` codes** -- the first version
@@ -455,13 +501,21 @@ def self_test() -> int:
         k[code] = "unreachable"
         s.setdefault(code, set()).add("crates/qqq-run/src/injected.rs")
 
-    fires("an `unreachable` code named in the tree is reported", an_unreachable_code_that_is_named)
+    fires(
+        "an `unreachable` code named in the tree is reported",
+        an_unreachable_code_that_is_named,
+    )
 
     # The one case whose parameter is not the tree: a table that disagrees with the page.
     d, k, t, s = copies()
     disagreed = classify(d, k, t, s, cli_reproducers={})
-    cases.append(("the `cli` set disagreeing with the table is reported",
-                  bool(disagreed), disagreed[0] if disagreed else "NO PROBLEM RAISED"))
+    cases.append(
+        (
+            "the `cli` set disagreeing with the table is reported",
+            bool(disagreed),
+            disagreed[0] if disagreed else "NO PROBLEM RAISED",
+        )
+    )
 
     # --- the summary table's rows against themselves -----------------------------------------
     #
@@ -470,7 +524,11 @@ def self_test() -> int:
     # rather than the four collections above, so it cannot ride on `fires()`.
     good_page = COOKBOOK.read_text(encoding="utf-8")
     cases.append(
-        ("the summary table's rows are self-consistent", not summary_row_problems(good_page), "")
+        (
+            "the summary table's rows are self-consistent",
+            not summary_row_problems(good_page),
+            "",
+        )
     )
     # Change the declared count and leave the list alone, which is the defect exactly.
     # The mutation is computed from the live count, not hardcoded: a hardcoded
@@ -500,20 +558,28 @@ def self_test() -> int:
     failed = 0
     print("check_agent_cookbook self-test")
     for name, ok, detail in cases:
-        print(f"  {'OK  ' if ok else 'FAIL'}  {name}" + (f"  ({detail})" if detail else ""))
+        print(
+            f"  {'OK  ' if ok else 'FAIL'}  {name}"
+            + (f"  ({detail})" if detail else "")
+        )
         failed += 0 if ok else 1
     if failed:
         print(f"\nSELF-TEST FAILED -- {failed} case(s) wrong")
         return 1
-    print("\nSELF-TEST PASSED -- every predicate fires on a mutated copy, and is silent on the real one")
+    print(
+        "\nSELF-TEST PASSED -- every predicate fires on a mutated copy, and is silent on the real one"
+    )
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--self-test", action="store_true")
-    ap.add_argument("--no-run", action="store_true",
-                    help="skip the executable half (the static half still runs)")
+    ap.add_argument(
+        "--no-run",
+        action="store_true",
+        help="skip the executable half (the static half still runs)",
+    )
     args = ap.parse_args()
     if args.self_test:
         return self_test()

@@ -273,6 +273,17 @@ impl Plan {
         if self.connect_timeout.is_zero() {
             return Err("connect_timeout must be non-zero, or no connection can be made");
         }
+        // `read_response` and the `Duration` worker loop both add these to
+        // `Instant::now()`, which panics on overflow. A timeout that cannot
+        // become a deadline is not a timeout. One clock read for both checks:
+        // overflow does not depend on the instant, only on the duration.
+        let now = Instant::now();
+        if now.checked_add(self.timeout).is_none() {
+            return Err("timeout overflows the clock range");
+        }
+        if now.checked_add(self.connect_timeout).is_none() {
+            return Err("connect_timeout overflows the clock range");
+        }
         match self.limit {
             Limit::Requests(0) => {
                 return Err("limit must request at least one request");
@@ -355,6 +366,15 @@ impl Plan {
 /// makes a body deliverable; omitting it for a `POST` produces a request the
 /// server reads as bodyless, which is the defect `SRV-018`'s round found by
 /// driving the real thing (`§O-155`).
+///
+/// # Safety contract: call [`Plan::validate`] first
+///
+/// This function performs no whitespace or control-character checks: it
+/// concatenates method, path, and host raw, so an unvalidated plan with a CR,
+/// LF, or space in any of those fields emits smuggled bytes. The injection
+/// guard lives in [`Plan::validate`], which [`one_request`] and [`drive`]
+/// both call — a direct caller of this function bypasses it, and must have
+/// validated already.
 #[must_use]
 pub fn encode_request(plan: &Plan) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
@@ -1114,35 +1134,7 @@ pub async fn drive(plan: &Plan) -> io::Result<RunResult> {
     // Warmup: sent and discarded, per `§9.1`'s requirement that the procedure be
     // stated. Never counted, and never silently skipped either -- the count comes
     // from the workload's own `Warmup`, so a row that declares no warmup gets none.
-    //
-    // # Why the first failures abort the run
-    //
-    // This loop used to discard every result and continue regardless. Against a
-    // target that refuses connections that meant 200 warmup attempts each paying
-    // the full connect timeout before the measured phase even began -- measured as
-    // a multi-minute hang on a closed port, while a real server finished in five
-    // seconds. A harness that cannot reach its target has nothing to measure, and
-    // the useful behaviour is to say so immediately rather than to compute a
-    // throughput of zero after several minutes.
-    let mut consecutive_failures = 0_u32;
-    for _ in 0..plan.warmup {
-        match one_request(plan).await {
-            Ok(_) => consecutive_failures = 0,
-            Err(e) => {
-                consecutive_failures += 1;
-                if consecutive_failures >= EARLY_EXIT_AFTER {
-                    return Err(io::Error::new(
-                        e.kind(),
-                        format!(
-                            "{} consecutive requests to {} failed ({e}); the target \
-                             does not appear to be serving",
-                            EARLY_EXIT_AFTER, plan.target
-                        ),
-                    ));
-                }
-            }
-        }
-    }
+    run_warmup(plan).await?;
 
     let connections = connections_for(plan.concurrency);
     let started = Instant::now();
@@ -1198,11 +1190,22 @@ pub async fn drive(plan: &Plan) -> io::Result<RunResult> {
             attempted += count;
         }
         Limit::Duration(duration) => {
+            // Computed once, before spawning: `validate` already refused an
+            // overflowing duration, but re-adding it per worker would
+            // reintroduce the panic `validate` exists to prevent — and a
+            // deadline read once is the same instant for every worker.
+            // `ok_or_else` rather than `expect`: `drive` is fallible, so a
+            // second construction path stays total instead of asserting.
+            let deadline = Instant::now().checked_add(duration).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "limit duration overflows the clock range",
+                )
+            })?;
             let mut handles = Vec::with_capacity(connections as usize);
             for _ in 0..connections {
                 let plan = plan.clone();
                 handles.push(tokio::spawn(async move {
-                    let deadline = Instant::now() + duration;
                     let mut local: Vec<Sample> = Vec::new();
                     let mut lost = 0_u64;
                     let mut count = 0_u64;
@@ -1275,6 +1278,40 @@ async fn join_workers(
         }
     }
     Ok((samples, failed, attempted))
+}
+
+/// Send the warmup requests and discard the results.
+///
+/// # Why the first failures abort the run
+///
+/// This loop used to discard every result and continue regardless. Against a
+/// target that refuses connections that meant 200 warmup attempts each paying
+/// the full connect timeout before the measured phase even began -- measured as
+/// a multi-minute hang on a closed port, while a real server finished in five
+/// seconds. A harness that cannot reach its target has nothing to measure, and
+/// the useful behaviour is to say so immediately rather than to compute a
+/// throughput of zero after several minutes.
+async fn run_warmup(plan: &Plan) -> io::Result<()> {
+    let mut consecutive_failures = 0_u32;
+    for _ in 0..plan.warmup {
+        match one_request(plan).await {
+            Ok(_) => consecutive_failures = 0,
+            Err(e) => {
+                consecutive_failures += 1;
+                if consecutive_failures >= EARLY_EXIT_AFTER {
+                    return Err(io::Error::new(
+                        e.kind(),
+                        format!(
+                            "{} consecutive requests to {} failed ({e}); the target \
+                             does not appear to be serving",
+                            EARLY_EXIT_AFTER, plan.target
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// How many consecutive failures mean the target is not serving.
@@ -1527,6 +1564,22 @@ mod tests {
             Framing::None
         );
         assert_eq!(framing_of(head, "GET").expect("GET"), Framing::Length(5));
+    }
+
+    #[test]
+    fn a_clock_overflowing_timeout_is_refused_not_panicked() {
+        // `Instant::now() + Duration::MAX` panics. The plan, the response
+        // reader, and the Duration worker loop all add timeouts to `now`,
+        // so validation refuses what would panic before any of them run.
+        let mut p = plan();
+        p.timeout = Duration::MAX;
+        assert!(p.validate().is_err());
+        p.timeout = Duration::from_secs(10);
+        p.connect_timeout = Duration::MAX;
+        assert!(p.validate().is_err());
+        p.connect_timeout = Duration::from_secs(2);
+        p.limit = Limit::Duration(Duration::MAX);
+        assert!(p.validate().is_err());
     }
 
     #[test]

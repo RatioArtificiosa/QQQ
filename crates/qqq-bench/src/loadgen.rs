@@ -48,7 +48,10 @@ use crate::stats::Distribution;
 /// One measured request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sample {
-    /// Time from the first byte written to the last byte of the response head read.
+    /// Time from the first byte written to the last byte read — the full
+    /// framed body, not just the head. The timer starts after connect (the
+    /// handshake belongs to setup, not to any request) and stops when the
+    /// response is complete.
     pub nanos: u64,
     /// The HTTP status code.
     pub status: u16,
@@ -277,6 +280,12 @@ impl Plan {
             Limit::Duration(d) if d.is_zero() => {
                 return Err("limit must drive for a non-zero duration");
             }
+            Limit::Duration(d) if Instant::now().checked_add(d).is_none() => {
+                // `read_response` and the `Duration` worker loop both add this
+                // to `Instant::now()`, which panics on overflow. A duration
+                // that cannot become a deadline is not a limit.
+                return Err("limit duration overflows the clock range");
+            }
             Limit::Requests(_) | Limit::Duration(_) => {}
         }
         if !self.path.starts_with('/') {
@@ -414,10 +423,19 @@ pub async fn read_response<S>(
 where
     S: tokio::io::AsyncRead + Unpin,
 {
-    let deadline = Instant::now() + timeout;
-    // Remaining budget at each read. `Instant + Duration` cannot overflow in
-    // practice, and `saturating_duration_since` turns an expired deadline
-    // into a zero timeout — which fails immediately rather than waiting.
+    // `checked_add`: `timeout` comes from the caller, and `Duration::MAX`
+    // overflows `Instant + Duration` — panicking the harness on a nonsense
+    // input rather than refusing it. The deadline math below assumes an
+    // instant that actually exists.
+    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "timeout overflows the clock range",
+        )
+    })?;
+    // Remaining budget at each read. `saturating_duration_since` turns an
+    // expired deadline into a zero timeout — which fails immediately rather
+    // than waiting.
     let remaining = || deadline.saturating_duration_since(Instant::now());
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
 
@@ -637,6 +655,17 @@ where
             let fresh: &[u8] = chunk.get(..read).expect("read returns at most chunk len");
             buf.extend_from_slice(fresh);
         }
+        // The data must end where the size line said it would: without this,
+        // a peer that sends fewer bytes than declared would have its next
+        // chunk-size line read from the middle of the shortfall, silently
+        // re-framing the rest of the body. `decode_chunked_len` checks the
+        // same condition on the parse path; both must agree.
+        if buf.get(need.saturating_sub(2)..need) != Some(b"\r\n".as_slice()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "chunk data is not followed by CRLF",
+            ));
+        }
         pos = need;
     }
 }
@@ -845,10 +874,18 @@ pub fn parse_response(buf: &[u8]) -> io::Result<ResponseHead> {
     // whole response, and validating the head as UTF-8 over the full buffer
     // fails on any binary body — a binary payload would then be counted as a
     // connection failure rather than measured. Only the head is ever decoded.
+    // A missing terminator is not a short head: without the blank line there
+    // is no boundary between head and body, so there is nothing to count.
     let body_start = buf
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .map_or(buf.len(), |p| p + 4);
+        .map(|p| p + 4)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "response has no head terminator",
+            )
+        })?;
     let head = buf
         .get(..body_start)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "response head out of range"))?;
@@ -864,12 +901,14 @@ pub fn parse_response(buf: &[u8]) -> io::Result<ResponseHead> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty response"))?;
 
     // `HTTP/1.1 200 OK`. Split on whitespace runs (see `status_of`): a
-    // doubled space must not shift the code into the reason phrase.
+    // doubled space must not shift the code into the reason phrase. The
+    // version must be exactly `HTTP/1.0` or `HTTP/1.1`: a prefix match
+    // accepts `HTTP/1.9`, a version no server speaks, as a success.
     let mut parts = status_line.split_whitespace();
     let version = parts
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no version token"))?;
-    if !version.starts_with("HTTP/1.") {
+    if version != "HTTP/1.0" && version != "HTTP/1.1" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unexpected status line: {status_line}"),
@@ -1360,6 +1399,38 @@ mod tests {
     #[test]
     fn a_non_utf8_head_is_refused() {
         assert!(parse_response(&[0xff, 0xfe, b'\r', b'\n', b'\r', b'\n']).is_err());
+    }
+
+    #[test]
+    fn a_response_without_a_head_terminator_is_refused() {
+        // Without the blank line there is no boundary between head and body,
+        // so there is nothing to count — not a short head.
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\n\nok").is_err());
+        assert!(parse_response(b"").is_err());
+    }
+
+    #[test]
+    fn only_http_1_0_and_1_1_are_accepted() {
+        // A prefix match accepts `HTTP/1.9`, a version no server speaks.
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\n\r\n").is_ok());
+        assert!(parse_response(b"HTTP/1.0 200 OK\r\n\r\n").is_ok());
+        assert!(parse_response(b"HTTP/1.9 200 OK\r\n\r\n").is_err());
+        assert!(parse_response(b"HTTP/2 200 OK\r\n\r\n").is_err());
+    }
+
+    #[test]
+    fn a_malformed_chunk_stream_is_refused_not_counted() {
+        // `decode_chunked_len` shares `read_chunked_body`'s structural checks:
+        // garbage in either path is an error, never a byte count.
+        let truncated = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel";
+        assert!(parse_response(truncated).is_err());
+        let bad_size =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\nhello\r\n0\r\n\r\n";
+        assert!(parse_response(bad_size).is_err());
+        let no_crlf =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX\r\n0\r\n\r\n";
+        assert!(parse_response(no_crlf).is_err());
     }
 
     #[test]

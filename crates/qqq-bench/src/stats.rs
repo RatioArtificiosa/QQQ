@@ -146,7 +146,6 @@ impl Distribution {
         if !(0.0..=1.0).contains(&p) {
             return None;
         }
-        let p = p.clamp(0.0, 1.0);
         let mut sorted = self.samples.clone();
         sorted.sort_unstable();
 

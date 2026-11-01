@@ -418,19 +418,21 @@ pub enum NonClaims {
 }
 
 impl NonClaims {
-    /// Build a qualified non-claim set, refusing an empty or blank list.
+    /// Build a qualified non-claim set, refusing an empty list or any blank entry.
     ///
     /// # Errors
     ///
-    /// Returns an error if `items` is empty or contains only blank strings. An
-    /// empty list here is the vacuity failure this project refuses everywhere
-    /// else: it satisfies "has a `NonClaims`" while stating nothing.
+    /// Returns an error if `items` is empty or any entry is blank. An empty
+    /// list here is the vacuity failure this project refuses everywhere else:
+    /// it satisfies "has a `NonClaims`" while stating nothing — and a blank
+    /// entry among real ones is the same failure with company, counted by
+    /// `len()` as a stated limit while stating nothing.
     pub fn qualified(
         items: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<Self, &'static str> {
         let items: Vec<String> = items.into_iter().map(Into::into).collect();
-        if items.is_empty() || items.iter().all(|item| item.trim().is_empty()) {
-            return Err("NonClaims::Qualified requires at least one non-blank item");
+        if items.is_empty() || items.iter().any(|item| item.trim().is_empty()) {
+            return Err("NonClaims::Qualified requires non-blank items");
         }
         Ok(Self::Qualified { items })
     }
@@ -533,9 +535,11 @@ impl Methodology {
     ///   zero milliseconds, both of which describe no warmup while claiming one;
     /// * a zero-connection [`Concurrency`], which [`connections_for`] would
     ///   silently clamp to 1 while the methodology discloses 0;
-    /// * a [`NonClaims`] that states nothing — an empty qualified list, or a
-    ///   blank unqualified reason — which satisfies "has a non-claims field"
-    ///   while disclosing nothing.
+    /// * a [`NonClaims`] that states nothing — an empty qualified list, a
+    ///   blank unqualified reason, or any blank entry among real ones — which
+    ///   satisfies "has a non-claims field" while disclosing nothing;
+    /// * a [`Pinning::Pinned`] that pins nothing — a blank mechanism, or an
+    ///   explicit confinement to zero cores.
     pub fn new(
         environment: Environment,
         warmup: Warmup,
@@ -586,10 +590,12 @@ impl Methodology {
         // `NonClaims::qualified` and `NonClaims::unqualified` already refuse
         // these shapes, but the enum itself is directly constructible — so the
         // gate that matters, this one, repeats the check rather than trusting
-        // the constructor the caller may not have used.
+        // the constructor the caller may not have used. Any blank entry fails,
+        // not just an all-blank list: a blank among real disclaimers is dead
+        // weight that `len()` would count as a stated limit.
         match &non_claims {
             NonClaims::Qualified { items }
-                if items.is_empty() || items.iter().all(|item| item.trim().is_empty()) =>
+                if items.is_empty() || items.iter().any(|item| item.trim().is_empty()) =>
             {
                 return Err(MethodologyError::EmptyNonClaims);
             }
@@ -597,6 +603,14 @@ impl Methodology {
                 return Err(MethodologyError::BlankNonClaimReason);
             }
             NonClaims::Qualified { .. } | NonClaims::Unqualified { .. } => {}
+        }
+        // A pinning that pins nothing states an allocation without stating it:
+        // an empty mechanism names no confinement, and zero cores is not a
+        // subset of any machine.
+        if let Pinning::Pinned { mechanism, cores } = &pinning
+            && (mechanism.trim().is_empty() || *cores == Some(0))
+        {
+            return Err(MethodologyError::InvalidPinning);
         }
 
         Ok(Self {
@@ -642,6 +656,9 @@ pub enum MethodologyError {
     EmptyNonClaims,
     /// A [`NonClaims::Unqualified`] with a blank reason was given.
     BlankNonClaimReason,
+    /// A [`Pinning::Pinned`] that pins nothing was given: a blank mechanism,
+    /// or an explicit confinement to zero cores.
+    InvalidPinning,
 }
 
 impl fmt::Display for MethodologyError {
@@ -673,6 +690,10 @@ impl fmt::Display for MethodologyError {
             Self::BlankNonClaimReason => f.write_str(
                 "§9.1 requires a what-this-does-not-measure section; an unqualified \
                  claim needs a non-blank reason",
+            ),
+            Self::InvalidPinning => f.write_str(
+                "a pinning claim that pins nothing — a blank mechanism or zero \
+                 cores — states an allocation without stating it",
             ),
         }
     }
@@ -1204,6 +1225,68 @@ mod tests {
         // The vacuity case: it satisfies "has a NonClaims" while stating nothing.
         assert!(NonClaims::qualified(Vec::<String>::new()).is_err());
         assert!(NonClaims::qualified(["", "  "]).is_err());
+    }
+
+    #[test]
+    fn a_blank_entry_among_real_ones_is_refused() {
+        // A blank next to real disclaimers is the same vacuity with company:
+        // `len()` would count it as a stated limit while it states nothing.
+        assert!(NonClaims::qualified(["does not measure X", "   "]).is_err());
+        let err = Methodology::new(
+            env(),
+            Warmup::Discard { iterations: 100 },
+            Concurrency::Fixed { connections: 8 },
+            3,
+            NonClaims::Qualified {
+                items: vec!["does not measure X".to_owned(), "  ".to_owned()],
+            },
+            "https://github.com/RatioArtificiosa/QQQ",
+            Pinning::Unpinned,
+        );
+        assert_eq!(err, Err(MethodologyError::EmptyNonClaims));
+    }
+
+    #[test]
+    fn a_pinning_that_pins_nothing_is_refused() {
+        // A blank mechanism names no confinement; zero cores is not a subset
+        // of any machine. Either states an allocation without stating it.
+        for pinning in [
+            Pinning::Pinned {
+                mechanism: "  ".to_owned(),
+                cores: Some(4),
+            },
+            Pinning::Pinned {
+                mechanism: "taskset 0-3".to_owned(),
+                cores: Some(0),
+            },
+        ] {
+            let err = Methodology::new(
+                env(),
+                Warmup::Discard { iterations: 100 },
+                Concurrency::Fixed { connections: 8 },
+                3,
+                non_claims(),
+                "https://github.com/RatioArtificiosa/QQQ",
+                pinning,
+            );
+            assert_eq!(err, Err(MethodologyError::InvalidPinning));
+        }
+        // Unpinned, and a pinned run that actually pins something, are fine.
+        assert!(
+            Methodology::new(
+                env(),
+                Warmup::Discard { iterations: 100 },
+                Concurrency::Fixed { connections: 8 },
+                3,
+                non_claims(),
+                "https://github.com/RatioArtificiosa/QQQ",
+                Pinning::Pinned {
+                    mechanism: "taskset 0-3".to_owned(),
+                    cores: Some(4),
+                },
+            )
+            .is_ok()
+        );
     }
 
     #[test]

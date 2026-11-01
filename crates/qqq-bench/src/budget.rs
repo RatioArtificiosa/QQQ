@@ -698,7 +698,11 @@ impl Verdict {
     /// ```
     #[must_use]
     pub fn render(&self, budget: &Budget) -> String {
-        debug_assert_eq!(
+        // A runtime assert, not a debug one: a verdict rendered against the
+        // wrong row's budget mislabels the report, and a mislabeled report in
+        // release is worse than a loud failure. This can only fire on a caller
+        // bug, never on a measurement.
+        assert_eq!(
             self.item, budget.item,
             "a verdict rendered against a different row's budget"
         );
@@ -1255,6 +1259,19 @@ mod tests {
                 budget.target
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "a verdict rendered against a different row")]
+    fn rendering_against_the_wrong_rows_budget_panics() {
+        // A mislabeled report in release is worse than a loud failure: the
+        // panic fires on caller bug, never on a measurement.
+        let one = Budget::for_item(Item::Perf003).expect("PERF-003 has a row");
+        let other = Budget::for_item(Item::Perf010).expect("PERF-010 has a row");
+        let verdict = one
+            .meets(&Measurement::new(200.0, Unit::Micros))
+            .expect("matching units");
+        let _ = verdict.render(&other);
     }
 
     #[test]

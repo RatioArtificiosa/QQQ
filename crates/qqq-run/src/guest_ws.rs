@@ -184,7 +184,9 @@ mod tests {
     use crate::guest_handler::GuestApp;
 
     /// The echo guest answers every message with its own bytes, so the
-    /// round trip measures the bridge rather than the guest.
+    /// round trip measures the bridge rather than the guest. Per-message
+    /// guest execution is proven separately: the audit row count below
+    /// rises by exactly one row per message sent.
     fn echo_app() -> std::sync::Arc<GuestApp> {
         let source = include_str!("../tests/fixtures/echo-http.wat");
         let manifest = qqq_cap::Manifest::parse(
@@ -239,6 +241,19 @@ mod tests {
         assert_eq!(opcode, 0x1, "a text message echoes as text");
         assert_eq!(&body, b"hello-ws", "the guest echo must round-trip");
 
+        // A second, distinct message: the bridge must call the guest again,
+        // not replay the first answer from a cache. The echo guest is
+        // stateless, so only the audit row count proves the second call
+        // happened — byte equality alone cannot distinguish a fresh guest
+        // execution from a bridge-side replay.
+        write_masked_text(&mut client, b"second-message").await;
+        let (opcode, body) = read_server_frame(&mut client).await;
+        assert_eq!(opcode, 0x1, "the second echo must come back as text");
+        assert_eq!(
+            &body, b"second-message",
+            "the second guest echo must round-trip"
+        );
+
         // The loopback peer resolves to its own address as tenant label.
         let (records, _) = app.audit_snapshot();
         assert!(
@@ -246,6 +261,11 @@ mod tests {
                 .iter()
                 .any(|r| r.tenant.as_ref().is_some_and(|t| t.as_str() == "127.0.0.1")),
             "the guest call must be attributed to the calling tenant"
+        );
+        assert_eq!(
+            records.len(),
+            2,
+            "two messages must produce two guest-call audit rows, one per message"
         );
         shutdown.signal();
         let _ = server_task.await;

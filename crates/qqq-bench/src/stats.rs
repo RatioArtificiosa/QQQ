@@ -136,11 +136,14 @@ impl Distribution {
         if self.samples.is_empty() {
             return None;
         }
-        // NaN is not a rank: `clamp` passes it through (comparisons against NaN
-        // are false, so neither bound applies) and the `as usize` cast below
-        // would silently turn it into index 0 — the minimum masquerading as a
-        // requested percentile. Refuse it instead of reporting a number.
-        if !p.is_finite() {
+        // Only [0.0, 1.0] is a rank. NaN passes `clamp` through (comparisons
+        // against NaN are false, so neither bound applies) and the `as usize`
+        // cast below would silently turn it into index 0 — the minimum
+        // masquerading as a requested percentile. Out-of-range finite values
+        // are the same class of caller error: silently clamping -0.5 to the
+        // minimum reports a percentile that was never asked for. Refuse
+        // instead of reporting a number.
+        if !(0.0..=1.0).contains(&p) {
             return None;
         }
         let p = p.clamp(0.0, 1.0);
@@ -457,12 +460,17 @@ mod tests {
         // `clamp` passes NaN through (every comparison against it is false),
         // and the old `as usize` cast then turned it into index 0 — the minimum
         // masquerading as a requested percentile. Infinity is not a rank
-        // either. All three refuse rather than report a number.
+        // either, nor is anything outside [0, 1]: clamping -0.5 to the minimum
+        // would report a percentile that was never asked for.
         let d = dist(&[1, 2, 3, 4]);
         assert_eq!(d.percentile(f64::NAN), None);
         assert_eq!(d.percentile(f64::INFINITY), None);
         assert_eq!(d.percentile(f64::NEG_INFINITY), None);
+        assert_eq!(d.percentile(-0.5), None);
+        assert_eq!(d.percentile(1.5), None);
         assert_eq!(d.percentile(0.99), Some(4));
+        assert_eq!(d.percentile(0.0), Some(1));
+        assert_eq!(d.percentile(1.0), Some(4));
     }
 
     #[test]

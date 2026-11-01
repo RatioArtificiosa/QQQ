@@ -57,8 +57,17 @@ impl Direction {
     /// so a measurement exactly on the target is met. Using `<` or `>` would fail
     /// a run that hit its budget exactly — the off-by-one that
     /// `SRV-020` recorded for a `le` bucket boundary.
+    ///
+    /// Non-finite and negative measurements never satisfy, in either direction:
+    /// `-inf <= target` is true and `+inf >= target` is true, so an unchecked
+    /// comparison would report a broken measurement as met. Fail-closed here —
+    /// a measurement that is not a real, non-negative number is not evidence
+    /// of anything.
     #[must_use]
     pub fn satisfied_by(self, measured: f64, target: f64) -> bool {
+        if !measured.is_finite() || measured < 0.0 {
+            return false;
+        }
         match self {
             Self::AtMost => measured <= target,
             Self::AtLeast => measured >= target,
@@ -604,6 +613,12 @@ impl Verdict {
         if self.target.total_cmp(&0.0) == std::cmp::Ordering::Equal {
             return None;
         }
+        // A headroom computed from a broken measurement is itself broken:
+        // NaN propagates through the arithmetic and would be reported as a
+        // number. Refuse rather than print it.
+        if !self.measured.is_finite() || !self.target.is_finite() {
+            return None;
+        }
         let raw = (self.measured - self.target) / self.target * 100.0;
         Some(match self.direction {
             Direction::AtMost => raw,
@@ -1108,6 +1123,29 @@ mod tests {
     }
 
     #[test]
+    fn a_non_finite_measurement_has_no_defined_headroom() {
+        let budget = Budget::for_item(Item::Perf003).expect("PERF-003 has a row");
+        let verdict = budget
+            .meets(&Measurement::new(200.0, Unit::Micros))
+            .expect("matching units");
+        // Sanity: a finite miss does have headroom.
+        assert!(verdict.headroom_percent().is_some());
+        let nan = Verdict {
+            item: verdict.item,
+            target: verdict.target,
+            measured: f64::NAN,
+            direction: verdict.direction,
+            met: false,
+        };
+        assert_eq!(nan.headroom_percent(), None);
+        let inf = Verdict {
+            measured: f64::INFINITY,
+            ..nan
+        };
+        assert_eq!(inf.headroom_percent(), None);
+    }
+
+    #[test]
     fn a_zero_target_has_no_defined_headroom() {
         let budget = Budget {
             item: Item::Perf008,
@@ -1235,6 +1273,37 @@ mod tests {
             .meets(&Measurement::new(f64::NAN, Unit::RequestsPerSecond))
             .expect("matching units");
         assert!(!miss.met);
+    }
+
+    #[test]
+    fn infinities_and_negatives_never_satisfy() {
+        // `-inf <= target` is true and `+inf >= target` is true, so without a
+        // guard an infinite measurement meets. Negative values are not real
+        // measurements either (nanos, RPS, bytes are all non-negative).
+        // Round 2 found both directions fail-open; the guard is in
+        // `satisfied_by` so every comparison, present and future, gets it.
+        let ceiling = Budget::for_item(Item::Perf003).expect("PERF-003 has a row");
+        // Note: -0.0 is deliberately absent here. `-0.0 < 0.0` is false, so it
+        // passes the guard and meets — correctly, since it *is* zero.
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            assert!(
+                !ceiling
+                    .meets(&Measurement::new(bad, Unit::Micros))
+                    .expect("matching units")
+                    .met,
+                "{bad} must not meet a ceiling"
+            );
+        }
+        let floor = Budget::for_item(Item::Perf010).expect("PERF-010 has a row");
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            assert!(
+                !floor
+                    .meets(&Measurement::new(bad, Unit::RequestsPerSecond))
+                    .expect("matching units")
+                    .met,
+                "{bad} must not meet a floor"
+            );
+        }
     }
 
     #[test]

@@ -115,8 +115,6 @@ impl RunResult {
         self.samples.iter().any(|s| s.body_bytes > 0)
     }
 
-    /// Every distinct status code seen, sorted.
-    ///
     /// The share of attempted requests that produced no response.
     ///
     /// A companion to [`RunResult::completed`] for the report: `statuses`
@@ -152,6 +150,8 @@ impl RunResult {
         Some(self.failed as f64 / self.attempted as f64)
     }
 
+    /// Every distinct status code seen, sorted.
+    ///
     /// A vector rather than a set so a report renders deterministically —
     /// `§10.5` requires stable output, and a `HashSet` iterates arbitrarily.
     #[must_use]
@@ -285,11 +285,53 @@ impl Plan {
         if self.method.trim().is_empty() {
             return Err("method must not be empty");
         }
+        // The request line is assembled by concatenation, so a CR, LF, or
+        // space inside any of these fields breaks framing — and a crafted
+        // value turns the "request" into two requests (header injection).
+        // Refuse the bytes that have framing meaning rather than encoding
+        // around them.
+        for (name, value) in [
+            ("method", self.method.as_str()),
+            ("path", self.path.as_str()),
+            ("host", self.host.as_str()),
+        ] {
+            if value
+                .chars()
+                .any(|c| c.is_ascii_control() || c.is_whitespace())
+            {
+                return Err(match name {
+                    "method" => "method must be a single token with no whitespace",
+                    "path" => "path must not contain whitespace; encode spaces as %20",
+                    _ => "host must be a bare hostname with no whitespace",
+                });
+            }
+        }
         if self.host.trim().is_empty() {
             return Err("host must not be empty");
         }
         if self.method.trim().eq_ignore_ascii_case("GET") && self.body.is_some() {
             return Err("a GET must not carry a body; the workload table forbids it");
+        }
+        if let Some(body) = &self.body
+            && body.len() > MAX_REQUEST_BODY_BYTES
+        {
+            return Err("body exceeds the 1 MiB request cap");
+        }
+        match self.concurrency {
+            Concurrency::Fixed { connections: 0 } | Concurrency::Saturating { cores: 0 } => {
+                return Err(
+                    "concurrency of zero runs one worker while disclosing none; use Sequential for one at a time",
+                );
+            }
+            Concurrency::Fixed { connections } if connections > MAX_CONNECTIONS => {
+                return Err("connection count exceeds the 4096-worker cap");
+            }
+            Concurrency::Saturating { cores } if cores > MAX_CONNECTIONS => {
+                return Err("core count exceeds the 4096-worker cap");
+            }
+            Concurrency::Fixed { .. }
+            | Concurrency::Saturating { .. }
+            | Concurrency::Sequential => {}
         }
         Ok(())
     }
@@ -356,9 +398,14 @@ pub fn encode_request(plan: &Plan) -> Vec<u8> {
 ///
 /// # Errors
 ///
-/// Returns a timeout error if the head does not arrive in time, or an I/O error if
-/// the connection fails. A timeout is a real failure — unlike the pre-fix
-/// behaviour, where it was an artefact of waiting for a close.
+/// Returns a timeout error if the response does not arrive in time, or an I/O
+/// error if the connection fails. A timeout is a real failure — unlike the
+/// pre-fix behaviour, where it was an artefact of waiting for a close.
+///
+/// The timeout is a deadline for the whole response, not a per-read budget:
+/// per-read timeouts let a peer that drips one byte at a time stretch a single
+/// response without bound. Each read draws from the time remaining when it
+/// starts, so the slowest possible response still ends at the deadline.
 pub async fn read_response<S>(
     stream: &mut S,
     timeout: Duration,
@@ -367,6 +414,11 @@ pub async fn read_response<S>(
 where
     S: tokio::io::AsyncRead + Unpin,
 {
+    let deadline = Instant::now() + timeout;
+    // Remaining budget at each read. `Instant + Duration` cannot overflow in
+    // practice, and `saturating_duration_since` turns an expired deadline
+    // into a zero timeout — which fails immediately rather than waiting.
+    let remaining = || deadline.saturating_duration_since(Instant::now());
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
 
     // --- The head, up to and including the blank line --------------------
@@ -375,7 +427,7 @@ where
             break pos;
         }
         let mut chunk = [0_u8; 4 * 1024];
-        let read = tokio::time::timeout(timeout, stream.read(&mut chunk))
+        let read = tokio::time::timeout(remaining(), stream.read(&mut chunk))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "read timed out"))??;
         if read == 0 {
@@ -422,7 +474,7 @@ where
             let want = head_end.saturating_add(n);
             while buf.len() < want {
                 let mut chunk = [0_u8; 8 * 1024];
-                let read = tokio::time::timeout(timeout, stream.read(&mut chunk))
+                let read = tokio::time::timeout(remaining(), stream.read(&mut chunk))
                     .await
                     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "read timed out"))??;
                 if read == 0 {
@@ -450,7 +502,7 @@ where
             // further, because reading here is what hung the first version.
         }
         Framing::Chunked => {
-            read_chunked_body(&mut buf, head_end, timeout, stream).await?;
+            read_chunked_body(&mut buf, head_end, deadline, stream).await?;
         }
     }
 
@@ -469,19 +521,23 @@ where
 async fn read_chunked_body<S>(
     buf: &mut Vec<u8>,
     head_end: usize,
-    timeout: Duration,
+    deadline: Instant,
     stream: &mut S,
 ) -> io::Result<()>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt as _;
+    // Drawn from the response deadline, like every other read on this path:
+    // see `read_response` for why the budget is shared rather than per-read.
+    let remaining = || deadline.saturating_duration_since(Instant::now());
     // `pos` only ever points inside `buf`: it starts at `head_end` (found by
     // scanning this same buffer) and advances past bytes already read, with
     // every overshoot guarded by a length check that returns first. The
     // `expect`s below restate that invariant where the borrow happens rather
     // than threading a proof through the loop.
     let mut pos = head_end;
+    let mut total = 0_usize;
     loop {
         // Fill until a complete chunk-size line is present.
         loop {
@@ -497,7 +553,7 @@ where
                 ));
             }
             let mut chunk = [0_u8; 8 * 1024];
-            let read = tokio::time::timeout(timeout, stream.read(&mut chunk))
+            let read = tokio::time::timeout(remaining(), stream.read(&mut chunk))
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "read timed out"))??;
             if read == 0 {
@@ -544,6 +600,17 @@ where
         if size == 0 {
             return Ok(());
         }
+        // The cap bounds the payload, not just the buffer: framing bytes
+        // allocate too, but a stream of megabyte chunks with a small total
+        // is legitimate framing overhead, while a large payload total is not
+        // a measurement this harness takes.
+        total = total.saturating_add(size);
+        if total > MAX_BODY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("chunked body exceeds the {MAX_BODY_BYTES}-byte body cap"),
+            ));
+        }
         // Consume `size` data bytes plus the trailing CRLF, reading more
         // until both are present or the peer closes/times out.
         let need = pos.saturating_add(size).saturating_add(2);
@@ -555,7 +622,7 @@ where
         }
         while buf.len() < need {
             let mut chunk = [0_u8; 8 * 1024];
-            let read = tokio::time::timeout(timeout, stream.read(&mut chunk))
+            let read = tokio::time::timeout(remaining(), stream.read(&mut chunk))
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "read timed out"))??;
             if read == 0 {
@@ -593,6 +660,24 @@ pub const MAX_HEAD_BYTES: usize = 128 * 1024;
 /// assert!(qqq_bench::loadgen::MAX_BODY_BYTES >= 8 << 20);
 /// ```
 pub const MAX_BODY_BYTES: usize = 8 << 20;
+
+/// The maximum request body the harness will send, in bytes.
+///
+/// The largest workload payload is 1 KiB (`crypto`). A gigabyte body would be
+/// allocated, encoded, and transmitted by the *harness* — self-inflicted memory
+/// pressure measured as server latency. 1 MiB is three orders of magnitude of
+/// headroom over every row in the table.
+pub const MAX_REQUEST_BODY_BYTES: usize = 1 << 20;
+
+/// The most workers one run will spawn.
+///
+/// Each worker holds a connection, so the count is bounded by what a machine
+/// can actually hold open: beyond the OS file-descriptor limit (commonly
+/// 1024) further workers fail their connects and report a server problem that
+/// is really a harness problem. 4096 allows raised-limit machines while
+/// keeping a typo'd `connections: u32::MAX` from attempting four billion
+/// spawns.
+pub const MAX_CONNECTIONS: u32 = 4096;
 
 /// Where the head ends: just past the first blank line, or `None`.
 ///
@@ -669,6 +754,11 @@ pub fn framing_of(head: &[u8], method: &str) -> io::Result<Framing> {
         }
     }
 
+    // Every `Content-Length` line is collected, not just the first: two that
+    // disagree are the request-smuggling ambiguity (which length delimits the
+    // body?), and silently taking the first answers it with a guess. Agreeing
+    // duplicates are the same declaration twice and collapse to one.
+    let mut lengths: Vec<usize> = Vec::new();
     for line in lower.lines() {
         if let Some(rest) = line.strip_prefix("content-length:") {
             let n: usize = rest.trim().parse().map_err(|_| {
@@ -677,12 +767,21 @@ pub fn framing_of(head: &[u8], method: &str) -> io::Result<Framing> {
                     format!("unparsable Content-Length: {rest:?}"),
                 )
             })?;
-            return Ok(if n == 0 {
-                Framing::None
-            } else {
-                Framing::Length(n)
-            });
+            lengths.push(n);
         }
+    }
+    if let Some(first) = lengths.first() {
+        if lengths.iter().any(|n| n != first) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "conflicting Content-Length values",
+            ));
+        }
+        return Ok(if *first == 0 {
+            Framing::None
+        } else {
+            Framing::Length(*first)
+        });
     }
 
     // No length, no chunking, and a status that permits a body: the only way to
@@ -692,9 +791,18 @@ pub fn framing_of(head: &[u8], method: &str) -> io::Result<Framing> {
 }
 
 /// The status code from a head, if the status line parses.
+///
+/// Split on whitespace runs rather than single spaces: a status line with a
+/// doubled space (`HTTP/1.1  200 OK`) is unusual but not unparseable, and
+/// indexing fixed positions would read the gap as the code.
 #[must_use]
 pub fn status_of(head: &str) -> Option<u16> {
-    head.lines().next()?.split(' ').nth(1)?.parse::<u16>().ok()
+    head.lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse::<u16>()
+        .ok()
 }
 
 /// A parsed response head.
@@ -755,8 +863,9 @@ pub fn parse_response(buf: &[u8]) -> io::Result<ResponseHead> {
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty response"))?;
 
-    // `HTTP/1.1 200 OK`
-    let mut parts = status_line.split(' ');
+    // `HTTP/1.1 200 OK`. Split on whitespace runs (see `status_of`): a
+    // doubled space must not shift the code into the reason phrase.
+    let mut parts = status_line.split_whitespace();
     let version = parts
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no version token"))?;
@@ -1106,13 +1215,25 @@ async fn join_workers(
     let mut samples = Vec::new();
     let mut failed = 0_u64;
     let mut attempted = 0_u64;
-    for handle in handles {
-        let (local, lost, count) = handle
-            .await
-            .map_err(|e| io::Error::other(format!("worker panicked: {e}")))?;
-        samples.extend(local);
-        failed += lost;
-        attempted += count;
+    // By-ref iteration so a panic can abort what has not been joined yet: a
+    // `for handle in handles` loop moves the vector and leaves the siblings
+    // unreachable — detached tasks that keep hammering the target after the
+    // run has already failed.
+    let mut pending = handles.into_iter();
+    while let Some(handle) = pending.next() {
+        match handle.await {
+            Ok((local, lost, count)) => {
+                samples.extend(local);
+                failed += lost;
+                attempted += count;
+            }
+            Err(e) => {
+                for rest in pending.by_ref() {
+                    rest.abort();
+                }
+                return Err(io::Error::other(format!("worker panicked: {e}")));
+            }
+        }
     }
     Ok((samples, failed, attempted))
 }

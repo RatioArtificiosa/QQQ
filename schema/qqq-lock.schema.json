@@ -100,6 +100,10 @@
           },
           "type": "array"
         },
+        "digest_changed": {
+          "description": "Whether the artifact digest changed.",
+          "type": "boolean"
+        },
         "from": {
           "anyOf": [
             {
@@ -121,9 +125,17 @@
           ],
           "type": "string"
         },
+        "license_changed": {
+          "description": "Whether the licence identifier changed.",
+          "type": "boolean"
+        },
         "name": {
           "description": "The package name.",
           "type": "string"
+        },
+        "source_changed": {
+          "description": "Whether the source changed.",
+          "type": "boolean"
         },
         "to": {
           "anyOf": [
@@ -135,13 +147,21 @@
             }
           ],
           "description": "The version after, absent when removed."
+        },
+        "wit_changed": {
+          "description": "Whether the interface digest changed.",
+          "type": "boolean"
         }
       },
       "required": [
         "caps_added",
         "caps_removed",
+        "digest_changed",
         "kind",
-        "name"
+        "license_changed",
+        "name",
+        "source_changed",
+        "wit_changed"
       ],
       "title": "qqq-lock#DependencyChange",
       "type": "object"
@@ -151,6 +171,10 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "The `LockDiff` record.",
       "properties": {
+        "build_changed": {
+          "description": "Whether the build configuration changed.",
+          "type": "boolean"
+        },
         "capability_changes": {
           "description": "Only the packages whose **authority** changed.",
           "items": {
@@ -167,6 +191,7 @@
         }
       },
       "required": [
+        "build_changed",
         "capability_changes",
         "changes"
       ],

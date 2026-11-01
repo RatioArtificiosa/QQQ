@@ -251,6 +251,10 @@ impl TenantEgress {
 
     /// Protocol ceiling for redirect hops: the connector re-vets every hop
     /// and never follows more than this, regardless of the grant below.
+    ///
+    /// ```
+    /// assert_eq!(qqq_cap::egress::TenantEgress::MAX_REDIRECT_HOPS, 3);
+    /// ```
     pub const MAX_REDIRECT_HOPS: u8 = 3;
 
     /// Permit following redirect hops, up to `max_hops`.

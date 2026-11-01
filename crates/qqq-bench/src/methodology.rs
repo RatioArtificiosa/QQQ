@@ -498,6 +498,13 @@ pub struct Methodology {
     /// than a bool: "yes it is open source" is unfalsifiable, and a reader who
     /// wants to check can follow a link.
     pub harness_source: String,
+    /// What the run was pinned to, if anything. Required because `§9.2` states
+    /// budgets at fixed core counts ("8 cores") and a result measured on a
+    /// machine pinned to a subset is a different claim from one that used the
+    /// whole machine. [`Pinning::Unpinned`] is the honest value for a run the
+    /// harness did not confine — it states no confinement rather than guessing
+    /// at one.
+    pub pinning: Pinning,
 }
 
 impl Methodology {
@@ -523,7 +530,12 @@ impl Methodology {
     /// * a blank [`harness_source`](Self::harness_source) — "the harness itself
     ///   open source" means a locatable artifact;
     /// * a [`Warmup::Discard`] of zero iterations, or a [`Warmup::Duration`] of
-    ///   zero milliseconds, both of which describe no warmup while claiming one.
+    ///   zero milliseconds, both of which describe no warmup while claiming one;
+    /// * a zero-connection [`Concurrency`], which [`connections_for`] would
+    ///   silently clamp to 1 while the methodology discloses 0;
+    /// * a [`NonClaims`] that states nothing — an empty qualified list, or a
+    ///   blank unqualified reason — which satisfies "has a non-claims field"
+    ///   while disclosing nothing.
     pub fn new(
         environment: Environment,
         warmup: Warmup,
@@ -531,6 +543,7 @@ impl Methodology {
         repetitions: u32,
         non_claims: NonClaims,
         harness_source: impl Into<String>,
+        pinning: Pinning,
     ) -> Result<Self, MethodologyError> {
         let harness_source = harness_source.into();
 
@@ -558,6 +571,33 @@ impl Methodology {
             }
             Warmup::None { .. } | Warmup::Discard { .. } | Warmup::Duration { .. } => {}
         }
+        // Zero connections is expressible — `Concurrency::Fixed { connections: 0 }`
+        // is deliberately distinct from `Sequential` — but not runnable: the
+        // load generator would clamp it to 1 and the run would disclose a
+        // concurrency it did not use.
+        match concurrency {
+            Concurrency::Fixed { connections: 0 } | Concurrency::Saturating { cores: 0 } => {
+                return Err(MethodologyError::ZeroConcurrency);
+            }
+            Concurrency::Fixed { .. }
+            | Concurrency::Saturating { .. }
+            | Concurrency::Sequential => {}
+        }
+        // `NonClaims::qualified` and `NonClaims::unqualified` already refuse
+        // these shapes, but the enum itself is directly constructible — so the
+        // gate that matters, this one, repeats the check rather than trusting
+        // the constructor the caller may not have used.
+        match &non_claims {
+            NonClaims::Qualified { items }
+                if items.is_empty() || items.iter().all(|item| item.trim().is_empty()) =>
+            {
+                return Err(MethodologyError::EmptyNonClaims);
+            }
+            NonClaims::Unqualified { reason } if reason.trim().is_empty() => {
+                return Err(MethodologyError::BlankNonClaimReason);
+            }
+            NonClaims::Qualified { .. } | NonClaims::Unqualified { .. } => {}
+        }
 
         Ok(Self {
             environment,
@@ -566,6 +606,7 @@ impl Methodology {
             repetitions,
             non_claims,
             harness_source,
+            pinning,
         })
     }
 }
@@ -593,6 +634,14 @@ pub enum MethodologyError {
     EmptyWarmup,
     /// [`Methodology::harness_source`] was blank.
     BlankHarnessSource,
+    /// A zero-connection [`Concurrency`] was given. Zero connections is
+    /// expressible at the `Concurrency` level but not runnable: the load
+    /// generator would clamp it to 1 while the methodology discloses 0.
+    ZeroConcurrency,
+    /// A [`NonClaims::Qualified`] with no non-blank items was given.
+    EmptyNonClaims,
+    /// A [`NonClaims::Unqualified`] with a blank reason was given.
+    BlankNonClaimReason,
 }
 
 impl fmt::Display for MethodologyError {
@@ -612,6 +661,18 @@ impl fmt::Display for MethodologyError {
             ),
             Self::BlankHarnessSource => f.write_str(
                 "§9.1 requires the harness be open source; harness_source must name where it is",
+            ),
+            Self::ZeroConcurrency => f.write_str(
+                "a zero-connection concurrency cannot be run; the load generator \
+                 would clamp it to 1 while the methodology discloses 0",
+            ),
+            Self::EmptyNonClaims => f.write_str(
+                "§9.1 requires a what-this-does-not-measure section; an empty \
+                 qualified list states nothing",
+            ),
+            Self::BlankNonClaimReason => f.write_str(
+                "§9.1 requires a what-this-does-not-measure section; an unqualified \
+                 claim needs a non-blank reason",
             ),
         }
     }
@@ -795,6 +856,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_extension_round_trips_through_serde() {
+        // The extension variant owns its name; the round trip must preserve
+        // it exactly rather than normalising it onto a specification row.
+        let other = BenchmarkName::Other("my-workload".to_owned());
+        let json = serde_json::to_string(&other).expect("serialisable");
+        let back: BenchmarkName = serde_json::from_str(&json).expect("deserialisable");
+        assert_eq!(back, other);
+        assert!(!back.is_specification_benchmark());
+    }
+
     // -- Environment --------------------------------------------------------
 
     #[test]
@@ -907,6 +979,7 @@ mod tests {
             3,
             non_claims(),
             "https://github.com/RatioArtificiosa/QQQ",
+            Pinning::Unpinned,
         );
         assert_eq!(err, Err(MethodologyError::EmptyWarmup));
     }
@@ -920,6 +993,7 @@ mod tests {
             3,
             non_claims(),
             "https://github.com/RatioArtificiosa/QQQ",
+            Pinning::Unpinned,
         );
         assert_eq!(err, Err(MethodologyError::EmptyWarmup));
     }
@@ -937,6 +1011,7 @@ mod tests {
             3,
             non_claims(),
             "https://github.com/RatioArtificiosa/QQQ",
+            Pinning::Unpinned,
         );
         assert_eq!(err, Err(MethodologyError::UnjustifiedNoWarmup));
     }
@@ -956,6 +1031,7 @@ mod tests {
                 3,
                 non_claims(),
                 "https://github.com/RatioArtificiosa/QQQ",
+                Pinning::Unpinned,
             )
             .is_ok()
         );
@@ -973,6 +1049,7 @@ mod tests {
                 given,
                 non_claims(),
                 "https://github.com/RatioArtificiosa/QQQ",
+                Pinning::Unpinned,
             );
             assert_eq!(
                 outcome,
@@ -994,6 +1071,7 @@ mod tests {
                 Methodology::REQUIRED_REPETITIONS,
                 non_claims(),
                 "https://github.com/RatioArtificiosa/QQQ",
+                Pinning::Unpinned,
             )
             .is_ok()
         );
@@ -1008,8 +1086,92 @@ mod tests {
             3,
             non_claims(),
             "  ",
+            Pinning::Unpinned,
         );
         assert_eq!(err, Err(MethodologyError::BlankHarnessSource));
+    }
+
+    #[test]
+    fn a_zero_connection_concurrency_is_refused() {
+        // `Fixed { connections: 0 }` is expressible — it is deliberately
+        // distinct from `Sequential` — but not runnable: the load generator
+        // would clamp it to 1 while the methodology discloses 0.
+        for concurrency in [
+            Concurrency::Fixed { connections: 0 },
+            Concurrency::Saturating { cores: 0 },
+        ] {
+            let err = Methodology::new(
+                env(),
+                Warmup::Discard { iterations: 100 },
+                concurrency,
+                3,
+                non_claims(),
+                "https://github.com/RatioArtificiosa/QQQ",
+                Pinning::Unpinned,
+            );
+            assert_eq!(err, Err(MethodologyError::ZeroConcurrency));
+        }
+    }
+
+    #[test]
+    fn non_claims_constructed_directly_are_still_gated() {
+        // `NonClaims::Qualified` is directly constructible, so a caller can
+        // bypass `NonClaims::qualified`'s check. This constructor repeats it
+        // rather than trusting a path the caller may not have taken.
+        let empty = Methodology::new(
+            env(),
+            Warmup::Discard { iterations: 100 },
+            Concurrency::Fixed { connections: 8 },
+            3,
+            NonClaims::Qualified { items: vec![] },
+            "https://github.com/RatioArtificiosa/QQQ",
+            Pinning::Unpinned,
+        );
+        assert_eq!(empty, Err(MethodologyError::EmptyNonClaims));
+
+        let blanks = Methodology::new(
+            env(),
+            Warmup::Discard { iterations: 100 },
+            Concurrency::Fixed { connections: 8 },
+            3,
+            NonClaims::Qualified {
+                items: vec!["   ".to_owned()],
+            },
+            "https://github.com/RatioArtificiosa/QQQ",
+            Pinning::Unpinned,
+        );
+        assert_eq!(blanks, Err(MethodologyError::EmptyNonClaims));
+
+        let blank_reason = Methodology::new(
+            env(),
+            Warmup::Discard { iterations: 100 },
+            Concurrency::Fixed { connections: 8 },
+            3,
+            NonClaims::Unqualified {
+                reason: "  ".to_owned(),
+            },
+            "https://github.com/RatioArtificiosa/QQQ",
+            Pinning::Unpinned,
+        );
+        assert_eq!(blank_reason, Err(MethodologyError::BlankNonClaimReason));
+    }
+
+    #[test]
+    fn pinning_is_published_with_the_result() {
+        // `§9.2` states budgets at fixed core counts, so the allocation is
+        // part of the claim. An unconfined run states `Unpinned`; a confined
+        // run states how.
+        let free = Methodology::new(
+            env(),
+            Warmup::Discard { iterations: 100 },
+            Concurrency::Fixed { connections: 8 },
+            3,
+            non_claims(),
+            "https://github.com/RatioArtificiosa/QQQ",
+            Pinning::Unpinned,
+        )
+        .expect("a complete methodology");
+        assert_eq!(free.pinning, Pinning::Unpinned);
     }
 
     // -- Concurrency --------------------------------------------------------

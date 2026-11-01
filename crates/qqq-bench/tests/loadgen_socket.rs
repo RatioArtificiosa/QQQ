@@ -27,7 +27,9 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use qqq_bench::loadgen::{Limit, Plan, drive, one_request, parse_response};
+use qqq_bench::loadgen::{
+    Limit, MAX_BODY_BYTES, Plan, drive, framing_of, one_request, parse_response,
+};
 use qqq_bench::methodology::Concurrency;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -344,4 +346,107 @@ async fn the_parser_agrees_with_a_response_this_server_actually_sent() {
         u64::try_from(parsed.body_bytes).expect("small"),
         sample.body_bytes
     );
+}
+
+#[tokio::test]
+async fn a_truncated_body_is_a_failure_not_a_short_sample() {
+    // A peer that closes mid-body after the head is known: the old code
+    // returned the short buffer and counted a truncated representation as a
+    // complete sample. Now the short read fails the sample instead.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut buf = vec![0_u8; 4_096];
+        let _ = stream.read(&mut buf).await;
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+            .await;
+        let _ = stream.shutdown().await;
+    });
+
+    let plan = plan_for(addr, Concurrency::Sequential);
+    let err = one_request(&plan).await.expect_err("truncation must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[tokio::test]
+async fn a_chunked_body_containing_a_blank_line_is_read_in_full() {
+    // The old terminator stopped at any `\r\n\r\n` past the head, so a chunk
+    // carrying HTML truncated the measurement. Chunked framing is parsed by
+    // size instead: 5 + 6 bytes of chunks, then the zero chunk.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut buf = vec![0_u8; 4_096];
+        let _ = stream.read(&mut buf).await;
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                  5\r\nhello\r\n6\r\nA\r\n\r\nB\r\n0\r\n\r\n",
+            )
+            .await;
+        let _ = stream.shutdown().await;
+    });
+
+    let plan = plan_for(addr, Concurrency::Sequential);
+    let sample = one_request(&plan).await.expect("chunked must read");
+    assert_eq!(sample.status, 200);
+    assert_eq!(
+        sample.body_bytes, 11,
+        "5 + 6 chunk bytes, terminator excluded"
+    );
+}
+
+#[tokio::test]
+async fn an_enormous_content_length_fails_fast_without_reading() {
+    // A `Content-Length` above `MAX_BODY_BYTES` names a body no response will
+    // carry. The reader must refuse it from the head alone rather than read
+    // toward it until the peer closes or the timeout fires.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut buf = vec![0_u8; 4_096];
+        let _ = stream.read(&mut buf).await;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        let _ = stream.write_all(head.as_bytes()).await;
+        // Hold the connection open past any reasonable read: a reader that
+        // waited for the body would hang here instead of failing fast.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let mut plan = plan_for(addr, Concurrency::Sequential);
+    plan.timeout = Duration::from_secs(5);
+    let err = one_request(&plan)
+        .await
+        .expect_err("oversized length must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
+async fn a_degenerate_plan_fails_before_touching_the_network() {
+    // `validate` runs before `connect`: a zero timeout must report the plan,
+    // not a connection failure, and must not open a socket at all.
+    let addr: SocketAddr = "127.0.0.1:9".parse().expect("a literal address");
+    let mut plan = plan_for(addr, Concurrency::Sequential);
+    plan.timeout = Duration::ZERO;
+    let err = one_request(&plan)
+        .await
+        .expect_err("degenerate plan must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn framing_names_length_from_a_valid_head() {
+    // The control for the refusal tests: a well-formed head still frames.
+    let head = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n";
+    assert!(matches!(
+        framing_of(head, "GET").expect("well-formed"),
+        qqq_bench::loadgen::Framing::Length(2)
+    ));
 }

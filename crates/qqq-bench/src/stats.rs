@@ -136,6 +136,13 @@ impl Distribution {
         if self.samples.is_empty() {
             return None;
         }
+        // NaN is not a rank: `clamp` passes it through (comparisons against NaN
+        // are false, so neither bound applies) and the `as usize` cast below
+        // would silently turn it into index 0 — the minimum masquerading as a
+        // requested percentile. Refuse it instead of reporting a number.
+        if !p.is_finite() {
+            return None;
+        }
         let p = p.clamp(0.0, 1.0);
         let mut sorted = self.samples.clone();
         sorted.sort_unstable();
@@ -268,15 +275,50 @@ impl Repetitions {
     }
 
     /// The smallest repetition value.
+    ///
+    /// # Why this is not the number to publish
+    ///
+    /// "Smallest" is only "best" for a ceiling. For a floor (throughput, where
+    /// larger is better) the smallest is the *worst* run, and publishing it as
+    /// the result inverts the verdict. Use [`Self::conservative`], which takes
+    /// the budget's direction and returns the run to report: the max for a
+    /// ceiling, the min for a floor — the value furthest from meeting, which is
+    /// the honest figure when runs disagree.
     #[must_use]
     pub fn best(&self) -> u64 {
         self.values.iter().copied().min().unwrap_or(0)
     }
 
     /// The largest repetition value.
+    ///
+    /// See [`Self::best`] for why neither extreme is publishable without a
+    /// direction; use [`Self::conservative`].
     #[must_use]
     pub fn worst(&self) -> u64 {
         self.values.iter().copied().max().unwrap_or(0)
+    }
+
+    /// The repetition to report against a budget: the least favorable one.
+    ///
+    /// For an `AtMost` budget (latency, memory, size) that is the maximum —
+    /// the slowest run is the claim. For an `AtLeast` budget (throughput) it
+    /// is the minimum. Reporting the conservative value means a published
+    /// figure that reproduces badly was measured badly, not selected well.
+    ///
+    /// ```
+    /// use qqq_bench::budget::Direction;
+    /// use qqq_bench::stats::Repetitions;
+    ///
+    /// let r = Repetitions::new(vec![100, 110, 120]).expect("three");
+    /// assert_eq!(r.conservative(Direction::AtMost), 120);
+    /// assert_eq!(r.conservative(Direction::AtLeast), 100);
+    /// ```
+    #[must_use]
+    pub fn conservative(&self, direction: crate::budget::Direction) -> u64 {
+        match direction {
+            crate::budget::Direction::AtMost => self.worst(),
+            crate::budget::Direction::AtLeast => self.best(),
+        }
     }
 
     /// How much the worst repetition exceeds the best, as a percentage.
@@ -321,8 +363,15 @@ impl Repetitions {
     /// A `None` spread — the zero-best case — is treated as **not stable**,
     /// because an undefined spread is not evidence of stability. The safe
     /// direction is to flag it, matching this project's deny-by-default rule.
+    ///
+    /// A non-finite or negative threshold is also treated as exceeded: no
+    /// measured spread can meaningfully be "within" NaN, and the fail-closed
+    /// reading of a nonsense gate is to flag the run rather than pass it.
     #[must_use]
     pub fn exceeds(&self, threshold_percent: f64) -> bool {
+        if !threshold_percent.is_finite() || threshold_percent < 0.0 {
+            return true;
+        }
         match self.spread_percent() {
             Some(spread) => spread > threshold_percent,
             None => true,
@@ -401,6 +450,19 @@ mod tests {
         assert_eq!(d.p90(), Some(90));
         assert_eq!(d.p99(), Some(99));
         assert_eq!(d.p999(), Some(100), "p99.9 of 100 samples is the maximum");
+    }
+
+    #[test]
+    fn a_nan_or_infinite_rank_is_not_a_percentile() {
+        // `clamp` passes NaN through (every comparison against it is false),
+        // and the old `as usize` cast then turned it into index 0 — the minimum
+        // masquerading as a requested percentile. Infinity is not a rank
+        // either. All three refuse rather than report a number.
+        let d = dist(&[1, 2, 3, 4]);
+        assert_eq!(d.percentile(f64::NAN), None);
+        assert_eq!(d.percentile(f64::INFINITY), None);
+        assert_eq!(d.percentile(f64::NEG_INFINITY), None);
+        assert_eq!(d.percentile(0.99), Some(4));
     }
 
     #[test]
@@ -498,6 +560,28 @@ mod tests {
         let r = Repetitions::new(vec![7, 7, 7]).expect("three");
         assert_eq!(r.spread_percent(), Some(0.0));
         assert!(!r.exceeds(0.0), "0% does not exceed a 0% threshold");
+    }
+
+    #[test]
+    fn the_conservative_repetition_follows_the_budget_direction() {
+        // Best/worst assume lower-is-better. For a ceiling (latency) the
+        // publishable run is the slowest; for a floor (throughput) it is the
+        // fastest. Reporting the other way inverts the verdict.
+        use crate::budget::Direction;
+        let r = Repetitions::new(vec![100, 110, 120]).expect("three");
+        assert_eq!(r.conservative(Direction::AtMost), 120);
+        assert_eq!(r.conservative(Direction::AtLeast), 100);
+    }
+
+    #[test]
+    fn a_nonsense_threshold_is_exceeded() {
+        // NaN, infinite, and negative thresholds cannot be "within": the
+        // fail-closed reading of a nonsense gate is to flag the run.
+        let r = Repetitions::new(vec![100, 100, 100]).expect("three");
+        assert!(r.exceeds(f64::NAN));
+        assert!(r.exceeds(f64::INFINITY));
+        assert!(r.exceeds(-1.0));
+        assert!(!r.exceeds(0.0), "a 0% spread does not exceed 0%");
     }
 
     #[test]

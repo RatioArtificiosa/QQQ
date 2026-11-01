@@ -117,6 +117,41 @@ impl RunResult {
 
     /// Every distinct status code seen, sorted.
     ///
+    /// The share of attempted requests that produced no response.
+    ///
+    /// A companion to [`RunResult::completed`] for the report: `statuses`
+    /// only lists codes from responses, so failures are invisible in it, and
+    /// a failure count without its denominator is not comparable across runs.
+    /// `None` for a run that attempted nothing, where the ratio is undefined —
+    /// `Some(0.0)` would claim a perfect run that never ran.
+    ///
+    /// ```
+    /// use qqq_bench::loadgen::RunResult;
+    /// use std::time::Duration;
+    ///
+    /// let result = RunResult {
+    ///     distribution: qqq_bench::stats::Distribution::new(),
+    ///     samples: Vec::new(),
+    ///     elapsed: Duration::from_secs(1),
+    ///     attempted: 4,
+    ///     failed: 1,
+    /// };
+    /// assert_eq!(result.failure_rate(), Some(0.25));
+    /// ```
+    #[must_use]
+    pub fn failure_rate(&self) -> Option<f64> {
+        if self.attempted == 0 {
+            return None;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "counts are far below 2^53 in any run that could finish; \
+                      the conversion is exact for every value this type can \
+                      hold in practice"
+        )]
+        Some(self.failed as f64 / self.attempted as f64)
+    }
+
     /// A vector rather than a set so a report renders deterministically —
     /// `§10.5` requires stable output, and a `HashSet` iterates arbitrarily.
     #[must_use]
@@ -195,6 +230,69 @@ impl Plan {
             warmup: 100,
         }
     }
+
+    /// Check that this plan can be driven.
+    ///
+    /// # Why a method and not a constructor
+    ///
+    /// [`Plan::get`] builds a valid plan, and the struct's fields are public so
+    /// tests and tools can state edge cases directly. A public struct with no
+    /// check means `timeout: ZERO`, `limit: Requests(0)`, or `path: ""` drives
+    /// zero requests or encodes a request line the server reads as garbage —
+    /// and a zero-request run reports a vacuous success. [`one_request`] calls
+    /// this first, so every driven plan is checked exactly once however it was
+    /// built.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first violated rule, naming the field. A `GET` with a body
+    /// is refused for the same reason: the workload table forbids it (a GET
+    /// row must not carry a body), so a plan that pairs them is a mistake,
+    /// not a measurement.
+    ///
+    /// ```
+    /// use qqq_bench::loadgen::Plan;
+    /// use qqq_bench::methodology::Concurrency;
+    /// use std::net::SocketAddr;
+    ///
+    /// let addr: SocketAddr = "127.0.0.1:9".parse().expect("a literal address");
+    /// let plan = Plan::get(addr, "/healthz", Concurrency::Sequential);
+    /// assert!(plan.validate().is_ok());
+    ///
+    /// let mut bad = plan.clone();
+    /// bad.path = "healthz".to_owned();
+    /// assert!(bad.validate().is_err());
+    /// ```
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.timeout.is_zero() {
+            return Err("timeout must be non-zero, or every request fails immediately");
+        }
+        if self.connect_timeout.is_zero() {
+            return Err("connect_timeout must be non-zero, or no connection can be made");
+        }
+        match self.limit {
+            Limit::Requests(0) => {
+                return Err("limit must request at least one request");
+            }
+            Limit::Duration(d) if d.is_zero() => {
+                return Err("limit must drive for a non-zero duration");
+            }
+            Limit::Requests(_) | Limit::Duration(_) => {}
+        }
+        if !self.path.starts_with('/') {
+            return Err("path must start with '/', or the request line is malformed");
+        }
+        if self.method.trim().is_empty() {
+            return Err("method must not be empty");
+        }
+        if self.host.trim().is_empty() {
+            return Err("host must not be empty");
+        }
+        if self.method.trim().eq_ignore_ascii_case("GET") && self.body.is_some() {
+            return Err("a GET must not carry a body; the workload table forbids it");
+        }
+        Ok(())
+    }
 }
 
 /// Encode one HTTP/1.1 request.
@@ -261,7 +359,11 @@ pub fn encode_request(plan: &Plan) -> Vec<u8> {
 /// Returns a timeout error if the head does not arrive in time, or an I/O error if
 /// the connection fails. A timeout is a real failure — unlike the pre-fix
 /// behaviour, where it was an artefact of waiting for a close.
-pub async fn read_response<S>(stream: &mut S, timeout: Duration) -> io::Result<Vec<u8>>
+pub async fn read_response<S>(
+    stream: &mut S,
+    timeout: Duration,
+    method: &str,
+) -> io::Result<Vec<u8>>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
@@ -303,10 +405,20 @@ where
     // buffer, so the range always exists.
     #[expect(clippy::expect_used, reason = "head_end found in buf")]
     let head: &[u8] = buf.get(..head_end).expect("head_end found in buf");
-    let framing = framing_of(head);
+    let framing = framing_of(head, method)?;
 
     match framing {
         Framing::Length(n) => {
+            // Bounded: a `Content-Length: 2^64` names a body no response will
+            // ever carry, and reading toward it without a cap lets a hostile
+            // or broken peer grow this buffer without limit. The head has
+            // `MAX_HEAD_BYTES` for the same reason; the body gets its own.
+            if n > MAX_BODY_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Content-Length {n} exceeds the {MAX_BODY_BYTES}-byte body cap"),
+                ));
+            }
             let want = head_end.saturating_add(n);
             while buf.len() < want {
                 let mut chunk = [0_u8; 8 * 1024];
@@ -314,9 +426,17 @@ where
                     .await
                     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "read timed out"))??;
                 if read == 0 {
-                    // The peer closed mid-body. The status is already known, so
-                    // this is a short read rather than a failure to measure.
-                    break;
+                    // The peer closed mid-body. The status is known but the
+                    // representation is not complete, and a truncated body
+                    // counted as a full sample would report a length the server
+                    // never sent. Fail the sample instead.
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "peer closed after {} of {n} body bytes",
+                            buf.len() - head_end
+                        ),
+                    ));
                 }
                 // Bound on a `let`: `read` returns at most the chunk length
                 // by contract.
@@ -330,35 +450,128 @@ where
             // further, because reading here is what hung the first version.
         }
         Framing::Chunked => {
-            // Read until the terminating zero-length chunk, which ends with the
-            // `\r\n\r\n` trailer sequence. Bounded by the same head cap logic
-            // via the timeout rather than a byte limit, because a legitimate
-            // chunked body can be large.
-            loop {
-                // Bound on a `let`: `head_end` indexes the same buffer the
-                // finder scanned, so the range always exists.
-                #[expect(clippy::expect_used, reason = "head_end found in buf")]
-                let post_head: &[u8] = buf.get(head_end..).expect("head_end found in buf");
-                if buf.ends_with(b"0\r\n\r\n") || find_head_end(post_head).is_some() {
-                    break;
-                }
-                let mut chunk = [0_u8; 8 * 1024];
-                let read = tokio::time::timeout(timeout, stream.read(&mut chunk))
-                    .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "read timed out"))??;
-                if read == 0 {
-                    break;
-                }
-                // Bound on a `let`: `read` returns at most the chunk length
-                // by contract.
-                #[expect(clippy::expect_used, reason = "read returns at most chunk len")]
-                let fresh: &[u8] = chunk.get(..read).expect("read returns at most chunk len");
-                buf.extend_from_slice(fresh);
-            }
+            read_chunked_body(&mut buf, head_end, timeout, stream).await?;
         }
     }
 
     Ok(buf)
+}
+
+/// Read a chunked body already in progress, parsing chunk sizes.
+///
+/// The previous terminator — "ends with `0\\r\\n\\r\\n` or contains a blank
+/// line anywhere past the head" — fired on any `\\r\\n\\r\\n` inside the body
+/// itself (HTML commonly contains one), truncating the measurement. Chunked
+/// framing is parsed instead: each chunk-size line is read as hexadecimal,
+/// exactly that many bytes plus the trailing CRLF are consumed, and the
+/// zero-length chunk ends the body. Bounded by [`MAX_BODY_BYTES`] for the
+/// same reason `Content-Length` bodies are.
+async fn read_chunked_body<S>(
+    buf: &mut Vec<u8>,
+    head_end: usize,
+    timeout: Duration,
+    stream: &mut S,
+) -> io::Result<()>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+    // `pos` only ever points inside `buf`: it starts at `head_end` (found by
+    // scanning this same buffer) and advances past bytes already read, with
+    // every overshoot guarded by a length check that returns first. The
+    // `expect`s below restate that invariant where the borrow happens rather
+    // than threading a proof through the loop.
+    let mut pos = head_end;
+    loop {
+        // Fill until a complete chunk-size line is present.
+        loop {
+            #[expect(clippy::expect_used, reason = "pos only advances within the buffer")]
+            let tail: &[u8] = buf.get(pos..).expect("pos stays within the buffer");
+            if tail.windows(2).any(|w| w == b"\r\n") {
+                break;
+            }
+            if buf.len() > head_end.saturating_add(MAX_BODY_BYTES) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("chunked body exceeds the {MAX_BODY_BYTES}-byte body cap"),
+                ));
+            }
+            let mut chunk = [0_u8; 8 * 1024];
+            let read = tokio::time::timeout(timeout, stream.read(&mut chunk))
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "read timed out"))??;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "peer closed mid-chunk",
+                ));
+            }
+            // Bound on a `let`: `read` returns at most the chunk length
+            // by contract.
+            #[expect(clippy::expect_used, reason = "read returns at most chunk len")]
+            let fresh: &[u8] = chunk.get(..read).expect("read returns at most chunk len");
+            buf.extend_from_slice(fresh);
+        }
+        // Bound on a `let`: the loop above guarantees a CRLF at or after
+        // `pos`, so the relative position always exists.
+        #[expect(clippy::expect_used, reason = "CRLF presence established above")]
+        let tail: &[u8] = buf.get(pos..).expect("pos stays within the buffer");
+        #[expect(clippy::expect_used, reason = "CRLF presence established above")]
+        let line_end = pos
+            + tail
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .expect("CRLF presence established above");
+        #[expect(
+            clippy::expect_used,
+            reason = "line_end is a found position inside the buffer"
+        )]
+        let line_bytes: &[u8] = buf
+            .get(pos..line_end)
+            .expect("line_end is a found position inside the buffer");
+        let line = std::str::from_utf8(line_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 chunk size"))?;
+        // Chunk extensions (`;foo=bar`) are ignored per RFC 9112 §7.1.1: the
+        // size is what precedes the first `;`.
+        let size_str = line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_str, 16).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("malformed chunk size: {line:?}"),
+            )
+        })?;
+        pos = line_end + 2;
+        if size == 0 {
+            return Ok(());
+        }
+        // Consume `size` data bytes plus the trailing CRLF, reading more
+        // until both are present or the peer closes/times out.
+        let need = pos.saturating_add(size).saturating_add(2);
+        if need.saturating_sub(head_end) > MAX_BODY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("chunked body exceeds the {MAX_BODY_BYTES}-byte body cap"),
+            ));
+        }
+        while buf.len() < need {
+            let mut chunk = [0_u8; 8 * 1024];
+            let read = tokio::time::timeout(timeout, stream.read(&mut chunk))
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "read timed out"))??;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "peer closed mid-chunk",
+                ));
+            }
+            // Bound on a `let`: `read` returns at most the chunk length
+            // by contract.
+            #[expect(clippy::expect_used, reason = "read returns at most chunk len")]
+            let fresh: &[u8] = chunk.get(..read).expect("read returns at most chunk len");
+            buf.extend_from_slice(fresh);
+        }
+        pos = need;
+    }
 }
 
 /// The maximum head size the reader will accept.
@@ -367,7 +580,27 @@ where
 /// never sends a blank line cannot make the harness grow a buffer without limit.
 pub const MAX_HEAD_BYTES: usize = 128 * 1024;
 
+/// The maximum response body the reader will accept, in bytes.
+///
+/// A `Content-Length` names what the peer *claims*; without a cap, a claim of
+/// 2^64 makes the reader loop until the peer closes or the timeout fires,
+/// allocating everything the peer sends in the meantime. 8 MiB is generous —
+/// the reference application's largest body (the template table) is two orders
+/// of magnitude smaller — and anything larger is either a hostile peer or a
+/// workload the harness was not designed to measure.
+///
+/// ```
+/// assert!(qqq_bench::loadgen::MAX_BODY_BYTES >= 8 << 20);
+/// ```
+pub const MAX_BODY_BYTES: usize = 8 << 20;
+
 /// Where the head ends: just past the first blank line, or `None`.
+///
+/// HTTP/1.1 delimits the head with CRLF (`RFC 9110 §5`). A head terminated by
+/// bare LF is malformed, and this function does not recognise it — the reader
+/// then waits for a terminator that never arrives and times out, counting the
+/// sample as failed. That is deliberate: accepting LF-only framing would commit
+/// the harness to a wire shape the reference server never sends.
 #[must_use]
 pub fn find_head_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
@@ -393,38 +626,69 @@ pub enum Framing {
 /// first would silently mis-frame such a response. A status that forbids a body
 /// wins over both, because a `204` carrying a stray `Content-Length: 5` must not
 /// make the reader wait for five bytes that will never come.
-#[must_use]
-pub fn framing_of(head: &[u8]) -> Framing {
+///
+/// # Errors
+///
+/// Returns an error when the head carries a `Content-Length` that is present
+/// but unparsable, or a `Transfer-Encoding` that is present but neither a
+/// bare `chunked` token nor absent. A framing the reader cannot decide is not
+/// a framing the reader may guess: guessing `None` would silently drop a body
+/// the server did send.
+pub fn framing_of(head: &[u8], method: &str) -> io::Result<Framing> {
     let text = String::from_utf8_lossy(head);
     let lower = text.to_ascii_lowercase();
+
+    // A HEAD response never carries a body, whatever the headers claim. Without
+    // this, a HEAD with `200` and `Content-Length: 5` would make the reader
+    // wait for five bytes that must not arrive.
+    if method.trim().eq_ignore_ascii_case("HEAD") {
+        return Ok(Framing::None);
+    }
 
     // A status of 1xx, 204, or 304 has no body.
     if let Some(status) = status_of(&lower)
         && (status == 204 || status == 304 || (100..200).contains(&status))
     {
-        return Framing::None;
+        return Ok(Framing::None);
     }
 
-    if lower.contains("transfer-encoding:") && lower.contains("chunked") {
-        return Framing::Chunked;
+    // Parsed line-by-line, not by substring: a header value mentioning the word
+    // "chunked" (e.g. `X-Note: not-chunked`) is not a transfer coding, and only
+    // a `Transfer-Encoding` line whose comma-separated tokens include exactly
+    // `chunked` selects chunked framing.
+    for line in lower.lines() {
+        if let Some(rest) = line.strip_prefix("transfer-encoding:") {
+            let chunked = rest.split(',').any(|token| token.trim() == "chunked");
+            if chunked {
+                return Ok(Framing::Chunked);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported transfer-encoding: {rest:?}"),
+            ));
+        }
     }
 
     for line in lower.lines() {
-        if let Some(rest) = line.strip_prefix("content-length:")
-            && let Ok(n) = rest.trim().parse::<usize>()
-        {
-            return if n == 0 {
+        if let Some(rest) = line.strip_prefix("content-length:") {
+            let n: usize = rest.trim().parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unparsable Content-Length: {rest:?}"),
+                )
+            })?;
+            return Ok(if n == 0 {
                 Framing::None
             } else {
                 Framing::Length(n)
-            };
+            });
         }
     }
 
     // No length, no chunking, and a status that permits a body: the only way to
     // know the end is the close, which this harness will not wait for. Reported
     // as no body, which measures the head and does not hang.
-    Framing::None
+    Ok(Framing::None)
 }
 
 /// The status code from a head, if the status line parses.
@@ -468,7 +732,18 @@ pub struct ResponseHead {
 ///
 /// Returns an error if the status line is absent or malformed. A response the
 /// harness cannot classify must not be counted as a success.
-pub fn parse_response(head: &[u8]) -> io::Result<ResponseHead> {
+pub fn parse_response(buf: &[u8]) -> io::Result<ResponseHead> {
+    // Split the head from the body FIRST, on bytes: the buffer carries the
+    // whole response, and validating the head as UTF-8 over the full buffer
+    // fails on any binary body — a binary payload would then be counted as a
+    // connection failure rather than measured. Only the head is ever decoded.
+    let body_start = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(buf.len(), |p| p + 4);
+    let head = buf
+        .get(..body_start)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "response head out of range"))?;
     let text = std::str::from_utf8(head).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -497,25 +772,113 @@ pub fn parse_response(head: &[u8]) -> io::Result<ResponseHead> {
         .parse::<u16>()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-numeric status code"))?;
 
-    // The head ends at the first blank line; anything after is body.
-    let body_start = head
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map_or(head.len(), |p| p + 4);
+    // Anything after the first blank line is body — but a chunked body is
+    // wrapped in size lines that are framing, not payload. Counting them as
+    // body bytes inflates the measurement by the framing overhead, so chunked
+    // bodies are decoded and only payload bytes are counted. A malformed
+    // chunk stream is refused rather than counted: the reader already
+    // enforces chunk structure on the socket path, so reaching here with one
+    // means hand-fed garbage, and guessing a byte count for it would be the
+    // fabrication this function exists to prevent.
+    // `body_start` is a found position plus 4 or `buf.len()`, so the range
+    // always exists.
+    #[expect(
+        clippy::expect_used,
+        reason = "body_start is a found position or buf.len()"
+    )]
+    let body: &[u8] = buf
+        .get(body_start..)
+        .expect("body_start is a found position or buf.len()");
+    let body_bytes = if is_chunked(head) {
+        decode_chunked_len(body)?
+    } else {
+        body.len()
+    };
     Ok(ResponseHead {
         status: code,
-        body_bytes: head.len() - body_start,
+        body_bytes,
     })
+}
+
+/// Whether the head declares chunked transfer coding.
+///
+/// Parsed line-by-line like [`framing_of`]: a header value that merely mentions
+/// the word is not a transfer coding.
+fn is_chunked(head: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(head);
+    text.lines().skip(1).any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower
+            .strip_prefix("transfer-encoding:")
+            .is_some_and(|rest| rest.split(',').any(|token| token.trim() == "chunked"))
+    })
+}
+
+/// Count the payload bytes of a chunked body, without the framing.
+///
+/// Returns an error on a malformed chunk stream rather than a number: a count
+/// produced from garbage is a fabrication, and this function refuses to
+/// fabricate.
+fn decode_chunked_len(body: &[u8]) -> io::Result<usize> {
+    // `pos` starts at 0 and only advances to offsets the length checks below
+    // have proven in-range, so it never exceeds `body.len()`. The `expect`s
+    // restate that invariant where the borrows happen.
+    let mut pos = 0_usize;
+    let mut total = 0_usize;
+    loop {
+        #[expect(clippy::expect_used, reason = "pos only advances within the buffer")]
+        let rest: &[u8] = body.get(pos..).expect("pos stays within the buffer");
+        let Some(rel) = rest.windows(2).position(|w| w == b"\r\n") else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "chunked body ends mid-size-line",
+            ));
+        };
+        #[expect(clippy::expect_used, reason = "rel is a found position inside rest")]
+        let line_bytes: &[u8] = rest
+            .get(..rel)
+            .expect("rel is a found position inside rest");
+        let line = std::str::from_utf8(line_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 chunk size"))?;
+        let size_str = line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_str, 16).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("malformed chunk size: {line:?}"),
+            )
+        })?;
+        pos += rel + 2;
+        if size == 0 {
+            return Ok(total);
+        }
+        total = total.saturating_add(size);
+        // Skip the data and its trailing CRLF. A short buffer is truncation,
+        // not a shorter body.
+        let next = pos.saturating_add(size).saturating_add(2);
+        if body.len() < next || body.get(next - 2..next) != Some(b"\r\n".as_slice()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "chunked body is truncated",
+            ));
+        }
+        pos = next;
+    }
 }
 
 /// Send one request over a fresh connection and measure it.
 ///
 /// # Errors
 ///
-/// Returns the I/O error if the connection, write, or read fails, or if the
-/// response cannot be classified.
+/// Returns the I/O error if the plan is degenerate (see [`Plan::validate`]),
+/// or if the connection, write, or read fails, or if the response cannot be
+/// classified.
 pub async fn one_request(plan: &Plan) -> io::Result<Sample> {
-    let started = Instant::now();
+    plan.validate().map_err(|reason| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid plan: {reason}"),
+        )
+    })?;
 
     // `connect_timeout`, not `timeout`: see the field's docs for the measured
     // reason. A failing connect must be cheap, or a wrong target costs the run's
@@ -523,6 +886,13 @@ pub async fn one_request(plan: &Plan) -> io::Result<Sample> {
     let mut stream = tokio::time::timeout(plan.connect_timeout, TcpStream::connect(plan.target))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connect timed out"))??;
+
+    // Timed from the first byte written, not from before the connect: the
+    // sample is the server's response latency, and the TCP handshake belongs
+    // to connection setup rather than to any request. Starting the clock
+    // earlier folds the handshake into every p99, which is what made the
+    // routed-overhead row read high against its 60 µs budget.
+    let started = Instant::now();
 
     let request = encode_request(plan);
     tokio::time::timeout(plan.timeout, stream.write_all(&request))
@@ -546,7 +916,7 @@ pub async fn one_request(plan: &Plan) -> io::Result<Sample> {
     // control. `Connection: close` stays in the request -- it is polite, and a
     // harness should not hold connections it will not reuse -- but the client no
     // longer *relies* on the server honouring it.
-    let buf = read_response(&mut stream, plan.timeout).await?;
+    let buf = read_response(&mut stream, plan.timeout, &plan.method).await?;
 
     let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
 
@@ -582,6 +952,17 @@ pub async fn one_request(plan: &Plan) -> io::Result<Sample> {
 /// because a benchmark that stops at the first refused connection reports nothing
 /// about the other nine hundred and ninety-nine.
 pub async fn drive(plan: &Plan) -> io::Result<RunResult> {
+    // Checked here as well as in `one_request`: a zero-iteration plan never
+    // calls `one_request`, so per-request validation alone would let
+    // `Requests(0)` report a vacuous success — zero attempts, zero failures,
+    // and a throughput of nothing measured as nothing wrong.
+    plan.validate().map_err(|reason| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid plan: {reason}"),
+        )
+    })?;
+
     // Warmup: sent and discarded, per `§9.1`'s requirement that the procedure be
     // stated. Never counted, and never silently skipped either -- the count comes
     // from the workload's own `Warmup`, so a row that declares no warmup gets none.
@@ -623,10 +1004,20 @@ pub async fn drive(plan: &Plan) -> io::Result<RunResult> {
 
     match plan.limit {
         Limit::Requests(total) => {
-            let per_worker = total / u64::from(connections);
-            let remainder = total % u64::from(connections);
-            let mut handles = Vec::with_capacity(connections as usize);
-            for worker in 0..connections {
+            // No idle workers: with fewer requests than connections, spawning
+            // the full count leaves most workers with zero work while still
+            // paying every spawn. The totals below are unchanged — the same
+            // requests are just divided among fewer workers.
+            //
+            // `try_from` rather than `as u32`: the value is at most
+            // `connections` (hence exactly representable), but a cast would
+            // assert that instead of proving it.
+            let workers =
+                u32::try_from(u64::from(connections).min(total.max(1))).unwrap_or(connections);
+            let per_worker = total / u64::from(workers);
+            let remainder = total % u64::from(workers);
+            let mut handles = Vec::with_capacity(workers as usize);
+            for worker in 0..workers {
                 // The first `remainder` workers take one extra request, so the
                 // totals add up exactly. `u64::from(worker) < remainder` rather
                 // than a cast of the comparison: `worker` is a `u32` and
@@ -653,14 +1044,10 @@ pub async fn drive(plan: &Plan) -> io::Result<RunResult> {
                     (local, lost, count)
                 }));
             }
-            for handle in handles {
-                let (local, lost, count) = handle
-                    .await
-                    .map_err(|e| io::Error::other(format!("worker panicked: {e}")))?;
-                samples.extend(local);
-                failed += lost;
-                attempted += count;
-            }
+            let (local, lost, count) = join_workers(handles).await?;
+            samples.extend(local);
+            failed += lost;
+            attempted += count;
         }
         Limit::Duration(duration) => {
             let mut handles = Vec::with_capacity(connections as usize);
@@ -681,14 +1068,10 @@ pub async fn drive(plan: &Plan) -> io::Result<RunResult> {
                     (local, lost, count)
                 }));
             }
-            for handle in handles {
-                let (local, lost, count) = handle
-                    .await
-                    .map_err(|e| io::Error::other(format!("worker panicked: {e}")))?;
-                samples.extend(local);
-                failed += lost;
-                attempted += count;
-            }
+            let (local, lost, count) = join_workers(handles).await?;
+            samples.extend(local);
+            failed += lost;
+            attempted += count;
         }
     }
 
@@ -705,6 +1088,33 @@ pub async fn drive(plan: &Plan) -> io::Result<RunResult> {
         attempted,
         failed,
     })
+}
+
+/// Join worker tasks, merging their samples and counts.
+///
+/// # Why this is shared rather than inlined twice
+///
+/// The `Requests` and `Duration` arms previously ended in identical join loops.
+/// Two copies of "a panicked worker is a run failure, a finished one contributes
+/// its samples" is how the copies disagree one day about what a panic means.
+/// One function states it once, and a worker that panics fails the run rather
+/// than vanishing: a missing worker's samples would otherwise read as a fast
+/// run with fewer requests.
+async fn join_workers(
+    handles: Vec<tokio::task::JoinHandle<(Vec<Sample>, u64, u64)>>,
+) -> io::Result<(Vec<Sample>, u64, u64)> {
+    let mut samples = Vec::new();
+    let mut failed = 0_u64;
+    let mut attempted = 0_u64;
+    for handle in handles {
+        let (local, lost, count) = handle
+            .await
+            .map_err(|e| io::Error::other(format!("worker panicked: {e}")))?;
+        samples.extend(local);
+        failed += lost;
+        attempted += count;
+    }
+    Ok((samples, failed, attempted))
 }
 
 /// How many consecutive failures mean the target is not serving.
@@ -832,6 +1242,116 @@ mod tests {
     }
 
     #[test]
+    fn a_binary_body_does_not_break_the_head_parse() {
+        // `parse_response` receives the whole buffer. Decoding the full buffer
+        // as UTF-8 fails on any binary body and would count the sample as a
+        // connection failure; only the head is decoded, so arbitrary body
+        // bytes are counted, not classified.
+        let mut raw = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n".to_vec();
+        raw.extend_from_slice(&[0x00, 0xff, 0x89, 0x50]);
+        let parsed = parse_response(&raw).expect("a binary body must parse");
+        assert_eq!(parsed.status, 200);
+        assert_eq!(parsed.body_bytes, 4);
+    }
+
+    #[test]
+    fn a_degenerate_plan_is_refused_before_any_socket() {
+        // Every field the driver depends on is checked up front: a zero
+        // timeout, a zero limit, a relative path, an empty method or host,
+        // and a GET carrying a body (which the workload table forbids).
+        let mut p = plan();
+        p.timeout = Duration::ZERO;
+        assert!(p.validate().is_err());
+
+        let mut p = plan();
+        p.limit = Limit::Requests(0);
+        assert!(p.validate().is_err());
+
+        let mut p = plan();
+        p.limit = Limit::Duration(Duration::ZERO);
+        assert!(p.validate().is_err());
+
+        let mut p = plan();
+        p.path = "healthz".to_owned();
+        assert!(p.validate().is_err());
+
+        let mut p = plan();
+        p.method = "   ".to_owned();
+        assert!(p.validate().is_err());
+
+        let mut p = plan();
+        p.host = String::new();
+        assert!(p.validate().is_err());
+
+        let mut p = plan();
+        p.body = Some(b"x".to_vec());
+        assert!(p.validate().is_err(), "a GET must not carry a body");
+
+        let mut p = plan();
+        p.method = "POST".to_owned();
+        p.body = Some(b"x".to_vec());
+        assert!(p.validate().is_ok());
+        assert!(plan().validate().is_ok(), "the default plan is valid");
+    }
+
+    #[test]
+    fn framing_refuses_an_unparsable_content_length() {
+        // A present-but-garbage length is not "no body": guessing None would
+        // silently drop a body the server did send.
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: many\r\n\r\n";
+        assert!(framing_of(head, "GET").is_err());
+    }
+
+    #[test]
+    fn framing_parses_transfer_encoding_line_by_line() {
+        // A header value merely mentioning "chunked" is not chunked framing;
+        // only a `Transfer-Encoding` line whose comma-separated tokens include
+        // exactly `chunked` selects it.
+        let head = b"HTTP/1.1 200 OK\r\nX-Note: not-chunked\r\nContent-Length: 2\r\n\r\n";
+        assert_eq!(
+            framing_of(head, "GET").expect("well-formed"),
+            Framing::Length(2)
+        );
+
+        let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+        assert_eq!(
+            framing_of(head, "GET").expect("well-formed"),
+            Framing::Chunked
+        );
+
+        let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n";
+        assert!(framing_of(head, "GET").is_err());
+    }
+
+    #[test]
+    fn framing_for_head_has_no_body_whatever_the_headers_claim() {
+        // A HEAD response never carries a body. Without this, a HEAD with
+        // `200` and `Content-Length: 5` would make the reader wait for five
+        // bytes that must never arrive.
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n";
+        assert_eq!(framing_of(head, "HEAD").expect("HEAD"), Framing::None);
+        assert_eq!(
+            framing_of(head, "head").expect("case-insensitive"),
+            Framing::None
+        );
+        assert_eq!(framing_of(head, "GET").expect("GET"), Framing::Length(5));
+    }
+
+    #[test]
+    fn an_oversized_content_length_is_refused_before_reading() {
+        // A `Content-Length: 2^64` names a body no response will ever carry.
+        // Reading toward it without a cap allocates everything a hostile or
+        // broken peer sends in the meantime.
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", u64::MAX);
+        assert!(
+            framing_of(head.as_bytes(), "GET").is_ok(),
+            "framing names it"
+        );
+        // The cap is enforced where the buffer would grow, in `read_response`.
+        assert!(u64::MAX > MAX_BODY_BYTES as u64);
+    }
+
+    #[test]
     fn a_404_is_a_response_not_a_failure() {
         // The distinction matters for the report: a server that answers 404 is
         // answering, so its throughput is real even though the route is wrong.
@@ -910,6 +1430,20 @@ mod tests {
         let result = empty_result(Duration::from_secs(1), 10, 10);
         assert_eq!(result.completed(), 0);
         assert_eq!(result.requests_per_second(), Some(0.0));
+    }
+
+    #[test]
+    fn the_failure_rate_divides_failures_by_attempts() {
+        let result = empty_result(Duration::from_secs(1), 4, 1);
+        assert_eq!(result.failure_rate(), Some(0.25));
+
+        let clean = empty_result(Duration::from_secs(1), 4, 0);
+        assert_eq!(clean.failure_rate(), Some(0.0));
+
+        // `None`, not `Some(0.0)`: a run that never attempted anything has no
+        // rate, and 0.0 would read as a perfect run that never happened.
+        let never = empty_result(Duration::from_secs(1), 0, 0);
+        assert_eq!(never.failure_rate(), None);
     }
 
     #[test]

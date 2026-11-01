@@ -913,6 +913,10 @@ pub mod limit_bounds {
     ///
     /// A zero poll budget would never poll (hang), and an unbounded one would
     /// starve the scheduler; the range check keeps both mistakes at parse time.
+    ///
+    /// ```
+    /// assert!(qqq_cap::manifest::limit_bounds::POLL_MAX >= 1);
+    /// ```
     pub const POLL_MAX: u32 = 10_000;
 }
 

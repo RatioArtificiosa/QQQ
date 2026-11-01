@@ -204,7 +204,28 @@ impl Workload {
             concurrency: Concurrency::Sequential,
             warmup: Warmup::Discard { iterations: 50 },
             method: "POST",
-            body: Some("seed=1KB-of-input-for-the-hash-workload-0123456789"),
+            // §9.1 hashes 1 KB: the seed below is exactly 1024 bytes, pinned
+            // by `crypto_body_is_one_kibibyte`. A shorter seed would hash less
+            // input while reporting the 1 KB row — the right name on the wrong
+            // workload.
+            body: Some(concat!(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )),
         },
         Self {
             name: BenchmarkName::Template,
@@ -303,12 +324,19 @@ impl Workload {
         self.name.as_str().into_owned()
     }
 
-    /// A one-line rendering of the request this workload sends.
+    /// A one-line rendering of the request this workload sends, against `path`.
+    ///
+    /// # Why the path is a parameter rather than stored
+    ///
+    /// The path is the application's fact: the reference app declares which
+    /// route implements each benchmark, and the harness must not keep a second
+    /// copy (the drift `§O-161`/`§O-162` recorded). Rendering the row's name
+    /// where the path goes would describe a request that is never sent.
     #[must_use]
-    pub fn describe_request(&self) -> String {
+    pub fn describe_request(&self, path: &str) -> String {
         match self.body {
-            Some(body) => format!("{} {} ({} byte body)", self.method, self.name, body.len()),
-            None => format!("{} {}", self.method, self.name),
+            Some(body) => format!("{} {path} ({} byte body)", self.method, body.len()),
+            None => format!("{} {path}", self.method),
         }
     }
 }
@@ -342,45 +370,17 @@ mod tests {
     }
 
     #[test]
-    fn the_static_matches_the_const_element_for_element() {
-        // Two names for one array. `ALL` is what `SPECIFICATION_COUNT` is checked
-        // against and what a caller takes by move; `TABLE` is what `find` borrows
-        // for `'static`. They are the same data today, and this is the assertion
-        // that keeps them the same data tomorrow -- the alternative to a test here
-        // is discovering the drift as a benchmark that measures a row the harness
-        // and the report disagree about.
-        assert_eq!(TABLE.len(), Workload::ALL.len());
-        for (from_static, from_const) in TABLE.iter().zip(Workload::ALL.iter()) {
-            assert_eq!(
-                from_static.name, from_const.name,
-                "TABLE and ALL disagree about a row's name"
-            );
-            assert_eq!(
-                from_static.shape, from_const.shape,
-                "{}: TABLE and ALL disagree about the shape",
-                from_static.name
-            );
-            assert_eq!(
-                from_static.concurrency, from_const.concurrency,
-                "{}: TABLE and ALL disagree about concurrency",
-                from_static.name
-            );
-            assert_eq!(
-                from_static.warmup, from_const.warmup,
-                "{}: TABLE and ALL disagree about warmup",
-                from_static.name
-            );
-            assert_eq!(
-                from_static.method, from_const.method,
-                "{}: TABLE and ALL disagree about the method",
-                from_static.name
-            );
-            assert_eq!(
-                from_static.body, from_const.body,
-                "{}: TABLE and ALL disagree about the body",
-                from_static.name
-            );
-        }
+    fn the_static_is_promoted_from_the_const() {
+        // `TABLE` is assigned from `Workload::ALL` at its declaration, not
+        // written out a second time, so an element-wise comparison would pass
+        // by construction and prove nothing (`§O-149`: a list verified against
+        // itself verifies nothing). What is pinned instead is the property the
+        // promotion exists for: `find` borrows for `'static`, which only a
+        // `static` can provide.
+        let found = Workload::find(&BenchmarkName::Hello).expect("hello exists");
+        let borrowed: &'static Workload = found;
+        assert_eq!(borrowed.name, BenchmarkName::Hello);
+        assert_eq!(TABLE.len(), SPECIFICATION_COUNT);
     }
 
     #[test]
@@ -553,11 +553,47 @@ mod tests {
     #[test]
     fn describe_request_names_the_method_and_mentions_a_body_only_when_there_is_one() {
         let hello = Workload::find(&BenchmarkName::Hello).expect("hello exists");
-        assert_eq!(hello.describe_request(), "GET hello");
+        assert_eq!(hello.describe_request("/healthz"), "GET /healthz");
 
         let crypto = Workload::find(&BenchmarkName::Crypto).expect("crypto exists");
-        let described = crypto.describe_request();
-        assert!(described.starts_with("POST "), "got {described}");
+        let described = crypto.describe_request("/crypto/10000");
+        assert!(
+            described.starts_with("POST /crypto/10000"),
+            "got {described}"
+        );
         assert!(described.contains("byte body"), "got {described}");
+    }
+
+    #[test]
+    fn crypto_body_is_one_kibibyte() {
+        // §9.1 hashes 1 KB. A shorter seed would hash less input while
+        // reporting the 1 KB row — the right name on the wrong workload.
+        let crypto = Workload::find(&BenchmarkName::Crypto).expect("crypto exists");
+        let body = crypto.body.expect("the crypto row must carry a payload");
+        assert_eq!(
+            body.len(),
+            1024,
+            "the crypto seed must be exactly 1 KiB, got {} bytes",
+            body.len()
+        );
+    }
+
+    #[test]
+    fn every_shape_drives_at_least_one_request() {
+        // A `Fixed { requests: 0 }` row would sample nothing and report p99 of
+        // an empty distribution; a `Sustained { seconds: 0 }` row would end
+        // before it began. The table is const, so this pins the values rather
+        // than validating at runtime.
+        for workload in Workload::ALL {
+            match workload.shape {
+                Shape::Fixed { requests } => {
+                    assert!(requests > 0, "{} has a zero-request shape", workload.name);
+                }
+                Shape::Sustained { seconds } => {
+                    assert!(seconds > 0, "{} has a zero-second shape", workload.name);
+                }
+                Shape::SingleShot => {}
+            }
+        }
     }
 }

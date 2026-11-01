@@ -25,7 +25,7 @@
 //! does not compile.
 //!
 //! ```
-//! use qqq_bench::methodology::{Concurrency, Methodology, NonClaims, Warmup};
+//! use qqq_bench::methodology::{Concurrency, Methodology, NonClaims, Pinning, Warmup};
 //! use qqq_bench::Environment;
 //! use std::collections::BTreeMap;
 //!
@@ -47,6 +47,7 @@
 //!     2,
 //!     NonClaims::qualified(["nothing yet"])?,
 //!     "https://github.com/RatioArtificiosa/QQQ",
+//!     Pinning::Unpinned,
 //! );
 //! assert!(too_few.is_err());
 //!
@@ -58,6 +59,7 @@
 //!     Methodology::REQUIRED_REPETITIONS,
 //!     NonClaims::qualified(["this example measures nothing"])?,
 //!     "https://github.com/RatioArtificiosa/QQQ",
+//!     Pinning::Unpinned,
 //! )?;
 //! assert_eq!(methodology.repetitions, 3);
 //! # Ok(())
@@ -137,9 +139,9 @@ mod tests {
     #[test]
     fn the_reexported_budget_table_is_the_same_table() {
         // A re-export that had drifted into a copy would give two sources of
-        // truth for one fact.
-        assert_eq!(BUDGETS.len(), Budget::ALL.len());
-        assert_eq!(BUDGETS[0].item.id(), Budget::ALL[0].item.id());
+        // truth for one fact. Compared in full, not just the first row: a
+        // drift at any other row would pass a first-row-only check.
+        assert_eq!(BUDGETS, Budget::ALL);
     }
 
     #[test]
@@ -169,6 +171,7 @@ mod tests {
             ])
             .expect("non-blank"),
             HARNESS_SOURCE,
+            Pinning::Unpinned,
         )
         .expect("a complete methodology");
 
@@ -188,16 +191,19 @@ mod tests {
 
         let repetitions = Repetitions::new(summaries).expect("three repetitions");
 
-        // The verdict against §9.2's warm-acquire row.
+        // The verdict against §9.2's warm-acquire row, judged on the
+        // conservative repetition: for a ceiling the slowest run is the
+        // claim, not the fastest.
         let budget = Budget::for_item(Item::Perf003).expect("PERF-003 has a row");
+        let conservative = repetitions.conservative(Direction::AtMost);
+        assert_eq!(conservative, repetitions.worst());
         let verdict = budget
-            .meets_nanos(repetitions.worst())
+            .meets_nanos(conservative)
             .expect("PERF-003 is a time budget");
 
         assert!(
             verdict.met,
-            "a worst-case p99 of {} ns should meet ≤100 µs",
-            repetitions.worst()
+            "a worst-case p99 of {conservative} ns should meet ≤100 µs",
         );
         assert!(
             repetitions.spread_percent().expect("non-zero best") < 5.0,

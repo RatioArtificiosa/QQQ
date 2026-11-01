@@ -80,8 +80,12 @@ impl Direction {
 pub enum Unit {
     /// Microseconds. `§9.2`'s latency rows.
     Micros,
-    /// Milliseconds. `§9.2`'s cold-instantiate and build-time rows.
+    /// Milliseconds. `§9.2`'s cold-instantiate rows.
     Millis,
+    /// Seconds. `§9.2`'s build-time row (`qqqai build`, 10k LOC Rust, ≤ 20 s):
+    /// twenty *milliseconds* for a clean build is impossible, and the previous
+    /// spelling of this row said exactly that while comparing as milliseconds.
+    Seconds,
     /// Megabytes. `§9.2`'s RSS rows.
     Megabytes,
     /// Kilobytes. `§9.2`'s per-instance memory row.
@@ -99,10 +103,11 @@ impl Unit {
         match self {
             Self::Micros => "µs",
             Self::Millis => "ms",
+            Self::Seconds => "s",
             Self::Megabytes => "MB",
             Self::Kilobytes => "KB",
             Self::RequestsPerSecond => "RPS",
-            Self::Count => "",
+            Self::Count => "count",
         }
     }
 }
@@ -320,7 +325,7 @@ impl Budget {
             item: Item::Perf013,
             target: 20.0,
             direction: Direction::AtMost,
-            unit: Unit::Millis,
+            unit: Unit::Seconds,
             method: "NOT_IMPLEMENTED::reference_app_clean_build",
         },
     ];
@@ -383,10 +388,9 @@ impl Budget {
     #[must_use]
     pub fn describe_target(&self) -> String {
         format!(
-            "{} {}{}{}",
+            "{} {} {}",
             self.direction.symbol(),
             Self::render_number(self.target),
-            if self.unit == Unit::Count { "" } else { " " },
             self.unit.symbol()
         )
     }
@@ -409,6 +413,12 @@ impl Budget {
     /// nothing.
     #[must_use]
     pub fn render_number(target: f64) -> String {
+        // Non-finite values render as-is: there is no compact form for NaN or
+        // infinity, and reaching for one (e.g. formatting NaN with decimals)
+        // would produce output that looks precise while meaning nothing.
+        if !target.is_finite() {
+            return format!("{target}");
+        }
         // Only an exactly-integral value may be rendered as an integer. `%` on
         // floats is exact for this purpose: it is 0.0 only when the value has no
         // fractional part.
@@ -460,26 +470,13 @@ impl Budget {
     /// Returns a [`BudgetError`] if this budget is not a time budget. The
     /// conversion is otherwise a trap: nanoseconds to a `RequestsPerSecond` row
     /// would divide by a second and produce a number that looks like a rate.
-    ///
-    /// # Why the conversion goes through a divisor rather than a cast
-    ///
-    /// `nanos as f64` is lossy above 2^53 ns — about 104 days — and clippy's
-    /// `cast_precision_loss` is correct to flag it. The precision is irrelevant
-    /// for a benchmark (a 104-day request is not a measurement) but *silently*
-    /// accepting a lossy conversion is the habit that produces a wrong number
-    /// somewhere it matters. Dividing in integer space first keeps the magnitude
-    /// small and the conversion exact for every realistic value, and the
-    /// `nanos`-level remainder is not needed because the comparison target is
-    /// never finer than a microsecond.
     pub fn meets_nanos(&self, nanos: u64) -> Result<Verdict, BudgetError> {
-        // Keep the dividend inside the exact-integer range of `f64` by splitting
-        // into whole units plus a fractional remainder computed in integers.
-        //
-        // `whole` is at most `u64::MAX / 1_000`, about 1.8e16, still above 2^53 --
-        // so the same argument applies recursively. It is applied once, which
-        // covers every duration below ~292 000 years; beyond that the value is a
-        // clock error rather than a measurement, and the comparison is unaffected
-        // because such a value misses every time budget by an enormous margin.
+        // [`as_f64_exact`] keeps the dividend inside `f64`'s exact-integer
+        // range (clamping absurd values, which miss every time budget by an
+        // enormous margin either way), and each arm divides once into the
+        // budget's unit. No whole-plus-remainder split: the comment that used
+        // to describe one did not match this code, and the single division is
+        // exact for every realistic duration.
         let measured = match self.unit {
             Unit::Micros => Measurement {
                 value: as_f64_exact(nanos) / 1_000.0,
@@ -488,6 +485,10 @@ impl Budget {
             Unit::Millis => Measurement {
                 value: as_f64_exact(nanos) / 1_000_000.0,
                 unit: Unit::Millis,
+            },
+            Unit::Seconds => Measurement {
+                value: as_f64_exact(nanos) / 1_000_000_000.0,
+                unit: Unit::Seconds,
             },
             other => {
                 return Err(BudgetError::NotATimeBudget {
@@ -519,6 +520,16 @@ pub struct Measurement {
 /// conversion rounds, and the rounding is at most one part in 9e15, which cannot
 /// change the outcome of a comparison against a budget stated in microseconds or
 /// milliseconds.
+///
+/// # Why the clamp is safe in both directions
+///
+/// Clamping maps every absurd value to 2^53, which exceeds every `§9.2` target by
+/// orders of magnitude. A ceiling compares "measured ≤ target" and a clamped
+/// value misses; a floor compares "measured ≥ target" and a clamped value meets.
+/// Both are the correct verdict for a 104-day request, because such a value is a
+/// clock error rather than a measurement — and no future `AtLeast` time budget
+/// can flip this: the clamp preserves "enormously larger than any budget", which
+/// is exactly what both directions need.
 ///
 /// Naming it means the reasoning is stated **once**, at the point where the
 /// conversion happens, instead of being repeated as a suppression at each call
@@ -649,16 +660,58 @@ impl fmt::Display for BudgetError {
 
 impl std::error::Error for BudgetError {}
 
+impl Verdict {
+    /// Render the verdict with its unit, taken from the budget that produced it.
+    ///
+    /// # Why this takes the budget rather than formatting bare
+    ///
+    /// A verdict without a unit is how "MISSES ≤ 100" gets read as a failure
+    /// against *some* hundred of *something*. The unit lives on the [`Budget`],
+    /// not on the verdict (two sources of truth for one fact is `§O-118`'s
+    /// shape), so rendering requires both — which is also what stops a caller
+    /// reporting a verdict against the wrong row without noticing.
+    ///
+    /// ```
+    /// use qqq_bench::budget::{Budget, Item, Measurement, Unit};
+    ///
+    /// let budget = Budget::for_item(Item::Perf003).expect("PERF-003 has a row");
+    /// let verdict = budget
+    ///     .meets(&Measurement::new(200.0, Unit::Micros))
+    ///     .expect("matching units");
+    /// assert!(verdict.render(&budget).contains("MISSES"));
+    /// assert!(verdict.render(&budget).contains("µs"));
+    /// ```
+    #[must_use]
+    pub fn render(&self, budget: &Budget) -> String {
+        debug_assert_eq!(
+            self.item, budget.item,
+            "a verdict rendered against a different row's budget"
+        );
+        let outcome = if self.met { "MEETS" } else { "MISSES" };
+        format!(
+            "{outcome} {} ({}): measured {:.3} {}, target {}{:.3} {}",
+            self.item.id(),
+            self.item.metric(),
+            self.measured,
+            budget.unit.symbol(),
+            self.direction.symbol(),
+            self.target,
+            budget.unit.symbol(),
+        )
+    }
+}
+
 impl fmt::Display for Verdict {
-    /// Renders the comparison with its unit.
+    /// Renders the comparison without its unit; prefer [`Verdict::render`].
     ///
     /// # Why `Verdict` carries no unit of its own
     ///
     /// A `Verdict` is the *comparison*; the `Budget` is the row. The unit lives on
     /// the budget, and duplicating it here would be two sources of truth for one
     /// fact — the shape this project records as "two correct halves with nothing
-    /// between them" (`§O-118`). So the rendering takes the unit from the budget
-    /// that produced the verdict, which `Verdict::render` requires.
+    /// between them" (`§O-118`). `Display` keeps the terse form for logs where
+    /// the row is already named; reports must use [`Verdict::render`], which
+    /// names the unit.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let outcome = if self.met { "MEETS" } else { "MISSES" };
         write!(
@@ -1126,5 +1179,150 @@ mod tests {
         let rendered = throughput.describe_target();
         assert!(rendered.contains("60k"), "got {rendered}");
         assert!(rendered.contains("≥"), "got {rendered}");
+    }
+
+    #[test]
+    fn the_build_budget_is_in_seconds() {
+        // §9.2 budgets `qqqai build`, 10k LOC Rust, at ≤ 20 s. A target of 20
+        // *milliseconds* for a clean build is impossible, and the previous
+        // spelling said exactly that while comparing as milliseconds.
+        let build = Budget::for_item(Item::Perf013).expect("PERF-013 has a row");
+        assert_eq!(build.unit, Unit::Seconds);
+        assert_eq!(build.target.total_cmp(&20.0), std::cmp::Ordering::Equal);
+        assert!(
+            build.describe_target().contains('s'),
+            "got {}",
+            build.describe_target()
+        );
+
+        // A 19-second build meets it; a 25-second one does not.
+        let meets = build.meets_nanos(19_000_000_000).expect("a time budget");
+        assert!(meets.met);
+        assert!((meets.measured - 19.0).abs() < f64::EPSILON);
+        let misses = build.meets_nanos(25_000_000_000).expect("a time budget");
+        assert!(!misses.met);
+    }
+
+    #[test]
+    fn every_budget_target_is_a_positive_finite_number() {
+        // A NaN, infinite, zero, or negative target makes every verdict from
+        // the row meaningless (NaN never meets; a negative floor always
+        // meets). The table is const, so this pins the values rather than
+        // validating at runtime.
+        for budget in Budget::ALL {
+            assert!(
+                budget.target.is_finite() && budget.target > 0.0,
+                "{} has target {}",
+                budget.item.id(),
+                budget.target
+            );
+        }
+    }
+
+    #[test]
+    fn a_nan_measurement_misses_in_both_directions() {
+        // Fail-closed: a broken measurement must not read as "met", and NaN
+        // compared either way is false. Pinned so a future special-case for
+        // NaN has to confront this test.
+        let ceiling = Budget::for_item(Item::Perf003).expect("PERF-003 has a row");
+        let miss = ceiling
+            .meets(&Measurement::new(f64::NAN, Unit::Micros))
+            .expect("matching units");
+        assert!(!miss.met);
+
+        let floor = Budget::for_item(Item::Perf010).expect("PERF-010 has a row");
+        let miss = floor
+            .meets(&Measurement::new(f64::NAN, Unit::RequestsPerSecond))
+            .expect("matching units");
+        assert!(!miss.met);
+    }
+
+    #[test]
+    fn a_verdict_renders_with_its_budget_unit() {
+        // A verdict without a unit reads "MISSES ≤ 100" against *some* hundred
+        // of something. `render` takes the budget so the unit cannot be omitted
+        // or taken from the wrong row.
+        let budget = Budget::for_item(Item::Perf003).expect("PERF-003 has a row");
+        let verdict = budget
+            .meets(&Measurement::new(200.0, Unit::Micros))
+            .expect("matching units");
+        let rendered = verdict.render(&budget);
+        assert!(rendered.contains("MISSES"), "got {rendered}");
+        assert!(rendered.contains("µs"), "got {rendered}");
+        assert!(rendered.contains("PERF-003"), "got {rendered}");
+    }
+
+    #[test]
+    fn render_number_handles_non_finite_targets() {
+        // NaN and infinity have no compact form; rendering them as a number
+        // would imply a precision the value does not carry.
+        assert_eq!(Budget::render_number(f64::NAN), "NaN");
+        assert_eq!(Budget::render_number(f64::INFINITY), "inf");
+        assert_eq!(Budget::render_number(60_000.0), "60k");
+        assert_eq!(Budget::render_number(20.0), "20");
+        assert_eq!(Budget::render_number(2.5), "2.5");
+    }
+
+    #[test]
+    fn every_section_9_2_row_has_a_decision_in_this_crate() {
+        // The in-crate counterpart of `tools/check_bench_contract.py`: every
+        // §9.2 metric row is either implemented in `Budget::ALL` or covered by
+        // a `NOT_A_HARNESS_ROW` exclusion. This reads the Proposal text so a
+        // renamed or removed §9.2 row fails here, in `cargo test`, without CI.
+        //
+        // The matching rule mirrors the checker's: an exact metric hit, or an
+        // exclusion name that contains or is contained in the row (the same
+        // rule that lets "Cold instantiate (from .wasm)" cover its row while
+        // "AOT cache performance" rides on PERF-004's identical measurement).
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("crates/<name>/ has two parents");
+        let proposal =
+            std::fs::read_to_string(root.join("QQQ-Proposal-V1.md")).expect("proposal exists");
+        let section = proposal
+            .split("## §9.2")
+            .nth(1)
+            .expect("§9.2 exists")
+            .split("\n## ")
+            .next()
+            .expect("§9.2 ends");
+        let implemented: Vec<&str> = Budget::ALL.iter().map(|b| b.item.metric()).collect();
+        let excluded: Vec<&str> = Budget::NOT_A_HARNESS_ROW
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        let mut rows = 0;
+        for line in section.lines() {
+            let line = line.trim();
+            if !line.starts_with('|') || line.contains("---") {
+                continue;
+            }
+            let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            if cells.len() < 3 || cells[0] == "Metric" || cells[0].is_empty() {
+                continue;
+            }
+            if !(cells[1].contains('≤') || cells[1].contains('≥')) {
+                continue;
+            }
+            rows += 1;
+            // Normalise the way the checker does: strip code ticks and
+            // backslash escapes, which §9.2 uses freely.
+            let metric: String = cells[0].replace(['`', '\\'], "");
+            let metric = metric.as_str();
+            let decided = implemented.contains(&metric)
+                || excluded
+                    .iter()
+                    .any(|e| metric.contains(e) || e.contains(metric));
+            assert!(
+                decided,
+                "§9.2 row {metric:?} has no decision: neither implemented in \
+                 Budget::ALL nor covered by NOT_A_HARNESS_ROW"
+            );
+        }
+        assert!(
+            rows >= 10,
+            "only {rows} §9.2 rows parsed; the scan is broken"
+        );
     }
 }

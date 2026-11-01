@@ -417,6 +417,9 @@ pub fn methodology_for(workload: &Workload, opts: &BenchOptions) -> Result<Metho
         Methodology::REQUIRED_REPETITIONS,
         non_claims,
         HARNESS_SOURCE,
+        // The harness does not confine the run (no taskset/cgroup scoping),
+        // so `Unpinned` is the true statement, not a default.
+        qqq_bench::methodology::Pinning::Unpinned,
     )
     .map_err(|e| usage(e.to_string()))
 }
@@ -629,6 +632,12 @@ pub async fn run(opts: &BenchOptions, target: SocketAddr) -> Result<BenchOutput,
             .await
             .map_err(|e| usage(format!("could not drive `{name}`: {e}")))?;
 
+        // A run of empty responses is not the workload it names: the `json`
+        // row serializes a 1 KB object, and every reference-app route answers
+        // with a body. Reporting it anyway would file a measurement for a
+        // workload that never ran.
+        check_bodies(&name, &outcome)?;
+
         let p99 = outcome.distribution.p99();
         let rps = outcome.requests_per_second();
 
@@ -789,6 +798,35 @@ pub fn path_for(name: &BenchmarkName) -> String {
         // An extension has no default; a caller measuring one must name its path.
         BenchmarkName::Other(name) => format!("/{name}"),
     }
+}
+
+/// Refuse to report a run whose responses all lacked bodies.
+///
+/// # Why this is a named rule and not an inline check
+///
+/// `§O-124`: a decision with no name cannot be pinned by a test. The rule is
+/// "a completed response without a body is not evidence the workload ran" —
+/// the `Sample::body_bytes` contract one level down — and naming it here lets
+/// a unit test feed it fabricated results instead of standing up a server.
+///
+/// # Errors
+///
+/// Returns a usage error when at least one response completed but none carried
+/// a body. An all-failed run is not an error here: it already reports no
+/// verdict, and conflating "nothing answered" with "something answered
+/// emptily" would hide which of the two happened.
+fn check_bodies(
+    name: &BenchmarkName,
+    outcome: &qqq_bench::loadgen::RunResult,
+) -> Result<(), Error> {
+    if outcome.completed() > 0 && !outcome.samples.iter().any(|s| s.body_bytes > 0) {
+        return Err(usage(format!(
+            "`{name}` completed {} responses but none carried a body; a run of \
+             empty responses is not a `{name}` measurement",
+            outcome.completed()
+        )));
+    }
+    Ok(())
 }
 
 /// The whole run, as a `CommandOutput`.
@@ -1286,5 +1324,65 @@ mod tests {
         // false would pass all of them.
         let doc = document(&[result_with(true), result_with(false), result_with(true)]);
         assert!(should_fail(&doc, true));
+    }
+
+    #[test]
+    fn a_run_of_empty_responses_is_not_a_measurement() {
+        // `§9.1`'s rows all answer with bodies. A run that completed responses
+        // but saw zero bytes is not the workload it names, so it is refused
+        // rather than reported. An all-failed run is not refused here: nothing
+        // answered, which already reports no verdict.
+        use qqq_bench::loadgen::{RunResult, Sample};
+        use std::time::Duration;
+        let empty = RunResult {
+            distribution: {
+                let mut d = qqq_bench::stats::Distribution::new();
+                d.record_nanos(100);
+                d
+            },
+            samples: vec![Sample {
+                nanos: 100,
+                status: 200,
+                body_bytes: 0,
+            }],
+            elapsed: Duration::from_secs(1),
+            attempted: 1,
+            failed: 0,
+        };
+        let err = check_bodies(&BenchmarkName::Json, &empty)
+            .expect_err("empty responses must be refused");
+        assert!(
+            err.to_string().contains("none carried a body"),
+            "got: {err}"
+        );
+
+        let answered = RunResult {
+            distribution: {
+                let mut d = qqq_bench::stats::Distribution::new();
+                d.record_nanos(100);
+                d
+            },
+            samples: vec![Sample {
+                nanos: 100,
+                status: 200,
+                body_bytes: 1,
+            }],
+            elapsed: Duration::from_secs(1),
+            attempted: 1,
+            failed: 0,
+        };
+        assert!(check_bodies(&BenchmarkName::Json, &answered).is_ok());
+
+        let silent = RunResult {
+            distribution: qqq_bench::stats::Distribution::new(),
+            samples: vec![],
+            elapsed: Duration::from_secs(1),
+            attempted: 1,
+            failed: 1,
+        };
+        assert!(
+            check_bodies(&BenchmarkName::Json, &silent).is_ok(),
+            "an all-failed run already reports no verdict; it must not newly error"
+        );
     }
 }

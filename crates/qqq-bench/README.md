@@ -39,7 +39,7 @@ implementation:
 
 ```rust
 // §9.1: "three repetitions with variance"
-let too_few = Methodology::new(env, warmup, concurrency, 2, non_claims, HARNESS_SOURCE);
+let too_few = Methodology::new(env, warmup, concurrency, 2, non_claims, HARNESS_SOURCE, Pinning::Unpinned);
 assert!(too_few.is_err());   // TooFewRepetitions { given: 2, required: 3 }
 
 // §9.1: "percentiles, not averages" -- there is no mean to call

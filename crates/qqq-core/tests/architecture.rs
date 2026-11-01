@@ -78,14 +78,22 @@ fn package_name(crate_dir: &Path) -> String {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", crate_dir.display()));
     let mut in_package = false;
     for line in text.lines() {
-        let line = line.trim();
+        let line = strip_toml_comment(line).trim();
         if line.starts_with('[') {
             in_package = line == "[package]";
             continue;
         }
-        if in_package && let Some(rest) = line.strip_prefix("name") {
-            let rest = rest.trim_start().trim_start_matches('=').trim();
-            return rest.trim_matches('"').to_owned();
+        // `split_once('=')` plus a key comparison: `strip_prefix("name")` also
+        // matches `names =`, and a quoted `#` or trailing comment must not leak
+        // into the value.
+        if in_package
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "name"
+        {
+            return value
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .to_owned();
         }
     }
     panic!("{} has no [package] name", crate_dir.display());
@@ -168,29 +176,175 @@ fn rank(name: &str) -> usize {
 /// Every `qqq-*` dependency declared in a manifest's `[dependencies]` and
 /// `[dev-dependencies]` tables.
 ///
-/// **`[dev-dependencies]` counts.** A dev-dependency from `qqq-core` to
-/// `qqq-host` would not ship in a release build, but it makes `qqq-core`'s own
-/// test suite require the entire Wasmtime stack — which defeats the stated
-/// reason for the layering (§4.3: "third parties can depend on `qqq-host` or
-/// `qqq-cap` alone"), and makes `cargo test -p qqq-core` a multi-minute build.
+/// `[dev-dependencies]` counts, and so do target-gated tables and renames
+/// (see `manifest_section_is_deps` and `parse_qqq_dep_edge`): a dev-dependency
+/// from `qqq-core` to `qqq-host` would not ship in a release build, but it
+/// makes `qqq-core`'s own test suite require the entire Wasmtime stack — which
+/// defeats the stated reason for the layering (§4.3: "third parties can depend
+/// on `qqq-host` or `qqq-cap` alone"), and makes `cargo test -p qqq-core` a
+/// multi-minute build.
 fn declared_qqq_deps(crate_dir: &Path) -> Vec<String> {
     let text = std::fs::read_to_string(crate_dir.join("Cargo.toml")).expect("readable manifest");
+    parse_manifest_deps(&text)
+}
+
+/// Every `qqq-*` edge in a manifest's text.
+///
+/// Split out so the joining rules are unit-testable without fixtures: a
+/// `package =` value may span lines (`foo = {\n package = "qqq-host"\n}`), a
+/// dependency may live in a dotted table (`[dependencies.foo]`), and only
+/// brace-balanced logical lines are parsed as edges.
+fn parse_manifest_deps(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut in_deps = false;
+    let mut pending: Option<String> = None;
+    // The dep a dotted table declares (`[dependencies.foo]` declares `foo`;
+    // a `package =` line inside it renames to the real crate).
+    let mut table_dep: Option<String> = None;
+    let flush_table_dep = |out: &mut Vec<String>, table_dep: &mut Option<String>| {
+        if let Some(name) = table_dep.take()
+            && name.starts_with("qqq-")
+        {
+            out.push(name);
+        }
+    };
     for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_deps = trimmed == "[dependencies]" || trimmed == "[dev-dependencies]";
+        let code = strip_toml_comment(line).trim();
+        if code.starts_with('[') && pending.is_none() {
+            flush_table_dep(&mut out, &mut table_dep);
+            in_deps = manifest_section_is_deps(code);
+            table_dep = dotted_table_dep(code);
             continue;
         }
-        if in_deps && let Some((key, _)) = trimmed.split_once('=') {
-            let key = key.trim();
-            if key.starts_with("qqq-") {
-                out.push(key.to_owned());
+        if !in_deps {
+            continue;
+        }
+        let logical = match pending.take() {
+            Some(prev) => prev + " " + code,
+            None => code.to_owned(),
+        };
+        // A value split across lines is one edge, not none: hold the line
+        // until its braces balance, then parse the whole.
+        if logical.matches('{').count() > logical.matches('}').count() {
+            pending = Some(logical);
+            continue;
+        }
+        if let Some(edge) = parse_qqq_dep_edge(&logical) {
+            out.push(edge);
+        } else if table_dep.is_some() {
+            // No inline edge: a `package =` line renames the dotted table's
+            // dep, satisfying (and clearing) it either way.
+            if let Some((key, value)) = logical.split_once('=')
+                && key.trim() == "package"
+            {
+                let name = value
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_owned();
+                if name.starts_with("qqq-") {
+                    out.push(name);
+                }
+                table_dep = None;
             }
         }
     }
+    flush_table_dep(&mut out, &mut table_dep);
     out
+}
+
+/// The dependency a dotted table header declares, if any.
+///
+/// `[dependencies.foo]` declares `foo`; `[target.…]` tables and multi-segment
+/// headers declare nothing by themselves.
+fn dotted_table_dep(header: &str) -> Option<String> {
+    for prefix in [
+        "[dependencies.",
+        "[dev-dependencies.",
+        "[build-dependencies.",
+    ] {
+        if let Some(rest) = header.strip_prefix(prefix) {
+            let name = rest.strip_suffix(']').unwrap_or(rest);
+            if !name.is_empty() && !name.contains(['.', '"', '\'']) {
+                return Some(name.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Whether a manifest section header opens a dependency table.
+///
+/// Exact `[dependencies]` / `[dev-dependencies]` / `[build-dependencies]`,
+/// dotted tables (`[dependencies.foo]`), and target-gated tables
+/// (`[target.'cfg(unix)'.dependencies]`): the prefix still names a dependency
+/// table, and an edge under any of them is still a layering edge.
+fn manifest_section_is_deps(header: &str) -> bool {
+    const TABLES: &[&str] = &[
+        "[dependencies]",
+        "[dev-dependencies]",
+        "[build-dependencies]",
+    ];
+    const PREFIXES: &[&str] = &[
+        "[dependencies.",
+        "[dev-dependencies.",
+        "[build-dependencies.",
+        "[target.",
+    ];
+    if TABLES.contains(&header) {
+        return true;
+    }
+    PREFIXES.iter().any(|p| header.starts_with(p)) && header.contains("dependencies")
+}
+
+/// A `qqq-*` edge on one manifest line, or `None`.
+///
+/// The key names the edge directly (`qqq-host = { version … }`); a table value
+/// with `package = "qqq-host"` names it through a rename (`alias = {…}`).
+/// Comment-tolerant: callers pass stripped lines, but stripping again is
+/// harmless and keeps this unit-testable on raw manifest text.
+fn parse_qqq_dep_edge(line: &str) -> Option<String> {
+    let line = strip_toml_comment(line);
+    let (key, value) = line.split_once('=')?;
+    let key = key.trim();
+    if key.starts_with("qqq-") {
+        return Some(key.to_owned());
+    }
+    let table = value.trim().strip_prefix('{')?;
+    for part in table.split(',') {
+        let (k, v) = part.split_once('=')?;
+        if k.trim() == "package" {
+            // The table's closing `}` trails the last value; package names
+            // cannot contain it, so it is structural rather than data.
+            let raw = v.trim();
+            let raw = raw.strip_suffix('}').map_or(raw, str::trim);
+            let name = raw.trim_matches(|c| c == '"' || c == '\'');
+            if name.starts_with("qqq-") {
+                return Some(name.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Strip a trailing `#` comment, ignoring `#` inside quotes.
+///
+/// TOML values in the scanned positions (names, package refs) never
+/// legitimately contain `#`, but URLs in neighbouring values do — so the
+/// stripper must be quote-aware rather than a bare `split('#')`. (Twin of the
+/// helper in `tests/naming.rs`; both test targets need it and neither may grow
+/// a dependency for it.)
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double => return line[..i].trim_end(),
+            _ => {}
+        }
+    }
+    line
 }
 
 /// **ARCH-004.** Every dependency edge points *down* the §4.3 order.
@@ -311,41 +465,68 @@ const UNSAFE_ALLOWED: &[&str] = &[
     "qqq-sys-signals",
 ];
 
-/// A crate's crate-level `unsafe_code` lint attribute, if it declares one.
+/// A crate's crate-level `unsafe_code` lint attributes, if it declares them.
+///
+/// Scans every crate root (`src/lib.rs` and, where it exists, `src/main.rs`)
+/// plus the build script: a binary is a separate crate root, and a `forbid`
+/// in `lib.rs` does not cover it — `unsafe` in argument parsing would run
+/// before any capability exists to constrain it. The same holds for
+/// `build.rs`, which compiles into every downstream build.
 ///
 /// Returns `(forbidden, is_conditional)`:
 ///
-/// * `forbidden` — whether the crate forbids `unsafe`.
-/// * `is_conditional` — whether the attribute is wrapped in `cfg_attr`, which
+/// * `forbidden` — whether every crate root forbids `unsafe`.
+/// * `is_conditional` — whether any attribute is wrapped in `cfg_attr`, which
 ///   **weakens it** and is therefore reported separately. A
 ///   `#![cfg_attr(not(test), forbid(unsafe_code))]` allows `unsafe` under
 ///   `cfg(test)`, so a test helper can introduce it and the release build's
 ///   guarantee becomes a property of the test configuration rather than of the
 ///   source.
 fn unsafe_lint(crate_dir: &Path) -> (bool, bool) {
-    let text = std::fs::read_to_string(crate_dir.join("src/lib.rs"))
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", crate_dir.display()));
     let mut forbidden = false;
+    let mut saw_allow = false;
     let mut conditional = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if !line.starts_with("#![") {
+    let mut roots = 0_usize;
+    for target in ["src/lib.rs", "src/main.rs", "build.rs"] {
+        let path = crate_dir.join(target);
+        if !path.is_file() {
             continue;
         }
-        if line.contains("unsafe_code") && line.contains("forbid") {
-            forbidden = true;
-            if line.starts_with("#![cfg_attr(") {
-                conditional = true;
+        roots += 1;
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let mut root_forbidden = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if !line.starts_with("#![") {
+                continue;
+            }
+            if line.contains("unsafe_code") && line.contains("forbid") {
+                root_forbidden = true;
+                if line.starts_with("#![cfg_attr(") {
+                    conditional = true;
+                }
+            }
+            // An `allow` at crate level in a crate that is not an exception is a
+            // defect this function must not miss. Tracked separately from the
+            // `forbid` above because order must not matter: a `forbid` followed
+            // by an `allow` must not report "forbidden", and neither may an
+            // `allow` the `forbid` precedes.
+            if line.contains("unsafe_code") && line.contains("allow") {
+                saw_allow = true;
             }
         }
-        // An `allow` at crate level in a crate that is not an exception is a
-        // defect this function must not miss, so it is reported as "not
-        // forbidden" by leaving `forbidden` unset.
-        if line.contains("unsafe_code") && line.contains("allow") {
-            forbidden = false;
+        forbidden = root_forbidden;
+        if !forbidden {
+            break;
         }
     }
-    (forbidden, conditional)
+    // No crate root at all is itself reported by the caller; here it means
+    // nothing was checked.
+    if roots == 0 {
+        return (false, false);
+    }
+    (forbidden && !saw_allow, conditional)
 }
 
 /// **ARCH-008.** Every crate outside the named exceptions forbids `unsafe`.
@@ -491,6 +672,68 @@ fn the_unsafe_exception_was_granted_through_its_process() {
 // ARCH-002 — authority only narrows downward
 // ---------------------------------------------------------------------------
 
+/// **ARCH-002 (companion).** `lock_recover()` may only appear where recovery
+/// is sound.
+///
+/// `qqq_core::sync` documents the rule — counters, idle lists and tenant maps
+/// behind RAII guards recover; the audit chain head and multi-field invariants
+/// fail closed — but a blanket `impl<T> LockRecover for Mutex<T>` lets any
+/// call site recover any lock, and prose does not enforce. So this test pins
+/// the complete set of call sites: `pool.rs` (pool counters, idle lists) and
+/// `guest_output.rs` (tenant maps behind RAII guards). A new call site anywhere
+/// else fails here first, and landing it means either proving the lock's
+/// critical sections are panic-free between statements or changing the rule
+/// deliberately.
+///
+/// Comment lines are ignored: prose may discuss recovery anywhere; only code
+/// may perform it.
+#[test]
+fn lock_recover_call_sites_are_the_sound_ones() {
+    const ALLOWED: &[&str] = &[
+        "crates/qqq-core/src/sync.rs",
+        "crates/qqq-host/src/pool.rs",
+        "crates/qqq-host/src/guest_output.rs",
+    ];
+    let mut found = BTreeSet::new();
+    for dir in crate_dirs() {
+        let src = dir.join("src");
+        if !src.is_dir() {
+            continue;
+        }
+        for entry in walk(&src) {
+            let Ok(text) = std::fs::read_to_string(&entry) else {
+                continue;
+            };
+            // Bare `lock_recover`: the qualified `LockRecover::lock_recover`
+            // and a spaced `lock_recover ()` are the same call and must trip
+            // the same wire. (Comment lines are skipped so prose cannot trip
+            // it; the allowlist names whole files, not lines.)
+            let uses = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*'))
+                .any(|l| l.contains("lock_recover"));
+            if uses {
+                let rel = entry
+                    .strip_prefix(workspace_root())
+                    .unwrap_or(&entry)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                found.insert(rel);
+            }
+        }
+    }
+    let allowed: BTreeSet<String> = ALLOWED.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        found, allowed,
+        "`lock_recover()` call sites changed: recovery is only sound for \
+         counters, idle lists and tenant maps (see `qqq_core::sync`). A new \
+         site must prove its critical sections panic-free or change this list \
+         deliberately — silently recovering the audit chain head would hide a \
+         broken invariant."
+    );
+}
+
 /// **ARCH-002.** The authority-flow invariant is enforced *structurally*, and
 /// this test asserts the structure rather than re-testing the behaviour.
 ///
@@ -515,20 +758,93 @@ fn the_unsafe_exception_was_granted_through_its_process() {
 ///
 /// This test reads the workspace source and fails if any `qqq-*` crate mentions
 /// a widening primitive on `GrantSet`.
+///
+/// Whether a file opens the inherent `impl GrantSet` block.
+///
+/// Line-based and comment-stripped: `impl GrantSet` and `impl<T> GrantSet`
+/// both match, while `impl PartialEq for GrantSet` (a trait impl, not the
+/// inherent block) and prose mentioning both words do not. Checking the whole
+/// file at once would conflate an `impl<T> Foo` with a `-> GrantSet` return
+/// type on another line, so each line must contain the whole shape.
+fn file_has_grantset_impl(text: &str) -> bool {
+    text.lines().any(|line| {
+        let squeezed: String = strip_rust_comment(line)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        is_grantset_impl(&squeezed)
+    })
+}
+
+/// Whether a whitespace-squeezed, comment-free line opens the inherent
+/// `impl GrantSet` block, with optional `unsafe` and generics.
+fn is_grantset_impl(squeezed: &str) -> bool {
+    let rest = squeezed.strip_prefix("unsafe").unwrap_or(squeezed);
+    let Some(rest) = rest.strip_prefix("impl") else {
+        return false;
+    };
+    let rest = match rest.strip_prefix('<') {
+        Some(after) => match after.find('>') {
+            Some(i) => &after[i + 1..],
+            None => return false,
+        },
+        None => rest,
+    };
+    // Exact, modulo the opening brace: a hypothetical `impl GrantSetters` is a
+    // different type, not the inherent impl this scanner exists to find. Real
+    // declarations end the line with `{` (or a `where` clause, which still
+    // starts with the bare name).
+    let rest = rest.strip_suffix('{').unwrap_or(rest);
+    rest == "GrantSet" || rest.starts_with("GrantSetwhere")
+}
+
+/// Strip a trailing `//` comment, ignoring `//` inside strings.
+///
+/// (Twin of `strip_toml_comment`, which strips `#`, and of `strip_inline_comment`
+/// in `tests/qblock.rs`; every test target carries its own rather than a
+/// dependency.)
+fn strip_rust_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'/' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'/') => {
+                return line.get(..i).map_or(line, str::trim_end);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    line
+}
+
 #[test]
 fn no_widening_constructor_on_grants_exists_anywhere() {
     // Names that would reintroduce widening. `narrow` is the only permitted
     // combinator, and it is checked to still exist below so this list cannot be
     // satisfied by deleting everything.
-    const FORBIDDEN: &[&str] = &[
-        "fn union(",
-        "fn widen(",
-        "fn merge(",
-        "fn extend_with(",
-        "fn add_capability(",
-        "fn grant_more(",
-        "fn with_extra(",
+    //
+    // `fn union` has no call paren on purpose: a generic `fn union<T>` must be
+    // caught too — and so must generics on every other widening name. Each
+    // base is matched with `(` or `<` immediately after, so a hypothetical
+    // `fn merger` does not trip the `merge` needle.
+    const FORBIDDEN_FN: &[&str] = &[
+        "fn union",
+        "fn widen",
+        "fn merge",
+        "fn extend_with",
+        "fn add_capability",
+        "fn grant_more",
+        "fn with_extra",
     ];
+    // `capabilities.insert(` (not bare `insert(`, which every map uses
+    // legitimately) is the method-call half of the documented threat: a new
+    // widening method would not be a `fn` definition at all.
+    const FORBIDDEN_CALL: &str = "capabilities.insert(";
 
     let mut found = Vec::new();
     let mut grant_set_impls = 0_usize;
@@ -543,19 +859,35 @@ fn no_widening_constructor_on_grants_exists_anywhere() {
             let Ok(text) = std::fs::read_to_string(&entry) else {
                 continue;
             };
-            let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-            if squeezed.contains("implGrantSet") || squeezed.contains("implGrantSet<") {
+            // Line-based and comment-stripped: a file-level `contains("impl")`
+            // plus `contains("GrantSet")` would conflate an `impl<T> Foo` with
+            // a `-> GrantSet` return type on another line. Each line must carry
+            // the whole `impl…GrantSet` shape (with optional `unsafe` and
+            // generics); prose mentioning both words does not count.
+            if file_has_grantset_impl(&text) {
                 grant_set_impls += 1;
             }
-            for needle in FORBIDDEN {
-                let squeezed_needle: String =
-                    needle.chars().filter(|c| !c.is_whitespace()).collect();
-                if squeezed.contains(&squeezed_needle) {
+            // Squeezed once per file for the substring needles below; the
+            // impl-shape check above stays line-based (see its comment).
+            let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+            for needle in FORBIDDEN_FN {
+                let base: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+                // A widening definition, generic or not: `fn union(` and
+                // `fn union<T>` both match, while a hypothetical `fn merger`
+                // does not (the `(` / `<` must follow immediately).
+                if squeezed.contains(&format!("{base}(")) || squeezed.contains(&format!("{base}<"))
+                {
                     found.push(format!(
                         "{} in {name}",
                         entry.file_name().unwrap_or_default().to_string_lossy()
                     ));
                 }
+            }
+            if squeezed.contains(FORBIDDEN_CALL) {
+                found.push(format!(
+                    "{} in {name}",
+                    entry.file_name().unwrap_or_default().to_string_lossy()
+                ));
             }
         }
     }
@@ -622,5 +954,105 @@ fn the_architecture_scanner_finds_real_files() {
     assert_eq!(
         package_name(&workspace_root().join("crates/qqq-core")),
         "qqq-core"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scanner unit tests — the manifest helpers above, pinned directly
+// ---------------------------------------------------------------------------
+
+/// Section headers: exact tables plus dotted and target-gated tables, never
+/// anything else.
+#[test]
+fn manifest_section_header_matching() {
+    assert!(manifest_section_is_deps("[dependencies]"));
+    assert!(manifest_section_is_deps("[dev-dependencies]"));
+    assert!(manifest_section_is_deps("[build-dependencies]"));
+    assert!(manifest_section_is_deps("[dependencies.foo]"));
+    assert!(manifest_section_is_deps("[dev-dependencies.foo]"));
+    assert!(manifest_section_is_deps(
+        "[target.'cfg(unix)'.dependencies]"
+    ));
+    assert!(manifest_section_is_deps(
+        "[target.cfg(windows).dev-dependencies]"
+    ));
+    // Headers arrive comment-stripped (the caller strips first), so the
+    // contract is asserted on stripped input.
+    assert!(manifest_section_is_deps(
+        strip_toml_comment("[target.'cfg(unix)'.dependencies] # linux only").trim()
+    ));
+    assert!(!manifest_section_is_deps("[package]"));
+    assert!(!manifest_section_is_deps("[features]"));
+    assert!(!manifest_section_is_deps("[patch.crates-io]"));
+}
+
+/// The `impl GrantSet` shape check: inherent impls (generic or not) count;
+/// trait impls and prose do not.
+#[test]
+fn grantset_impl_shape_matching() {
+    assert!(is_grantset_impl("implGrantSet{"));
+    assert!(is_grantset_impl("impl<T>GrantSet{"));
+    assert!(is_grantset_impl("unsafeimplGrantSet{"));
+    assert!(is_grantset_impl("impl<'a>GrantSet{"));
+    assert!(!is_grantset_impl("implPartialEqforGrantSet{"));
+    assert!(!is_grantset_impl("implGrantSetters{"));
+    assert!(!is_grantset_impl("structGrantSet"));
+    assert!(!is_grantset_impl("//implGrantSet{"));
+}
+
+/// Dependency edges: direct names and `package =` renames.
+#[test]
+fn dep_edge_parsing() {
+    assert_eq!(
+        parse_qqq_dep_edge("qqq-host = { version = \"1\" }"),
+        Some("qqq-host".to_owned())
+    );
+    // A rename: the local name is not a qqq crate, the package is the edge.
+    assert_eq!(
+        parse_qqq_dep_edge("host = { package = \"qqq-host\", version = \"1\" }"),
+        Some("qqq-host".to_owned())
+    );
+    assert_eq!(parse_qqq_dep_edge("serde = { workspace = true }"), None);
+    assert_eq!(
+        parse_qqq_dep_edge("alias = { package = \"other-crate\" }"),
+        None
+    );
+    // Single quotes and trailing comments must not leak into the name.
+    assert_eq!(
+        parse_qqq_dep_edge("alias = { package = 'qqq-cap' } # renamed"),
+        Some("qqq-cap".to_owned())
+    );
+}
+
+/// Comment stripping respects quotes: a `#` in a URL is data, not a comment.
+#[test]
+fn toml_comment_stripping_respects_quotes() {
+    assert_eq!(
+        strip_toml_comment("name = \"qqqai\" # the binary"),
+        "name = \"qqqai\""
+    );
+    assert_eq!(
+        strip_toml_comment("foo = { git = \"https://x/y#branch\" } # pinned"),
+        "foo = { git = \"https://x/y#branch\" }"
+    );
+    assert_eq!(strip_toml_comment("no comment here"), "no comment here");
+}
+
+/// Whole-manifest parsing: dotted tables, target-gated tables, renames split
+/// across lines, and sections that must NOT count.
+#[test]
+fn manifest_edges_cover_tables_renames_and_splits() {
+    let text = "[package]\nname = \"demo\"\n\
+        [dependencies]\nqqq-core = \"1\"\n\
+        [dependencies.alias]\npackage = \"qqq-host\"\nversion = \"1\"\n\
+        [dependencies.qqq-toml]\nversion = \"1\"\n\
+        [target.'cfg(unix)'.dependencies]\nrenamed = { package = \"qqq-cap\" }\n\
+        [target.'cfg(windows)'.dependencies]\nsplit = {\n package = \"qqq-io\",\n}\n\
+        [features]\ndefault = []\n";
+    let mut edges = parse_manifest_deps(text);
+    edges.sort_unstable();
+    assert_eq!(
+        edges,
+        vec!["qqq-cap", "qqq-core", "qqq-host", "qqq-io", "qqq-toml"]
     );
 }

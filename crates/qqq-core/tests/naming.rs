@@ -5,6 +5,7 @@
 // shipping code carries no such allowance.
 #![allow(
     clippy::expect_used,
+    clippy::indexing_slicing,
     reason = "test setup unwraps fixtures and indexes inline vectors"
 )]
 
@@ -36,6 +37,15 @@
 //! while reading every other crate.
 
 use std::path::{Path, PathBuf};
+
+/// Every subcommand the CLI teaches, shared by the document scan and the
+/// drift pin below. Adding a subcommand means updating this list deliberately —
+/// a new command the scan does not know is a command the scan cannot check.
+const SUBCOMMANDS: &[&str] = &[
+    "new", "init", "add", "remove", "install", "update", "build", "run", "dev", "serve", "test",
+    "bench", "fmt", "lint", "inspect", "audit", "verify", "caps", "why", "trace", "doctor", "mcp",
+    "schema", "openapi", "migrate", "bindings", "add-cap",
+];
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -128,21 +138,52 @@ fn the_cli_binary_is_named_qqqai_and_never_qqq() {
 }
 
 /// The `name = "…"` values inside every `[[bin]]` stanza.
+///
+/// Parsed with `split_once('=')` plus a key comparison: `strip_prefix("name")`
+/// also matches `names =`. Trailing comments and single-quoted values are
+/// handled — see `strip_toml_comment`.
 fn declared_bin_names(manifest: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut in_bin = false;
     for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_bin = trimmed == "[[bin]]";
+        let line = strip_toml_comment(line).trim();
+        if line.starts_with('[') {
+            in_bin = line == "[[bin]]";
             continue;
         }
-        if in_bin && let Some(rest) = trimmed.strip_prefix("name") {
-            let rest = rest.trim_start().trim_start_matches('=').trim();
-            out.push(rest.trim_matches('"').to_owned());
+        if in_bin
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "name"
+        {
+            out.push(
+                value
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_owned(),
+            );
         }
     }
     out
+}
+
+/// Strip a trailing `#` comment, ignoring `#` inside quotes.
+///
+/// TOML names in the scanned positions never legitimately contain `#`, but
+/// neighbouring values (URLs) do — so the stripper is quote-aware rather than
+/// a bare `split('#')`. (Twin of the helper in `tests/architecture.rs`; both
+/// test targets need it and neither may grow a dependency for it.)
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double => return line[..i].trim_end(),
+            _ => {}
+        }
+    }
+    line
 }
 
 /// No crate is *named* `qqq`.
@@ -154,17 +195,26 @@ fn declared_bin_names(manifest: &str) -> Vec<String> {
 fn no_package_is_named_qqq() {
     for (dir_name, text) in manifests() {
         // The [package] name, which is the first `name =` after `[package]`.
+        // Parsed strictly: `names =` is a different key, and comments/quotes
+        // must not leak into the value.
         let mut in_package = false;
         let mut package_name = None;
         for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                in_package = trimmed == "[package]";
+            let line = strip_toml_comment(line).trim();
+            if line.starts_with('[') {
+                in_package = line == "[package]";
                 continue;
             }
-            if in_package && let Some(rest) = trimmed.strip_prefix("name") {
-                let rest = rest.trim_start().trim_start_matches('=').trim();
-                package_name = Some(rest.trim_matches('"').to_owned());
+            if in_package
+                && let Some((key, value)) = line.split_once('=')
+                && key.trim() == "name"
+            {
+                package_name = Some(
+                    value
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .to_owned(),
+                );
                 break;
             }
         }
@@ -196,6 +246,22 @@ fn no_package_is_named_qqq() {
     }
 }
 
+/// **Every document in the list is scanned — none may silently disappear.**
+///
+/// A document deleted or renamed without updating this list would shrink the
+/// scan without failing it. The count pins the coverage.
+#[test]
+fn the_document_list_is_scanned_whole() {
+    let root = workspace_root();
+    let docs = ["README.md", "QQQ-Proposal-V1.md", "CONTRIBUTING.md"];
+    for doc in docs {
+        assert!(
+            root.join(doc).is_file(),
+            "document {doc} is missing; update the scan list deliberately"
+        );
+    }
+}
+
 /// **Every command shown in the documents is `qqqai`, never bare `qqq`.**
 ///
 /// # Why the documents are checked and not just the manifests
@@ -207,17 +273,21 @@ fn no_package_is_named_qqq() {
 ///
 /// The scan looks for `qqq` used as a *command*, not the string `qqq`: the brand
 /// appears legitimately everywhere ("QQQ is a runtime"), and `qqq-` prefixes
-/// crate names. What is forbidden is `qqq` followed by a known subcommand name.
+/// crate names. What is forbidden is `qqq` followed by a known subcommand name —
+/// with spaces, tabs, or a hyphen between them. A hyphen mention that names a
+/// known crate (`qqq-run`) is the crate, not the command, and is exempt.
 #[test]
 fn the_documents_never_teach_a_bare_qqq_command() {
-    const SUBCOMMANDS: &[&str] = &[
-        "new", "init", "add", "remove", "install", "update", "build", "run", "dev", "serve",
-        "test", "bench", "fmt", "lint", "inspect", "audit", "verify", "caps", "why", "trace",
-        "doctor", "mcp", "schema", "openapi", "migrate", "bindings", "add-cap",
-    ];
-
     let root = workspace_root();
     let docs = ["README.md", "QQQ-Proposal-V1.md", "CONTRIBUTING.md"];
+    let manifests = manifests();
+    // Exempt by package name, not directory name: the two agree today, but the
+    // rule is about what `cargo install` sees, so the check reads what the
+    // manifest declares.
+    let crate_names: Vec<String> = manifests
+        .iter()
+        .filter_map(|(_, text)| package_name_of(text))
+        .collect();
     let mut problems = Vec::new();
     let mut scanned = 0_usize;
 
@@ -230,34 +300,200 @@ fn the_documents_never_teach_a_bare_qqq_command() {
         let text = std::fs::read_to_string(&path).expect("document is readable");
         for (i, line) in text.lines().enumerate() {
             for sub in SUBCOMMANDS {
-                // `qqq <subcommand>` and `qqq-<subcommand>`-style mistakes, but
-                // NOT `qqqai <subcommand>` (correct) or `qqq:<interface>` (a WIT
-                // identifier) or `qqq-<crate>` (a crate name).
-                let bare = format!("qqq {sub}");
-                let mut from = 0;
-                while let Some(at) = line[from..].find(&bare) {
-                    let abs = from + at;
-                    // Preceded by `qqqai`? Then it is `qqqai new`... unless the
-                    // match starts inside `qqqai`, i.e. at the `qqq` of `qqqai`.
-                    let before = &line[..abs];
-                    let is_qqqai = before.ends_with("qqqai");
-                    // Preceded by `-`? Then it is a crate name like `qqq-run`.
-                    let is_crate = before.ends_with('-');
-                    if !is_qqqai && !is_crate {
-                        problems.push(format!("{doc}:{}: `{bare}`", i + 1));
+                for at in command_mentions(line, sub, &crate_names) {
+                    // Char-boundary-safe snippet for the message: byte slicing
+                    // a multibyte line would panic, turning the report into a
+                    // crash instead of a violation list.
+                    let mut end = (at + 3 + 1 + sub.len()).min(line.len());
+                    while !line.is_char_boundary(end) {
+                        end -= 1;
                     }
-                    from = abs + bare.len();
+                    problems.push(format!("{doc}:{}: `{}`", i + 1, &line[at..end]));
                 }
             }
         }
     }
 
-    assert!(scanned >= 2, "expected to scan at least two documents");
+    assert_eq!(
+        scanned,
+        docs.len(),
+        "expected to scan all {} documents; a missing one would shrink the scan silently",
+        docs.len()
+    );
     assert!(
         problems.is_empty(),
         "documents teach a bare `qqq` command; §D-001 requires `qqqai`:\n  {}",
         problems.join("\n  ")
     );
+}
+
+/// Byte offsets where `line` mentions `qqq <sub>` or `qqq-<sub>` as a command.
+///
+/// Boundaries do the work that a substring search cannot: the char before
+/// `qqq` must not be alnum/`-`/`_` (so `aqqq run`, `foo-qqq run` and `qqqai run`
+/// never match), and the char after the subcommand must not be alnum/`-`/`_`
+/// (so `qqq runner`, `qqq-runner` and `qqq:interface` never match). Between
+/// `qqq` and the subcommand, one or more spaces/tabs — or a single hyphen, for
+/// the `qqq-<sub>` spelling, which is additionally exempt when the whole token
+/// is a known crate name (`qqq-run` means the crate, not the command).
+fn command_mentions(line: &str, sub: &str, crate_names: &[String]) -> Vec<usize> {
+    fn is_word(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+    }
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 <= line.len() {
+        // Byte-compared, not str-sliced: `i` advances byte-wise and may rest
+        // inside a multibyte char, where `&line[i..i + 3]` would panic. ASCII
+        // `qqq` at a mid-char position cannot match, so this is exact.
+        if bytes.get(i..i + 3) != Some(b"qqq".as_slice()) || (i > 0 && is_word(bytes[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 3;
+        let hyphen = if bytes.get(j) == Some(&b'-') {
+            j += 1;
+            true
+        } else {
+            let start = j;
+            while bytes.get(j).is_some_and(u8::is_ascii_whitespace) {
+                j += 1;
+            }
+            if j == start {
+                i += 1;
+                continue;
+            }
+            false
+        };
+        if line[j..].starts_with(sub) {
+            let end = j + sub.len();
+            let after_ok = end == line.len() || !is_word(bytes[end]);
+            if after_ok {
+                if hyphen {
+                    // A hyphen mention that names a known crate is the crate.
+                    let token = &line[i..end];
+                    if !crate_names.iter().any(|c| c == token) {
+                        out.push(i);
+                    }
+                } else {
+                    out.push(i);
+                }
+            }
+            i = end;
+        } else {
+            i = j;
+        }
+    }
+    out
+}
+
+/// Every `qqqai <word>` taught in the documents must be a known subcommand.
+///
+/// The bare-`qqq` test only checks words already in `SUBCOMMANDS`; without this
+/// pin, a new `qqqai publish` subcommand would ship with documentation the
+/// scan never examines — and a `qqq publish` typo for it would pass silently.
+/// Failing here means: add the subcommand to `SUBCOMMANDS` deliberately, so
+/// both spellings get checked from then on.
+///
+/// `DOCUMENTED_FUTURE` names the commands the Proposal teaches deliberately
+/// ahead of implementation (`deploy` in the §4.6 artifact pipeline, `source`
+/// in §4.8.4 tracked by `REG-014` and explicitly "not part of §5.2's V1
+/// command set"). They are allowed in prose but must never gain a bare-`qqq`
+/// spelling; promoting one to `SUBCOMMANDS` is the day it ships.
+#[test]
+fn every_documented_qqqai_command_is_a_known_subcommand() {
+    const DOCUMENTED_FUTURE: &[&str] = &["deploy", "source"];
+    let root = workspace_root();
+    let docs = ["README.md", "QQQ-Proposal-V1.md", "CONTRIBUTING.md"];
+    let mut unknown = Vec::new();
+    for doc in docs {
+        let text = std::fs::read_to_string(root.join(doc)).expect("document is readable");
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i + 5 <= text.len() {
+            // Byte-compared, like `command_mentions`: `i` advances byte-wise
+            // and may rest inside a multibyte char, where str slicing panics.
+            if bytes.get(i..i + 5) != Some(b"qqqai".as_slice())
+                || (i > 0 && is_qqqai_boundary(bytes[i - 1]))
+            {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 5;
+            while bytes.get(j).is_some_and(|b| *b == b' ' || *b == b'\t') {
+                j += 1;
+            }
+            // A subcommand starts with a lowercase letter: flags (`--help`),
+            // versions (`1.2.3`) and punctuation after `qqqai` are not words
+            // to pin, and matching them would cry wolf on ordinary prose.
+            let word_ok = bytes.get(j).is_some_and(u8::is_ascii_lowercase);
+            let start = j;
+            while bytes
+                .get(j)
+                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+            {
+                j += 1;
+            }
+            if word_ok && j > start {
+                let word = &text[start..j];
+                if !SUBCOMMANDS.contains(&word) && !DOCUMENTED_FUTURE.contains(&word) {
+                    unknown.push(format!(
+                        "{doc}:{}: `qqqai {word}`",
+                        line_of(&text, start) + 1
+                    ));
+                }
+            }
+            i = j.max(i + 1);
+        }
+    }
+    assert!(
+        unknown.is_empty(),
+        "documents teach `qqqai` commands outside SUBCOMMANDS; add them deliberately:\n  {}",
+        unknown.join("\n  ")
+    );
+}
+
+/// The `[package] name` of a manifest, or `None`.
+///
+/// The same strict parse the package-name test uses (key comparison, comment
+/// stripping, both quote styles): the bare-`qqq` crate-name exemption must key
+/// on what `cargo install` sees, not on directory names.
+fn package_name_of(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let line = strip_toml_comment(line).trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "name"
+        {
+            return Some(
+                value
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_owned(),
+            );
+        }
+    }
+    None
+}
+
+/// Whether a byte continues a `qqqai` token to the left (so `aqqqai` and
+/// `foo-qqqai` are not command mentions).
+fn is_qqqai_boundary(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+/// The 0-based line number containing byte offset `at`.
+fn line_of(text: &str, at: usize) -> usize {
+    text[..at.min(text.len())]
+        .bytes()
+        .filter(|&b| b == b'\n')
+        .count()
 }
 
 /// The control for the whole module: the scanner reads real data.
@@ -279,4 +515,37 @@ fn the_naming_scanner_finds_real_manifests() {
     let root = workspace_root();
     let _ = Path::new(&root); // the helper resolves
     assert!(root.join("Cargo.toml").is_file(), "workspace root resolved");
+}
+/// Unit tests for the command matcher: every boundary the scanner promises.
+#[test]
+fn command_mentions_matches_only_real_commands() {
+    let crates = vec!["qqq-run".to_owned(), "qqq-serve".to_owned()];
+    // Space and tab separators, multiple spaces.
+    assert_eq!(
+        command_mentions("run qqq new project", "new", &crates),
+        vec![4]
+    );
+    assert_eq!(
+        command_mentions("qqq\tserve now", "serve", &crates),
+        vec![0]
+    );
+    assert_eq!(command_mentions("use  qqq  run x", "run", &crates), vec![5]);
+    // Hyphen spelling that is NOT a crate: a command.
+    assert_eq!(
+        command_mentions("try qqq-new today", "new", &crates),
+        vec![4]
+    );
+    // Hyphen spelling that IS a crate: not a command.
+    assert!(command_mentions("see qqq-run for details", "run", &crates).is_empty());
+    assert!(command_mentions("see qqq-serve for details", "serve", &crates).is_empty());
+    // `qqqai`, WIT identifiers, longer words, and affixed tokens never match.
+    assert!(command_mentions("qqqai run now", "run", &crates).is_empty());
+    assert!(command_mentions("qqq:http/incoming-handler", "http", &crates).is_empty());
+    assert!(command_mentions("run qqq runner", "run", &crates).is_empty());
+    assert!(command_mentions("run qqq-runner", "run", &crates).is_empty());
+    assert!(command_mentions("aqqq run", "run", &crates).is_empty());
+    assert!(command_mentions("x-qqq run", "run", &crates).is_empty());
+    // End of line and punctuation after the subcommand are fine.
+    assert_eq!(command_mentions("type qqq new", "new", &crates), vec![5]);
+    assert_eq!(command_mentions("type qqq new.", "new", &crates), vec![5]);
 }

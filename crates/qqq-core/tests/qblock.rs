@@ -82,6 +82,14 @@ fn declared() -> (BTreeSet<String>, usize) {
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
         for line in text.lines() {
             let line = line.trim();
+            assert!(
+                !line.starts_with("world ") && !line.starts_with("world{"),
+                "wit/ gained a `world` block in {}: the interface grammar below \
+                 counts top-level `interface X {{` lines only, and a world with \
+                 inline interfaces would silently disagree with \
+                 tools/gen_wit_reference.py. Extend both grammars together.",
+                path.display()
+            );
             if let Some(rest) = line.strip_prefix("package ") {
                 let rest = rest.trim_end_matches(';').trim();
                 let root = rest
@@ -89,12 +97,33 @@ fn declared() -> (BTreeSet<String>, usize) {
                     .next()
                     .unwrap_or_else(|| panic!("bad package line in {}: {line}", path.display()));
                 packages.insert(root.to_owned());
-            } else if line.starts_with("interface ") && line.ends_with('{') {
+            } else if is_interface_line(line) {
                 interfaces += 1;
             }
         }
     }
     (packages, interfaces)
+}
+
+/// Whether a WIT line declares a top-level interface.
+///
+/// Comment-stripped first: `interface f { // trailing note` is still a
+/// declaration, and counting it only when the brace is last would make the
+/// interface count silently wrong the day someone annotates the line.
+fn is_interface_line(line: &str) -> bool {
+    let line = strip_wit_comment(line).trim();
+    line.starts_with("interface ") && line.ends_with('{')
+}
+
+/// A WIT line with `//` comments removed.
+///
+/// Only line comments exist in these files; a `//` inside a string would be
+/// cut too, but interface and package lines never contain strings.
+fn strip_wit_comment(line: &str) -> &str {
+    match line.find("//") {
+        Some(at) => line[..at].trim_end(),
+        None => line,
+    }
 }
 
 /// Bindable level, first definition: the distinct namespace roots of the
@@ -170,40 +199,86 @@ fn bindable_from_manifest_stanzas() -> BTreeSet<String> {
 
 /// Bound level: the `iface("qqq:<ns>@<ver>", &[..], true|false, ..)` flags in
 /// `qqq-abi/src/registry.rs`, in file order.
+///
+/// Each call is gathered whole — single-line or spread over following lines —
+/// and the name and flag are read positionally (name first, flag right after
+/// the capability list closes). That way neither a reformatted registry nor a
+/// long capability list silently drops a row, and a malformed call fails
+/// loudly instead of vanishing from the scan.
 fn bound_flags() -> Vec<(String, bool)> {
     let text = read_tree("crates/qqq-abi/src/registry.rs");
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     let mut i = 0;
     while let Some(line) = lines.get(i) {
-        if line.trim() == "iface(" {
-            let mut name: Option<String> = None;
-            let mut seen_caps = false;
-            let mut j = i + 1;
-            while j < lines.len() && j < i + 40 {
-                let Some(inner) = lines.get(j) else { break };
-                let t = inner.trim();
-                if t.starts_with("\"qqq:") && name.is_none() {
-                    name = Some(t.trim_matches(|c| c == '"' || c == ',').to_owned());
-                } else if t.starts_with("&[") {
-                    seen_caps = true;
-                } else if seen_caps && (t == "true," || t == "false,") {
-                    out.push((
-                        name.clone().unwrap_or_else(|| {
-                            panic!("iface( at registry.rs:{} has no name", i + 1)
-                        }),
-                        t == "true,",
-                    ));
-                    break;
-                }
-                j += 1;
-            }
-            i = j;
+        if !line.trim_start().starts_with("iface(") {
+            i += 1;
+            continue;
         }
-        i += 1;
+        // Gather the whole call, ending at the line that closes it. No fixed
+        // window: a cap on the lookahead would silently drop a row the day a
+        // capability list outgrew it.
+        let mut chunk = String::new();
+        let mut j = i;
+        while let Some(inner) = lines.get(j) {
+            chunk.push_str(inner);
+            chunk.push('\n');
+            if inner.contains("),") {
+                break;
+            }
+            j += 1;
+        }
+        i = j + 1;
+        // Comment lines inside the call (the `// Implemented:` notes) are
+        // stripped before joining, so prose can never impersonate an argument.
+        let flat: String = chunk
+            .lines()
+            .map(|l| strip_inline_comment(l).trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let name = flat
+            .split('"')
+            .find(|s| s.starts_with("qqq:"))
+            .unwrap_or_else(|| panic!("iface( ending at registry.rs:{i} has no name"))
+            .to_owned();
+        // The flag is the argument right after the capability list closes.
+        // Searching positionally (rather than for any bare `true` in the
+        // call) means a summary mentioning ", true," can never impersonate it.
+        let after_caps = flat
+            .split(']')
+            .nth(1)
+            .unwrap_or_else(|| panic!("iface( {name} has no capability list before its flag"));
+        match iface_flag(after_caps) {
+            Some(enabled) => out.push((name, enabled)),
+            None => {
+                panic!("iface( {name} has no true/false flag after its capability list")
+            }
+        }
     }
     assert!(!out.is_empty(), "no iface( entries parsed from registry.rs");
     out
+}
+
+/// The enabled flag in a gathered `iface(` call: the argument right after the
+/// capability list closes.
+///
+/// The input is the call text *after* the closing `]` (see `bound_flags`);
+/// anything else is a caller bug, and `None` is the honest answer for it.
+/// Split out so the three call shapes are unit-testable without fixtures: a
+/// multi-line call with the flag on its own line, a single-line call, and a
+/// trailing comment — plus the negative case of a call with no flag at all.
+fn iface_flag(after_caps: &str) -> Option<bool> {
+    let word = after_caps
+        .split(',')
+        .nth(1)
+        .map(str::trim)
+        .map(|s| s.trim_end_matches(')').trim());
+    match word {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    }
 }
 
 /// The §4.8.5 section text, cut at the next `###` heading.
@@ -494,4 +569,59 @@ fn host_module_linker_and_registry_sets_agree() {
         BTreeSet::from(["test".to_owned(), "wasi".to_owned(), "wasi03".to_owned()]),
         "non-registry modules changed; wasi/wasi03/test are the only ones allowed"
     );
+}
+// ---------------------------------------------------------------------------
+// Scanner unit tests — the WIT/registry line grammars, pinned directly
+// ---------------------------------------------------------------------------
+
+/// Strip a trailing `//` comment, ignoring `//` inside quotes.
+///
+/// Quote-aware like its twins in `tests/architecture.rs` and `tests/naming.rs`
+/// (each test target carries its own copy rather than a dependency): a `//`
+/// inside a URL is data, not a comment.
+fn strip_inline_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    // `.get` throughout: `i` advances byte-wise and the return slice must be a
+    // char boundary, which indexing cannot prove to the linter.
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'/' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'/') => {
+                return line.get(..i).map_or(line, str::trim_end);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    line
+}
+
+#[test]
+fn interface_grammar_sees_commented_declarations() {
+    assert!(is_interface_line("interface f {"));
+    assert!(is_interface_line("interface f { // trailing note"));
+    assert!(!is_interface_line("// interface f {"));
+    assert!(!is_interface_line("interface f"));
+    // A world block is not an interface line; the scanner panics on worlds
+    // separately so they cannot slip through the count.
+    assert!(!is_interface_line("world foo {"));
+}
+
+#[test]
+fn enabled_flag_covers_all_call_shapes() {
+    // Multi-line call, flag on its own line (the current registry shape):
+    // the text after the capability list's `]`.
+    assert_eq!(iface_flag(",\n true,\n \"summary\",\n"), Some(true));
+    // Single-line call, flag before the close paren.
+    assert_eq!(iface_flag(", true),"), Some(true));
+    // Commented flag: stripped by the caller, but the matcher tolerates the
+    // bare words either way.
+    assert_eq!(iface_flag(", true"), Some(true));
+    assert_eq!(iface_flag(", false"), Some(false));
+    // No flag at all: a malformed call the scanner must reject loudly.
+    assert_eq!(iface_flag(","), None);
 }

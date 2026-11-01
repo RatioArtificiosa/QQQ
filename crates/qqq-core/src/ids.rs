@@ -185,9 +185,13 @@ fn validate_name(s: &str) -> Result<(), IdError> {
     if s.is_empty() {
         return Err(IdError::Empty);
     }
-    if s.len() > MAX_ID_LEN {
+    // Characters, not bytes: the limit and the message agree, and a 65-char
+    // multibyte name reports `got: 65` rather than a byte count that no human
+    // can map back to the name they typed.
+    let len = s.chars().count();
+    if len > MAX_ID_LEN {
         return Err(IdError::TooLong {
-            got: s.len(),
+            got: len,
             max: MAX_ID_LEN,
         });
     }
@@ -295,7 +299,11 @@ id_newtype!(PackageName, "package");
 /// policy (Proposal §2.8). A deliberately small implementation rather than a
 /// dependency: the semantics QQQ needs are `Ord` and equality, and the full
 /// `SemVer` grammar is more surface than the job requires.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+///
+/// The wire shape is the dotted string (`"1.2.3"`), matching `Display` and
+/// `FromStr` — not the derived struct shape, which would disagree with every
+/// other surface that names a version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Version {
     /// Major component; increments on a breaking change.
     pub major: u32,
@@ -358,9 +366,21 @@ impl Version {
     ///
     /// Used by the deprecation policy: a consumer on 1.4 may use a capability
     /// introduced in 1.2, but never one introduced in 2.0.
+    ///
+    /// Pre-1.0 the major is always 0, so the minor takes its role: `0.2.0`
+    /// does NOT satisfy a `0.1.x` requirement, mirroring how cargo treats
+    /// `0.minor` bumps as breaking. Without the carve-out the rule would bless
+    /// a combination the package manager refuses to resolve.
     #[must_use]
     pub const fn is_compatible_with(self, other: Self) -> bool {
-        self.major == other.major && self.minor >= other.minor
+        if self.major == 0 || other.major == 0 {
+            return self.major == other.major
+                && self.minor == other.minor
+                && self.patch >= other.patch;
+        }
+        self.major == other.major
+            && (self.minor > other.minor
+                || (self.minor == other.minor && self.patch >= other.patch))
     }
 }
 
@@ -370,16 +390,37 @@ impl fmt::Display for Version {
     }
 }
 
+impl Serialize for Version {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Version {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 impl FromStr for Version {
     type Err = VersionParseError;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let mut parts = s.split('.');
+        // Tolerant of surrounding whitespace, like `ErrorCode::parse`: callers
+        // paste versions out of logs and manifests.
+        let mut parts = s.trim().split('.');
         let mut next = |what: &'static str| -> std::result::Result<u32, VersionParseError> {
             let raw = parts
                 .next()
                 .ok_or(VersionParseError::MissingComponent(what))?;
             // Reject empty and non-digit without allocating.
             if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(VersionParseError::NotANumber(raw.to_owned()));
+            }
+            // No leading zeros: the canonical form is `to_string`, which never
+            // emits them, so accepting `01.02.03` would let two spellings of one
+            // version into manifests and logs.
+            if raw.len() > 1 && raw.starts_with('0') {
                 return Err(VersionParseError::NotANumber(raw.to_owned()));
             }
             raw.parse::<u32>()
@@ -487,6 +528,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn length_limit_counts_characters_not_bytes() {
+        // 65 multibyte characters are 130 bytes; the limit is 64 *characters*,
+        // which is what the error message promises — so the reported count
+        // must be 65, not 130. (The charset check would reject these anyway;
+        // the length check runs first and must measure correctly.)
+        assert_eq!(
+            PackageName::new("é".repeat(65)),
+            Err(IdError::TooLong {
+                got: 65,
+                max: MAX_ID_LEN
+            })
+        );
+        // And a short multibyte name fails on the charset, not the length:
+        // 33 characters are within the limit even at 66 bytes, so the error
+        // must name the character class, not a length breach.
+        assert_eq!(
+            PackageName::new("é".repeat(33)),
+            Err(IdError::MustStartWithLetter { ch: 'é' })
+        );
+    }
+
+    /// Every newtype enforces the same rules: the validation lives in one
+    /// shared function so the rules cannot drift, and these tests pin that
+    /// each newtype actually routes through it.
+    #[test]
+    fn tenant_and_component_ids_reject_like_package_names() {
+        for bad in ["", "Bad Name", "9lives", "orders-", "a/b", "a\0b"] {
+            assert!(TenantId::new(bad).is_err(), "TenantId must reject {bad:?}");
+            assert!(
+                ComponentId::new(bad).is_err(),
+                "ComponentId must reject {bad:?}"
+            );
+        }
+        assert_eq!(TenantId::new("acme").unwrap().as_str(), "acme");
+        assert_eq!(
+            ComponentId::new("orders-api").unwrap().as_str(),
+            "orders-api"
+        );
+    }
+
     /// A path separator must never survive validation. This is a security
     /// control, not a style rule: a package name reaches directory paths.
     #[test]
@@ -546,6 +628,37 @@ mod tests {
     }
 
     #[test]
+    fn version_rejects_leading_zeros_and_trims_whitespace() {
+        // `to_string` never emits leading zeros, so parsing must not accept
+        // them: two spellings of one version would enter manifests and logs.
+        for bad in ["01.2.3", "1.02.3", "1.2.03", "00.0.0"] {
+            assert!(bad.parse::<Version>().is_err(), "should reject {bad:?}");
+        }
+        // But a bare zero in any position is fine, and surrounding whitespace
+        // is tolerated like `ErrorCode::parse`.
+        assert_eq!("0.0.0".parse::<Version>().unwrap(), Version::new(0, 0, 0));
+        assert_eq!(
+            "  1.2.3  ".parse::<Version>().unwrap(),
+            Version::new(1, 2, 3)
+        );
+    }
+
+    #[test]
+    fn version_serialises_as_the_dotted_string() {
+        let v = Version::new(1, 4, 0);
+        let j = serde_json::to_string(&v).unwrap();
+        assert_eq!(
+            j, "\"1.4.0\"",
+            "wire shape must match Display/FromStr, not the struct fields"
+        );
+        let back: Version = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, v);
+        // And a struct-shaped payload must NOT deserialize: it was never a
+        // valid version on any surface.
+        assert!(serde_json::from_str::<Version>(r#"{"major":1,"minor":4,"patch":0}"#).is_err());
+    }
+
+    #[test]
     fn compatibility_rule_is_major_scoped() {
         let v12 = Version::new(1, 2, 0);
         let v14 = Version::new(1, 4, 0);
@@ -559,6 +672,30 @@ mod tests {
             !v20.is_compatible_with(v12),
             "a major bump is not compatible"
         );
+    }
+
+    #[test]
+    fn compatibility_compares_patch_within_a_minor() {
+        let v140 = Version::new(1, 4, 0);
+        let v149 = Version::new(1, 4, 9);
+        // "At least as new" includes the patch: a 1.4.0 consumer has not seen
+        // the nine fixes in 1.4.9, so it must not satisfy a 1.4.9 requirement.
+        assert!(v149.is_compatible_with(v140));
+        assert!(!v140.is_compatible_with(v149));
+    }
+
+    #[test]
+    fn compatibility_treats_zero_major_minor_as_breaking() {
+        // Pre-1.0 the minor takes the major's role (cargo semantics): 0.2.0
+        // must not satisfy a 0.1.x requirement, while 0.1.9 satisfies 0.1.0.
+        let v010 = Version::new(0, 1, 0);
+        let v019 = Version::new(0, 1, 9);
+        let v020 = Version::new(0, 2, 0);
+        assert!(v019.is_compatible_with(v010));
+        assert!(!v010.is_compatible_with(v019));
+        assert!(!v020.is_compatible_with(v010));
+        assert!(!v010.is_compatible_with(v020));
+        assert!(!v020.is_compatible_with(Version::new(1, 0, 0)));
     }
 
     /// Observations §D-001: the binary is `qqqai` and the brand is `QQQ`.

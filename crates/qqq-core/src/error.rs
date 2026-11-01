@@ -119,6 +119,12 @@ impl fmt::Display for ErrorClass {
 
 /// Every stable QQQ error code.
 ///
+/// The discriminants are the codes themselves, and the declaration order is
+/// numeric within each class — so the derived `Ord` agrees with [`Self::number`].
+/// Keep it that way: `codes_are_sorted` pins `all()`, and a declaration-order
+/// assertion pins this order too, so a new code in the wrong place fails loudly
+/// rather than silently reordering a `BTreeSet<ErrorCode>` somewhere downstream.
+///
 /// # Adding a code
 ///
 /// 1. Append it in numeric order within its class.
@@ -133,12 +139,9 @@ impl fmt::Display for ErrorClass {
 /// support threads reference codes indefinitely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum ErrorCode {
     // -- 1xxx: build / compile ------------------------------------------------
-    /// The component's imports do not match the interfaces the host provides.
-    /// **Remediation:** run `qqqai build` and fix the reported interface, or
-    /// check that the manifest declares the right `entrypoint`.
-    WitInterfaceMismatch = 1004,
     /// A language toolchain failed to compile the project.
     /// **Remediation:** run the underlying compiler directly for full output;
     /// `qqqai build --verbose` shows the exact invocation.
@@ -150,6 +153,10 @@ pub enum ErrorCode {
     /// The project's target was not installed for the active toolchain.
     /// **Remediation:** `rustup target add wasm32-wasip2`.
     MissingTarget = 1003,
+    /// The component's imports do not match the interfaces the host provides.
+    /// **Remediation:** run `qqqai build` and fix the reported interface, or
+    /// check that the manifest declares the right `entrypoint`.
+    WitInterfaceMismatch = 1004,
     /// A reproducible build produced a different digest on a second run.
     /// **Remediation:** find the nondeterminism source; see Proposal §5.4.
     NonReproducibleBuild = 1005,
@@ -162,10 +169,6 @@ pub enum ErrorCode {
     /// **Remediation:** the error names the offending field and the expected
     /// shape; `qqqai schema --command manifest` prints the schema.
     ManifestSchemaViolation = 2002,
-    /// A capability stanza is syntactically valid but semantically wrong —
-    /// e.g. a host glob that can never match, or a negative quota.
-    /// **Remediation:** run `qqqai why <capability>` for the resolution chain.
-    CapabilitySyntaxInvalid = 2007,
     /// A `secret` reference names something the environment does not define.
     /// **Remediation:** set the named environment variable, or correct the
     /// reference. The value itself is never echoed.
@@ -181,6 +184,10 @@ pub enum ErrorCode {
     /// The manifest requests something only QQQ Fabric can provide.
     /// **Remediation:** grant it locally, or install Fabric.
     RequiresFabric = 2006,
+    /// A capability stanza is syntactically valid but semantically wrong —
+    /// e.g. a host glob that can never match, or a negative quota.
+    /// **Remediation:** run `qqqai why <capability>` for the resolution chain.
+    CapabilitySyntaxInvalid = 2007,
 
     // -- 3xxx: runtime guest traps -------------------------------------------
     /// The guest exceeded its declared memory limit.
@@ -251,10 +258,6 @@ pub enum ErrorCode {
     GuestResponseRefused = 3009,
 
     // -- 4xxx: capability denials --------------------------------------------
-    /// The requested capability is not granted by any configuration layer.
-    /// **Remediation:** the error prints the exact stanza to add to
-    /// `qqq.toml`, and `qqqai why <capability>` shows the full chain.
-    CapabilityDenied = 4003,
     /// A capability was granted, but not for the specific parameter requested —
     /// e.g. an HTTP client grant for a host not on the allowlist.
     /// **Remediation:** the error names the granted set and the requested
@@ -264,6 +267,10 @@ pub enum ErrorCode {
     /// **Remediation:** this is a configuration error, not a user error. Move
     /// the grant into `qqq.toml`.
     CapabilityWideningRefused = 4002,
+    /// The requested capability is not granted by any configuration layer.
+    /// **Remediation:** the error prints the exact stanza to add to
+    /// `qqq.toml`, and `qqqai why <capability>` shows the full chain.
+    CapabilityDenied = 4003,
     /// The guest requested a secret it was granted, but the secret value could
     /// not be used for the requested operation.
     /// **Remediation:** check the secret's format and the operation's
@@ -276,22 +283,14 @@ pub enum ErrorCode {
     CapabilityQuotaExhausted = 4005,
 
     // -- 5xxx: package / registry --------------------------------------------
+    /// The registry could not be reached.
+    /// **Remediation:** retryable. Check connectivity or use `--offline`.
+    RegistryUnreachable = 5001,
     /// An artifact's signature did not verify against the configured trust
     /// policy.
     /// **Remediation:** do not bypass this. Verify the publisher, or update the
     /// trust policy if the signer is legitimately new.
     SignatureVerificationFailed = 5002,
-    /// The registry could not be reached.
-    /// **Remediation:** retryable. Check connectivity or use `--offline`.
-    RegistryUnreachable = 5001,
-    /// A named dependency is not present in the manifest.
-    /// **Remediation:** the error names the table searched; `qqqai inspect`
-    /// lists what the project actually depends on.
-    ///
-    /// Distinct from `VersionUnsatisfiable`: that means a dependency exists and
-    /// no version satisfies it, this means there is no such dependency at all.
-    /// Conflating them would send a user with a typo to search the registry.
-    DependencyNotFound = 5007,
     /// The lockfile and the manifest disagree.
     /// **Remediation:** run `qqqai install` to re-resolve, or `--frozen` to
     /// fail rather than change anything.
@@ -307,6 +306,14 @@ pub enum ErrorCode {
     /// **Remediation:** `qqqai install --force` re-fetches. Report if it
     /// recurs — this indicates a registry or transport problem.
     StoreCorrupted = 5006,
+    /// A named dependency is not present in the manifest.
+    /// **Remediation:** the error names the table searched; `qqqai inspect`
+    /// lists what the project actually depends on.
+    ///
+    /// Distinct from `VersionUnsatisfiable`: that means a dependency exists and
+    /// no version satisfies it, this means there is no such dependency at all.
+    /// Conflating them would send a user with a typo to search the registry.
+    DependencyNotFound = 5007,
 
     // -- 6xxx: host / infrastructure -----------------------------------------
     /// The instance pool has no free slot and the request was shed.
@@ -399,6 +406,13 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// The class this code belongs to.
+    ///
+    /// # Panics
+    ///
+    /// Panics in a build that adds an 8xxx+ (or 0xxx) code without updating
+    /// this match. That is deliberate: a silent misclassification as `Agent`
+    /// would be worse, and the `class_matches_numeric_range` test fails first
+    /// anyway.
     #[must_use]
     pub const fn class(self) -> ErrorClass {
         match (self as u16) / 1000 {
@@ -408,7 +422,13 @@ impl ErrorCode {
             4 => ErrorClass::Capability,
             5 => ErrorClass::Package,
             6 => ErrorClass::Host,
-            _ => ErrorClass::Agent,
+            7 => ErrorClass::Agent,
+            // Every code is 1xxx-7xxx by construction (see the range test), so
+            // reaching here would mean a code was added without updating this
+            // match — a loud failure rather than a silent misclassification as
+            // Agent. (`panic!` with a literal, not `unreachable!`, because only
+            // the former is allowed in a `const fn`.)
+            _ => panic!("ErrorCode out of its 1-7xxx class range"),
         }
     }
 
@@ -522,15 +542,22 @@ impl ErrorCode {
 
     /// Parse a full identifier such as `QQQ-4003` (case-insensitive on the
     /// prefix, tolerant of surrounding whitespace).
+    ///
+    /// The code part must be exactly four digits with no leading zeros beyond
+    /// what the code itself carries: `QQQ-04003` does not parse, because the
+    /// canonical identifier is `QQQ-4003` and accepting both would let two
+    /// spellings of one error into logs.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
-        let rest = s
-            .strip_prefix("QQQ-")
-            .or_else(|| s.strip_prefix("qqq-"))
-            .or_else(|| s.strip_prefix("Qqq-"))?;
-        // Reject `QQQ-4_003` style noise; digits only.
-        if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        // Four prefix bytes forming `qqq-` in any casing, then exactly four
+        // digits. `get` fails on short or non-boundary input rather than
+        // panicking, and `eq_ignore_ascii_case` covers all eight casings.
+        if !s.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("qqq-")) {
+            return None;
+        }
+        let rest = s.get(4..)?;
+        if rest.len() != 4 || !rest.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
         rest.parse::<u16>().ok().and_then(Self::from_number)
@@ -603,11 +630,20 @@ pub struct Error {
 
 impl Error {
     /// Construct an error from a code and a human sentence.
+    ///
+    /// The message must be a single line: [`Self::render`] and [`Self::to_string`]
+    /// assume one human sentence, and a `Display` that spans lines would break
+    /// the single-line composition `Display` exists for.
     #[must_use]
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        let message = message.into();
+        debug_assert!(
+            !message.contains('\n'),
+            "error messages must be a single line; use `cause` for detail"
+        );
         Self {
             code,
-            message: message.into(),
+            message,
             cause: Vec::new(),
             remediation: None,
             context: Vec::new(),
@@ -777,6 +813,21 @@ mod tests {
         }
     }
 
+    /// Declaration order is numeric order, so the derived `Ord` agrees with
+    /// `number()`. A new code appended in the wrong place fails here rather
+    /// than silently reordering every sorted collection of codes.
+    #[test]
+    fn declaration_order_is_numeric_order() {
+        let mut sorted = ErrorCode::all().to_vec();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            ErrorCode::all(),
+            "ErrorCode declaration order drifted from numeric order; the derived \
+             Ord no longer agrees with number()"
+        );
+    }
+
     /// Codes must be sorted, so review diffs are readable and `all()` is
     /// obviously complete at a glance.
     #[test]
@@ -876,8 +927,30 @@ mod tests {
             ErrorCode::parse("  qqq-4003  "),
             Some(ErrorCode::CapabilityDenied)
         );
+        // All eight casings of the prefix must work, not just the three the
+        // original implementation happened to list.
+        for prefix in [
+            "QQQ-", "QQq-", "QqQ-", "Qqq-", "qQQ-", "qQq-", "qqQ-", "qqq-",
+        ] {
+            assert_eq!(
+                ErrorCode::parse(&format!("{prefix}4003")),
+                Some(ErrorCode::CapabilityDenied),
+                "prefix {prefix} must parse"
+            );
+        }
         assert_eq!(
             ErrorCode::parse("Qqq-4003"),
+            Some(ErrorCode::CapabilityDenied)
+        );
+    }
+
+    #[test]
+    fn parse_rejects_noncanonical_digit_shapes() {
+        // Five digits with a leading zero is not the canonical identifier, even
+        // though it denotes the same number.
+        assert_eq!(ErrorCode::parse("QQQ-04003"), None);
+        assert_eq!(
+            ErrorCode::parse("QQQ-4003"),
             Some(ErrorCode::CapabilityDenied)
         );
     }

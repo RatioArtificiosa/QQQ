@@ -1778,13 +1778,17 @@ impl Manifest {
                 push(Capability::ClockMonotonic);
             }
         }
+        // Non-blank gates, like kv above: validation refuses blanks at parse,
+        // and direct construction (which bypasses validation) must grant
+        // nothing for blanks too — otherwise `allow = [" "]` grants `EnvRead`
+        // for no variable on the direct path but refuses on the parse path.
         if let Some(e) = &self.capabilities.env
-            && !e.allow.is_empty()
+            && e.allow.iter().any(|s| !s.trim().is_empty())
         {
             push(Capability::EnvRead);
         }
         if let Some(d) = &self.capabilities.dns
-            && !d.resolve.is_empty()
+            && d.resolve.iter().any(|s| !s.trim().is_empty())
         {
             push(Capability::DnsResolve);
         }
@@ -4120,6 +4124,59 @@ allow_origins = ["https://app.example.com"]
         assert!(
             msg.contains("not a URL"),
             "should guide the user; got: {msg}"
+        );
+    }
+
+    /// Ultra-review r3 M2: numeric and hex IP forms must be refused at
+    /// parse — a resolver reads `2130706433`/`0x7f.1` as an address while a
+    /// naive allowlist reads a name.
+    #[test]
+    fn numeric_and_hex_ip_forms_are_rejected_at_parse() {
+        for bad in ["2130706433", "0x7f.1", "0X7F.1"] {
+            let src = format!("{MINIMAL}\n[capabilities.http]\nclient = [\"{bad}\"]\n");
+            assert!(
+                Manifest::parse(&src).is_err(),
+                "numeric/hex form `{bad}` must be refused at parse"
+            );
+        }
+    }
+
+    /// Ultra-review r3 M1: blank env/dns entries grant nothing however the
+    /// manifest is built — parse refuses, and direct construction gates too.
+    #[test]
+    fn blank_env_and_dns_direct_construction_grants_nothing() {
+        use crate::manifest::{DnsCapability, EnvCapability};
+        use std::collections::BTreeMap;
+        let manifest = Manifest {
+            package: Package {
+                name: "probe".to_owned(),
+                version: "0.1.0".to_owned(),
+                description: None,
+                license: None,
+            },
+            build: Build::default(),
+            capabilities: Capabilities {
+                env: Some(EnvCapability {
+                    allow: vec!["   ".to_owned()],
+                }),
+                dns: Some(DnsCapability {
+                    resolve: vec![String::new()],
+                }),
+                ..Default::default()
+            },
+            limits: Limits::default(),
+            dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
+            server: Server::default(),
+        };
+        let caps = manifest.declared_capabilities();
+        assert!(
+            !caps.contains(&crate::capability::Capability::EnvRead),
+            "blank env must grant nothing"
+        );
+        assert!(
+            !caps.contains(&crate::capability::Capability::DnsResolve),
+            "blank dns must grant nothing"
         );
     }
 

@@ -330,6 +330,15 @@ fn validate_websocket(ws: &crate::manifest::WebsocketPolicy) -> Result<(), Manif
                 });
             }
         }
+        if value == "*" || value.starts_with('.') || value.ends_with('.') || value.contains("..") {
+            return Err(ManifestError::InvalidField {
+                field: "server.websocket.allowed_hosts".to_owned(),
+                reason: format!(
+                    "`{value}` is not a bare host: no wildcard, no leading or \
+                     trailing dot, no empty label"
+                ),
+            });
+        }
     }
     for (name, cap) in [
         ("max_frame_bytes", ws.max_frame_bytes),

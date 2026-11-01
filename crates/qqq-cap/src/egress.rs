@@ -668,6 +668,21 @@ impl EgressPolicy {
                 "it contains a path separator; a destination is a host, not a URL".to_owned(),
             ));
         }
+        for bad in [':', '?', '#'] {
+            if bad == ':'
+                && (destination.host.starts_with('[')
+                    || destination.host.parse::<std::net::Ipv6Addr>().is_ok())
+            {
+                continue;
+            }
+            if destination.host.contains(bad) {
+                return Decision::Deny(Denial::MalformedHost(format!(
+                    "it contains `{bad}`, which never appears in a bare hostname; \
+                         bracket IPv6 literals as `[::1]` and put paths, queries, \
+                         and fragments in the request, not the destination"
+                )));
+            }
+        }
         if destination.host.contains('\0') {
             return Decision::Deny(Denial::MalformedHost("it contains a NUL byte".to_owned()));
         }
@@ -679,6 +694,24 @@ impl EgressPolicy {
         if destination.host.contains('%') {
             return Decision::Deny(Denial::MalformedHost(
                 "it contains a zone ID, which this policy does not support".to_owned(),
+            ));
+        }
+        // Numeric forms a resolver reads as an address (`2130706433`,
+        // `0x7f.1`) must not sail through as hostnames: they would bypass
+        // the literal-address gate. Refuse them as malformed so the fix is
+        // at the destination, not in the allowlist.
+        if !destination.host.contains('.') && destination.host.chars().all(|c| c.is_ascii_digit()) {
+            return Decision::Deny(Denial::MalformedHost(
+                "it is all digits and reads as a numeric IP address; write the \
+                 dotted-quad form instead"
+                    .to_owned(),
+            ));
+        }
+        if destination.host.contains("0x") || destination.host.contains("0X") {
+            return Decision::Deny(Denial::MalformedHost(
+                "it looks like a hexadecimal IP literal, which this policy does \
+                 not support; write the dotted-quad form instead"
+                    .to_owned(),
             ));
         }
 
@@ -858,6 +891,51 @@ mod tests {
             configured_but_missing.denial(),
             Some(&Denial::HostNotAllowed)
         );
+    }
+
+    /// Ultra-review r3 M2/L5: numeric/hex/query/fragment/colon destinations
+    /// are malformed — never `HostNotAllowed` (which would send the operator
+    /// to the allowlist) and never treated as names.
+    #[test]
+    fn malformed_destinations_are_malformed_not_unmatched() {
+        let policy = policy_with(&["api.example.com"]);
+        for host in [
+            "2130706433",
+            "0x7f.1",
+            "user@example.com",
+            "fe80::1%eth0",
+            "example.com?q=1",
+            "example.com#frag",
+            "example.com:8080",
+        ] {
+            let decision = policy.authorize(
+                &grants_with_http(),
+                &tenant("acme"),
+                &Destination::new(host, 443, Scheme::Https),
+            );
+            assert!(
+                matches!(decision.denial(), Some(Denial::MalformedHost(_))),
+                "{host} must be malformed, got: {:?}",
+                decision.denial(),
+            );
+        }
+        // Bracketed and bare IPv6 literals are well-formed (still gated by
+        // the literal opt-in, not by shape).
+        for host in ["[::1]", "::1"] {
+            let decision = policy.authorize(
+                &grants_with_http(),
+                &tenant("acme"),
+                &Destination::new(host, 443, Scheme::Https),
+            );
+            assert!(
+                matches!(
+                    decision.denial(),
+                    Some(Denial::IpLiteralNotAllowed | Denial::HostNotAllowed)
+                ),
+                "{host} must pass shape, got: {:?}",
+                decision.denial(),
+            );
+        }
     }
 
     // -- The allowlist actually decides --------------------------------------

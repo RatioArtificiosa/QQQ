@@ -312,7 +312,7 @@ impl Capability {
         // manifest text, and Levenshtein over 24 names is O(input × name).
         // No capability name exceeds 16 chars, so anything far longer is a
         // typo-free rejection — returning None bounds work to 64 chars.
-        if input.len() > 64 {
+        if input.chars().count() > 64 {
             return None;
         }
         // Distance threshold scales with input length: a 3-char typo in a

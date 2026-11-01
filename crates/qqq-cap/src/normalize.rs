@@ -319,6 +319,23 @@ impl HostPattern {
                     })?,
             )
         } else {
+            // A bare number (`2130706433`) is a numeric IP in `inet_aton`
+            // semantics (it means 127.0.0.1), and `0x` marks a hex literal
+            // (`0x7f.1`). Both read as addresses to a resolver but as names
+            // to a naive allowlist — the classic bypass. Refuse them: name
+            // the address in dotted-quad form or opt into literals.
+            if !host_lower.contains('.') && host_lower.chars().all(|c| c.is_ascii_digit()) {
+                return Err(format!(
+                    "`{host_lower}` is all digits and reads as a numeric IP address; \
+                     write the dotted-quad form instead"
+                ));
+            }
+            if host_lower.contains("0x") {
+                return Err(format!(
+                    "`{host_lower}` looks like a hexadecimal IP literal, which this \
+                     policy does not support; write the dotted-quad form instead"
+                ));
+            }
             None
         };
         let (wildcard, bare) = split_wildcard(&host_lower, is_ipv6, literal_ip.as_ref())?;
@@ -463,8 +480,15 @@ fn parse_port(s: &str) -> Result<u16, String> {
     if s.is_empty() {
         return Err("port is empty".to_owned());
     }
-    s.parse::<u16>()
-        .map_err(|_| format!("`{s}` is not a valid port (0-65535)"))
+    let port: u16 = s
+        .parse()
+        .map_err(|_| format!("`{s}` is not a valid port (1-65535)"))?;
+    // Port 0 never matches a real destination (the connector dials a concrete
+    // port), so allowing it creates dead configuration that reads as policy.
+    if port == 0 {
+        return Err("port 0 never matches a destination; name the real port".to_owned());
+    }
+    Ok(port)
 }
 
 impl fmt::Display for HostPattern {

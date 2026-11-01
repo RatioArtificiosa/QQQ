@@ -2732,6 +2732,14 @@ mod tests {
         assert!(demand.is_none(), "no demand half expected");
     }
 
+    /// Ultra-review r3 M6: `to` accepts only `host` — any other field is
+    /// refused rather than parsed-then-ignored by the overlay compiler.
+    #[test]
+    fn a_to_clause_on_a_non_host_field_is_rejected() {
+        let e = err("deny http.client to mfa \"x\"");
+        assert!(e.message.contains("only `host`"), "got: {}", e.message);
+    }
+
     /// Ultra-review r1 C3: `allow` with a qualifier is rejected — it would
     /// otherwise enforce as an unqualified intersection (widening).
     /// `deny` with a qualifier stays unconditional (fail-closed, documented).

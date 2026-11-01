@@ -353,6 +353,13 @@ pub struct HardenPolicy {
     /// as an unprivileged user already — the common case under a container
     /// runtime, and the one where attempting `setuid` would *fail* and produce a
     /// spurious `Failed` entry.
+    ///
+    /// # Why a configured drop off Linux is `Unsupported` rather than `Failed`
+    ///
+    /// Identity change is a Linux step; on other platforms the process identity
+    /// is managed by the platform's own mechanism, so there is nothing to refuse
+    /// and the report stays clean. A caller that needs the distinction gets it
+    /// from the per-step outcome, which names the platform limitation.
     pub drop_to_uid: Option<u32>,
     /// Drop to this gid, when set.
     pub drop_to_gid: Option<u32>,
@@ -419,7 +426,43 @@ pub enum SeccompProfile {
 }
 
 impl SeccompProfile {
-    /// The syscalls this profile permits.
+    /// Allowlist names that exist only on x86-64.
+    ///
+    /// See `insert_legacy_x86_64_syscalls` for why: aarch64 removed the non-`at`
+    /// file syscalls, the old poll/select/epoll variants, `pipe`/`dup2`,
+    /// `eventfd`, and the x86-only `arch_prctl`. `build_and_install` skips these
+    /// off x86-64 rather than failing — their successors are all in the profile,
+    /// so the filter loses nothing, and failing would make seccomp
+    /// uninstallable on aarch64. Any OTHER unresolvable name is still a QQQ bug,
+    /// and the successor-coverage test below pins that the skip narrows nothing.
+    ///
+    /// Linux-only like the filter it describes: seccomp is a Linux facility, so
+    /// off Linux this list would be dead weight.
+    #[cfg(target_os = "linux")]
+    const X86_64_ONLY_SYSCALLS: &[&str] = &[
+        "dup2",
+        "pipe",
+        "eventfd",
+        "epoll_create",
+        "epoll_wait",
+        "poll",
+        "select",
+        "stat",
+        "lstat",
+        "access",
+        "readlink",
+        "rename",
+        "unlink",
+        "mkdir",
+        "rmdir",
+        "arch_prctl",
+    ];
+
+    /// Every syscall the [`SeccompProfile::Runtime`] profile permits.
+    ///
+    /// An **associated** constant, because the list is a property of the profile
+    /// rather than a free-standing table: `Self::RUNTIME_ALLOWLIST` reads as what
+    /// it is, and a second profile added later gets its own.
     ///
     /// # How this list was chosen, and what it is not
     ///
@@ -434,11 +477,6 @@ impl SeccompProfile {
     /// would use to escalate (`ptrace`, `mount`, `kexec_*`, `bpf`,
     /// `process_vm_*`, `init_module`, `setuid` after startup), not that it is the
     /// smallest set that works.
-    /// Every syscall the [`SeccompProfile::Runtime`] profile permits.
-    ///
-    /// An **associated** constant, because the list is a property of the profile
-    /// rather than a free-standing table: `Self::RUNTIME_ALLOWLIST` reads as what
-    /// it is, and a second profile added later gets its own.
     ///
     /// # Why this is a constant rather than a `match` arm
     ///
@@ -475,6 +513,9 @@ impl SeccompProfile {
         "sigaltstack",
         "restart_syscall",
         "prctl",
+        // x86-only (FS/GS base); resolved only where the constant exists —
+        // see `insert_optional_syscalls`. On other 64-bit architectures the
+        // profile build reports the platform gap rather than filtering wrongly.
         "arch_prctl",
         // -- memory ------------------------------------------------
         "brk",
@@ -710,26 +751,6 @@ pub const STEP_ORDER: &[&str] = &[
     STEP_SECCOMP,
 ];
 
-/// Apply the hardening steps in [`STEP_ORDER`].
-///
-/// # Never fails
-///
-/// Returns a [`HardenReport`] describing what happened. See that type for why
-/// this is not a `Result`.
-///
-/// # The steps, and what each defends against
-///
-/// * **`no_new_privs`** — a `setuid` binary executed by this process cannot gain
-///   privilege. Without it, a compromise that reaches `execve` can re-escalate
-///   through any setuid binary on the filesystem.
-/// * **Dropping gid then uid** — the process loses the authority to read or write
-///   anything the target identity cannot. This is the step that bounds the blast
-///   radius of a compromise that escapes Wasm entirely: §7.1's first asset is
-///   *host process integrity*, and this is what makes its loss less than total.
-/// * **seccomp** — narrows the syscall surface a compromised host can reach. It is
-///   the weakest of the three (a filter is a policy, not a boundary) and the
-///   reason it is off by default.
-///
 /// What the running host supports of §7.5's optional hardening.
 ///
 /// # Why detection exists when enforcement does not
@@ -769,7 +790,16 @@ pub struct HostCapabilities {
     pub landlock: bool,
 }
 
-/// Detect whether the host has MPK, and why enforcement is not wired up.
+/// The optional hardening this host supports.
+#[must_use]
+pub fn host_capabilities() -> HostCapabilities {
+    HostCapabilities {
+        memory_protection_keys: mpk_support(),
+        landlock: landlock_available(),
+    }
+}
+
+/// Apply the hardening steps in [`STEP_ORDER`].
 ///
 /// # The block, stated exactly
 ///
@@ -846,21 +876,23 @@ fn cpu_has_pku() -> bool {
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn landlock_available() -> bool {
-    // `landlock` exposes the probe through its own compatibility type. Using it
-    // rather than hand-rolling a `landlock_create_ruleset` call keeps this safe and
-    // keeps the ABI knowledge in the crate that owns it.
+    // Creation without restriction is the probe: `Ruleset::create` performs the
+    // `landlock_create_ruleset` syscall, while `restrict_self` — which is never
+    // called here — is the only irreversible half. A created ruleset that is
+    // never restricted is dropped without effect, so asking the question cannot
+    // restrict the process. The previous version of this probe only ran the
+    // *builder* (`handle_access(...).is_ok()` performs no syscall) and OR-ed a
+    // constant-true comparison, so it answered `true` on every Linux kernel
+    // including ones predating Landlock.
+    //
+    // Both traits stay imported deliberately: `Access` for `from_all`, and
+    // `RulesetAttr` for `handle_access` — the two calls that decide *which*
+    // rights are queried and *how*, the security-relevant choices in this probe.
     use landlock::{ABI, Access, AccessFs, Ruleset, RulesetAttr};
-    // `handle_access` on a default ruleset queries the kernel ABI. If the kernel
-    // has no Landlock, the crate reports an error rather than an ABI, and this
-    // returns false. No ruleset is created and `restrict_self` is never called, so
-    // nothing here is irreversible.
     Ruleset::default()
         .handle_access(AccessFs::from_all(ABI::V1))
+        .and_then(Ruleset::create)
         .is_ok()
-        // The `RulesetAttr` import is needed for `handle_access`; silencing an
-        // unused-import warning is not the point -- this line exists so a reader
-        // sees that only the *query* half ran.
-        && ABI::V1 as u32 >= 1
 }
 
 /// Landlock is a Linux LSM, so no other platform has it.
@@ -879,21 +911,29 @@ pub fn landlock_available() -> bool {
     false
 }
 
-/// The optional hardening this host supports.
-#[must_use]
-pub fn host_capabilities() -> HostCapabilities {
-    HostCapabilities {
-        memory_protection_keys: mpk_support(),
-        landlock: landlock_available(),
-    }
-}
-
 /// Apply the hardening steps in [`STEP_ORDER`].
 ///
 /// # Never fails
 ///
 /// Returns a [`HardenReport`] describing what happened. See that type for why
 /// this is not a `Result`.
+///
+/// # The steps, and what each defends against
+///
+/// * **`no_new_privs`** — a `setuid` binary executed by this process cannot gain
+///   privilege. Without it, a compromise that reaches `execve` can re-escalate
+///   through any setuid binary on the filesystem.
+/// * **Dropping gid then uid** — the process loses the authority to read or write
+///   anything the target identity cannot. This is the step that bounds the blast
+///   radius of a compromise that escapes Wasm entirely: §7.1's first asset is
+///   *host process integrity*, and this is what makes its loss less than total.
+/// * **Landlock** — restricts what a compromised host process can read on the
+///   filesystem to the granted directories. Irreversible for the installing
+///   process, which is why it is opt-in and negotiated at the highest ABI the
+///   kernel accepts.
+/// * **seccomp** — narrows the syscall surface a compromised host can reach. It is
+///   the weakest of the three (a filter is a policy, not a boundary) and the
+///   reason it is off by default.
 #[must_use]
 pub fn harden(policy: &HardenPolicy) -> HardenReport {
     let mut report = HardenReport::new();
@@ -943,18 +983,39 @@ mod imp {
             );
         };
 
+        // Refuse to drop to the root group. `setgid(0)` when already root is a
+        // no-op that reports success, so a policy that named gid 0 would produce
+        // an `Applied` entry for a drop that did not happen — the same
+        // lying-report shape the uid guard below refuses.
+        if gid == 0 {
+            return StepOutcome::failed(
+                STEP_DROP_GID,
+                "`drop_to_gid` is 0, which is root; dropping to root is a no-op \
+                 that would be reported as applied",
+            );
+        }
+
         // Supplementary groups FIRST, and this is the step that is easy to miss.
         // `setgid` changes the *primary* group only; a process started by root
         // keeps root's supplementary groups, and those are checked by the kernel
         // on file access just as the primary is. Dropping the primary group and
         // leaving the supplementary ones is a hardening step that reads as
         // complete and is not.
-        if let Err(e) = nix::unistd::setgroups(&[Gid::from_raw(gid)]) {
+        //
+        // Cleared, not set: after `setgid` the primary group is `gid`, so no
+        // supplementary group is needed and the empty set is the minimal one.
+        // Only a privileged process may call `setgroups` at all — even to keep
+        // its own group — so an unprivileged process skips this call and keeps
+        // the groups it started with, which are already its own and which it
+        // could not change anyway.
+        if nix::unistd::Uid::effective().is_root()
+            && let Err(e) = nix::unistd::setgroups(&[])
+        {
             return StepOutcome::failed(
                 STEP_DROP_GID,
                 format!(
                     "setgroups was refused: {e}; the supplementary groups are still \
-                         those of the starting user, which is a partial drop"
+                     those of the starting user, which is a partial drop"
                 ),
             );
         }
@@ -987,13 +1048,34 @@ mod imp {
             );
         }
 
+        // This step owns the supplementary groups unconditionally: a uid change
+        // that kept the old groups would be a partial drop that reads as
+        // complete. Clearing here is idempotent — if the gid step already ran
+        // it cleared them, and repeating the clear is a harmless no-op — so a
+        // gid step that was requested but FAILED (a refused `setgroups`, a
+        // refused gid) cannot leak root's groups past the uid change. Only a
+        // privileged process can clear them; an unprivileged process keeps its
+        // own groups, which it could not change anyway, so there is nothing to
+        // refuse here.
+        if nix::unistd::Uid::effective().is_root()
+            && let Err(e) = nix::unistd::setgroups(&[])
+        {
+            return StepOutcome::failed(
+                STEP_DROP_UID,
+                format!(
+                    "setgroups was refused while clearing the supplementary groups \
+                     for the uid-only drop: {e}; the old groups would survive \
+                     the uid change, which is a partial drop"
+                ),
+            );
+        }
+
         match nix::unistd::setuid(Uid::from_raw(uid)) {
             Ok(()) => StepOutcome::applied(STEP_DROP_UID),
             Err(e) => StepOutcome::failed(STEP_DROP_UID, format!("setuid was refused: {e}")),
         }
     }
 
-    /// Install the seccomp-BPF filter.
     /// Apply a Landlock filesystem ruleset (`SEC-026`).
     ///
     /// # What Landlock adds that the capability engine does not
@@ -1021,17 +1103,11 @@ mod imp {
     /// confusing outage. The caller asked for Landlock but named nothing to keep,
     /// which is a configuration error, and it is reported as one.
     pub(super) fn landlock(policy: &HardenPolicy) -> StepOutcome {
-        // `Access` and `Compatible` are traits, so they must be in scope for
-        // `AccessFs::from_all` and `Ruleset::compatibility` to resolve. Both are
-        // imported deliberately rather than via a glob: `from_all` is the access
-        // mask that decides *which* filesystem rights the ruleset handles, and
-        // `compatibility` is the setting that decides whether a weaker ruleset is
-        // accepted silently -- the two most security-relevant choices in this
-        // function, so they should be visible at the call site.
-        use landlock::{
-            ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-            RulesetAttr, RulesetCreatedAttr, RulesetStatus,
-        };
+        // `RulesetCreatedAttr` is the trait behind the `add_rule` /
+        // `restrict_self` calls below, and `PathBeneath` / `PathFd` shape the
+        // rules; the ABI negotiation lives in `create_with_best_abi`, so this
+        // function no longer names an ABI itself.
+        use landlock::{AccessFs, PathBeneath, PathFd, RulesetCreatedAttr, RulesetStatus};
 
         if !policy.landlock {
             return StepOutcome::skipped(
@@ -1051,6 +1127,17 @@ mod imp {
             );
         }
 
+        // # Why the highest ABI the kernel accepts, rather than V1
+        //
+        // `from_all(ABI::V1)` on a V5 kernel enforces only the V1 rights and still
+        // reports `FullyEnforced` — true of the request, but an operator reading
+        // "fully enforced" believes `REFER` and `TRUNCATE` are restricted when
+        // they are not. Requesting the highest ABI the kernel accepts makes the
+        // report's "fully enforced" mean what it says, and the negotiated ABI is
+        // recorded in the outcome detail either way. V1 remains the floor: a
+        // 5.13 kernel only knows V1, and that is a legitimate ceiling, not a
+        // shortfall.
+        //
         // # Why the ABI is probed rather than assumed, and why `HardRequirement`
         //
         // `set_compatibility(CompatLevel::HardRequirement)` makes every subsequent
@@ -1064,12 +1151,8 @@ mod imp {
         //
         // The call must come BEFORE `handle_access`, because it governs the build
         // methods that follow it.
-        let ruleset = match Ruleset::default()
-            .set_compatibility(CompatLevel::HardRequirement)
-            .handle_access(AccessFs::from_all(ABI::V1))
-            .and_then(Ruleset::create)
-        {
-            Ok(created) => created,
+        let (ruleset, abi) = match create_with_best_abi() {
+            Ok(found) => found,
             Err(e) => return classify_landlock_error(&e),
         };
 
@@ -1096,7 +1179,7 @@ mod imp {
                     );
                 }
             };
-            match created.add_rule(PathBeneath::new(fd, AccessFs::from_read(ABI::V1))) {
+            match created.add_rule(PathBeneath::new(fd, AccessFs::from_read(abi))) {
                 Ok(next) => {
                     created = next;
                     applied += 1;
@@ -1158,6 +1241,38 @@ mod imp {
         }
     }
 
+    /// Create a ruleset at the highest Landlock ABI the kernel supports.
+    ///
+    /// Tries V5 down to V1 and keeps the first `create` that succeeds: that
+    /// version is the kernel's ceiling, and it is what the returned ruleset
+    /// enforces. `HardRequirement` stays on for every attempt, so a kernel that
+    /// accepts the version but not a requested right still errors rather than
+    /// silently enforcing less. A higher attempt that fails for any reason falls
+    /// through to the next lower ABI — V1 is the floor, and only the floor's
+    /// error is classified, so a kernel without Landlock at all surfaces its
+    /// `ENOSYS` rather than an error from an ABI it was never expected to know.
+    fn create_with_best_abi()
+    -> Result<(landlock::RulesetCreated, landlock::ABI), landlock::RulesetError> {
+        use landlock::{ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr};
+        for abi in [ABI::V5, ABI::V4, ABI::V3, ABI::V2] {
+            let attempt = Ruleset::default()
+                .set_compatibility(CompatLevel::HardRequirement)
+                .handle_access(AccessFs::from_all(abi))
+                .and_then(Ruleset::create);
+            if let Ok(created) = attempt {
+                return Ok((created, abi));
+            }
+        }
+        // V1 is the floor: its error is what the caller classifies, so a kernel
+        // without Landlock at all surfaces its `ENOSYS` rather than an error
+        // from an ABI it was never expected to know.
+        Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::from_all(ABI::V1))
+            .and_then(Ruleset::create)
+            .map(|created| (created, ABI::V1))
+    }
+
     /// Decide whether a Landlock construction failure is the environment or a fault.
     ///
     /// # Why this does not simply catch everything
@@ -1168,12 +1283,7 @@ mod imp {
     /// nothing. Only the errors that *mean* "unsupported" are classified that way.
     fn classify_landlock_error(e: &landlock::RulesetError) -> StepOutcome {
         let text = e.to_string();
-        // `landlock` renders its errors with the errno name, which is the only
-        // stable signal the crate exposes.
-        let unsupported = text.contains("ENOSYS")
-            || text.contains("EOPNOTSUPP")
-            || text.contains("not supported");
-        if unsupported {
+        if landlock_err_is_unsupported(e) {
             StepOutcome::unsupported(
                 STEP_LANDLOCK,
                 format!(
@@ -1196,6 +1306,31 @@ mod imp {
         }
     }
 
+    /// Whether a Landlock error means "this kernel cannot do it" rather than
+    /// "the request was refused".
+    ///
+    /// # Why the errno is matched structurally rather than read from `Display`
+    ///
+    /// The `Display` text is a rendering choice of the `landlock` crate; a
+    /// rewording would silently flip `Failed` and `Unsupported` — hiding a real
+    /// fault as an environment answer, or alarming on an old kernel. Matching
+    /// the syscall errno is matching the kernel's answer, which is the stable
+    /// contract. `ENOSYS` is "no such syscall" (pre-5.13); `EOPNOTSUPP` is the
+    /// kernel declining the requested operation.
+    fn landlock_err_is_unsupported(e: &landlock::RulesetError) -> bool {
+        use landlock::{CreateRulesetError, RestrictSelfError, RulesetError};
+        let errno = match e {
+            RulesetError::CreateRuleset(CreateRulesetError::CreateRulesetCall {
+                source, ..
+            }) => source.raw_os_error(),
+            RulesetError::RestrictSelf(RestrictSelfError::RestrictSelfCall { source, .. }) => {
+                source.raw_os_error()
+            }
+            _ => None,
+        };
+        matches!(errno, Some(libc::ENOSYS | libc::EOPNOTSUPP))
+    }
+
     pub(super) fn seccomp(policy: &HardenPolicy) -> StepOutcome {
         if !policy.seccomp {
             return StepOutcome::skipped(
@@ -1208,7 +1343,7 @@ mod imp {
         let profile = policy.seccomp_profile;
         match build_and_install(profile) {
             Ok(()) => StepOutcome::applied(STEP_SECCOMP),
-            Err(detail) => StepOutcome::failed(STEP_SECCOMP, detail),
+            Err(outcome) => outcome,
         }
     }
 
@@ -1263,11 +1398,37 @@ mod imp {
     /// history of seccomp bypasses. The program denies by default and permits an
     /// explicit allowlist, so a syscall added to Linux tomorrow is refused without
     /// anyone updating this file.
-    fn build_and_install(profile: SeccompProfile) -> Result<(), String> {
+    fn build_and_install(profile: SeccompProfile) -> Result<(), StepOutcome> {
         use seccompiler::{SeccompAction, SeccompFilter};
 
-        let arch = seccompiler::TargetArch::try_from(std::env::consts::ARCH)
-            .map_err(|e| format!("no seccomp target arch for this platform: {e}"))?;
+        let Some(arch) = target_arch_for(std::env::consts::ARCH) else {
+            // An unknown architecture is an environment answer, not a refusal:
+            // nothing failed, there is simply no filter written for this
+            // platform. Reporting it `Failed` would make `is_clean` false on a
+            // host where nothing went wrong.
+            return Err(StepOutcome::unsupported(
+                STEP_SECCOMP,
+                format!(
+                    "no seccompiler target for architecture `{}`; the seccomp \
+                     filter is written per architecture and this one has none",
+                    std::env::consts::ARCH
+                ),
+            ));
+        };
+
+        if !seccomp_profile_covers(std::env::consts::ARCH) {
+            // seccompiler knows this architecture but the profile's number
+            // tables do not cover it — same environment answer, one layer up.
+            return Err(StepOutcome::unsupported(
+                STEP_SECCOMP,
+                format!(
+                    "the `Runtime` seccomp profile is written for x86-64 and \
+                     aarch64; `{}` has no number table, so there is nothing to \
+                     install rather than something refused",
+                    std::env::consts::ARCH
+                ),
+            ));
+        }
 
         // A `BTreeMap<i64, Vec<SeccompRule>>` of syscall number to rules. An empty
         // rule vector means "permit unconditionally", which is what every entry
@@ -1280,14 +1441,30 @@ mod imp {
         let mut rules = std::collections::BTreeMap::new();
         for name in profile.allowed() {
             let Some(nr) = syscall_number(name) else {
-                return Err(format!(
-                    "the `Runtime` profile names `{name}`, which this architecture does \
-                     not have; the profile is platform-specific and this is a QQQ bug \
-                     rather than a configuration error"
+                // Off x86-64 the documented legacy names have no number, and
+                // their successors are all in the profile — skipping them
+                // narrows nothing (pinned by the successor-coverage test), while
+                // failing would make seccomp uninstallable on aarch64. Any other
+                // unresolvable name is a QQQ bug rather than a configuration
+                // error.
+                if !cfg!(target_arch = "x86_64")
+                    && SeccompProfile::X86_64_ONLY_SYSCALLS.contains(name)
+                {
+                    continue;
+                }
+                return Err(StepOutcome::failed(
+                    STEP_SECCOMP,
+                    format!(
+                        "the `Runtime` profile names `{name}`, which this architecture does \
+                         not have; the profile is platform-specific and this is a QQQ bug \
+                         rather than a configuration error"
+                    ),
                 ));
             };
             rules.insert(nr, Vec::new());
         }
+
+        let failed = |detail: String| StepOutcome::failed(STEP_SECCOMP, detail);
 
         let filter = SeccompFilter::new(
             rules,
@@ -1300,14 +1477,48 @@ mod imp {
             SeccompAction::Allow,
             arch,
         )
-        .map_err(|e| format!("the seccomp filter was rejected at construction: {e}"))?;
+        .map_err(|e| {
+            failed(format!(
+                "the seccomp filter was rejected at construction: {e}"
+            ))
+        })?;
 
         let program: seccompiler::BpfProgram = filter
             .try_into()
-            .map_err(|e| format!("the seccomp filter failed to compile to BPF: {e}"))?;
+            .map_err(|e| failed(format!("the seccomp filter failed to compile to BPF: {e}")))?;
 
         seccompiler::apply_filter(&program)
-            .map_err(|e| format!("the kernel refused the seccomp filter: {e}"))
+            .map_err(|e| failed(format!("the kernel refused the seccomp filter: {e}")))
+    }
+
+    /// Resolve an architecture name to a seccompiler target, if it has one.
+    ///
+    /// # Why this is a separate function rather than an inline call
+    ///
+    /// So the unknown-architecture branch — the one that must report
+    /// `Unsupported` rather than `Failed` — has a seam a test can reach. That
+    /// branch only fires on architectures this fleet does not have, so without
+    /// the seam it would be an untested claim about the `Step` contract, which
+    /// distinguishes an environment answer from a refusal.
+    /// Whether the seccomp profile is written for the named architecture.
+    ///
+    /// # Why a separate predicate rather than an inline match
+    ///
+    /// Same seam rationale as `target_arch_for`: the unsupported branch only
+    /// fires on architectures this fleet does not have, so without a callable
+    /// predicate it would be an untested claim about the `Step` contract. A
+    /// name goes in, a bool comes out, and the test below pins both sides.
+    pub(super) fn seccomp_profile_covers(name: &str) -> bool {
+        // The number tables behind `syscall_number` are written per
+        // architecture, and today they cover x86-64 fully and aarch64 through
+        // the `*at` successors. Anywhere else the profile would fail
+        // name-by-name with "this is a QQQ bug" — but a platform the profile
+        // was never written for is an environment answer, not a bug.
+        matches!(name, "x86_64" | "aarch64")
+    }
+
+    pub(super) fn target_arch_for(name: &str) -> Option<seccompiler::TargetArch> {
+        seccompiler::TargetArch::try_from(name).ok()
     }
 
     /// Resolve a syscall name to its number on this architecture.
@@ -1319,7 +1530,7 @@ mod imp {
     /// refusing every legitimate call. Resolving by name at runtime means the
     /// profile is written once, in portable terms, and each architecture gets its
     /// own numbers.
-    fn syscall_number(name: &str) -> Option<i64> {
+    pub(super) fn syscall_number(name: &str) -> Option<i64> {
         use std::collections::BTreeMap;
         use std::sync::OnceLock;
 
@@ -1362,6 +1573,7 @@ mod imp {
         insert_process_and_memory_syscalls(m);
         insert_io_and_poll_syscalls(m);
         insert_network_and_fs_syscalls(m);
+        insert_legacy_x86_64_syscalls(m);
     }
 
     /// Process lifecycle, signals, memory, and the thread primitives a guest
@@ -1419,23 +1631,16 @@ mod imp {
             "pwrite64" => libc::SYS_pwrite64,
             "close" => libc::SYS_close,
             "dup" => libc::SYS_dup,
-            "dup2" => libc::SYS_dup2,
             "dup3" => libc::SYS_dup3,
             "fcntl" => libc::SYS_fcntl,
             "ioctl" => libc::SYS_ioctl,
             "lseek" => libc::SYS_lseek,
-            "pipe" => libc::SYS_pipe,
             "pipe2" => libc::SYS_pipe2,
-            "eventfd" => libc::SYS_eventfd,
             "eventfd2" => libc::SYS_eventfd2,
-            "epoll_create" => libc::SYS_epoll_create,
             "epoll_create1" => libc::SYS_epoll_create1,
             "epoll_ctl" => libc::SYS_epoll_ctl,
-            "epoll_wait" => libc::SYS_epoll_wait,
             "epoll_pwait" => libc::SYS_epoll_pwait,
-            "poll" => libc::SYS_poll,
             "ppoll" => libc::SYS_ppoll,
-            "select" => libc::SYS_select,
             "pselect6" => libc::SYS_pselect6,
             "clock_gettime" => libc::SYS_clock_gettime,
             "clock_nanosleep" => libc::SYS_clock_nanosleep,
@@ -1473,28 +1678,20 @@ mod imp {
             "getsockopt" => libc::SYS_getsockopt,
             "setsockopt" => libc::SYS_setsockopt,
             "openat" => libc::SYS_openat,
-            "stat" => libc::SYS_stat,
             "statx" => libc::SYS_statx,
-            "lstat" => libc::SYS_lstat,
             "fstat" => libc::SYS_fstat,
             "fstatfs" => libc::SYS_fstatfs,
             "statfs" => libc::SYS_statfs,
             "newfstatat" => libc::SYS_newfstatat,
-            "access" => libc::SYS_access,
             "faccessat" => libc::SYS_faccessat,
             "getdents64" => libc::SYS_getdents64,
-            "readlink" => libc::SYS_readlink,
             "readlinkat" => libc::SYS_readlinkat,
             "getcwd" => libc::SYS_getcwd,
             "chdir" => libc::SYS_chdir,
             "fchdir" => libc::SYS_fchdir,
-            "rename" => libc::SYS_rename,
             "renameat" => libc::SYS_renameat,
-            "unlink" => libc::SYS_unlink,
             "unlinkat" => libc::SYS_unlinkat,
-            "mkdir" => libc::SYS_mkdir,
             "mkdirat" => libc::SYS_mkdirat,
-            "rmdir" => libc::SYS_rmdir,
             "fsync" => libc::SYS_fsync,
             "fdatasync" => libc::SYS_fdatasync,
             "ftruncate" => libc::SYS_ftruncate,
@@ -1504,6 +1701,54 @@ mod imp {
             "splice" => libc::SYS_splice,
         }
     }
+
+    /// Legacy names that exist only on x86-64.
+    ///
+    /// aarch64 removed the non-`at` file syscalls, the old poll/select/epoll
+    /// variants, `pipe`/`dup2`/`eventfd`, and `arch_prctl` (which is x86-only:
+    /// it sets FS/GS base). Their `*at` / `*2` / `p*` successors are all in the
+    /// profile already, so an aarch64 filter built without these loses nothing
+    /// — and naming them unconditionally broke compilation on aarch64, because
+    /// the constants do not exist there.
+    ///
+    /// Keeping these separate from the portable tables is deliberate: a reader
+    /// can tell at a glance which names are guaranteed to resolve and which
+    /// depend on the target, and the crate compiles on both 64-bit Linux
+    /// architectures instead of only the one CI runs.
+    #[cfg(target_arch = "x86_64")]
+    fn insert_legacy_x86_64_syscalls(m: &mut std::collections::BTreeMap<&'static str, i64>) {
+        macro_rules! syscalls {
+            ($($name:literal => $const:expr),* $(,)?) => {
+                $( m.insert($name, $const); )*
+            };
+        }
+        syscalls! {
+            "dup2" => libc::SYS_dup2,
+            "pipe" => libc::SYS_pipe,
+            "eventfd" => libc::SYS_eventfd,
+            "epoll_create" => libc::SYS_epoll_create,
+            "epoll_wait" => libc::SYS_epoll_wait,
+            "poll" => libc::SYS_poll,
+            "select" => libc::SYS_select,
+            "stat" => libc::SYS_stat,
+            "lstat" => libc::SYS_lstat,
+            "access" => libc::SYS_access,
+            "readlink" => libc::SYS_readlink,
+            "rename" => libc::SYS_rename,
+            "unlink" => libc::SYS_unlink,
+            "mkdir" => libc::SYS_mkdir,
+            "rmdir" => libc::SYS_rmdir,
+            "arch_prctl" => libc::SYS_arch_prctl,
+        }
+    }
+
+    /// No legacy names on architectures without the entries above.
+    ///
+    /// Present so `syscall_number` can call it unconditionally, which keeps the
+    /// supported/unconditional split in one place instead of in a `cfg` inside a
+    /// closure body.
+    #[cfg(not(target_arch = "x86_64"))]
+    fn insert_legacy_x86_64_syscalls(_m: &mut std::collections::BTreeMap<&'static str, i64>) {}
 
     /// Syscalls added only on the architectures that provide them.
     ///
@@ -1525,7 +1770,6 @@ mod imp {
             "set_tid_address" => libc::SYS_set_tid_address,
             "rt_sigtimedwait" => libc::SYS_rt_sigtimedwait,
             "restart_syscall" => libc::SYS_restart_syscall,
-            "arch_prctl" => libc::SYS_arch_prctl,
             "memfd_create" => libc::SYS_memfd_create,
             "close_range" => libc::SYS_close_range,
             "epoll_pwait2" => libc::SYS_epoll_pwait2,
@@ -1645,4 +1889,148 @@ fn apply_landlock(policy: &HardenPolicy) -> StepOutcome {
 #[cfg(not(target_os = "linux"))]
 fn apply_seccomp(policy: &HardenPolicy) -> StepOutcome {
     imp::seccomp(policy)
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests — pure logic with no process-global side effects
+// ---------------------------------------------------------------------------
+
+/// Tests that must run without touching the process: architecture mapping and
+/// platform-width assumptions. Everything irreversible lives in
+/// `tests/harden.rs` and runs in a child process instead.
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::SeccompProfile;
+    use super::imp::{seccomp_profile_covers, syscall_number, target_arch_for};
+
+    /// The profile covers the two 64-bit Linux architectures it is written for,
+    /// and explicitly nothing else.
+    #[test]
+    fn the_seccomp_profile_names_its_architectures() {
+        assert!(seccomp_profile_covers("x86_64"));
+        assert!(seccomp_profile_covers("aarch64"));
+        assert!(!seccomp_profile_covers("riscv64gc"));
+        assert!(!seccomp_profile_covers("definitely-not-an-arch"));
+    }
+
+    /// The unknown-architecture branch reports `Unsupported`, not `Failed`.
+    ///
+    /// That branch only fires on architectures this fleet does not have, so
+    /// without this seam it would be an untested claim about the `Step`
+    /// contract, which distinguishes an environment answer from a refusal.
+    #[test]
+    fn unknown_architectures_have_no_seccomp_target() {
+        assert!(
+            target_arch_for("definitely-not-an-arch").is_none(),
+            "an unknown architecture must resolve to no target"
+        );
+    }
+
+    /// The architectures this fleet builds for do resolve.
+    #[test]
+    fn known_architectures_resolve() {
+        assert!(
+            target_arch_for("x86_64").is_some(),
+            "x86_64 must resolve: the CI fleet runs on it"
+        );
+        assert!(
+            target_arch_for("aarch64").is_some(),
+            "aarch64 must resolve: the profile claims both 64-bit targets"
+        );
+    }
+
+    /// Every name the `Runtime` profile allows resolves on this architecture —
+    /// or is a documented x86-64-only legacy name whose successor covers it.
+    ///
+    /// A name without a number would make `build_and_install` fail the seccomp
+    /// step with "this is a QQQ bug" — this test catches the typo or the
+    /// platform gap at check time instead of at install time.
+    #[test]
+    fn the_runtime_allowlist_resolves_on_this_architecture() {
+        for name in SeccompProfile::Runtime.allowed() {
+            if syscall_number(name).is_some() {
+                continue;
+            }
+            // Off x86-64 only the documented legacy names may miss, and only
+            // because their successors cover the same operations (pinned by the
+            // successor-coverage test below). Anything else is a typo or a
+            // platform gap with no honest fallback.
+            assert!(
+                !cfg!(target_arch = "x86_64")
+                    && SeccompProfile::X86_64_ONLY_SYSCALLS.contains(name),
+                "allowlist name `{name}` has no syscall number on {}; the profile \
+                 and the number table disagree",
+                std::env::consts::ARCH
+            );
+        }
+    }
+
+    /// Every x86-64-only name has an allowed successor, so the aarch64 filter
+    /// loses nothing by skipping the legacy names.
+    ///
+    /// This is the claim that makes the `build_and_install` skip honest rather
+    /// than convenient: each legacy operation remains permitted through its
+    /// modern spelling, which is already in the profile. `arch_prctl` is the
+    /// deliberate exception — it sets x86 FS/GS base, which has no aarch64
+    /// meaning at all, so there is nothing to cover.
+    #[test]
+    fn every_x86_64_only_syscall_has_an_allowed_successor() {
+        const SUCCESSORS: &[(&str, &str)] = &[
+            ("dup2", "dup3"),
+            ("pipe", "pipe2"),
+            ("eventfd", "eventfd2"),
+            ("epoll_create", "epoll_create1"),
+            ("epoll_wait", "epoll_pwait"),
+            ("poll", "ppoll"),
+            ("select", "pselect6"),
+            ("stat", "newfstatat"),
+            ("lstat", "newfstatat"),
+            ("access", "faccessat"),
+            ("readlink", "readlinkat"),
+            ("rename", "renameat"),
+            ("unlink", "unlinkat"),
+            ("mkdir", "mkdirat"),
+            // `rmdir` is covered by `unlinkat` with `AT_REMOVEDIR`.
+            ("rmdir", "unlinkat"),
+        ];
+        let allow = SeccompProfile::Runtime.allowed();
+        for (legacy, successor) in SUCCESSORS {
+            assert!(
+                SeccompProfile::X86_64_ONLY_SYSCALLS.contains(legacy),
+                "`{legacy}` must be listed as x86-64-only for the install skip \
+                 to apply to it"
+            );
+            assert!(
+                allow.contains(successor),
+                "legacy `{legacy}` is skipped off x86-64, but its successor \
+                 `{successor}` is not in the allowlist — the aarch64 filter \
+                 would refuse a legitimate operation"
+            );
+        }
+        // `arch_prctl` is x86-only with no successor; it must still be listed
+        // so the skip applies, and it must NOT gain a fake successor above.
+        assert!(
+            SeccompProfile::X86_64_ONLY_SYSCALLS.contains(&"arch_prctl"),
+            "`arch_prctl` must be listed as x86-64-only"
+        );
+        assert!(
+            !SUCCESSORS.iter().any(|(l, _)| *l == "arch_prctl"),
+            "`arch_prctl` has no aarch64 meaning and must not claim a successor"
+        );
+    }
+
+    /// `libc::SYS_*` are `c_long`, and the number table stores `i64`.
+    ///
+    /// The `insert_*` functions rely on every supported target being 64-bit,
+    /// where that conversion is exact; on a 32-bit target it would truncate.
+    /// This pins the assumption rather than leaving it in a comment.
+    #[test]
+    fn syscall_numbers_fit_in_i64_without_conversion() {
+        assert_eq!(
+            size_of::<libc::c_long>(),
+            8,
+            "the syscall table assumes 64-bit `c_long`; a 32-bit target would \
+             truncate every number it stores"
+        );
+    }
 }

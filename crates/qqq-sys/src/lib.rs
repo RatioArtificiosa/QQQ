@@ -40,6 +40,7 @@
 pub mod harden;
 
 pub use harden::{
-    HardenPolicy, HardenReport, STEP_DROP_GID, STEP_DROP_UID, STEP_NO_NEW_PRIVS, STEP_ORDER,
-    STEP_SECCOMP, SeccompProfile, Step, StepOutcome, harden,
+    HardenPolicy, HardenReport, HostCapabilities, STEP_DROP_GID, STEP_DROP_UID, STEP_LANDLOCK,
+    STEP_NO_NEW_PRIVS, STEP_ORDER, STEP_SECCOMP, SeccompProfile, Step, StepOutcome, harden,
+    host_capabilities, landlock_available, mpk_support,
 };

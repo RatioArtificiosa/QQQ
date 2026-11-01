@@ -36,7 +36,7 @@ serde = { workspace = true }
 # Safe `*nix` bindings: `setuid`, `setgid`, `setgroups`, `set_no_new_privs`.
 # Features are explicit rather than `full`, so the dependency surface is the set
 # of modules this crate calls — and that surface is what a reviewer reads.
-# # Why `uio` is among the features, which is the one that is not obvious
+# # Why `uio` used to be among these features, and where it went
 #
 # `nix::sys::uio::process_vm_readv` is the **seccomp probe**: `tests/harden.rs`
 # proves the filter refuses something, by calling `process_vm_readv` on the
@@ -56,8 +56,9 @@ serde = { workspace = true }
 #
 # The `Runtime` profile is written for a host that must `mmap`, `futex`, `epoll`
 # and `accept`; `uio` adds no runtime dependency, only the safe wrapper this probe
-# calls. Nothing in the library's non-test code uses it.
-nix = { version = "0.31", default-features = false, features = ["user", "process", "uio"] }
+# calls. Nothing in the library's non-test code uses it, so it lives in
+# `[dev-dependencies]` below rather than in the features above.
+nix = { version = "0.31", default-features = false, features = ["user", "process"] }
 # Compiles a BPF seccomp program from a typed filter description and installs it.
 # `apply_filter` is the only entry point, and it is safe.
 seccompiler = "0.5"
@@ -78,15 +79,24 @@ libc = "0.2"
 # — "is this blocked on the item, or on one way of doing it?" — dissolved it, the
 # same way it dissolved `SEC-017` and `SEC-019`.
 #
-# Version floor `0.3` rather than `0.4` is deliberate: the API used here
+# Version floor `0.4` rather than `0.3` is deliberate: the API used here
 # (`Ruleset`, `AccessFs`, `PathBeneath`) is stable across both, and a lower floor
 # spares downstreams a lockfile bump for no benefit.
 landlock = "0.4"
 
 
 [dev-dependencies]
+# `nix` with `uio`: the seccomp probe (`tests/harden.rs::probe_denied_syscall`)
+# calls `process_vm_readv`, and nothing in the library's non-test code uses it.
+# It lives here rather than in the main `nix` features so the shipped closure
+# does not carry a syscall wrapper only the tests call.
+nix = { version = "0.31", default-features = false, features = ["uio"] }
 # The hardening tests reconstruct a report from a child process, so they need JSON.
 # It is a dev-dependency rather than a real one: the library only ever SERIALISES
 # a report (a HardenReport is an output, never an input), so serde_json is a
 # test-only concern and pulling it into the library would be an unused dependency.
 serde_json = { workspace = true }
+# The seccomp coverage probe runs a miniature Tokio runtime (reactor, timer,
+# loopback TCP, filesystem) under the installed filter. Same reason as above:
+# the library never runs an async runtime; only the probe does.
+tokio = { workspace = true }

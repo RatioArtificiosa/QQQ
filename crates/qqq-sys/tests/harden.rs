@@ -98,7 +98,7 @@ fn harden_child_entry_point() {
         // **default-allow** filter, the exact bypass the profile prevents,
         // passed it. Clippy merged the two identical arms; the distinction that
         // matters lives in the caller, not in the policy.
-        "seccomp" | "seccomp_denies" => HardenPolicy {
+        "seccomp" | "seccomp_denies" | "seccomp_io" => HardenPolicy {
             seccomp: true,
             ..HardenPolicy::default()
         },
@@ -111,6 +111,17 @@ fn harden_child_entry_point() {
             // permitted for an unprivileged process and is a no-op, which makes
             // it the one identity change that is safe to test anywhere.
             drop_to_uid: Some(current_uid()),
+            ..HardenPolicy::default()
+        },
+        "gid_zero" => HardenPolicy {
+            drop_to_gid: Some(0),
+            ..HardenPolicy::default()
+        },
+        "gid_current" => HardenPolicy {
+            // The gid the process already has. Like `uid_current`, this is the
+            // one group change safe to test anywhere: with the supplementary
+            // groups already the process's own, the step must apply.
+            drop_to_gid: Some(current_gid()),
             ..HardenPolicy::default()
         },
         // `SEC-026`. Landlock is **irreversible**, so a ruleset can only be
@@ -144,6 +155,28 @@ fn harden_child_entry_point() {
         }
     };
 
+    // The Landlock probe file is created BEFORE the ruleset installs: after
+    // `restrict_self` the child could not create it, and the probe must open a
+    // file that exists — an `ENOENT` would read as "not refused" and fail the
+    // test for an environmental reason. The path is pid-unique and lives
+    // nowhere near the granted `/proc/self`, so granting and probing cannot
+    // overlap by accident.
+    let probe_path = (mode == "landlock_denies").then(|| {
+        let path = landlock_probe_path();
+        std::fs::write(&path, b"probe").unwrap_or_else(|e| {
+            eprintln!(
+                "could not create the Landlock probe file {}: {e}",
+                path.display()
+            );
+            std::process::exit(2);
+        });
+        // The parent removes this after the child exits: post-`restrict_self`
+        // the child itself could not unlink it, and pid-unique litter would
+        // accumulate across runs.
+        println!("HARDEN_PROBE_PATH:{}", path.display());
+        path
+    });
+
     let report = harden(&policy);
 
     // The probe: after the filter is in place, attempt a syscall the profile
@@ -157,6 +190,16 @@ fn harden_child_entry_point() {
         println!("HARDEN_PROBE:{}", probe_denied_syscall());
     }
 
+    // The coverage probe: a miniature of the host's runtime life under the
+    // installed filter — reactor, timer, loopback TCP exchange, filesystem
+    // round trip. If the profile omits a syscall any of these need, the child
+    // dies with SIGSYS (no probe line, and the parent fails loudly) or the
+    // call errors (reported, never passed). Either way a coverage gap cannot
+    // pass silently.
+    if mode == "seccomp_io" {
+        println!("HARDEN_PROBE:{}", probe_runtime_io());
+    }
+
     // The Landlock probe: after the ruleset is installed, try to read a directory
     // that was NOT granted and report whether the kernel refused.
     //
@@ -167,8 +210,8 @@ fn harden_child_entry_point() {
     // restricts nothing -- the `§O-085` shape, found twice in this repository
     // already. The only claim worth making is behavioural: with `/proc/self`
     // granted, opening a file under a *different* directory must fail with `EACCES`.
-    if mode == "landlock_denies" {
-        println!("HARDEN_PROBE:{}", probe_ungranted_path());
+    if let Some(path) = &probe_path {
+        println!("HARDEN_PROBE:{}", probe_ungranted_path(path));
     }
 
     // The report goes to stdout as JSON so the parent can assert on the
@@ -275,11 +318,109 @@ fn probe_denied_syscall() -> String {
     "unsupported".to_owned()
 }
 
+/// Exercise the runtime paths the host needs while the seccomp filter is
+/// installed: reactor + timer, loopback TCP, filesystem round trip.
+///
+/// # Why this exists alongside the deny probe
+///
+/// The deny probe proves the filter *refuses*; this one proves it still
+/// *permits* — that the allowlist covers a Tokio runtime doing host-shaped
+/// work. A profile that allowed nothing would pass every refusal test and kill
+/// every host that installed it. The two probes are the two halves of the
+/// filter's contract, and this is the half the installation test cannot see.
+///
+/// Returns `"io_ok"`, `"refused:<what>"` (an `EPERM`/error from a filtered
+/// call), or `"panicked:<what>"` (an unexpected failure, reported rather than
+/// passed). A `SIGSYS` death produces no probe line at all, which the parent
+/// test treats as a loud failure rather than as inconclusive.
+#[cfg(target_os = "linux")]
+fn probe_runtime_io() -> String {
+    let outcome = std::panic::catch_unwind(runtime_io_once);
+    match outcome {
+        Ok(Ok(())) => "io_ok".to_owned(),
+        Ok(Err(what)) => format!("refused:{what}"),
+        Err(_) => "panicked:runtime task failed".to_owned(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_io_once() -> Result<(), String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("runtime build: {e:?}"))?;
+    rt.block_on(async {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("bind: {e:?}"))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|e| format!("local_addr: {e:?}"))?;
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener
+                .accept()
+                .await
+                .map_err(|e| format!("accept: {e:?}"))?;
+            let mut buf = [0u8; 1];
+            tokio::io::AsyncReadExt::read_exact(&mut sock, &mut buf)
+                .await
+                .map_err(|e| format!("server read: {e:?}"))?;
+            tokio::io::AsyncWriteExt::write_all(&mut sock, &buf)
+                .await
+                .map_err(|e| format!("server write: {e:?}"))?;
+            Ok::<(), String>(())
+        });
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| format!("connect: {e:?}"))?;
+        tokio::io::AsyncWriteExt::write_all(&mut client, b"x")
+            .await
+            .map_err(|e| format!("client write: {e:?}"))?;
+        let mut buf = [0u8; 1];
+        tokio::io::AsyncReadExt::read_exact(&mut client, &mut buf)
+            .await
+            .map_err(|e| format!("client read: {e:?}"))?;
+        server.await.map_err(|e| format!("server join: {e:?}"))??;
+        let path = std::env::temp_dir().join(format!("qqq-seccomp-io-{}", std::process::id()));
+        tokio::fs::write(&path, b"probe")
+            .await
+            .map_err(|e| format!("fs write: {e:?}"))?;
+        let back = tokio::fs::read(&path)
+            .await
+            .map_err(|e| format!("fs read: {e:?}"))?;
+        if back != b"probe" {
+            return Err("fs round trip mismatch".to_owned());
+        }
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|e| format!("fs remove: {e:?}"))?;
+        Ok(())
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn probe_runtime_io() -> String {
+    "unsupported".to_owned()
+}
+
 /// The current uid, on Linux; `u32::MAX` elsewhere (unreachable in practice).
 fn current_uid() -> u32 {
     #[cfg(target_os = "linux")]
     {
         nix_uid()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        u32::MAX
+    }
+}
+
+/// The current gid, on Linux; `u32::MAX` elsewhere (unreachable in practice).
+fn current_gid() -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        nix_gid()
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -308,7 +449,30 @@ fn nix_uid() -> u32 {
             return v;
         }
     }
-    0
+    // No `0` fallback: 0 is root, and a parse failure silently becoming "we are
+    // root" would flip the `uid_current` child into the `uid_zero` path and pass
+    // for the wrong reason. `/proc/self/status` always exists on Linux, so an
+    // absence here is a broken test environment, reported loudly.
+    panic!("could not read the real uid from /proc/self/status");
+}
+
+/// The real gid, read the same way as the uid above and failing the same way:
+/// a silent `0` would become "we are the root group" and flip the `gid_current`
+/// child into the refusal path.
+#[cfg(target_os = "linux")]
+fn nix_gid() -> u32 {
+    for line in std::fs::read_to_string("/proc/self/status")
+        .unwrap_or_default()
+        .lines()
+    {
+        if let Some(rest) = line.strip_prefix("Gid:")
+            && let Some(first) = rest.split_whitespace().next()
+            && let Ok(v) = first.parse::<u32>()
+        {
+            return v;
+        }
+    }
+    panic!("could not read the real gid from /proc/self/status");
 }
 
 /// Run a child, returning its report, exit status, and any probe verdict.
@@ -350,6 +514,17 @@ fn run_child_with_probe(mode: &str) -> (HardenReport, bool, Option<String>) {
         .find_map(|l| l.strip_prefix("HARDEN_PROBE:"))
         .map(str::trim)
         .map(ToOwned::to_owned);
+
+    // The child reports the probe file it created so the parent can remove it:
+    // post-`restrict_self` the child itself could not unlink it. Best-effort —
+    // a failed test may still leave one behind, which the next run's unique
+    // name tolerates.
+    for line in stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("HARDEN_PROBE_PATH:"))
+    {
+        let _ = std::fs::remove_file(line.trim());
+    }
 
     (report, out.status.success(), probe)
 }
@@ -915,15 +1090,93 @@ fn dropping_to_the_current_uid_applies() {
     assert!(ok, "the child must exit cleanly: {report:?}");
 
     let outcome = report.get(STEP_DROP_UID).expect("reported");
-    // `Applied` on a normal runner. A hardened CI container with a seccomp
-    // profile that refuses `setuid` would give `Failed`, and that is a legitimate
-    // environment outcome rather than a code defect — so the assertion is that
-    // the step was *attempted and reported*, never silently skipped.
-    assert_ne!(
+    if current_uid() == 0 {
+        // Running as root (many CI containers do): the uid is already 0, so the
+        // uid-0 guard must fire exactly as in the `uid_zero` mode. `Applied`
+        // here would mean the guard was bypassed for the "current" uid.
+        assert_eq!(
+            outcome,
+            Step::Failed,
+            "as root the current uid IS 0, so the uid-0 guard must refuse: {report:?}"
+        );
+    } else {
+        // `setuid` to the own uid is always permitted for an unprivileged
+        // process, and no filter is installed in this child that could refuse
+        // the call — so `Applied` is deterministic here, not environmental. A
+        // `Failed` would mean the drop path itself is broken.
+        assert_eq!(
+            outcome,
+            Step::Applied,
+            "dropping to the already-held uid must apply: {report:?}"
+        );
+    }
+}
+
+/// **Dropping to gid 0 is refused, and the report says why.**
+///
+/// The group twin of the uid-0 guard: `setgid(0)` when already in the root group
+/// succeeds and does nothing, so an `Applied` entry would claim a drop that did
+/// not happen.
+#[test]
+fn dropping_to_root_group_is_refused_rather_than_reported_as_applied() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+
+    let (report, _ok) = run_child("gid_zero");
+
+    let outcome = report
+        .get(STEP_DROP_GID)
+        .expect("the step must be reported");
+    assert_eq!(
         outcome,
-        Step::Skipped,
-        "a configured `drop_to_uid` must not be skipped: {report:?}"
+        Step::Failed,
+        "a `drop_to_gid` of 0 must be refused: dropping to root is a no-op that \
+         `setgid` reports as success. Report: {report:?}"
     );
+
+    let detail = report
+        .problems()
+        .iter()
+        .find(|s| s.step == STEP_DROP_GID)
+        .and_then(|s| s.detail.clone())
+        .unwrap_or_default();
+    assert!(
+        detail.contains('0') || detail.to_lowercase().contains("root"),
+        "the refusal must say what is wrong with gid 0: {detail:?}"
+    );
+}
+
+/// Dropping to the gid the process already has is permitted and harmless.
+///
+/// The group twin of the uid test, and the test that covers the supplementary
+/// group handling: a `drop_to_gid` of the already-held gid must apply (rather
+/// than fail in `setgroups`, which an unprivileged process may not call), while
+/// a privileged drop clears the supplementaries before `setgid`.
+#[test]
+fn dropping_to_the_current_gid_applies() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+
+    let (report, ok) = run_child("gid_current");
+    assert!(ok, "the child must exit cleanly: {report:?}");
+
+    let outcome = report.get(STEP_DROP_GID).expect("reported");
+    if current_gid() == 0 {
+        // Already in the root group: the gid-0 guard must fire.
+        assert_eq!(
+            outcome,
+            Step::Failed,
+            "the current gid IS 0, so the gid-0 guard must refuse: {report:?}"
+        );
+    } else {
+        assert_eq!(
+            outcome,
+            Step::Applied,
+            "dropping to the already-held gid must apply: {report:?}"
+        );
+    }
 }
 
 /// **The whole module is safe to call: no step kills the caller.**
@@ -1097,6 +1350,18 @@ fn the_seccomp_filter_refuses_a_denied_syscall() {
              Report: {report:?}"
         );
 
+        // Only a kernel refusal is inconclusive. Any other failure text — a
+        // profile typo ("this is a QQQ bug"), a BPF compile error — is a defect
+        // and must fail loudly rather than hide behind this branch. In
+        // particular, an unresolvable name on an uncovered architecture reports
+        // "platform-specific", which is a real gap, not an environment excuse.
+        assert!(
+            detail.contains("kernel refused"),
+            "the seccomp filter failed for a reason that is not the kernel \
+             refusing it, so this is a QQQ bug rather than an environment \
+             limitation: {detail}. Report: {report:?}"
+        );
+
         eprintln!(
             "the KERNEL refused the seccomp filter, so the probe is inconclusive              here (this is an environment outcome, not a pass): {detail}"
         );
@@ -1158,6 +1423,14 @@ fn the_default_seccomp_action_is_a_refusal() {
             "the filter could not be constructed, which means its default action is \
              not a refusal: {detail}"
         );
+        // Same narrowing as the probe test: only a kernel refusal is
+        // inconclusive; anything else fails loudly.
+        assert!(
+            detail.contains("kernel refused"),
+            "the seccomp filter failed for a reason that is not the kernel \
+             refusing it, so this is a QQQ bug rather than an environment \
+             limitation: {detail}"
+        );
         return;
     }
 
@@ -1182,7 +1455,67 @@ fn the_default_seccomp_action_is_a_refusal() {
     );
 }
 
-/// Try to read an ungranted directory, and report whether Landlock refused.
+/// **The seccomp filter PERMITS what the runtime needs — the coverage half.**
+///
+/// # The gap this closes
+///
+/// Every other seccomp test proves the filter refuses or installs. None proves a
+/// host can actually *run* under it: a profile that allowed nothing would pass
+/// them all and kill every process that installed it. The installation test's own
+/// doc comment records this as an accepted gap ("validated for installation, not
+/// for coverage"). This test closes it for the operations the host performs — a
+/// Tokio reactor with a timer, a loopback TCP exchange, and a filesystem round
+/// trip — all executed in a child with the filter installed.
+///
+/// A missing syscall shows up as a dead child (`SIGSYS`, no probe line) or as a
+/// `refused:` probe, never as a pass. Either failure names the operation, which
+/// is the evidence a profile addition needs.
+#[test]
+fn the_seccomp_filter_permits_the_host_runtime() {
+    if !cfg!(target_os = "linux") {
+        // Nothing to observe where the code is not compiled.
+        return;
+    }
+
+    let (report, ok, probe) = run_child_with_probe("seccomp_io");
+    assert!(ok, "the child must exit cleanly: {report:?}");
+
+    if report.get(STEP_SECCOMP) == Some(Step::Failed) {
+        // Same rule as the refusal tests: only a kernel refusal is
+        // inconclusive; anything else (including a profile typo) fails loudly.
+        let detail = report
+            .problems()
+            .iter()
+            .find(|s| s.step == STEP_SECCOMP)
+            .and_then(|s| s.detail.clone())
+            .unwrap_or_default();
+        assert!(
+            detail.contains("kernel refused"),
+            "the seccomp filter failed for a reason that is not the kernel \
+             refusing it, so this is a QQQ bug rather than an environment \
+             limitation: {detail}. Report: {report:?}"
+        );
+        eprintln!(
+            "the KERNEL refused the seccomp filter, so the coverage probe is \
+             inconclusive here (an environment outcome, not a pass): {detail}"
+        );
+        return;
+    }
+
+    let probe = probe.expect(
+        "the child ran in `seccomp_io` mode but produced no HARDEN_PROBE line; \
+         a SIGSYS death also produces no line, so a missing line is a failed \
+         coverage probe, not an inconclusive one",
+    );
+    assert_eq!(
+        probe, "io_ok",
+        "the host runtime could not run under the installed filter: {probe}. \
+         The operation it names needs a syscall the allowlist omits. \
+         Report: {report:?}"
+    );
+}
+
+/// Try to read an ungranted file, and report whether Landlock refused.
 ///
 /// # Why this is a *positive* probe rather than a report check
 ///
@@ -1190,7 +1523,16 @@ fn the_default_seccomp_action_is_a_refusal() {
 /// `Applied`. That is exactly the assertion that let a default-ALLOW seccomp filter
 /// pass every test in this workspace (`§O-085`): the step *was* applied, and it
 /// restricted nothing. So the claim made here is behavioural — after granting read
-/// access to `/proc/self` and nothing else, opening `/etc/hostname` must fail.
+/// access to `/proc/self` and nothing else, opening the caller-created probe file
+/// must fail.
+///
+/// # Why the probe file is created by the caller instead of using `/etc/hostname`
+///
+/// A path under `/etc` may not exist on a minimal image, and a missing file fails
+/// with `ENOENT` — which this probe reports as `indeterminate`, failing the test
+/// for an environmental reason rather than proving anything. A file the child
+/// creates itself always exists, so `refused` means the ruleset bound and
+/// `allowed` means it did not.
 ///
 /// # What is returned, and why the variants are distinguishable
 ///
@@ -1198,14 +1540,11 @@ fn the_default_seccomp_action_is_a_refusal() {
 /// * `indeterminate:<errno>` — the open failed for some *other* reason, so the
 ///   evidence is weaker and the caller reports it as such rather than as a pass.
 ///   This matters: a path that does not exist would produce `ENOENT`, and counting
-///   that as a refusal would make the test pass on a host with no `/etc`.
+///   that as a refusal would make the test pass on a host with no probe file.
 /// * `allowed` — the open succeeded, which means the ruleset did not bind.
 #[cfg(target_os = "linux")]
-fn probe_ungranted_path() -> String {
-    // `/etc/hostname` is deliberately not the granted path. `/etc` is present on
-    // every image this test runs in; when it is absent the probe says so instead of
-    // silently reporting a refusal.
-    match std::fs::File::open("/etc/hostname") {
+fn probe_ungranted_path(path: &std::path::Path) -> String {
+    match std::fs::File::open(path) {
         Ok(_) => "allowed".to_owned(),
         Err(e) => match e.raw_os_error() {
             Some(libc::EACCES | libc::EPERM) => "refused".to_owned(),
@@ -1216,8 +1555,14 @@ fn probe_ungranted_path() -> String {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn probe_ungranted_path() -> String {
+fn probe_ungranted_path(_path: &std::path::Path) -> String {
     "unsupported".to_owned()
+}
+
+/// The probe file for the Landlock behavioural test: pid-unique, under the
+/// system temp dir, and — by construction — outside the granted `/proc/self`.
+fn landlock_probe_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("qqq-landlock-probe-{}", std::process::id()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,12 +1592,13 @@ fn the_landlock_step_is_reported_for_every_outcome() {
         .get(STEP_LANDLOCK)
         .expect("the Landlock step must always appear, whatever the kernel supports");
 
-    assert!(
-        matches!(
-            landlock,
-            Step::Applied | Step::Skipped | Step::Unsupported | Step::Failed
-        ),
-        "the step must report a real outcome, got {landlock:?}"
+    // Landlock was requested, so the step was attempted: `Skipped` would mean
+    // the request was silently dropped, which is the defect this module has
+    // produced before. The step must be one of the three attempted outcomes.
+    assert_ne!(
+        landlock,
+        Step::Skipped,
+        "a requested Landlock step must never report Skipped: {report:?}"
     );
 
     // On a kernel with Landlock (5.13+, which every supported platform has) the
@@ -1260,6 +1606,23 @@ fn the_landlock_step_is_reported_for_every_outcome() {
     #[cfg(target_os = "linux")]
     {
         if landlock == Step::Unsupported {
+            // The Unsupported answer must name the 5.13 floor: any other
+            // Unsupported text would mean the step gave up for a reason the test
+            // does not understand, which is not an environment outcome the test
+            // may skip past. (`problems()` only lists refusals, so the detail is
+            // read off the step itself — `Unsupported` is deliberately not a
+            // problem.)
+            let detail = report
+                .steps
+                .iter()
+                .find(|s| s.step == STEP_LANDLOCK)
+                .and_then(|s| s.detail.clone())
+                .unwrap_or_default();
+            assert!(
+                detail.contains("5.13"),
+                "an Unsupported Landlock step must name the 5.13 kernel floor: \
+                 {detail}. Report: {report:?}"
+            );
             eprintln!(
                 "note: this kernel reports no Landlock support, so the enforcement \
                  probe is skipped here. That is an environment outcome, not a pass: \
@@ -1301,9 +1664,9 @@ fn a_landlock_policy_with_no_paths_is_a_failure_not_a_no_op() {
 ///
 /// Everything else about Landlock can be true of a ruleset that restricts nothing.
 /// This one installs a ruleset granting read access to `/proc/self` and **nothing
-/// else**, then opens `/etc/hostname` in the same process. If the open succeeds,
-/// the ruleset did not bind — which is the `§O-085` failure exactly: an installed
-/// control that refuses nothing while the report reads `Applied`.
+/// else**, then opens a caller-created probe file in the same process. If the open
+/// succeeds, the ruleset did not bind — which is the `§O-085` failure exactly: an
+/// installed control that refuses nothing while the report reads `Applied`.
 ///
 /// The child is required because Landlock is irreversible: installing a ruleset in
 /// the test process itself would break every test that runs after it in the same
@@ -1423,16 +1786,47 @@ fn host_capabilities_reports_both_optional_features() {
         "the aggregate must agree with the individual probe"
     );
 
-    // On Linux with a modern kernel, Landlock availability must be `true` -- the
-    // container kernel is 6.x. This is asserted only where it is knowable, and the
-    // failure message says what a `false` here would mean.
+    // On a kernel old enough to predate Landlock, `false` is the honest answer
+    // and the test notes it rather than failing: §7.5 lists Landlock as defence
+    // in depth, and an old kernel is an environment, not a defect. On 5.13+ the
+    // probe must answer `true` — it performs the real `landlock_create_ruleset`
+    // syscall now rather than trusting the builder, so a `false` there means the
+    // probe is broken or the kernel compiled Landlock out, both worth failing
+    // loudly over.
     #[cfg(target_os = "linux")]
-    if !caps.landlock {
+    if kernel_predates_landlock() {
         eprintln!(
-            "note: this kernel reports no Landlock, so the availability probe \
-             cannot be positively confirmed here (an environment outcome, not a pass)"
+            "this kernel predates Landlock (5.13), so the availability probe \
+             cannot be positively confirmed here: {caps:?}"
+        );
+    } else {
+        assert!(
+            caps.landlock,
+            "on a 5.13+ kernel the availability probe must report Landlock: \
+             a `false` here means the probe does not query the kernel or the \
+             kernel compiled Landlock out: {caps:?}"
         );
     }
+}
+
+/// Whether this kernel predates Landlock (5.13), read from the running kernel
+/// rather than assumed from the build host.
+#[cfg(target_os = "linux")]
+fn kernel_predates_landlock() -> bool {
+    let text = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let mut parts = text.trim().split('.');
+    let major: u64 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor: u64 = parts
+        .next()
+        .and_then(|p| {
+            p.chars()
+                .take_while(|c| c.is_numeric())
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0);
+    (major, minor) < (5, 13)
 }
 
 /// **Landlock availability is a query, not an installation.**
@@ -1446,12 +1840,17 @@ fn host_capabilities_reports_both_optional_features() {
 fn the_landlock_availability_probe_has_no_side_effects() {
     let _available = landlock_available();
 
-    // If the probe had called `restrict_self`, this open would be refused.
-    std::fs::File::open("/etc/hostname").unwrap_or_else(|e| {
+    // If the probe had called `restrict_self`, this open would be refused. The
+    // file is created by the test itself so the assertion does not depend on any
+    // particular system path existing.
+    let path = landlock_probe_path();
+    std::fs::write(&path, b"probe").expect("the probe file must create");
+    std::fs::File::open(&path).unwrap_or_else(|e| {
         panic!(
             "the Landlock availability probe must not restrict the calling process: \
              opening a normal file afterwards failed with {e}. An irreversible \
              sandbox installed as a side effect of a query is a trap."
         )
     });
+    let _ = std::fs::remove_file(&path);
 }

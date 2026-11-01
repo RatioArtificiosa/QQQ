@@ -106,6 +106,14 @@ test (§6) rather than by the crate boundary.
 concerns develop genuinely different review requirements, split it. The split is
 mechanical — the modules already map one-to-one onto the three named crates.
 
+**Revisit outcome (2026-11-01).** `src/harden.rs` has passed ~1,700 lines, so the
+trigger fired. Decision: keep one module. The file is a single coherent concern
+(Linux process hardening: identity, Landlock, seccomp) with one report type and
+one step order that must stay consistent — splitting it would separate the order
+table from the steps it governs, which is the property §6-adjacent tests pin.
+Next trigger: a second concern with genuinely different review requirements, or
+growth past ~3,000 lines.
+
 ---
 
 ## 5. What a reviewer must check
@@ -128,7 +136,7 @@ For each `unsafe` block, in addition to correctness:
 
 | Rule | Enforced by | Fails when |
 |---|---|---|
-| The crate forbids `unsafe` while it is a stub | `crates/qqq-core/tests/architecture.rs::the_unsafe_exception_was_granted_through_its_process` | an `allow(unsafe_code)` lands with no `SAFETY.md` beside it |
+| The crate forbids `unsafe` while no exception is granted | `crates/qqq-core/tests/architecture.rs::the_unsafe_exception_was_granted_through_its_process` | an `allow(unsafe_code)` lands with no `SAFETY.md` beside it |
 | No crate outside the exception list permits `unsafe` | `...::every_non_exception_crate_forbids_unsafe_code` | a crate drops its bare `forbid`, or weakens it to `cfg_attr` |
 | The exception list names real crates | `...::the_unsafe_exception_list_names_real_crates` | the list goes stale and exempts nothing |
 | The lint policy is live | `tools/fault_inject_architecture.py` | injection of a bare `allow(unsafe_code)` is not detected |
@@ -136,8 +144,9 @@ For each `unsafe` block, in addition to correctness:
 **What is *not* enforced, and cannot be by a test in this repository:** that the
 safety argument in §3 is *correct*. That is the second reviewer's job, and
 `GOV-007` (the maintainer ladder) is what makes a second reviewer exist. Until
-then, `qqq-sys` stays a stub and keeps its `forbid` — which is the honest state,
-and the one the enforcement above maintains automatically.
+then, `qqq-sys` carries real content but keeps its `forbid` with no exception
+granted — which is the honest state, and the one the enforcement above maintains
+automatically.
 
 ---
 
@@ -180,8 +189,9 @@ Two consequences worth recording:
    review once. `§O-081` records the reasoning in full.
 
 **What this does not change.** The ledger's second and third rows still govern any
-*future* `unsafe` in this crate. If `Landlock` (named as unimplemented in
-`src/harden.rs`) or a raw `io_uring` ring is needed later and no safe wrapper
-exists, the exception process is the path — and it remains blocked until a second
-maintainer exists. Recording that here means the next person finds the constraint
-rather than rediscovering it.
+*future* `unsafe` in this crate. If a raw `io_uring` ring is needed later and no
+safe wrapper exists, the exception process is the path — and it remains blocked
+until a second maintainer exists. `SEC-026` (Landlock) was implemented the same
+safe-wrapper way in `src/harden.rs::landlock`; `SEC-027` (MPK enforcement) is the
+remaining item with no safe wrapper in the ecosystem. Recording that here means
+the next person finds the constraint rather than rediscovering it.

@@ -1858,6 +1858,7 @@ dependencies = [
 name = "qqq-io"
 version = "0.1.1"
 dependencies = [
+ "libc",
  "qqq-core",
  "tokio",
 ]

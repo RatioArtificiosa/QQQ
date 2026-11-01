@@ -28,7 +28,7 @@ Sizes are **LF-normalised content byte counts**, identical on every platform reg
 
 ## The machine contracts (for an agent)
 
-- [docs/errors.md](docs/errors.md) — Every `QQQ-XXXX` error code with its cause and remediation. _(agent)_ (13 KB)
+- [docs/errors.md](docs/errors.md) — Every `QQQ-XXXX` error code with its cause and remediation. _(agent)_ (14 KB)
 - [docs/wit-reference.md](docs/wit-reference.md) — Every WIT package, interface, function and type, generated from `wit/`. _(agent)_ (17 KB)
 - [docs/wit-style-guide.md](docs/wit-style-guide.md) — The six WIT style rules from §6.3, which are machine-checked and which are judgement. _(agent)_ (7 KB)
 - [docs/definition-of-done-for-a-change.md](docs/definition-of-done-for-a-change.md) — Which of the five artefacts a change requires -- code, tests, docs, xref, observations -- and the rule that a `-> Done:` line must name the command that produces its number. _(agent)_ (5 KB)

@@ -55,6 +55,13 @@ use crate::source_map::SourceMap;
 ///
 /// Field-for-field the `WasmFrame` shape `qqq-host` serializes. Declared here so
 /// a report can be resolved without depending on the crate that produced it.
+///
+/// There is deliberately **no `column` field**: `WasmFrame` does not carry
+/// one, so a detached report never contains one either. The extractor reads
+/// columns into the map (they disambiguate same-line instructions for future
+/// use), but resolving through a field the wire format has no room for would
+/// invent a contract the producer cannot keep. If `WasmFrame` ever gains a
+/// column, this shape gains one with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportedFrame {
     /// The module name, when the report carried one.
@@ -79,12 +86,15 @@ pub struct ReportedFrame {
 impl ReportedFrame {
     /// Whether a resolver has anything to add.
     ///
-    /// Both a file *and* a line, not either: a frame with a file and no line
-    /// renders as `func+0x…` (`WasmFrame`'s `Display` requires both), so half a
-    /// location is not a location and is worth resolving.
+    /// Both a file *and* a line, and both meaningful: a detached report is
+    /// hand-writable JSON, so it may carry an empty (or whitespace-only) file
+    /// or a zero line — all rejected for `FrameLocation` at its own trust
+    /// boundary. Treating those as resolved would leave a confident-wrong
+    /// location in place while counting it authoritative.
     #[must_use]
     pub fn is_resolved(&self) -> bool {
-        self.file.is_some() && self.line.is_some()
+        self.file.as_ref().is_some_and(|s| !s.trim().is_empty())
+            && self.line.is_some_and(|l| l != 0)
     }
 }
 
@@ -199,7 +209,19 @@ pub fn resolve_frames(
             continue;
         };
 
-        if let Some(location) = map.lookup(offset) {
+        // The bound is exclusive and comes from the line program's own end
+        // markers: an offset at or past it is outside every range the program
+        // described. Without a bound (a hand-built map), `lookup` keeps its
+        // range semantics and the last row covers its tail.
+        //
+        // Delegated to `lookup_bounded`: the map's own bound gates inside
+        // `lookup` as well, so the explicit bound here only ever narrows —
+        // one rule, checked at both levels, never two rules disagreeing.
+        let found = match map.upper_bound() {
+            Some(bound) => map.lookup_bounded(offset, bound),
+            None => map.lookup(offset),
+        };
+        if let Some(location) = found {
             report.resolved += 1;
             let mut resolved = frame.clone();
             resolved.file = Some(location.file.clone());
@@ -222,6 +244,17 @@ pub fn resolve_frames(
 /// visible: a frame with a location prints `func (file:line)`, and a frame
 /// without prints `func+0xoffset`. There is no branch that prints a location for
 /// a frame that has none.
+///
+/// "Has a location" means exactly what `is_resolved` means — non-empty file
+/// and non-zero line. A degenerate location (`""`, `0`) renders as the offset
+/// form, never as `(:0)`: the renderer must not print what the resolver
+/// refuses to keep.
+///
+/// The format mirrors `WasmFrame`'s `Display` in `qqq-host` (`trap.rs`) byte
+/// for byte — including dropping `module`, which the host rendering also
+/// omits — so a detached report and a live trap render identically and a diff
+/// of the two is stable. Diverging here would make the same trap print two
+/// ways depending on which path rendered it.
 #[must_use]
 pub fn render_frames(frames: &[ReportedFrame]) -> String {
     frames
@@ -229,7 +262,9 @@ pub fn render_frames(frames: &[ReportedFrame]) -> String {
         .enumerate()
         .map(|(i, f)| {
             let location = match (&f.file, f.line) {
-                (Some(file), Some(line)) => format!(" ({file}:{line})"),
+                (Some(file), Some(line)) if !file.trim().is_empty() && line != 0 => {
+                    format!(" ({file}:{line})")
+                }
                 _ => match f.offset {
                     Some(off) => format!("+0x{off:x}"),
                     None => String::new(),
@@ -303,22 +338,55 @@ mod tests {
 
     // -- the rule: never guess ----------------------------------------------
 
-    /// **The fault-injection target for this module.** An unmapped offset must
-    /// leave the frame unresolved rather than falling back to the nearest row.
+    /// **The fault-injection target for this module.** An offset before the
+    /// first row must leave the frame unresolved rather than falling back to
+    /// the nearest row.
     #[test]
     fn an_offset_before_the_first_row_is_unmapped_not_guessed() {
-        let (out, report) = resolve_frames(&[frame("mystery", Some(0x4000))], &map());
-        // 0x4000 is past the last row's start, so it *is* covered by the last
-        // row by DWARF's range semantics -- assert the real answer.
-        assert_eq!(out[0].file.as_deref(), Some("src/db.rs"));
-        assert_eq!(report.unmapped, 0);
+        let (out, report) = resolve_frames(
+            &[frame("mystery", Some(0))],
+            &SourceMap::from_entries(vec![entry(0x100, "src/a.rs", 1)]),
+        );
+        assert_eq!(
+            out[0].file, None,
+            "an uncovered offset must not be resolved"
+        );
+        assert_eq!(report.unmapped, 1);
+        assert!(!report.fully_resolved());
+    }
 
-        // Now a genuinely uncovered case: an empty map has no covering row.
-        let (out, report) = resolve_frames(&[frame("mystery", Some(0x10))], &SourceMap::empty());
-        assert_eq!(out[0].file, None, "an empty map must not invent a location");
+    /// Without an upper bound the map keeps DWARF range semantics: an offset
+    /// past the last row's start *is* covered by the last row, so it resolves.
+    ///
+    /// This is the honest half of what the old test asserted — range coverage
+    /// is real, and only an extractor-recorded bound can contradict it.
+    #[test]
+    fn past_the_last_row_resolves_when_no_bound_was_recorded() {
+        let (out, report) = resolve_frames(&[frame("tail", Some(0x4000))], &map());
+        assert_eq!(out[0].file.as_deref(), Some("src/db.rs"));
+        assert_eq!(out[0].line, Some(17));
+        assert_eq!(report.unmapped, 0);
+    }
+
+    /// With an extractor-recorded bound, an offset at or past it is unmapped —
+    /// the no-guessing rule. This is the case the old test should have pinned.
+    #[test]
+    fn past_the_recorded_bound_is_unmapped_not_guessed() {
+        let bounded = map().with_upper_bound(0x30);
+        let (out, report) = resolve_frames(&[frame("tail", Some(0x4000))], &bounded);
+        assert_eq!(out[0].file, None, "past the bound is outside every range");
         assert_eq!(out[0].line, None);
         assert_eq!(report.unmapped, 1);
         assert!(!report.fully_resolved());
+
+        // And the boundary itself is exclusive.
+        let (out, _) = resolve_frames(&[frame("edge", Some(0x30))], &bounded);
+        assert_eq!(out[0].file, None);
+        // 0x2f is inside the range starting at 0x00 — the first row, not the
+        // last: bounds gate the tail, they do not move the rows.
+        let (out, report) = resolve_frames(&[frame("edge", Some(0x2f))], &bounded);
+        assert_eq!(out[0].file.as_deref(), Some("src/main.rs"));
+        assert_eq!(report.resolved, 1);
     }
 
     #[test]
@@ -363,6 +431,73 @@ mod tests {
         assert_eq!(out[0].line, Some(42));
         assert_eq!(report.resolved, 1);
         assert_eq!(report.already_resolved, 0);
+    }
+
+    /// A half location the map cannot cover is preserved, not cleared: the
+    /// miss path pushes the frame untouched, so whatever the reporter knew
+    /// survives. (The hit path above overwrites with the map's answer; both
+    /// branches now pinned, so a future change to either fails loudly.)
+    #[test]
+    fn a_half_location_is_preserved_on_a_miss() {
+        let mut half = frame("mystery", Some(0x10));
+        half.file = Some("somewhere.rs".to_owned());
+        half.line = None;
+
+        let (out, report) = resolve_frames(&[half], &SourceMap::empty());
+        assert_eq!(out[0].file.as_deref(), Some("somewhere.rs"));
+        assert_eq!(out[0].line, None);
+        assert_eq!(report.unmapped, 1);
+    }
+
+    /// Degenerate locations are not resolved: an empty file or a zero line
+    /// is not a location (both rejected for `FrameLocation` itself), so a
+    /// frame carrying one is still worth resolving — and must never count
+    /// as already authoritative.
+    #[test]
+    fn a_degenerate_location_is_still_resolved() {
+        for (file, line) in [
+            (Some(String::new()), Some(42)),
+            (Some("x.rs".to_owned()), Some(0)),
+            (Some("   ".to_owned()), Some(7)),
+        ] {
+            let mut bad = frame("handle", Some(0x0150));
+            bad.file = file;
+            bad.line = line;
+
+            let (out, report) = resolve_frames(&[bad], &map());
+            assert_eq!(out[0].file.as_deref(), Some("src/handler.rs"));
+            assert_eq!(out[0].line, Some(42));
+            assert_eq!(
+                report.resolved, 1,
+                "a degenerate location must not count as resolved"
+            );
+            assert_eq!(report.already_resolved, 0);
+        }
+    }
+
+    /// Rendering agrees with resolving: a degenerate location prints as the
+    /// offset form, never as `(:0)` or `( :7)`.
+    #[test]
+    fn rendering_never_prints_a_degenerate_location() {
+        let degenerate = ReportedFrame {
+            module: None,
+            func: "broken".to_owned(),
+            offset: Some(0x1a3),
+            file: Some(String::new()),
+            line: Some(0),
+        };
+        let text = render_frames(std::slice::from_ref(&degenerate));
+        assert!(text.contains("+0x1a3"), "{text}");
+        assert!(!text.contains(":0"), "{text}");
+
+        let whitespace = ReportedFrame {
+            file: Some("   ".to_owned()),
+            line: Some(7),
+            ..degenerate.clone()
+        };
+        let text = render_frames(std::slice::from_ref(&whitespace));
+        assert!(text.contains("+0x1a3"), "{text}");
+        assert!(!text.contains("( "), "{text}");
     }
 
     // -- the report itself ---------------------------------------------------

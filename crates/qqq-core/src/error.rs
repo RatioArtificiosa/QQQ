@@ -160,6 +160,12 @@ pub enum ErrorCode {
     /// A reproducible build produced a different digest on a second run.
     /// **Remediation:** find the nondeterminism source; see Proposal §5.4.
     NonReproducibleBuild = 1005,
+    /// The artifact's DWARF debug info could not be parsed.
+    /// **Remediation:** rebuild with debug info (`[profile.release] debug = true`);
+    /// if the failure persists, the toolchain emitted malformed DWARF — report
+    /// the toolchain version. Frames without a mapping report no location
+    /// rather than a guessed one.
+    DebugInfoInvalid = 1006,
 
     // -- 2xxx: manifest / configuration --------------------------------------
     /// `qqq.toml` is not valid TOML.
@@ -474,6 +480,7 @@ impl ErrorCode {
             Self::MissingTarget,
             Self::WitInterfaceMismatch,
             Self::NonReproducibleBuild,
+            Self::DebugInfoInvalid,
             Self::ManifestSyntaxInvalid,
             Self::ManifestSchemaViolation,
             Self::SecretUnresolvable,

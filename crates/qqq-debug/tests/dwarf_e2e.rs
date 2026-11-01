@@ -33,16 +33,30 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A scratch project directory, removed on drop.
 struct Project {
     path: PathBuf,
 }
 
+/// Disambiguates concurrent or repeated runs: pid alone collides when a
+/// previous run's directory survives (a crash between create and drop) or two
+/// agents share a machine.
+static PROJECT_SEQ: AtomicU64 = AtomicU64::new(0);
+
 impl Project {
     fn new(tag: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let seq = PROJECT_SEQ.fetch_add(1, Ordering::Relaxed);
         let mut path = std::env::temp_dir();
-        path.push(format!("qqq-debug-e2e-{tag}-{}", std::process::id()));
+        path.push(format!(
+            "qqq-debug-e2e-{tag}-{}-{nanos}-{seq}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(path.join("src")).expect("create project");
         Self { path }
@@ -61,6 +75,24 @@ impl Drop for Project {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// Whether the `wasm32-wasip2` target is verifiably absent.
+///
+/// Probes `rustup target list --installed` first, because the build-stderr
+/// sniff in `build_component` is version-fragile: a new cargo may word the
+/// missing-target error differently and turn a skip into a false failure.
+/// Only a *positive* listing without the target skips — if rustup itself is
+/// missing or fails, the build is attempted and its outcome decides, exactly
+/// as before.
+fn wasm_target_missing() -> bool {
+    let Ok(out) = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+    else {
+        return false;
+    };
+    out.status.success() && !String::from_utf8_lossy(&out.stdout).contains("wasm32-wasip2")
 }
 
 /// Compile the project to a component, or `None` when the target is missing.
@@ -91,6 +123,31 @@ fn build_component(project: &Project) -> Option<Vec<u8>> {
 
     let artifact = project.path.join("target/wasm32-wasip2/release/app.wasm");
     std::fs::read(&artifact).ok()
+}
+
+/// The `debug = true` fixture artifact, built once per test-binary run.
+///
+/// Three tests need the same bytes; building three throwaway projects costs a
+/// `cargo build --release` each (seconds apiece) and litters three temp dirs.
+/// The build is a pure function of the fixture sources below, so sharing it
+/// changes no outcome. The directory is removed right after the bytes are
+/// read — only the bytes are shared, never a path.
+fn shared_debug_wasm() -> Option<Vec<u8>> {
+    static BUILT: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            if wasm_target_missing() {
+                return None;
+            }
+            let project = Project::new("shared");
+            project.write("Cargo.toml", CARGO_TOML);
+            project.write("src/lib.rs", LIB_RS);
+            let bytes = build_component(&project);
+            // `project` drops here and removes its directory; only the bytes
+            // are shared, never a path.
+            bytes
+        })
+        .clone()
 }
 
 const CARGO_TOML: &str = r#"[package]
@@ -139,10 +196,8 @@ pub fn helper(a: i32) -> i32 {
 
 /// The 1-based line number of a marker within [`LIB_RS`].
 ///
-/// Unused today and kept deliberately: the assertion below is on the *file*,
-/// which is what the defect was about, but a caller wanting to pin an exact line
-/// should derive it from the source rather than hard-code a number that rots.
-#[allow(dead_code)]
+/// Live again: the accuracy assertion below derives the expected line from the
+/// source rather than hard-coding a number that rots.
 fn line_of(marker: &str) -> u32 {
     LIB_RS
         .lines()
@@ -153,12 +208,8 @@ fn line_of(marker: &str) -> u32 {
 
 #[test]
 fn a_real_component_yields_source_locations() {
-    let project = Project::new("real");
-    project.write("Cargo.toml", CARGO_TOML);
-    project.write("src/lib.rs", LIB_RS);
-
-    let Some(wasm) = build_component(&project) else {
-        eprintln!(
+    let Some(wasm) = shared_debug_wasm() else {
+        println!(
             "SKIPPED: the wasm32-wasip2 target is not installed - this test did not run.\n\
              Install it with: rustup target add wasm32-wasip2"
         );
@@ -178,23 +229,28 @@ fn a_real_component_yields_source_locations() {
         "the line program must produce rows: {}",
         report.explain()
     );
+    // The extractor records the line program's own end marker: offsets past
+    // the artifact's code must resolve to nothing, not to the last row.
+    assert!(
+        report.map.upper_bound().is_some(),
+        "a real line program ends with an end_sequence marker"
+    );
 
-    // The mapping must name the fixture file.
+    // The mapping must name the fixture file at the fixture line.
     //
-    // Matched on the **basename**, because that is what this toolchain records:
-    // measured, the fixture appears as bare `lib.rs`, not `src/lib.rs`. DWARF
-    // stores whatever path the compiler was given, and for `wasm32-wasip2` the
-    // file table holds file names with the directory resolved separately.
-    //
-    // Asserting on `src/lib.rs` failed on a map that *did* contain the fixture,
-    // which is a test bug that would have looked like a product bug. The
-    // assertion is now on what the toolchain actually emits, with the observation
-    // recorded rather than assumed.
-    let found_fixture = report
+    // Matched exactly, not by basename: the extractor joins the directory
+    // table, so the fixture records as `src/lib.rs` — measured on a real
+    // build. A basename match would also catch a standard library `lib.rs`
+    // at the same line; the exact relative path plus the exact line makes a
+    // false positive vanishingly unlikely, and the failure message prints
+    // every distinct file so a toolchain that records differently is obvious
+    // instead of mysterious.
+    let expected_line = line_of("helper(x) + 1");
+    let fixture_row = report
         .map
         .entries()
         .iter()
-        .any(|e| e.location.file.ends_with("lib.rs"));
+        .find(|e| e.location.file == "src/lib.rs" && e.location.line == expected_line);
 
     // The full set for the failure message only.
     let mut sample: Vec<&str> = report
@@ -207,65 +263,98 @@ fn a_real_component_yields_source_locations() {
     sample.dedup();
     let total_files = sample.len();
 
+    let fixture_row = fixture_row.unwrap_or_else(|| {
+        panic!(
+            "the fixture source must appear in the map at line {expected_line}. \
+             {total_files} distinct file(s): {sample:?}"
+        )
+    });
+
+    // And the map round-trips through its own lookup: the row's address must
+    // resolve back to the row's location, proving `lookup` agrees with the
+    // table rather than merely re-reading it.
+    assert_eq!(
+        report.map.lookup(fixture_row.address),
+        Some(&fixture_row.location),
+        "lookup must agree with the table it searches"
+    );
+
+    // The helper's body line is pinned too: `line_of` serves both markers,
+    // and a one-marker test would leave the helper's accuracy unproven.
+    let helper_line = line_of("a * 2");
     assert!(
-        found_fixture,
-        "the fixture source must appear in the map. {total_files} distinct file(s): {sample:?}"
+        report
+            .map
+            .entries()
+            .iter()
+            .any(|e| e.location.file == "src/lib.rs" && e.location.line == helper_line),
+        "the helper body (line {helper_line}) must appear in the map"
     );
 }
 
-/// A lookup **between** rows resolves to the row that covers it.
+/// A lookup **between** rows resolves to the row that covers it — or to
+/// nothing when the probe falls in a gap between line-program sequences.
 ///
-/// The property that makes this a range map rather than a point map, asserted
-/// against a real artifact rather than a synthetic table.
+/// The oracle is split deliberately. Whether `before.address + 1` is covered
+/// depends on the extractor's sequence data, which this test cannot see — so
+/// asserting coverage here would enshrine one toolchain's padding layout.
+/// What this test pins on real DWARF is the no-guessing property: the probe
+/// must resolve to the covering row or to nothing, never to a *different*
+/// row. Exact gap semantics live in the unit test
+/// `an_offset_in_a_sequence_gap_is_unmapped`, which controls the sequences.
+/// The row-start assertion below guards the other side: a gate that denied
+/// row starts would deny everything.
 #[test]
 fn an_offset_between_real_rows_resolves() {
-    let project = Project::new("between");
-    project.write("Cargo.toml", CARGO_TOML);
-    project.write("src/lib.rs", LIB_RS);
-
-    let Some(wasm) = build_component(&project) else {
-        eprintln!("SKIPPED: the wasm32-wasip2 target is not installed");
+    let Some(wasm) = shared_debug_wasm() else {
+        println!("SKIPPED: the wasm32-wasip2 target is not installed");
         return;
     };
 
     let report = qqq_debug::extract(&wasm).expect("extraction must not fail");
     let entries = report.map.entries();
     if entries.len() < 2 {
-        eprintln!("SKIPPED: the artifact produced fewer than two rows");
+        println!("SKIPPED: the artifact produced fewer than two rows");
         return;
     }
 
-    // Walk every gap and assert the answer is the preceding row.
+    // Walk every gap: the answer is the preceding row or nothing.
     for pair in entries.windows(2) {
         let (before, after) = (&pair[0], &pair[1]);
         if after.address > before.address + 1 {
-            let probe = before.address + 1;
-            let got = report.map.lookup(probe).expect("inside the covered range");
+            // The row's own start always resolves: sequences begin at their
+            // first row, so a gate that denied this would deny everything.
             assert_eq!(
-                got, &before.location,
-                "offset {probe:#x} lies in the range starting at {:#x} and must \
-                 resolve to it, not to the next row at {:#x}",
-                before.address, after.address
+                report.map.lookup(before.address),
+                Some(&before.location),
+                "a row's own start must resolve: {:#x}",
+                before.address
+            );
+            let probe = before.address + 1;
+            let got = report.map.lookup(probe);
+            assert!(
+                got == Some(&before.location) || got.is_none(),
+                "offset {probe:#x} must resolve to its covering row or to \
+                 nothing (a sequence gap), never to another row"
             );
         }
     }
 }
 
 /// An offset before the first row is **unmapped**, not attributed to the first.
+///
+/// Both branches assert: a first row above zero leaves `0` uncovered, while a
+/// first row *at* zero covers it — the test cannot pass vacuously either way.
 #[test]
 fn an_offset_below_the_first_real_row_is_unmapped() {
-    let project = Project::new("below");
-    project.write("Cargo.toml", CARGO_TOML);
-    project.write("src/lib.rs", LIB_RS);
-
-    let Some(wasm) = build_component(&project) else {
-        eprintln!("SKIPPED: the wasm32-wasip2 target is not installed");
+    let Some(wasm) = shared_debug_wasm() else {
+        println!("SKIPPED: the wasm32-wasip2 target is not installed");
         return;
     };
 
     let report = qqq_debug::extract(&wasm).expect("extraction must not fail");
     let Some(first) = report.map.entries().first() else {
-        eprintln!("SKIPPED: the artifact produced no rows");
+        println!("SKIPPED: the artifact produced no rows");
         return;
     };
 
@@ -275,6 +364,32 @@ fn an_offset_below_the_first_real_row_is_unmapped() {
             None,
             "an offset before the first row must not be attributed to it"
         );
+    } else {
+        assert_eq!(
+            report.map.lookup(0),
+            Some(&first.location),
+            "a first row at zero covers offset zero"
+        );
+    }
+
+    // Past the recorded bound, resolution reports nothing — the extractor's
+    // end marker gates `resolve_frames`, so a garbage offset never guesses at
+    // the last row. (`lookup` itself keeps range semantics for boundless maps;
+    // the gate lives where the bound is known.)
+    if let Some(bound) = report.map.upper_bound() {
+        let frame = qqq_debug::ReportedFrame {
+            module: None,
+            func: "tail".to_owned(),
+            offset: Some(bound),
+            file: None,
+            line: None,
+        };
+        let (out, gated) = qqq_debug::resolve_frames(&[frame], &report.map);
+        assert_eq!(
+            out[0].file, None,
+            "the bound is exclusive: {bound:#x} is outside every range"
+        );
+        assert_eq!(gated.unmapped, 1);
     }
 }
 
@@ -284,6 +399,10 @@ fn an_offset_below_the_first_real_row_is_unmapped() {
 /// invented locations from any input would pass every test above.
 #[test]
 fn an_artifact_without_debug_info_says_so_and_names_the_fix() {
+    if wasm_target_missing() {
+        println!("SKIPPED: the wasm32-wasip2 target is not installed");
+        return;
+    }
     let project = Project::new("nodebug");
     project.write(
         "Cargo.toml",
@@ -303,7 +422,7 @@ path = "src/lib.rs"
     project.write("src/lib.rs", LIB_RS);
 
     let Some(wasm) = build_component(&project) else {
-        eprintln!("SKIPPED: the wasm32-wasip2 target is not installed");
+        println!("SKIPPED: the wasm32-wasip2 target is not installed");
         return;
     };
 
@@ -327,4 +446,55 @@ path = "src/lib.rs"
         None,
         "an artifact with no debug info must map nothing"
     );
+}
+
+/// Wrapping the artifact in a component envelope changes nothing.
+///
+/// `cargo build --target wasm32-wasip2` emits a **core module**, not a
+/// component — so no test above exercises the nested-module path that made
+/// this feature report "no debug info" for a 265 KB artifact. Rather than
+/// shell out to `wasm-tools` (a CLI dependency the test suite must not grow),
+/// this wraps the real bytes by hand: a component preamble plus one section
+/// id `1` carrying the module. `extract` must descend and produce the byte-
+/// identical map — entries, end bound, and row count.
+///
+/// The envelope encoding is the Component Model preamble (magic, version
+/// `0x0d00`, layer `0x0001`) plus the section id from the walk the unit tests
+/// pin byte by byte.
+#[test]
+fn an_extract_through_a_component_wrapper_matches_direct_extraction() {
+    fn push_uleb(out: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let mut byte = u8::try_from(value & 0x7f).expect("seven bits fit");
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    let Some(wasm) = shared_debug_wasm() else {
+        println!("SKIPPED: the wasm32-wasip2 target is not installed");
+        return;
+    };
+
+    let mut wrapped = vec![0x00, b'a', b's', b'm', 0x0d, 0x00, 0x01, 0x00];
+    wrapped.push(0x01); // nested core module
+    push_uleb(&mut wrapped, wasm.len() as u64);
+    wrapped.extend_from_slice(&wasm);
+
+    let direct = qqq_debug::extract(&wasm).expect("direct extraction must not fail");
+    let via_wrapper = qqq_debug::extract(&wrapped).expect("wrapped extraction must not fail");
+
+    assert!(via_wrapper.is_wasm);
+    assert!(via_wrapper.has_debug_info(), "{}", via_wrapper.explain());
+    assert_eq!(
+        via_wrapper.map, direct.map,
+        "the nested path must yield the same table — rows and end bound"
+    );
+    assert_eq!(via_wrapper.rows, direct.rows);
 }

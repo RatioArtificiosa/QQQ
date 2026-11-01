@@ -88,6 +88,16 @@ logs and issue trackers reference them indefinitely.
 { "code": "QQQ-1005" }
 ```
 
+### `QQQ-1006` — `DebugInfoInvalid`
+
+**Cause.** The artifact's DWARF debug info could not be parsed.
+
+**Remediation.** Rebuild with debug info (`[profile.release] debug = true`); if the failure persists, the toolchain emitted malformed DWARF — report the toolchain version. Frames without a mapping report no location rather than a guessed one.
+
+```json
+{ "code": "QQQ-1006" }
+```
+
 ## Manifest and configuration
 
 ### `QQQ-2001` — `ManifestSyntaxInvalid`

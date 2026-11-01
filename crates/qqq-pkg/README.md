@@ -38,7 +38,7 @@ Two consequences shape the code:
 | Content-addressed store layout, verified reads, hard-link/copy materialization | **implemented** (`PKG-001`) |
 | Full solver with backtracking | not implemented (`PKG-003`) |
 | Registry client, fetching, resume | not implemented (`PKG-002`, `PKG-011`) |
-| Signature verification and trust policy | not implemented (`PKG-015`) |
+| Signature verification primitives (detached Ed25519 `sign` / `verify`, trust policies) | **implemented, unwired** (`PKG-015` is the install-path wiring) |
 | The registry itself | not implemented (`PKG-006` … `PKG-008`) |
 
 ## The lockfile covers itself

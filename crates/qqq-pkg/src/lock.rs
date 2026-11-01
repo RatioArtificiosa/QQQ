@@ -47,7 +47,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use qqq_core::{Error, ErrorCode, Result};
+use qqq_core::{Error, ErrorCode, Result, Version};
 
 /// The lockfile format version this build writes.
 ///
@@ -289,15 +289,27 @@ pub enum LockfileError {
         /// What this build writes.
         supported: u32,
     },
-    /// Two packages share a name and version.
+    /// Two packages share a name.
+    ///
+    /// Keyed by name rather than name-and-version because `get` and the diff
+    /// both key by name: a second entry under one name would make `get`
+    /// return the first while the diff reports the last.
     Duplicate {
-        /// The duplicated key.
+        /// The duplicated package name.
         key: String,
     },
     /// A package name or version is empty.
     EmptyField {
         /// Which field.
         field: String,
+    },
+    /// A package field failed validation: a NUL byte in a name or version,
+    /// or a malformed digest.
+    InvalidField {
+        /// Which field.
+        field: String,
+        /// Why it was rejected.
+        reason: String,
     },
     /// The covering hash does not match the contents.
     HashMismatch {
@@ -306,6 +318,31 @@ pub enum LockfileError {
         /// The hash computed from the contents.
         computed: String,
     },
+}
+
+/// Validate a digest-shaped field (`digest`, `wit`) at the parse boundary.
+fn validate_digest_field(field: &str, value: &str) -> std::result::Result<(), LockfileError> {
+    crate::store::Digest::parse(value)
+        .map(|_| ())
+        .map_err(|e| LockfileError::InvalidField {
+            field: field.to_owned(),
+            reason: e.message,
+        })
+}
+
+/// Reject a hashed field containing a hash separator.
+///
+/// NUL (`0x00`), record separator (`0x1E`) and group separator (`0x1D`) are
+/// the bytes the covering hash uses as delimiters; a field containing one
+/// recreates the split-collision the delimiters exist to prevent.
+fn check_field_bytes(field: &str, value: &str) -> std::result::Result<(), LockfileError> {
+    if value.bytes().any(|b| b == 0x00 || b == 0x1E || b == 0x1D) {
+        return Err(LockfileError::InvalidField {
+            field: field.to_owned(),
+            reason: "must not contain NUL or hash separators".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 impl fmt::Display for LockfileError {
@@ -320,6 +357,9 @@ impl fmt::Display for LockfileError {
                 write!(f, "`{key}` appears more than once in `qqq.lock`")
             }
             Self::EmptyField { field } => write!(f, "a package has an empty `{field}`"),
+            Self::InvalidField { field, reason } => {
+                write!(f, "a package has an invalid `{field}`: {reason}")
+            }
             Self::HashMismatch { recorded, computed } => write!(
                 f,
                 "`qqq.lock` has been modified: recorded hash {recorded}, computed {computed}"
@@ -349,6 +389,9 @@ impl LockfileError {
             Self::EmptyField { .. } => {
                 "the field is required; run `qqqai install` to regenerate the lockfile"
             }
+            Self::InvalidField { .. } => {
+                "fix the field; run `qqqai install` to regenerate the lockfile"
+            }
             Self::HashMismatch { .. } => {
                 "the lockfile was edited by hand or by another tool; run `qqqai install` \
                  to regenerate it, and check what changed"
@@ -372,11 +415,34 @@ impl Lockfile {
     }
 
     /// Add a package, keeping the list sorted.
+    ///
+    /// `push` does not refuse duplicates: it is the builder used by
+    /// `update::apply`, which moves one entry per name and never creates
+    /// two. Only *parsed* lockfiles are canonical — `parse` refuses a
+    /// repeated name, because `get` returns the first match while the diff
+    /// reports the last, and a hand-built lockfile with two entries under
+    /// one name would silently disagree with itself depending on the reader.
     pub fn push(&mut self, package: LockPackage) {
         self.packages.push(package);
         self.normalise();
     }
+}
 
+/// Order packages for hashing and listing: by name, then semver-aware.
+///
+/// Unparseable versions fall back to string order — deterministic, never a
+/// refusal. Shared by `normalise` and `compute_hash` so the two cannot drift
+/// into different orders.
+fn package_order(a: &LockPackage, b: &LockPackage) -> std::cmp::Ordering {
+    a.name.cmp(&b.name).then_with(|| {
+        match (a.version.parse::<Version>(), b.version.parse::<Version>()) {
+            (Ok(x), Ok(y)) => x.cmp(&y),
+            _ => a.version.cmp(&b.version),
+        }
+    })
+}
+
+impl Lockfile {
     /// Sort and deduplicate capability lists, then sort the package list.
     ///
     /// # Why this runs on every mutation and on every parse
@@ -386,13 +452,70 @@ impl Lockfile {
     /// report changes that are not changes — and a tool that cries wolf about
     /// authority changes is worse than one that says nothing, because the real
     /// one is buried.
+    ///
+    /// An absent build config and an empty one are the same absence
+    /// (`skip_serializing_if` writes nothing for an empty config, so they
+    /// round-trip identically): normalising the empty config to absent keeps
+    /// `==` agreeing with the hash, which already folds nothing for either.
     fn normalise(&mut self) {
         for p in &mut self.packages {
+            // Capabilities are identifiers: surrounding whitespace is never
+            // meaningful, and a blank entry grants nothing while hashing as a
+            // separator — so `[""]` and `[]` would compare and hash
+            // differently for the same authority. Trim, drop blanks, dedup.
+            p.caps = std::mem::take(&mut p.caps)
+                .into_iter()
+                .map(|c| c.trim().to_owned())
+                .filter(|c| !c.is_empty())
+                .collect();
             p.caps.sort_unstable();
             p.caps.dedup();
+            // An empty or blank string is not a value: `Some("")` and `None`
+            // hash identically (both feed nothing) but compare unequally, so
+            // a hand-written empty field would make two identical resolutions
+            // disagree. Trimmed first, because `" sha256:…" ` validates (the
+            // digest parser trims) but would otherwise hash *with* the spaces
+            // while the parsed twin hashes without. Normalise to absent at
+            // the same boundary that sorts.
+            for field in [&mut p.source, &mut p.digest, &mut p.wit, &mut p.license] {
+                if let Some(s) = field.as_deref() {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        *field = None;
+                    } else if trimmed.len() != s.len() {
+                        *field = Some(trimmed.to_owned());
+                    }
+                }
+            }
         }
-        self.packages
-            .sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.version.cmp(&b.version)));
+        // The build config's caps are authority too: an unsorted config
+        // would hash — and compare — differently for the same grant set.
+        if let Some(build) = &mut self.metadata.build {
+            build.caps = std::mem::take(&mut build.caps)
+                .into_iter()
+                .map(|c| c.trim().to_owned())
+                .filter(|c| !c.is_empty())
+                .collect();
+            build.caps.sort_unstable();
+            build.caps.dedup();
+            for field in [&mut build.language, &mut build.target, &mut build.profile] {
+                if let Some(s) = field.as_deref() {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        *field = None;
+                    } else if trimmed.len() != s.len() {
+                        *field = Some(trimmed.to_owned());
+                    }
+                }
+            }
+            // An explicitly empty config is the same absence as no config:
+            // the hash folds nothing for either, and serialisation writes
+            // nothing for either, so `==` must agree too.
+            if build.is_empty() {
+                self.metadata.build = None;
+            }
+        }
+        self.packages.sort_by(package_order);
     }
 
     /// Look up a package by name.
@@ -417,9 +540,12 @@ impl Lockfile {
     ///
     /// # What is covered, and what is not
     ///
-    /// Covered: every package's **name, version, digest, wit digest and
-    /// capabilities**. Not covered: the metadata block, because it contains this
-    /// hash and covering it would be circular.
+    /// Covered: every package's **name, version, source, digest, wit digest
+    /// and capabilities**. Not covered: the metadata block, because it contains this
+    /// hash and covering it would be circular; and the licence identifier,
+    /// because it changes neither the artifact's bytes nor its authority —
+    /// a licence edit is visible in the diff as `ModifiedInPlace`
+    /// (`DependencyChange::is_license_only`), not in the hash.
     ///
     /// The digest and capability fields are covered deliberately. A lockfile
     /// whose artifact digest changed is a different resolution; one whose
@@ -435,7 +561,14 @@ impl Lockfile {
         // The format version, so a schema change moves the hash.
         h.update(LOCK_VERSION.to_le_bytes());
 
-        for p in &self.packages {
+        // Sorted here, not just in `normalise`: `compute_hash` takes `&self`
+        // and must not depend on whether the caller normalised first. A
+        // hand-built lockfile with packages in insertion order hashes the
+        // same as its parsed (normalised) twin — otherwise `stamp` followed
+        // by `parse` would compute different hashes for the same resolution.
+        let mut ordered: Vec<&LockPackage> = self.packages.iter().collect();
+        ordered.sort_by(|a, b| package_order(a, b));
+        for p in ordered {
             // NUL separators between fields: without them, ("ab","c") and
             // ("a","bc") hash identically, and a package could be crafted whose
             // fields collide with another's. This is the classic
@@ -505,7 +638,12 @@ impl Lockfile {
     }
 
     /// Stamp the covering hash into the metadata.
+    ///
+    /// Normalises first: a hand-built lockfile with unsorted packages would
+    /// otherwise hash differently from its own parsed form, and `parse` would
+    /// refuse what `stamp` just wrote.
     pub fn stamp(&mut self, generated_by: &str) {
+        self.normalise();
         self.metadata.generated_by = Some(generated_by.to_owned());
         self.metadata.lockfile_hash = Some(self.compute_hash());
     }
@@ -514,8 +652,8 @@ impl Lockfile {
     ///
     /// # Errors
     ///
-    /// [`LockfileError`] for syntax, schema version, duplicates, empty fields, or
-    /// a covering-hash mismatch.
+    /// [`LockfileError`] for syntax, schema version, duplicates, empty or
+    /// invalid fields, or a covering-hash mismatch.
     pub fn parse(text: &str) -> std::result::Result<Self, LockfileError> {
         let mut lock: Self =
             toml::from_str(text).map_err(|e| LockfileError::Syntax(e.message().to_owned()))?;
@@ -534,6 +672,11 @@ impl Lockfile {
         // Duplicates and empty fields are checked here rather than trusted.
         // A lockfile listing a package twice is ambiguous about which one wins,
         // and ambiguity about authority is the thing this file exists to remove.
+        //
+        // Keyed by name, not by name-and-version: `get` and the diff both key
+        // by name (an update changes the version, which is exactly the
+        // continuity they depend on), so a second entry under one name would
+        // make `get` return the first while the diff reports the last.
         let mut seen = std::collections::BTreeSet::new();
         for p in &lock.packages {
             if p.name.trim().is_empty() || p.version.trim().is_empty() {
@@ -545,8 +688,63 @@ impl Lockfile {
                     },
                 });
             }
-            if !seen.insert(p.key()) {
-                return Err(LockfileError::Duplicate { key: p.key() });
+            // Every hashed field is separator-clean: the hash joins fields
+            // with NUL, record (`0x1E`) and group (`0x1D`) separators, and a
+            // field containing one recreates the `("ab","c")` / `("a","bc")`
+            // collision the separators exist to prevent. Digests and wits
+            // cannot contain them (hex, enforced below); names, versions,
+            // sources, licences and capabilities can, so they are rejected.
+            check_field_bytes("name", &p.name)?;
+            check_field_bytes("version", &p.version)?;
+            if let Some(source) = &p.source {
+                check_field_bytes("source", source)?;
+            }
+            if let Some(license) = &p.license {
+                check_field_bytes("license", license)?;
+            }
+            for cap in &p.caps {
+                check_field_bytes("caps", cap)?;
+            }
+            // A pinned version is exact: `major.minor.patch`, canonical, no
+            // leading zeros. A lockfile pinning `1.2` or `garbage` could never
+            // be resolved to a single artifact, and `1.2` vs `1.2.0` hashing
+            // differently while meaning the same thing would make two
+            // identical resolutions disagree.
+            if p.version.parse::<Version>().is_err() {
+                return Err(LockfileError::InvalidField {
+                    field: "version".to_owned(),
+                    reason: "must be major.minor.patch".to_owned(),
+                });
+            }
+            // Digests and interface hashes are content addresses: malformed
+            // ones are caught here, at the boundary, instead of failing pages
+            // later when the store tries to use them.
+            if let Some(digest) = &p.digest {
+                validate_digest_field("digest", digest)?;
+            }
+            if let Some(wit) = &p.wit {
+                validate_digest_field("wit", wit)?;
+            }
+            if !seen.insert(p.name.clone()) {
+                return Err(LockfileError::Duplicate {
+                    key: p.name.clone(),
+                });
+            }
+        }
+        // The build config is hashed too, so its fields get the same
+        // separator-cleanliness check as the package fields.
+        if let Some(build) = &lock.metadata.build {
+            if let Some(language) = &build.language {
+                check_field_bytes("language", language)?;
+            }
+            if let Some(target) = &build.target {
+                check_field_bytes("target", target)?;
+            }
+            if let Some(profile) = &build.profile {
+                check_field_bytes("profile", profile)?;
+            }
+            for cap in &build.caps {
+                check_field_bytes("caps", cap)?;
             }
         }
 
@@ -597,6 +795,15 @@ impl Default for Lockfile {
 // ---------------------------------------------------------------------------
 
 /// How one package changed between two lockfiles.
+///
+/// Four independent `*_changed` flags rather than an enum because the flags
+/// compose: a single update can move the digest *and* reword the licence.
+/// (`struct_excessive_bools` is allowed here for exactly that reason — the
+/// alternative, a powerset enum, would be less readable than four names.)
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the four change flags are independent and compose; an enum powerset would be less readable"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyChange {
     /// The package name.
@@ -611,6 +818,29 @@ pub struct DependencyChange {
     pub caps_added: Vec<String>,
     /// Capabilities that disappeared.
     pub caps_removed: Vec<String>,
+    /// Whether the artifact digest changed.
+    ///
+    /// A digest-only swap — same version, same capabilities, different bytes —
+    /// is the shape of an artifact substitution, and `ModifiedInPlace` alone
+    /// would not distinguish it from a license edit.
+    pub digest_changed: bool,
+    /// Whether the interface digest changed.
+    ///
+    /// The `wit` digest is covered by the hash for the same reason the artifact
+    /// digest is: an interface change is what breaks composition. Tracked for
+    /// the same reason as `digest_changed` — without it a `wit`-only swap
+    /// reads as an undescribed `ModifiedInPlace`.
+    pub wit_changed: bool,
+    /// Whether the source changed.
+    ///
+    /// Same name and version from a different source is a different package
+    /// (see `LockPackage::source`), so a source move is reported, not silent.
+    pub source_changed: bool,
+    /// Whether the licence identifier changed.
+    ///
+    /// A licence change alters no bytes and grants no authority, but it is
+    /// still a fact a reviewer wants separated from "nothing changed".
+    pub license_changed: bool,
 }
 
 impl DependencyChange {
@@ -622,6 +852,33 @@ impl DependencyChange {
     #[must_use]
     pub fn grants_new_authority(&self) -> bool {
         !self.caps_added.is_empty()
+    }
+
+    /// Whether the change is limited to the licence identifier.
+    ///
+    /// A licence edit changes no bytes and grants no authority, but it is
+    /// still separated from "nothing changed" so a reviewer can tell a
+    /// digest swap (bytes changed) from a paperwork edit.
+    ///
+    /// ```
+    /// # use qqq_pkg::lock::{ChangeKind, DependencyChange};
+    /// # let change = DependencyChange {
+    /// #     name: "x".into(), from: Some("1.0.0".into()), to: Some("1.0.0".into()),
+    /// #     kind: ChangeKind::ModifiedInPlace, caps_added: vec![], caps_removed: vec![],
+    /// #     digest_changed: false, wit_changed: false,
+    /// #     source_changed: false, license_changed: true,
+    /// # };
+    /// assert!(change.is_license_only());
+    /// ```
+    #[must_use]
+    pub fn is_license_only(&self) -> bool {
+        self.kind == ChangeKind::ModifiedInPlace
+            && self.caps_added.is_empty()
+            && self.caps_removed.is_empty()
+            && !self.digest_changed
+            && !self.wit_changed
+            && !self.source_changed
+            && self.license_changed
     }
 }
 
@@ -676,6 +933,13 @@ impl CapabilityDelta {
 pub struct LockDiff {
     /// Every changed package.
     pub changes: Vec<DependencyChange>,
+    /// Whether the build configuration changed.
+    ///
+    /// The diff keys on packages, but a config change moves the covering hash
+    /// without touching any package — without this flag that event would be
+    /// invisible (`is_empty` true) while the hash moved. A target or profile
+    /// change is a reproducibility event, so it is reported, not hidden.
+    pub build_changed: bool,
     /// Only the packages whose **authority** changed.
     ///
     /// Derived from `changes` rather than computed separately, so the two cannot
@@ -688,7 +952,7 @@ impl LockDiff {
     /// Whether anything changed at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.changes.is_empty() && !self.build_changed
     }
 
     /// Whether any dependency gained authority.
@@ -717,6 +981,15 @@ impl LockDiff {
     /// Compute the diff from `old` to `new`.
     #[must_use]
     pub fn compute(old: &Lockfile, new: &Lockfile) -> Self {
+        // Normalised clones: the inputs may be hand-built (unsorted, blank
+        // fields, empty-vs-absent configs), and the diff must not report
+        // formatting as change. `normalise` is idempotent, so parsed inputs
+        // pass through unchanged.
+        let mut old = old.clone();
+        old.normalise();
+        let mut new = new.clone();
+        new.normalise();
+        let build_changed = old.metadata.build != new.metadata.build;
         // Keyed by **name**, not by name-and-version: an update changes the
         // version, and keying on the pair would report every update as a removal
         // plus an addition — losing the fact that it is the same dependency,
@@ -739,10 +1012,19 @@ impl LockDiff {
                     // no prior state in which they were absent-but-allowed.
                     caps_added: after.caps.clone(),
                     caps_removed: Vec::new(),
+                    // Nothing before to differ from.
+                    digest_changed: false,
+                    wit_changed: false,
+                    source_changed: false,
+                    license_changed: false,
                 }),
                 Some(before) => {
                     let caps_added = difference(&after.caps, &before.caps);
                     let caps_removed = difference(&before.caps, &after.caps);
+                    let digest_changed = before.digest != after.digest;
+                    let wit_changed = before.wit != after.wit;
+                    let source_changed = before.source != after.source;
+                    let license_changed = before.license != after.license;
 
                     let kind = if before.version != after.version {
                         ChangeKind::Updated
@@ -760,6 +1042,10 @@ impl LockDiff {
                         kind,
                         caps_added,
                         caps_removed,
+                        digest_changed,
+                        wit_changed,
+                        source_changed,
+                        license_changed,
                     });
                 }
             }
@@ -773,10 +1059,14 @@ impl LockDiff {
                     to: None,
                     kind: ChangeKind::Removed,
                     caps_added: Vec::new(),
-                    // A removed package's capabilities are gone, which is not an
-                    // escalation and not a security event. Reported for
-                    // completeness only.
-                    caps_removed: Vec::new(),
+                    // A removed package's capabilities are gone with it: not an
+                    // escalation, but lost authority all the same, and
+                    // `total_removed` counts what is gone.
+                    caps_removed: before.caps.clone(),
+                    digest_changed: false,
+                    wit_changed: false,
+                    source_changed: false,
+                    license_changed: false,
                 });
             }
         }
@@ -795,6 +1085,7 @@ impl LockDiff {
 
         Self {
             changes,
+            build_changed,
             capability_changes,
         }
     }
@@ -895,9 +1186,9 @@ mod tests {
     #[test]
     fn the_hash_covers_the_artifact_digest() {
         let mut a = lock(vec![pkg("x", "1.0.0", &[])]);
-        a.packages[0].digest = Some("sha256:aaaa".to_owned());
+        a.packages[0].digest = Some(format!("sha256:{}", "aa".repeat(32)));
         let mut b = lock(vec![pkg("x", "1.0.0", &[])]);
-        b.packages[0].digest = Some("sha256:bbbb".to_owned());
+        b.packages[0].digest = Some(format!("sha256:{}", "bb".repeat(32)));
         assert_ne!(
             a.compute_hash(),
             b.compute_hash(),
@@ -948,7 +1239,7 @@ mod tests {
         others.push(source);
 
         let mut wit = lock(vec![pkg("x", "1.0.0", &[])]);
-        wit.packages[0].wit = Some("sha256:cc".to_owned());
+        wit.packages[0].wit = Some(format!("sha256:{}", "cc".repeat(32)));
         others.push(wit);
 
         for other in &others {
@@ -960,9 +1251,14 @@ mod tests {
         }
     }
 
-    /// The field separators must prevent a collision: `("ab","c")` and
-    /// `("a","bc")` must not hash identically. Without separators they would,
-    /// and a package could be crafted whose fields collide with another's.
+    /// Field boundaries are unambiguous — and NUL bytes, the one shape that
+    /// could smuggle one field split into another, are refused at parse.
+    ///
+    /// Without separators, `("ab","c")` and `("a","bc")` would hash
+    /// identically. With NUL separators they do not — but a NUL *inside* a
+    /// field recreates the ambiguity (`("a\0b","c")` and `("a","b\0c")`
+    /// share a preimage), so names and versions carrying NUL are rejected
+    /// rather than hashed.
     #[test]
     fn field_boundaries_are_unambiguous() {
         let a = lock(vec![
@@ -973,21 +1269,19 @@ mod tests {
             LockPackage::new("a", "bc"),
             LockPackage::new("ab", "c"),
         ]);
-        // Both normalise to the same order, so these are the same lockfile —
-        // and the point is that the insertion order of the *fields* within a
-        // record cannot be permuted to collide. Constructing the collision
-        // directly:
-        let mut shifted = Lockfile::new();
-        shifted.packages = vec![LockPackage::new("ab\x00c", ""), LockPackage::new("a", "bc")];
-        shifted.packages[0].name = "ab".to_owned();
-        shifted.packages[0].version = "c".to_owned();
-        let shifted = {
-            let mut l = Lockfile::new();
-            l.packages = vec![LockPackage::new("a", "bc"), LockPackage::new("ab", "c")];
-            l
-        };
-        assert_eq!(a.compute_hash(), shifted.compute_hash());
+        // Both normalise to the same order, so these are the same lockfile.
         assert_eq!(a.compute_hash(), b.compute_hash());
+
+        // A field split that NUL bytes would make ambiguous never reaches
+        // the hash: parse refuses it first.
+        let text = format!(
+            "version = {LOCK_VERSION}\n\n[[package]]\nname = \"a\\u0000b\"\nversion = \"c\"\n"
+        );
+        let e = Lockfile::parse(&text).unwrap_err();
+        assert!(
+            matches!(e, LockfileError::InvalidField { .. }),
+            "a NUL split must be refused, got {e:?}"
+        );
     }
 
     #[test]
@@ -1017,7 +1311,7 @@ mod tests {
             pkg("qqqai/json", "1.2.4", &["none"]),
             pkg("qqqai/validate", "2.0.1", &["clock.monotonic"]),
         ]);
-        original.packages[0].digest = Some("sha256:9f2c".to_owned());
+        original.packages[0].digest = Some(format!("sha256:{}", "9f2c".repeat(16)));
         original.packages[0].license = Some("Apache-2.0".to_owned());
         original.stamp("qqqai 1.0.0");
 
@@ -1077,12 +1371,93 @@ mod tests {
         assert!(matches!(e, LockfileError::Duplicate { .. }));
     }
 
+    /// Keyed by name, not name-and-version: `get` and the diff both key by
+    /// name, so `x@1` plus `x@2` would make `get` return the first while the
+    /// diff reports the last. Refuse the ambiguity instead.
+    #[test]
+    fn a_duplicate_name_with_different_versions_is_refused() {
+        let text = format!(
+            "version = {LOCK_VERSION}\n\n\
+             [[package]]\nname = \"x\"\nversion = \"1.0.0\"\n\n\
+             [[package]]\nname = \"x\"\nversion = \"2.0.0\"\n"
+        );
+        let e = Lockfile::parse(&text).unwrap_err();
+        assert!(
+            matches!(&e, LockfileError::Duplicate { key } if key == "x"),
+            "duplicates key by name: {e:?}"
+        );
+    }
+
     #[test]
     fn an_empty_name_or_version_is_refused() {
         let text =
             format!("version = {LOCK_VERSION}\n\n[[package]]\nname = \"\"\nversion = \"1.0.0\"\n");
         let e = Lockfile::parse(&text).unwrap_err();
         assert!(matches!(e, LockfileError::EmptyField { .. }));
+    }
+
+    /// A NUL byte in a name or version is refused: NUL collides with the
+    /// field separators the covering hash relies on, and no filesystem
+    /// accepts NUL in a path a name may become. Written as TOML `\u0000`
+    /// escapes — a literal NUL byte would not survive the test file itself.
+    #[test]
+    fn a_nul_byte_in_a_name_or_version_is_refused() {
+        for (name, version) in [("x\\u0000y", "1.0.0"), ("x", "1.0\\u0000")] {
+            let text = format!(
+                "version = {LOCK_VERSION}\n\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n"
+            );
+            let e = Lockfile::parse(&text).unwrap_err();
+            assert!(
+                matches!(e, LockfileError::InvalidField { .. }),
+                "NUL must be rejected, got {e:?}"
+            );
+        }
+    }
+
+    /// The hash separators are rejected everywhere they are hashed, not just
+    /// in names: a `0x1E` in a capability or a `0x1D` in a source recreates
+    /// the split-collision the NUL test pins for names.
+    #[test]
+    fn hash_separators_are_rejected_in_every_hashed_field() {
+        let cases = [
+            (
+                "caps",
+                "[[package]]\nname = \"x\"\nversion = \"1.0.0\"\ncaps = [\"a\\u001eb\"]\n",
+            ),
+            (
+                "source",
+                "[[package]]\nname = \"x\"\nversion = \"1.0.0\"\nsource = \"a\\u001db\"\n",
+            ),
+            (
+                "license",
+                "[[package]]\nname = \"x\"\nversion = \"1.0.0\"\nlicense = \"a\\u0000b\"\n",
+            ),
+        ];
+        for (field, body) in cases {
+            let text = format!("version = {LOCK_VERSION}\n\n{body}");
+            let e = Lockfile::parse(&text).unwrap_err();
+            assert!(
+                matches!(&e, LockfileError::InvalidField { field: f, .. } if f == field),
+                "{field} with a separator must be rejected, got {e:?}"
+            );
+        }
+    }
+
+    /// Digest-shaped fields are validated at the parse boundary: a malformed
+    /// digest would otherwise fail pages later when the store tries to use
+    /// it, far from the lockfile that carried it.
+    #[test]
+    fn a_malformed_digest_or_wit_is_refused_at_parse() {
+        for (field, value) in [("digest", "not-a-digest"), ("wit", "sha256:xyz")] {
+            let text = format!(
+                "version = {LOCK_VERSION}\n\n[[package]]\nname = \"x\"\nversion = \"1.0.0\"\n{field} = \"{value}\"\n"
+            );
+            let e = Lockfile::parse(&text).unwrap_err();
+            assert!(
+                matches!(e, LockfileError::InvalidField { .. }),
+                "{field} = {value:?} must be rejected, got {e:?}"
+            );
+        }
     }
 
     /// **A hand-edited lockfile is detected, not trusted.** The covering hash is
@@ -1129,10 +1504,14 @@ mod tests {
                 supported: 1,
             },
             LockfileError::Duplicate {
-                key: "x@1".to_owned(),
+                key: "x".to_owned(),
             },
             LockfileError::EmptyField {
                 field: "name".to_owned(),
+            },
+            LockfileError::InvalidField {
+                field: "digest".to_owned(),
+                reason: "test".to_owned(),
             },
             LockfileError::HashMismatch {
                 recorded: "a".to_owned(),
@@ -1249,6 +1628,9 @@ mod tests {
         assert!(diff.changes[0].to.is_none());
         // Removing a dependency is not an escalation.
         assert!(!diff.has_escalation());
+        // But its authority is gone, and the totals count what is gone.
+        assert_eq!(diff.changes[0].caps_removed, vec!["http.client"]);
+        assert_eq!(diff.total_removed(), 1);
     }
 
     /// An unchanged lockfile must produce an **empty** diff, not a list of
@@ -1298,6 +1680,60 @@ mod tests {
         assert_eq!(names, vec!["apple", "mango", "zebra"]);
     }
 
+    /// A build-config-only change moves the hash but touches no package: the
+    /// diff must still report it, or `is_empty` would be true while the hash
+    /// moved.
+    #[test]
+    fn a_build_config_change_is_reported_despite_no_package_change() {
+        let before = base_lock();
+        let mut after = base_lock();
+        after.metadata.build = Some(BuildConfig::new("rust", "wasm32-wasip2", "debug"));
+
+        let diff = LockDiff::compute(&before, &after);
+        assert!(diff.build_changed);
+        assert!(
+            !diff.is_empty(),
+            "a hash-moving change is not an empty diff"
+        );
+        assert!(diff.changes.is_empty());
+        assert!(!diff.has_escalation());
+    }
+
+    /// Hand-built order does not move the hash: `compute_hash` sorts a copy,
+    /// so insertion order is not part of the digest.
+    #[test]
+    fn insertion_order_does_not_move_the_hash() {
+        let mut a = Lockfile::new();
+        a.packages = vec![pkg("b", "1.0.0", &[]), pkg("a", "1.0.0", &[])];
+        let mut b = Lockfile::new();
+        b.packages = vec![pkg("a", "1.0.0", &[]), pkg("b", "1.0.0", &[])];
+        assert_eq!(a.compute_hash(), b.compute_hash());
+    }
+
+    /// Whitespace-only fields normalise away, and blank capabilities drop:
+    /// `[" "]` grants nothing and must compare — and hash — like `[]`.
+    #[test]
+    fn blank_fields_normalise_to_absent() {
+        let mut l = lock(vec![pkg("x", "1.0.0", &[" ", "http.client"])]);
+        l.packages[0].source = Some("   ".to_owned());
+        l.normalise();
+        assert!(l.packages[0].source.is_none());
+        assert_eq!(l.packages[0].caps, vec!["http.client"]);
+    }
+
+    /// Semver-aware sort: `1.10` follows `1.9`, which lexicographic order
+    /// gets backwards.
+    #[test]
+    fn versions_sort_numerically_not_lexicographically() {
+        let l = lock(vec![
+            pkg("x", "1.10.0", &[]),
+            pkg("x", "1.9.0", &[]),
+            pkg("x", "1.2.0", &[]),
+        ]);
+        let versions: Vec<&str> = l.packages.iter().map(|p| p.version.as_str()).collect();
+        assert_eq!(versions, vec!["1.2.0", "1.9.0", "1.10.0"]);
+    }
+
     /// The capability change list must be derived from the change list, so the
     /// two cannot disagree. A `caps_added` entry that did not appear in
     /// `capability_changes` would be a supply-chain event nobody was shown.
@@ -1339,9 +1775,9 @@ mod tests {
     #[test]
     fn a_digest_swap_is_reported_as_a_modified_in_place() {
         let mut before = lock(vec![pkg("x", "1.0.0", &[])]);
-        before.packages[0].digest = Some("sha256:aaaa".to_owned());
+        before.packages[0].digest = Some(format!("sha256:{}", "aa".repeat(32)));
         let mut after = lock(vec![pkg("x", "1.0.0", &[])]);
-        after.packages[0].digest = Some("sha256:bbbb".to_owned());
+        after.packages[0].digest = Some(format!("sha256:{}", "bb".repeat(32)));
 
         let diff = LockDiff::compute(&before, &after);
         assert_eq!(diff.changes.len(), 1);
@@ -1350,6 +1786,44 @@ mod tests {
             diff.changes[0].caps_added.is_empty(),
             "a digest swap grants no authority"
         );
+        // And the record says *what* changed: bytes, not paperwork.
+        assert!(diff.changes[0].digest_changed);
+        assert!(!diff.changes[0].license_changed);
+        assert!(!diff.changes[0].is_license_only());
+    }
+
+    /// A licence-only edit is a modification in place, but flagged as
+    /// paperwork — distinguishable from a digest swap, which moves bytes.
+    #[test]
+    fn a_license_edit_is_flagged_as_paperwork_not_substitution() {
+        let mut before = lock(vec![pkg("x", "1.0.0", &[])]);
+        before.packages[0].license = Some("MIT".to_owned());
+        let mut after = lock(vec![pkg("x", "1.0.0", &[])]);
+        after.packages[0].license = Some("Apache-2.0".to_owned());
+
+        let diff = LockDiff::compute(&before, &after);
+        assert_eq!(diff.changes.len(), 1);
+        assert_eq!(diff.changes[0].kind, ChangeKind::ModifiedInPlace);
+        assert!(diff.changes[0].is_license_only());
+        assert!(!diff.changes[0].digest_changed);
+        assert!(!diff.changes[0].grants_new_authority());
+    }
+
+    /// A `wit`-only swap is a composition break, not paperwork: flagged by
+    /// `wit_changed`, excluded from `is_license_only`.
+    #[test]
+    fn a_wit_swap_is_flagged_as_an_interface_change() {
+        let mut before = lock(vec![pkg("x", "1.0.0", &[])]);
+        before.packages[0].wit = Some(format!("sha256:{}", "aa".repeat(32)));
+        let mut after = lock(vec![pkg("x", "1.0.0", &[])]);
+        after.packages[0].wit = Some(format!("sha256:{}", "bb".repeat(32)));
+
+        let diff = LockDiff::compute(&before, &after);
+        assert_eq!(diff.changes.len(), 1);
+        assert_eq!(diff.changes[0].kind, ChangeKind::ModifiedInPlace);
+        assert!(diff.changes[0].wit_changed);
+        assert!(!diff.changes[0].digest_changed);
+        assert!(!diff.changes[0].is_license_only());
     }
     // -- The build config the hash covers — CON-005 ------------------------
 
@@ -1362,7 +1836,7 @@ mod tests {
     fn base_lock() -> Lockfile {
         let mut l = Lockfile::new();
         let mut pkg = LockPackage::new("qqqai/telemetry", "1.0.0");
-        pkg.digest = Some("sha256:aa".to_owned());
+        pkg.digest = Some(format!("sha256:{}", "aa".repeat(32)));
         l.push(pkg);
         l
     }
@@ -1509,9 +1983,12 @@ mod tests {
     /// contribute nothing to the hash while looking recorded.
     #[test]
     fn an_unknown_config_key_is_refused() {
-        let text =
-            "[lock]\nversion = 1\n\n[metadata.build]\nlanguage = \"rust\"\nlangauge = \"ts\"\n";
-        let err = Lockfile::parse(text).expect_err("must refuse");
+        // No `[lock]` header: the only error source must be the typo'd key,
+        // or the test passes for the wrong reason.
+        let text = format!(
+            "version = {LOCK_VERSION}\n\n[metadata.build]\nlanguage = \"rust\"\nlangauge = \"ts\"\n"
+        );
+        let err = Lockfile::parse(&text).expect_err("must refuse");
         assert!(matches!(err, LockfileError::Syntax(_)), "{err:?}");
     }
 

@@ -17,7 +17,12 @@
 //! | Content-addressed store layout, verification, and materialization | **implemented** (`PKG-001`) |
 //! | Full dependency solver with backtracking | not implemented (`PKG-003`) |
 //! | Registry client, fetching, resume | not implemented (`PKG-002`, `PKG-011`) |
-//! | Signature verification and trust policy | not implemented (`PKG-015`) |
+//! | Signature verification and trust policy | primitives implemented, unwired (`PKG-015`) |
+//!
+//! `signature.rs` implements detached Ed25519 `sign` / `verify` and trust
+//! policies (`requiring`, `opportunistic`, `none`) — but no install path
+//! calls them yet, so signing today proves bytes, not provenance. Wiring
+//! verification into `install` is `PKG-015`.
 //! | `qqqai add` / `install` / `update` | not implemented (`CLI-005` … `CLI-007`) |
 //! | The registry itself | not implemented (`PKG-006` … `PKG-008`, `PKG-012`) |
 //! | First-party and ported packages | not implemented (`PKG-016`, `PKG-017`) |

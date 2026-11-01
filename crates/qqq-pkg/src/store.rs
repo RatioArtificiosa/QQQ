@@ -554,6 +554,21 @@ fn settle_destination(digest: &Digest, dest: &Path) -> Result<DestState> {
         .with_cause(e.to_string())
     })?;
     if actual == *digest {
+        // Re-check the file type immediately before the permission change: a
+        // swap since the hash — to a symlink pointing elsewhere — would make
+        // the chmod below follow it. The window after this check is one call.
+        if symlink_not_regular(dest) {
+            return Err(Error::new(
+                ErrorCode::StoreCorrupted,
+                format!(
+                    "`{}` changed under us: no longer a regular file",
+                    dest.display()
+                ),
+            )
+            .with_remediation(
+                "re-run `qqqai install`; investigate concurrent writers if it recurs",
+            ));
+        }
         make_readonly(dest)?;
         // The hash above predates the permission change: re-read so a swap
         // in between is a loud refusal rather than a verified no-op. What
@@ -604,8 +619,8 @@ enum DestState {
 /// Called only after the store entry verified, so a corrupt or absent store
 /// never costs the destination its current bytes. Re-checks that the path
 /// is still a regular file rather than trusting the settle-time metadata;
-/// a swap inside this call itself remains possible (no `O_NOFOLLOW`
-/// under `forbid(unsafe_code)`), narrowed to two syscalls with a refusal
+/// a swap inside this call itself remains possible (link/rename/chmod take
+/// no open flags to gate on), narrowed to two syscalls with a refusal
 /// on anything unexpected between them.
 #[cfg(feature = "fs")]
 #[allow(
@@ -660,13 +675,14 @@ static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 /// a second filesystem; production always passes false through
 /// [`StoreLayout::materialize`].
 ///
-/// A pre-existing symlink at the temp name is refused outright: `copy` would
-/// write through it into someone else's file, and only something planted
-/// between the sweep and this call can be here. A leftover regular file is
-/// removed — by name it can only be our own stale temp. A predicted temp
-/// name plus a planted link still loses to a microsecond race, so this
-/// narrows the window rather than closing it; see the threat note on
-/// [`StoreLayout::materialize`].
+/// A pre-existing entry at the temp name is refused outright: `copy` would
+/// write through a planted link into someone else's file, and only something
+/// planted between the sweep and this call can be here. A leftover regular
+/// file is removed — by name it can only be our own stale temp. A predicted
+/// temp name plus a planted link still loses the race, because both the link
+/// and the copy fail loudly rather than following it: `hard_link` fails if
+/// the name exists at all, and the copy opens with `create_new`, which fails
+/// if anything appeared at the name and never follows a link.
 /// Filesystem-backed: gated out of `core-only` builds.
 #[cfg(feature = "fs")]
 fn link_or_copy(src: &Path, tmp: &Path, force_copy: bool) -> Result<LinkMethod> {
@@ -701,7 +717,22 @@ fn link_or_copy(src: &Path, tmp: &Path, force_copy: bool) -> Result<LinkMethod> 
         }
     }
     let copy = |why: &str| {
-        std::fs::copy(src, tmp).map_err(|e| {
+        // Opened with `create_new`, not `fs::copy`: if a link or file was
+        // planted at the temp name after the check above, the open fails
+        // instead of writing through it. No `O_NOFOLLOW` plumbing needed —
+        // `create_new` never follows, on any platform.
+        let mut tmp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp)
+            .map_err(|e| {
+                Error::new(
+                    ErrorCode::StoreCorrupted,
+                    format!("could not create `{}`{why}", tmp.display()),
+                )
+                .with_cause(e.to_string())
+            })?;
+        let mut src_file = std::fs::File::open(src).map_err(|e| {
             Error::new(
                 ErrorCode::StoreCorrupted,
                 format!(
@@ -711,7 +742,19 @@ fn link_or_copy(src: &Path, tmp: &Path, force_copy: bool) -> Result<LinkMethod> 
                 ),
             )
             .with_cause(e.to_string())
-        })
+        })?;
+        std::io::copy(&mut src_file, &mut tmp_file).map_err(|e| {
+            Error::new(
+                ErrorCode::StoreCorrupted,
+                format!(
+                    "could not copy `{}` to `{}`{why}",
+                    src.display(),
+                    tmp.display()
+                ),
+            )
+            .with_cause(e.to_string())
+        })?;
+        Ok(())
     };
     if force_copy {
         copy("")?;
@@ -773,6 +816,11 @@ impl StoreLayout {
     /// second source of truth that can disagree with the store — and a metadata
     /// file that vanished while its artifact remained is a state a separate
     /// index makes possible and a side-by-side layout makes impossible.
+    ///
+    /// There is deliberately no verified `write_metadata` companion: sidecars
+    /// carry no authority (nothing is resolved from them), so they are plain
+    /// files written with plain writes. Adding a verified writer would imply
+    /// a trust property the format does not have.
     #[must_use]
     pub fn metadata_path(&self, digest: &Digest) -> PathBuf {
         let mut p = self.artifact_path(digest);
@@ -786,6 +834,11 @@ impl StoreLayout {
 
     /// Whether an artifact is present.
     ///
+    /// Follows the same rule as [`Self::read`]: a symlink at the store path
+    /// is *not* refused here, because the bytes it points to are verified on
+    /// every read — and a symlink to the correct bytes is harmless. Refusing
+    /// it would break a working store for no safety gain; the write path
+    /// below is where planting is refused.
     /// Filesystem-backed: gated out of `core-only` builds.
     #[cfg(feature = "fs")]
     #[must_use]
@@ -807,6 +860,13 @@ impl StoreLayout {
     /// a truncated write, a partial copy, or a substituted file all leave
     /// something at that path. Reading without verifying would make the store a
     /// cache that silently serves the wrong bytes, which is worse than no cache.
+    ///
+    /// # Why a symlink at the store path is followed, then verified
+    ///
+    /// The bytes are hashed after the read, so a link pointing elsewhere fails
+    /// loudly with both digests — and a link pointing to the correct bytes is
+    /// indistinguishable from the bytes themselves. Content addressing makes
+    /// the *content* the boundary, not the path shape.
     /// Filesystem-backed: gated out of `core-only` builds.
     #[cfg(feature = "fs")]
     pub fn read(&self, digest: &Digest) -> Result<Vec<u8>> {
@@ -844,8 +904,8 @@ impl StoreLayout {
     ///
     /// # Errors
     ///
-    /// `QQQ-5006` when the directory cannot be created or the file cannot be
-    /// written.
+    /// `QQQ-5006` when the directory cannot be created, the file cannot be
+    /// written, or a symlink blocks the destination path.
     ///
     /// # Why the digest is computed rather than supplied
     ///
@@ -853,38 +913,134 @@ impl StoreLayout {
     /// then hold bytes under a path that does not describe them — permanently
     /// breaking the invariant the whole design rests on. Computing it here makes
     /// that impossible rather than merely discouraged.
+    ///
+    /// # Why placement is temp-file plus rename
+    ///
+    /// `std::fs::write` follows a symlink at the destination, so a link
+    /// planted between the check below and the write would receive the
+    /// store's bytes outside the store. Writing to a fresh temp name (created
+    /// with `create_new`, which fails if anything appeared there) and
+    /// renaming closes that window: `rename` replaces the *name* and never
+    /// follows it. A link still present at rename time is refused rather
+    /// than replaced — it is someone else's state.
     /// Filesystem-backed: gated out of `core-only` builds.
     #[cfg(feature = "fs")]
     pub fn write(&self, bytes: &[u8]) -> Result<Digest> {
         let digest = Digest::of(bytes);
         let path = self.artifact_path(&digest);
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                Error::new(
-                    ErrorCode::StoreCorrupted,
-                    format!("could not create `{}`", parent.display()),
-                )
-                .with_cause(e.to_string())
-            })?;
-        }
-
-        // Already present: nothing to do. Presence is *not* re-verified here —
-        // verification happens on read, which hashes every time, so a corrupt
-        // entry fails loudly at use rather than silently at write.
-        // Re-writing would be wasted I/O, and on a shared store it would be
-        // a write race.
-        if self.contains(&digest) {
-            return Ok(digest);
-        }
-
-        std::fs::write(&path, bytes).map_err(|e| {
+        let Some(parent) = path.parent() else {
+            return Err(Error::new(
+                ErrorCode::StoreCorrupted,
+                format!("`{}` has no parent directory", path.display()),
+            )
+            .with_remediation("this is a bug in the store path construction; please report it"));
+        };
+        std::fs::create_dir_all(parent).map_err(|e| {
             Error::new(
                 ErrorCode::StoreCorrupted,
-                format!("could not write `{}`", path.display()),
+                format!("could not create `{}`", parent.display()),
             )
             .with_cause(e.to_string())
         })?;
+
+        // A symlink at the store path is refused *here*, unlike in `read`:
+        // writing through it would place bytes outside the store — including
+        // through a link to a path that does not exist yet, which `contains`
+        // below would not even notice. Reading through a link is harmless
+        // (verified); writing through one is not. A store path is only ever
+        // a regular file this tool wrote, so a link here is always foreign.
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(Error::new(
+                ErrorCode::StoreCorrupted,
+                format!(
+                    "`{}` is a symlink; the store never writes through links",
+                    path.display()
+                ),
+            )
+            .with_remediation("remove it and run `qqqai install` again"));
+        }
+
+        // Already present: verify rather than trust. Presence is not evidence
+        // of integrity (see `read`), and re-hashing one file is what lets a
+        // corrupt entry heal on the next write instead of failing loudly
+        // forever. Re-writing unconditionally would be wasted I/O, and on a
+        // shared store it would be a write race; verifying first keeps the
+        // fast path (absent or intact) and pays one hash only when a file
+        // is actually there.
+        if self.contains(&digest) {
+            let present = std::fs::read(&path).map_err(|e| {
+                Error::new(
+                    ErrorCode::StoreCorrupted,
+                    format!("could not re-read `{}`", path.display()),
+                )
+                .with_cause(e.to_string())
+            })?;
+            if Digest::of(&present) == digest {
+                return Ok(digest);
+            }
+            // Present but corrupt: fall through and replace below, so the
+            // entry heals instead of failing every future read.
+        }
+
+        // Fresh temp name in the same directory (same filesystem, so the
+        // rename below is atomic). `create_new` fails if anything appeared
+        // at the name — planted or stale — and never follows a link. The
+        // name shares materialize's `tmp-<hex>-<pid>-<n>` shape so the same
+        // sweep below collects it after a crash; a pid reused by the OS
+        // would otherwise fail `create_new` forever on a stale file.
+        sweep_stale_tmps(parent);
+        let short = match digest.hex().get(..8) {
+            Some(prefix) => prefix,
+            None => digest.hex(),
+        };
+        let n = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pid = std::process::id();
+        let tmp = parent.join(format!("tmp-{short}-{pid}-{n}"));
+        let mut tmp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| {
+                Error::new(
+                    ErrorCode::StoreCorrupted,
+                    format!("could not create `{}`", tmp.display()),
+                )
+                .with_cause(e.to_string())
+            })?;
+        if let Err(e) = std::io::Write::write_all(&mut tmp_file, bytes) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::new(
+                ErrorCode::StoreCorrupted,
+                format!("could not write `{}`", tmp.display()),
+            )
+            .with_cause(e.to_string()));
+        }
+        drop(tmp_file);
+        // A link planted after the first check is refused, not replaced: the
+        // rename below would swap it away silently, and a destination that
+        // changed under us is refused everywhere else in this module too.
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::new(
+                ErrorCode::StoreCorrupted,
+                format!(
+                    "`{}` changed under us: refusing to replace a link",
+                    path.display()
+                ),
+            )
+            .with_remediation(
+                "re-run `qqqai install`; investigate concurrent writers if it recurs",
+            ));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::new(
+                ErrorCode::StoreCorrupted,
+                format!("could not write `{}`", path.display()),
+            )
+            .with_cause(e.to_string()));
+        }
         Ok(digest)
     }
 
@@ -893,25 +1049,80 @@ impl StoreLayout {
     /// Used by `qqqai install --offline` to report what is available without
     /// reaching for the network. Sorted so the listing is deterministic, which
     /// matters because it appears in `--json` output that an agent diffs.
-    #[must_use]
+    ///
+    /// Entries that are neither digests nor `.meta` sidecars are skipped
+    /// without comment: they are inert (the store never reads by name, only
+    /// by digest), and a stray file from a crashed write is not evidence of
+    /// tampering — tampering with a *listed* artifact fails its digest check
+    /// on read regardless.
+    ///
+    /// # Errors
+    ///
+    /// `QQQ-5006` when any store directory cannot be read. A listing that
+    /// cannot be completed is an error rather than a partial answer: a
+    /// permission-denied bucket reported as "empty" would send the operator
+    /// to re-fetch what is actually there but unreadable.
+    ///
+    /// The one exception is a store that was never written: a missing top
+    /// level means nothing was ever stored, so it lists as empty rather
+    /// than failing. Anything else unreadable — permissions, corruption —
+    /// is an error.
     /// Filesystem-backed: gated out of `core-only` builds.
     #[cfg(feature = "fs")]
-    pub fn list(&self) -> Vec<Digest> {
+    pub fn list(&self) -> Result<Vec<Digest>> {
         let mut out = Vec::new();
         let algo_dir = self.root.join(DIGEST_ALGORITHM);
-        let Ok(level1) = std::fs::read_dir(&algo_dir) else {
-            return out;
+        let level1 = match std::fs::read_dir(&algo_dir) {
+            Ok(dir) => dir,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => {
+                return Err(Error::new(
+                    ErrorCode::StoreCorrupted,
+                    format!("could not list `{}`", algo_dir.display()),
+                )
+                .with_cause(e.to_string())
+                .with_remediation("check the store directory exists and is readable"));
+            }
         };
 
-        for a in level1.flatten() {
-            let Ok(level2) = std::fs::read_dir(a.path()) else {
-                continue;
-            };
-            for b in level2.flatten() {
-                let Ok(files) = std::fs::read_dir(b.path()) else {
-                    continue;
-                };
-                for f in files.flatten() {
+        for a in level1 {
+            let a = a.map_err(|e| {
+                Error::new(
+                    ErrorCode::StoreCorrupted,
+                    format!("could not list `{}`", algo_dir.display()),
+                )
+                .with_cause(e.to_string())
+            })?;
+            let level2 = std::fs::read_dir(a.path()).map_err(|e| {
+                Error::new(
+                    ErrorCode::StoreCorrupted,
+                    format!("could not list `{}`", a.path().display()),
+                )
+                .with_cause(e.to_string())
+            })?;
+            for b in level2 {
+                let b = b.map_err(|e| {
+                    Error::new(
+                        ErrorCode::StoreCorrupted,
+                        format!("could not list `{}`", a.path().display()),
+                    )
+                    .with_cause(e.to_string())
+                })?;
+                let files = std::fs::read_dir(b.path()).map_err(|e| {
+                    Error::new(
+                        ErrorCode::StoreCorrupted,
+                        format!("could not list `{}`", b.path().display()),
+                    )
+                    .with_cause(e.to_string())
+                })?;
+                for f in files {
+                    let f = f.map_err(|e| {
+                        Error::new(
+                            ErrorCode::StoreCorrupted,
+                            format!("could not list `{}`", b.path().display()),
+                        )
+                        .with_cause(e.to_string())
+                    })?;
                     let name = f.file_name().to_string_lossy().into_owned();
                     // Skip the metadata sidecars, which share the directory.
                     // Extension comparison is case-insensitive because the store
@@ -931,15 +1142,18 @@ impl StoreLayout {
         }
         out.sort_unstable();
         out.dedup();
-        out
+        Ok(out)
     }
 
     /// How many artifacts are stored.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// `QQQ-5006` when the store cannot be listed; see [`Self::list`].
     /// Filesystem-backed: gated out of `core-only` builds.
     #[cfg(feature = "fs")]
-    pub fn count(&self) -> usize {
-        self.list().len()
+    pub fn count(&self) -> Result<usize> {
+        Ok(self.list()?.len())
     }
 
     /// Place an artifact at a project path, verified, as a link when possible.
@@ -978,15 +1192,16 @@ impl StoreLayout {
     ///
     /// # Residual races, stated plainly
     ///
-    /// The checks above narrow every swap window to a single call each, and a
-    /// predicted temp name plus an `O(N)` symlink plant still has to win a
-    /// microsecond race the pid in the name makes unpredictable — but without
-    /// `O_NOFOLLOW` (blocked by this crate's `forbid(unsafe_code)`) no
-    /// check-then-act sequence on a shared filesystem closes fully. The
-    /// adversary this leaves standing is a local writer racing a single
-    /// install, and every outcome of losing that race is a loud refusal,
-    /// never silent corruption: the placed bytes are re-verified after the
-    /// link, and the destination is re-checked after the rename.
+    /// The checks above narrow every swap window to a single call each. A
+    /// planted temp name fails loudly rather than being written through: the
+    /// copy path opens the temp file with `create_new` (which fails if
+    /// anything — link or file — appeared at the name, and never follows it),
+    /// and `hard_link` fails if the name exists at all. What remains
+    /// unclosable is `rename`/`chmod` themselves, which take no flags: the
+    /// adversary left standing is a local writer racing a single install, and
+    /// every outcome of losing that race is a loud refusal, never silent
+    /// corruption: the placed bytes are re-verified after the link, and the
+    /// destination is re-checked after the rename.
     ///
     /// Replacing a linked destination clears the read-only bit through the
     /// shared inode, so a replaced-away store entry is left writable. That
@@ -1370,7 +1585,7 @@ mod fs_tests {
         let a = layout.write(b"same").expect("must write");
         let b = layout.write(b"same").expect("must write again");
         assert_eq!(a, b, "identical content must produce one digest");
-        assert_eq!(layout.count(), 1, "and one stored artifact");
+        assert_eq!(layout.count().expect("count"), 1, "and one stored artifact");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1382,7 +1597,7 @@ mod fs_tests {
         let a = layout.write(b"one").expect("must write");
         let b = layout.write(b"two").expect("must write");
         assert_ne!(a, b);
-        assert_eq!(layout.count(), 2);
+        assert_eq!(layout.count().expect("count"), 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1450,6 +1665,59 @@ mod fs_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A corrupt entry heals on the next write: re-writing verifies first,
+    /// and a mismatch falls through to overwrite rather than returning the
+    /// corrupt entry as intact.
+    #[test]
+    fn writing_over_a_corrupt_entry_heals_it() {
+        let root = temp_root("heal");
+        let layout = StoreLayout::new(&root);
+
+        let digest = layout.write(b"the original content").expect("must write");
+        std::fs::write(layout.artifact_path(&digest), b"tampered!").expect("overwrite");
+        assert!(layout.read(&digest).is_err(), "tampering must be caught");
+
+        let healed = layout
+            .write(b"the original content")
+            .expect("rewrite must heal");
+        assert_eq!(healed, digest);
+        assert_eq!(
+            layout.read(&digest).expect("must read after healing"),
+            b"the original content"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Writing through a planted symlink is refused: the link would place
+    /// bytes outside the store. (Reading through one is harmless — verified —
+    /// but writing is not.)
+    ///
+    /// Unix-only: creating the link needs a privilege Windows CI cannot
+    /// assume, matching the convention of the other symlink-plant tests in
+    /// this module. The refusal itself is platform-independent code.
+    #[test]
+    #[cfg(unix)]
+    fn writing_through_a_planted_symlink_is_refused() {
+        let root = temp_root("linkplant");
+        let layout = StoreLayout::new(&root);
+
+        let digest = layout.write(b"staged").expect("must write");
+        let path = layout.artifact_path(&digest);
+        std::fs::remove_file(&path).expect("clear");
+        let outside = root.join("outside.bin");
+        std::os::unix::fs::symlink(&outside, &path).expect("plant link");
+
+        let e = layout
+            .write(b"staged")
+            .expect_err("a planted link must not be written through");
+        assert_eq!(e.code, ErrorCode::StoreCorrupted);
+        assert!(
+            !outside.exists(),
+            "nothing must have been written outside the store"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn an_empty_artifact_is_storable() {
         let root = temp_root("empty");
@@ -1470,8 +1738,8 @@ mod fs_tests {
     fn listing_an_empty_store_yields_nothing() {
         let root = temp_root("empty-list");
         let layout = StoreLayout::new(&root);
-        assert!(layout.list().is_empty());
-        assert_eq!(layout.count(), 0);
+        assert!(layout.list().expect("list").is_empty());
+        assert_eq!(layout.count().expect("count"), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1489,7 +1757,7 @@ mod fs_tests {
         }
         expected.sort_unstable();
 
-        let listed = layout.list();
+        let listed = layout.list().expect("list");
         assert_eq!(listed, expected, "the listing must be complete and sorted");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1504,7 +1772,7 @@ mod fs_tests {
         let d = layout.write(b"body").expect("write");
         std::fs::write(layout.metadata_path(&d), b"{}").expect("write metadata");
 
-        let listed = layout.list();
+        let listed = layout.list().expect("list");
         assert_eq!(listed, vec![d], "only real artifacts are listed");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1525,7 +1793,7 @@ mod fs_tests {
         let upper = layout.metadata_path(&d).with_extension("META");
         std::fs::write(&upper, b"{}").expect("write upper-case metadata");
 
-        let listed = layout.list();
+        let listed = layout.list().expect("list");
         assert_eq!(
             listed,
             vec![d],
@@ -1534,11 +1802,32 @@ mod fs_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A store that was never written lists as empty: a missing top level
+    /// means nothing was ever stored, not that something is wrong.
     #[test]
-    fn a_missing_store_root_lists_nothing_rather_than_failing() {
+    fn a_missing_store_root_lists_nothing() {
         let layout = StoreLayout::new("/definitely/not/a/store");
-        assert!(layout.list().is_empty());
-        assert_eq!(layout.count(), 0);
+        assert!(layout.list().expect("a fresh store lists empty").is_empty());
+        assert_eq!(layout.count().expect("count"), 0);
+    }
+
+    /// Anything else unreadable is an error, not an empty listing: a
+    /// permission-denied (or file-in-the-way) bucket reported as "empty"
+    /// would send the operator to re-fetch what is actually there but
+    /// unreadable. A regular file where the top level belongs is the
+    /// portable stand-in for an unreadable directory.
+    #[test]
+    fn an_unreadable_store_root_fails_loudly() {
+        let root = temp_root("blocked-list");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(root.join(DIGEST_ALGORITHM), b"not a dir").expect("block");
+        let layout = StoreLayout::new(&root);
+        let err = layout
+            .list()
+            .expect_err("an unreadable store must not list empty");
+        assert_eq!(err.code, ErrorCode::StoreCorrupted);
+        assert!(layout.count().is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // -- materialization (PKG-001) -------------------------------------------
@@ -1676,7 +1965,7 @@ mod fs_tests {
         let first = layout.materialize(&digest, &dest).expect("first");
         let second = layout.materialize(&digest, &dest).expect("second");
         assert_eq!(first.bytes, second.bytes);
-        assert_eq!(layout.count(), 1, "one stored artifact");
+        assert_eq!(layout.count().expect("count"), 1, "one stored artifact");
         assert_eq!(
             std::fs::read(&dest).expect("must read"),
             b"once",

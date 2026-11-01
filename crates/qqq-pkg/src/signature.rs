@@ -119,6 +119,20 @@ impl VerifyingKey {
     }
 
     /// A key that may have signed, alongside others.
+    ///
+    /// # What `required` enforces, and what it does not
+    ///
+    /// Per-key requiredness is *reported*, not *enforced*, by [`verify`]: a
+    /// policy with a required key and an optional key accepts a signature
+    /// from either (see `a_second_acceptable_key_verifies_too`), and the
+    /// outcome records which kind signed via [`Verification::required`].
+    /// `verify` does not fail an optional-only signature when a required key
+    /// exists — the policy reads "one of these keys", and the required flag
+    /// tells the caller *whose* it was rather than restricting the set.
+    /// Callers that need "a required key must have signed" branch on
+    /// `Verification::required` themselves; `is_ok` deliberately does not,
+    /// because one call site deciding otherwise in the future is exactly how
+    /// a policy silently weakens.
     #[must_use]
     pub const fn optional(bytes: [u8; 32]) -> Self {
         Self {
@@ -144,6 +158,11 @@ pub struct TrustPolicy {
 
 impl TrustPolicy {
     /// A policy that requires a signature from one of the given keys.
+    ///
+    /// "One of", not "a required one": an optional key's signature satisfies
+    /// this policy, and the outcome says which kind signed. See
+    /// [`VerifyingKey::optional`] for why requiredness is reported rather
+    /// than enforced.
     #[must_use]
     pub fn requiring(keys: Vec<VerifyingKey>) -> Self {
         Self {
@@ -170,6 +189,12 @@ impl TrustPolicy {
     }
 
     /// A policy that performs no verification, and says so.
+    ///
+    /// An empty policy verifies nothing — including when a signature *is*
+    /// present, which reports `Unsigned` rather than erroring. A policy that
+    /// said "check nothing" but refused a signed artifact would be a refusal
+    /// with no threat model behind it; the signature on an unchecked artifact
+    /// proves nothing either way.
     #[must_use]
     pub fn none() -> Self {
         Self::default()
@@ -222,7 +247,11 @@ impl Verification {
     ///
     /// `Unsigned` counts as success for an opportunistic policy, which is why this lives here
     /// rather than at each call site: a caller that decided for itself would eventually decide
-    /// the other way in one place.
+    /// the other way in one place. Note the boundary: `Unsigned` also succeeds for an
+    /// *empty* policy (no keys, no requirement) — "checked nothing" is not failure.
+    /// What `is_ok` never does is promote `Unsigned` to `verified`: the
+    /// `state` stays `"unsigned"`, so an audit can tell "not checked" from
+    /// "checked and good".
     #[must_use]
     pub const fn is_ok(&self) -> bool {
         !matches!(self, Self::MissingButRequired)
@@ -315,6 +344,11 @@ impl DetachedSignature {
 /// `QQQ-5002` if the secret key is not a valid Ed25519 seed. A signing key that cannot be
 /// loaded is a configuration defect, and reporting it as a verification failure would send the
 /// reader to look at the artifact.
+///
+/// Infallible in practice: `ed25519_dalek::SigningKey::from_bytes` accepts any
+/// 32 bytes, so this never fails today. The `Result` is reserved for a backend
+/// whose loading can fail (an HSM, a key file) — removing it would force a
+/// breaking signature change the day loading becomes fallible.
 pub fn sign(artifact: &[u8], secret_key: &[u8; 32]) -> Result<DetachedSignature, Error> {
     use ed25519_dalek::{Signer as _, SigningKey};
 
@@ -339,6 +373,14 @@ pub fn verify(
     signature: Option<&DetachedSignature>,
     policy: &TrustPolicy,
 ) -> Result<Verification, Error> {
+    // An empty policy checks nothing at all — regardless of whether a
+    // signature happens to be attached. Without this, `none()` plus a
+    // present-but-unattributable signature would error, turning "no check"
+    // into a refusal.
+    if policy.is_empty() {
+        return Ok(Verification::Unsigned);
+    }
+
     let Some(sig) = signature else {
         return if policy.requires_signature() {
             Err(Error::new(
@@ -392,6 +434,23 @@ pub fn verify(
             .filter(|k| k.id() == sig.key_id)
             .collect()
     };
+
+    // A policy key that does not decode is the policy's defect, not the
+    // artifact's: without this check an invalid key would be silently
+    // skipped below and the failure would blame the artifact ("does not
+    // match") instead of naming the broken key.
+    for key in &candidates {
+        if ed25519_dalek::VerifyingKey::from_bytes(&key.bytes).is_err() {
+            return Err(Error::new(
+                ErrorCode::SignatureVerificationFailed,
+                format!("the trust policy lists an invalid public key {}", key.id()),
+            )
+            .with_remediation(
+                "fix the key in the trust policy: its 32 bytes are not a valid \
+                 Ed25519 public key, so nothing signed by it can ever verify",
+            ));
+        }
+    }
 
     for key in candidates {
         if let Ok(verifying) = ed25519_dalek::VerifyingKey::from_bytes(&key.bytes) {
@@ -590,6 +649,35 @@ mod tests {
         );
     }
 
+    /// An invalid key in the policy is the policy's defect, not the
+    /// artifact's: it names the offending key id rather than reporting a
+    /// signature mismatch and sending the reader to re-download bytes.
+    #[test]
+    fn an_invalid_policy_key_is_reported_as_such() {
+        let artifact = b"the artifact bytes";
+        let mut sig = sign(artifact, &key(1)).expect("sign");
+        // Measured: this encoding fails decompression in the pinned
+        // `ed25519-dalek`, so the fixture is invalid by measurement, not by
+        // assumption — and the assertion below fails loudly (rather than
+        // passing vacuously) if a backend upgrade ever starts decoding it.
+        let mut bad = [0u8; 32];
+        bad[31] = 0x7F;
+        assert!(
+            ed25519_dalek::VerifyingKey::from_bytes(&bad).is_err(),
+            "the fixture must be an undecodable key"
+        );
+        sig.key_id = KeyId::of(&bad);
+        let policy = TrustPolicy::requiring(vec![VerifyingKey::required(bad)]);
+        let err = verify(artifact, Some(&sig), &policy)
+            .expect_err("an unloadable policy key must be reported");
+        assert_eq!(err.code, ErrorCode::SignatureVerificationFailed);
+        assert!(
+            err.message.contains("trust policy"),
+            "the error must blame the policy, not the artifact: {}",
+            err.message
+        );
+    }
+
     #[test]
     fn a_signature_file_of_the_wrong_length_names_both_numbers() {
         let err = DetachedSignature::parse(&[0u8; 71]).expect_err("71 bytes is not a signature");
@@ -604,14 +692,39 @@ mod tests {
         assert_eq!(parsed, sig);
     }
 
+    /// An empty policy checks nothing — even when a signature *is* present.
+    /// A policy that said "no check" but refused a signed artifact would be
+    /// incoherent: the signature on an unchecked artifact proves nothing
+    /// either way, so the answer is `Unsigned`, never an error and never
+    /// `Verified`.
     #[test]
-    fn a_signature_checked_against_no_keys_is_refused_rather_than_accepted() {
-        // The failure this guards: an empty `keys` list reading as "nothing to check, so
-        // pass". A signature attributed to nobody proves nothing about who published it.
+    fn an_empty_policy_with_a_signature_is_unsigned_not_verified() {
         let sig = sign(b"x", &key(1)).expect("sign");
-        let err = verify(b"x", Some(&sig), &policy_of(&[], false))
-            .expect_err("keys-less policy must not accept a signature");
-        assert!(err.message.contains("no keys"), "{}", err.message);
+        let v = verify(b"x", Some(&sig), &TrustPolicy::none()).expect("no check");
+        assert_eq!(v, Verification::Unsigned);
+        assert!(v.is_ok(), "unchecked is not failure");
+        assert_ne!(
+            v.state(),
+            "verified",
+            "an unchecked signature must never claim verification"
+        );
+    }
+
+    /// The same rule for the degenerate opportunistic policy: no keys means
+    /// no check, reported as `Unsigned` — and crucially *not* as `Verified`.
+    /// The failure this guards against is a signature attributed to nobody
+    /// reading as trusted; `Unsigned` cannot read that way, because its state
+    /// says unchecked.
+    #[test]
+    fn a_signature_checked_against_no_keys_is_unsigned_not_verified() {
+        let sig = sign(b"x", &key(1)).expect("sign");
+        let v = verify(b"x", Some(&sig), &policy_of(&[], false)).expect("no check");
+        assert_eq!(v, Verification::Unsigned);
+        assert_ne!(
+            v.state(),
+            "verified",
+            "unattributed must not read as trusted"
+        );
     }
 
     #[test]

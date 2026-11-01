@@ -33,6 +33,11 @@
 //! | `*` | any | |
 //! | `>=1.0, <2.0` | **all** clauses must hold | conjunction |
 //!
+//! A missing component is read as `0` (see `parse_partial_version`), and the
+//! operator meanings compose with that: `~1` means `~1.0.0`, i.e.
+//! `>=1.0.0, <1.1.0` — patch-level within minor `0`, *not* Cargo's `<2.0.0`.
+//! Tilde pins the minor it names; a bare `1` names minor `0`.
+//!
 //! **Deliberately absent:** `1.2.*` wildcards and `||` unions. A requirement
 //! that needs a union is a requirement that should be two dependencies, and a
 //! wildcard patch is how a build silently picks up a different version than the
@@ -148,6 +153,17 @@ impl Requirement {
         // requirement, so the operator lexing below is unchanged and there is
         // exactly one implementation of it.
         //
+        // A `|` is refused with its own diagnostic rather than falling
+        // through to operator lexing: without it, `1.0 | 2.0` would fail as
+        // "`0 | <2` is not a number", which names the wrong problem — unions
+        // are a deliberate omission (see the module docs), not a typo.
+        if s.contains('|') {
+            return Err(bad(
+                s,
+                "unions (`|`) are not supported; write two dependencies instead",
+            ));
+        }
+        //
         // An empty clause is refused explicitly. `>=1.0,` splitting to
         // `[">=1.0", ""]` would otherwise report "a requirement cannot be
         // empty", which is true of the requirement but not of what the user
@@ -176,7 +192,27 @@ impl Requirement {
                     },
                 ));
             }
+            // `*` in a comma list is redundant but harmless: `*,>=1.0`
+            // admits everything the second clause admits, so the `Any`
+            // clause carries no information and is dropped. Without this,
+            // `*,*` would parse to two `Any` clauses while `is_any`
+            // reports false — the same requirement meaning two different
+            // things by clause count.
+            if *part == "*" {
+                continue;
+            }
             clauses.push(parse_clause(part, s)?);
+        }
+
+        if clauses.is_empty() {
+            // Every clause was `*`: the requirement is `Any`, not an empty
+            // conjunction — so `is_any` and `clause_count` agree with `*`.
+            return Ok(Self {
+                clauses: vec![Clause {
+                    op: Op::Any,
+                    version: None,
+                }],
+            });
         }
 
         Ok(Self { clauses })
@@ -214,12 +250,23 @@ impl Requirement {
     /// one (the `why` output, the lockfile's diagnostics) need the operator
     /// without destructuring. For a comma list this is the *first* bound, which
     /// is the one a human reads first.
+    ///
+    /// # What this is not
+    ///
+    /// This is a display helper, not an enforcement input: on `>=1.0, <2.0`
+    /// it returns `>=` and says nothing about the `<2.0`. Enforcement is
+    /// [`Requirement::matches`], which checks every clause. A caller that
+    /// branches on `op()` for a multi-clause requirement enforces half a
+    /// range — use `clause_count` plus `matches` instead.
     #[must_use]
     pub fn op(&self) -> Op {
         self.clauses.first().map_or(Op::Any, |c| c.op)
     }
 
     /// The first clause's version.
+    ///
+    /// Same caveat as [`Requirement::op`]: the first bound only. Enforcement
+    /// is [`Requirement::matches`].
     #[must_use]
     pub fn version(&self) -> Option<&Version> {
         self.clauses.first().and_then(|c| c.version.as_ref())
@@ -330,6 +377,9 @@ impl fmt::Display for Requirement {
 /// `major.minor.patch`, or when the version falls outside the range.
 pub fn check_host_requirement(requirement: &str, host_version: &str) -> Result<()> {
     let req = Requirement::parse(requirement)?;
+    // `Version::parse` already tolerates surrounding whitespace; the test
+    // below pins that end to end, because a padded version pasted out of a
+    // log must not turn a satisfied range into a refusal.
     let host: Version = host_version.parse().map_err(|_| {
         Error::new(
             ErrorCode::VersionUnsatisfiable,
@@ -388,6 +438,15 @@ fn parse_clause(part: &str, whole: &str) -> Result<Clause> {
     let rest = rest.trim();
     if rest.is_empty() {
         return Err(bad(whole, "an operator has no version after it"));
+    }
+    // A `*` is only meaningful alone: `>=*` or `1.*` are wildcards, and
+    // wildcards are a deliberate omission (see the module docs), not a
+    // version the digit parser should misreport.
+    if rest.contains('*') {
+        return Err(bad(
+            whole,
+            "wildcards (`*`) are not supported; write an explicit bound like `>=1.2.0`",
+        ));
     }
 
     let version = parse_partial_version(rest, whole)?;
@@ -457,6 +516,14 @@ fn parse_partial_version(rest: &str, whole: &str) -> Result<Version> {
                 whole,
                 &format!("`{rest}` has an empty component; expected `major.minor.patch`"),
             ));
+        }
+        // Strictly ASCII digits with no leading zeros and no `+` sign — the
+        // same canonical rule `qqq_core::Version` enforces, so a component
+        // accepted here is accepted there and `Display` round-trips exactly.
+        // `u32::parse` alone would admit `+1` and `01`, letting two spellings
+        // of one version into manifests and logs.
+        if !part.bytes().all(|b| b.is_ascii_digit()) || (part.len() > 1 && part.starts_with('0')) {
+            return Err(bad(whole, &format!("`{part}` in `{rest}` is not a number")));
         }
         *slot = part
             .parse::<u32>()
@@ -823,6 +890,86 @@ mod tests {
             "the error should name the bad component: {}",
             e.render()
         );
+    }
+
+    /// `u32::parse` alone would admit `+1` and `01`; the canonical rule —
+    /// shared with `qqq_core::Version` — admits ASCII digits with no leading
+    /// zeros and no sign, so one version has one spelling everywhere.
+    #[test]
+    fn signed_or_zero_padded_components_are_refused() {
+        for text in ["+1.2.3", "01.2.3", "1.02.3", "1.2.03"] {
+            assert!(Requirement::parse(text).is_err(), "`{text}` must not parse");
+        }
+    }
+
+    /// A union attempt names the real problem: unions are a deliberate
+    /// omission, not a typo the lexer should misreport as "not a number".
+    #[test]
+    fn a_union_is_refused_as_an_omission_not_a_typo() {
+        let e = Requirement::parse("1.0 || 2.0").unwrap_err();
+        assert!(
+            e.render().contains("unions"),
+            "the error must name the omission: {}",
+            e.render()
+        );
+    }
+
+    /// A single pipe is also a union attempt, not a version character: `|`
+    /// never appears in a valid requirement, so any of them diagnoses first.
+    #[test]
+    fn a_single_pipe_is_refused_as_a_union() {
+        let e = Requirement::parse(">=1.0 | <2.0").unwrap_err();
+        assert!(
+            e.render().contains("unions"),
+            "any pipe means union: {}",
+            e.render()
+        );
+    }
+
+    /// A wildcard is refused as a wildcard: `1.2.*` would otherwise fail as
+    /// "`*` is not a number", which names the wrong problem.
+    #[test]
+    fn a_wildcard_is_refused_as_a_wildcard() {
+        let e = Requirement::parse("1.2.*").unwrap_err();
+        assert!(
+            e.render().contains("wildcard"),
+            "the error must name the omission: {}",
+            e.render()
+        );
+    }
+
+    /// `*` in a comma list carries no information and is dropped, so `*,*`
+    /// means the same `Any` as `*` — including for `is_any`.
+    #[test]
+    fn stars_in_a_comma_list_collapse_to_any() {
+        let r = Requirement::parse("*,*").expect("must parse");
+        assert!(r.is_any());
+        assert_eq!(r.clause_count(), 1);
+        let r = Requirement::parse("*,>=1.0").expect("must parse");
+        assert!(!r.is_any());
+        assert_eq!(r.clause_count(), 1);
+        assert!(r.matches(&v("9.9.9")));
+        assert!(!r.matches(&v("0.1.0")));
+    }
+
+    /// `op()` and `version()` expose the first clause only: on a range they
+    /// are a display convenience, and enforcement must go through `matches`.
+    #[test]
+    fn first_clause_accessors_do_not_enforce_the_range() {
+        let r = req(">=1.0, <2.0");
+        assert_eq!(r.op(), Op::GreaterOrEqual);
+        assert_eq!(r.version(), Some(&v("1.0.0")));
+        // The range's upper bound is invisible to both accessors — which is
+        // exactly why enforcement reads `matches`, not `op`/`version`.
+        assert!(r.matches(&v("1.5.0")));
+        assert!(!r.matches(&v("5.0.0")));
+    }
+
+    /// Whitespace around the host version is tolerated: versions are pasted
+    /// out of logs, and trailing whitespace must not refuse a satisfied range.
+    #[test]
+    fn a_padded_host_version_still_satisfies() {
+        check_host_requirement(">=0.2,<0.4", "  0.3.5  ").expect("padding must not refuse");
     }
 
     /// A bare `.` and a trailing dot are both refused rather than read as `0`.

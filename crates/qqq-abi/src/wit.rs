@@ -23,6 +23,8 @@
 //! edited independently — the exact drift this design forbids.
 //!
 //! See Proposal §6.3 and Checklist `ABI-001` … `ABI-016`, `CON-011`.
+//! (`ABI-017`/`ABI-018` live in `registry`: the 0.3 set beside 0.2, and the
+//! no-bump pin. This module's surface stops at `ABI-016`.)
 
 /// The `qqq:crypto` interface source.
 ///
@@ -233,10 +235,14 @@ pub fn wit_source(name: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    /// Every interface in the registry must have non-trivial source. A
-    /// `include_str!` of a missing or empty file would otherwise compile.
+    /// Every embedded interface must declare its own package — and be a
+    /// syntactically plausible WIT file, not just a non-empty string. Byte
+    /// identity with the on-disk file (tested below) proves the bytes match;
+    /// this pins the shape: exactly one `package` declaration, and at least
+    /// one `interface` (or `world`) block. A truncated file that still names
+    /// its package would pass the name check while serving nothing.
     #[test]
-    fn every_interface_has_source() {
+    fn every_embedded_source_declares_its_own_package() {
         assert!(!ALL_WIT.is_empty());
         for (name, src) in ALL_WIT {
             assert!(
@@ -244,9 +250,25 @@ mod tests {
                 "interface `{name}` has suspiciously little source ({} bytes)",
                 src.len()
             );
+            let expected = format!("package {name};");
             assert!(
-                src.contains("package qqq:"),
-                "interface `{name}` must declare its package"
+                src.contains(&expected),
+                "interface `{name}` does not declare itself; expected `{expected}`"
+            );
+            // Declaration lines, not prose mentions: a `package` word inside a
+            // doc comment must not count, and a file with two declarations
+            // would serve an ambiguous contract.
+            let declarations = src
+                .lines()
+                .filter(|l| l.trim_start().starts_with("package "))
+                .count();
+            assert_eq!(
+                declarations, 1,
+                "interface `{name}` must declare exactly one package"
+            );
+            assert!(
+                src.contains("interface ") || src.contains("world "),
+                "interface `{name}` declares no interface or world block"
             );
         }
     }
@@ -313,13 +335,47 @@ mod tests {
     /// the runtime does not implement — the drift this design exists to prevent.
     #[test]
     fn embedded_source_matches_the_published_files() {
-        // `include_str!` already guarantees this at compile time for the exact
-        // paths used above; this test documents *why* that matters and would
-        // catch a future edit that read the file at runtime instead.
+        // `include_str!` pins the content at compile time, so this compares
+        // against the on-disk file to prove the pin holds: the test fails the
+        // day someone replaces an `include_str!` with a runtime read (or edits
+        // one side without the other), rather than merely documenting the risk.
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../wit");
         for (name, src) in ALL_WIT {
+            let file = name
+                .strip_prefix("qqq:")
+                .and_then(|s| s.split('@').next())
+                .map_or_else(
+                    || panic!("bad interface name `{name}`"),
+                    |ns| format!("qqq-{ns}.wit"),
+                );
+            let on_disk = std::fs::read_to_string(dir.join(&file))
+                .unwrap_or_else(|e| panic!("cannot read wit/{file} for `{name}`: {e}"));
+            assert_eq!(
+                *src, on_disk,
+                "`{name}` differs between the embedded copy and wit/{file}"
+            );
+        }
+    }
+
+    /// Every embedded WIT package is either registry-mapped or explicitly
+    /// non-capability. An embedded-but-unmapped package would be an authority
+    /// nobody grants and nothing serves — invisible either way, which is
+    /// exactly the drift the registry's single mapping exists to prevent.
+    ///
+    /// The two allowlisted packages are not capabilities: `qqq:test` is the
+    /// test runner's own surface (no grants, no rows, by design) and
+    /// `qqq:agent` is agent self-description, likewise ungranted.
+    #[test]
+    fn every_embedded_package_is_mapped_or_explicitly_non_capability() {
+        const NON_CAPABILITY_WIT: &[&str] = &["qqq:agent@1.0.0", "qqq:test@1.0.0"];
+        let table = crate::registry::interfaces();
+        let mapped: std::collections::BTreeSet<&str> =
+            table.iter().map(|i| i.name.as_str()).collect();
+        for (name, _) in ALL_WIT {
             assert!(
-                !src.is_empty(),
-                "`{name}` must be embedded, not read at runtime"
+                mapped.contains(name) || NON_CAPABILITY_WIT.contains(name),
+                "WIT package `{name}` is embedded but neither registry-mapped \
+                 nor on the non-capability allowlist; wire it up or justify it"
             );
         }
     }

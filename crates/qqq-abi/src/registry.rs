@@ -154,6 +154,7 @@ pub fn interfaces() -> Vec<HostInterface> {
 /// | `qqq:clock` | `wall-clock`, `monotonic-clock` |
 /// | `qqq:crypto` | `random`, `hashing`, `hmac`, `aead`, `signing` |
 /// | `qqq:http` | `http`, `incoming-handler` |
+/// | `qqq:sql` | `database`, `transaction` |
 ///
 /// Without this table, `qqqai inspect` — which must map one *imported interface*
 /// back to one capability — can only search by package, so an artifact importing
@@ -163,8 +164,21 @@ pub fn interfaces() -> Vec<HostInterface> {
 /// answer rather than an imprecise one.
 ///
 /// `None` means the package has a single interface and the package name is
-/// already exact, or that the capability is not yet mapped — both of which the
-/// caller reports as an unmapped import rather than guessing.
+/// already exact, or that the package's interfaces deliberately share one
+/// lookup path. `qqq:sql` is the second case: `database` and `transaction` both
+/// live behind per-statement direction checks (`sql.query` gates reads,
+/// `sql.execute` gates writes), so no single interface maps to a single weaker
+/// grant — the caller falls through to the package fallback and reports the
+/// stronger grant, which never understates. An unmapped capability (none exists
+/// today; `every_capability_maps_to_exactly_one_interface` pins that) is
+/// reported as an unmapped import rather than guessed.
+///
+/// Callers compare imports version-stripped: `qqq:clock/wall-clock@1.0.0`
+/// matches `qqq:clock/wall-clock` because a patch release never changes an
+/// interface's shape. The versioned `wasi03_interface_for` names exact
+/// revisions instead, and its anti-drift test in `qqq-host` pins the served
+/// name byte-identical — two conventions for two stabilities, documented here
+/// so a new row picks the right one.
 ///
 /// ```rust
 /// use qqq_abi::registry::interface_path_for;
@@ -179,6 +193,10 @@ pub fn interfaces() -> Vec<HostInterface> {
 ///     Some("qqq:http/http")
 /// );
 /// assert_eq!(interface_path_for(Capability::FsRead), None);
+/// // `qqq:sql` deliberately has no per-interface paths (see above): the
+/// // caller falls through to the package fallback.
+/// assert_eq!(interface_path_for(Capability::SqlQuery), None);
+/// assert_eq!(interface_path_for(Capability::SqlExecute), None);
 /// ```
 #[must_use]
 pub fn interface_path_for(c: Capability) -> Option<&'static str> {
@@ -187,17 +205,17 @@ pub fn interface_path_for(c: Capability) -> Option<&'static str> {
         HttpClient, HttpServer,
     };
 
-    Some(match c {
+    match c {
         // Two interfaces in one package: the distinction the package name loses.
-        ClockWall => "qqq:clock/wall-clock",
-        ClockMonotonic => "qqq:clock/monotonic-clock",
+        ClockWall => Some("qqq:clock/wall-clock"),
+        ClockMonotonic => Some("qqq:clock/monotonic-clock"),
 
         // Five in one package.
-        CryptoRandom => "qqq:crypto/random",
-        CryptoHash => "qqq:crypto/hashing",
-        CryptoHmac => "qqq:crypto/hmac",
-        CryptoAead => "qqq:crypto/aead",
-        CryptoSign => "qqq:crypto/signing",
+        CryptoRandom => Some("qqq:crypto/random"),
+        CryptoHash => Some("qqq:crypto/hashing"),
+        CryptoHmac => Some("qqq:crypto/hmac"),
+        CryptoAead => Some("qqq:crypto/aead"),
+        CryptoSign => Some("qqq:crypto/signing"),
 
         // `qqq:http/http` carries **both** directions: `send` is outbound and
         // `incoming-authority` reports which server is serving the request. A
@@ -210,12 +228,13 @@ pub fn interface_path_for(c: Capability) -> Option<&'static str> {
         // it understated an artifact that can also serve. `incoming-handler` is
         // deliberately absent from this table because a server **exports** it
         // rather than importing it, so it never appears in an import list.
-        HttpServer | HttpClient => "qqq:http/http",
+        HttpServer | HttpClient => Some("qqq:http/http"),
 
         // The filesystem package has one interface, so the package name is
-        // already exact — handled by the package-level fallback.
-        _ => return None,
-    })
+        // already exact; `qqq:sql` deliberately has no per-interface paths
+        // (see above). Both fall through to the package-level fallback.
+        _ => None,
+    }
 }
 
 /// The WASI 0.3 interface a capability unlocks, if the host serves one —
@@ -417,6 +436,9 @@ fn io_interfaces() -> Vec<HostInterface> {
 /// Returns the **first** match in the sorted table. A capability that unlocks
 /// more than one interface would be a design error — a grant should map to one
 /// surface, so an auditor reading the manifest can predict the blast radius.
+/// That invariant is enforced by `every_capability_maps_to_exactly_one_interface`;
+/// the debug assertion below pins it at the use site, so a second matching row
+/// fails loudly in test builds instead of silently serving the first.
 ///
 /// ```rust
 /// use qqq_abi::registry::interface_for;
@@ -427,7 +449,12 @@ fn io_interfaces() -> Vec<HostInterface> {
 /// ```
 #[must_use]
 pub fn interface_for(c: Capability) -> Option<HostInterface> {
-    interfaces().into_iter().find(|i| i.is_unlocked_by(c))
+    let table = interfaces();
+    debug_assert!(
+        table.iter().filter(|i| i.is_unlocked_by(c)).count() <= 1,
+        "capability `{c}` matches more than one interface"
+    );
+    table.into_iter().find(|i| i.is_unlocked_by(c))
 }
 
 /// The interfaces a grant set unlocks, sorted.
@@ -488,11 +515,17 @@ pub fn unimplemented_capabilities(grants: &qqq_cap::resolve::GrantSet) -> Vec<Ca
     let mut out: Vec<Capability> = grants
         .capabilities()
         .into_iter()
+        // A capability with no registry row at all counts as unimplemented:
+        // there is nothing servable behind it, so silence would be a lie.
+        // Today every capability maps (pinned by
+        // `every_capability_maps_to_exactly_one_interface`), which makes this
+        // arm a backstop rather than a live path — and that is exactly when a
+        // backstop is cheapest to keep.
         .filter(|c| {
             table
                 .iter()
                 .find(|i| i.is_unlocked_by(*c))
-                .is_some_and(|i| !i.implemented)
+                .is_none_or(|i| !i.implemented)
         })
         .collect();
     out.sort_unstable();
@@ -563,6 +596,12 @@ mod tests {
                 "`{}` has a non-numeric version part",
                 i.name
             );
+            let major: u32 = parts[0].parse().expect("numeric, checked above");
+            assert!(
+                major >= 1,
+                "`{}`: a published interface must be at major >= 1",
+                i.name
+            );
         }
     }
 
@@ -575,6 +614,14 @@ mod tests {
         assert_eq!(names, sorted, "the table must be sorted by name");
         for i in &table {
             assert!(!i.summary.is_empty(), "{} needs a summary", i.name);
+            // V1 has no ungated interfaces: an empty `unlocked_by` would grant
+            // authority without a capability, and `is_unlocked_by` would never
+            // match it, so the row would be dead weight that reads as coverage.
+            assert!(
+                !i.unlocked_by.is_empty(),
+                "{} unlocks no capability; every interface must be gated",
+                i.name
+            );
         }
     }
 
@@ -666,6 +713,15 @@ mod tests {
         assert!(names.contains(&"qqq:clock@1.0.0".to_owned()));
         assert!(!names.contains(&"qqq:sql@1.0.0".to_owned()));
         assert!(!names.contains(&"qqq:fs@1.0.0".to_owned()));
+        // Sorted by name: consumers display and diff this list, and an
+        // unsorted grant set would make identical grants report in different
+        // orders.
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            names, sorted,
+            "required_interfaces must return names sorted"
+        );
     }
 
     #[test]
@@ -741,7 +797,7 @@ mod tests {
     fn partial_implementations_do_not_claim_completeness() {
         let fs = interfaces()
             .into_iter()
-            .find(|i| i.name.starts_with("qqq:fs"))
+            .find(|i| i.name == "qqq:fs@1.0.0")
             .expect("fs interface must exist");
         assert!(
             !fs.implemented,
@@ -766,8 +822,16 @@ mod tests {
         let table = interfaces();
         let j = serde_json::to_value(&table).unwrap();
         assert!(j.is_array());
-        assert_eq!(j.as_array().unwrap().len(), table.len());
-        assert!(j[0]["name"].is_string());
-        assert!(j[0]["implemented"].is_boolean());
+        let rows = j.as_array().unwrap();
+        assert_eq!(rows.len(), table.len());
+        // Every row, not just the first: a row missing `summary` or
+        // `unlocked_by` would serialize without it, and the schema surface
+        // would silently lose a field the contract promises.
+        for (row, iface) in rows.iter().zip(table.iter()) {
+            assert_eq!(row["name"], serde_json::json!(iface.name));
+            assert_eq!(row["implemented"], serde_json::json!(iface.implemented));
+            assert!(row["summary"].is_string(), "{}", iface.name);
+            assert!(row["unlocked_by"].is_array(), "{}", iface.name);
+        }
     }
 }

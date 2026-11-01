@@ -27,7 +27,7 @@
 //!
 //! ## Checklist coverage
 //!
-//! `ABI-001` … `ABI-016`, `CON-011`, `CON-014`. See `QQQ-Proposal-V1.md` §6.3.
+//! `ABI-001` … `ABI-018`, `CON-011`, `CON-014`. See `QQQ-Proposal-V1.md` §6.3.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -38,9 +38,10 @@ pub mod registry;
 pub mod wit;
 
 pub use registry::{
-    HostInterface, interface_for, interfaces, required_interfaces, unimplemented_capabilities,
+    HostInterface, interface_for, interface_path_for, interfaces, required_interfaces,
+    unimplemented_capabilities, wasi03_interface_for,
 };
 pub use wit::{
-    AI_WIT, ALL_WIT, CLOCK_WIT, CRYPTO_WIT, DNS_WIT, ENV_WIT, FS_WIT, HTTP_WIT, KV_WIT, LOG_WIT,
-    QUEUE_WIT, SECRETS_WIT, SQL_WIT, TRACE_WIT, wit_source,
+    AGENT_WIT, AI_WIT, ALL_WIT, CLOCK_WIT, CRYPTO_WIT, DNS_WIT, ENV_WIT, FS_WIT, HTTP_WIT, KV_WIT,
+    LOG_WIT, QUEUE_WIT, SECRETS_WIT, SQL_WIT, TEST_WIT, TRACE_WIT, wit_source,
 };

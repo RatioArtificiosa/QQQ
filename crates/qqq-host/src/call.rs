@@ -402,10 +402,16 @@ pub fn call_handler_raw(
 /// caught, and the message must say so: "the call was refused" alone sends an
 /// operator to the guest, when the fault is in the host's encoding.
 fn signature_mismatch(handle: &HandlerHandle, e: &wasmtime::Error) -> Error {
+    // Wasmtime errors are multi-line (trap details, backtraces); the `Error`
+    // contract requires a single-line message, so the message stays flat and
+    // the full report rides in `cause`.
+    let detail = e.to_string();
+    let one_line = detail.split_whitespace().collect::<Vec<_>>().join(" ");
     Error::new(
         ErrorCode::InternalInvariantViolated,
-        format!("the call to `{handle}` was refused before the guest ran: {e}"),
+        format!("the call to `{handle}` was refused before the guest ran"),
     )
+    .with_cause(one_line)
     .with_context("component", handle.component().to_owned())
     .with_remediation(
         "this is a mismatch between the host's encoding and the component's declared \

@@ -1094,9 +1094,10 @@ impl Manifest {
             value
                 .try_into()
                 .map_err(|e: toml::de::Error| ManifestError::InvalidField {
-                    field: e
-                        .span()
-                        .map_or_else(|| "<unknown>".to_owned(), |_| "<see message>".to_owned()),
+                    field: e.span().map_or_else(
+                        || "<unknown>".to_owned(),
+                        |span| format!("<toml bytes {}..{}>", span.start, span.end),
+                    ),
                     reason: e.message().to_owned(),
                 })?;
 
@@ -1350,37 +1351,8 @@ impl Manifest {
             }
         }
 
-        // -- http client hosts must be `host:port` shaped or bare hosts --
-        if let Some(http) = &self.capabilities.http {
-            for (i, h) in http.client.iter().enumerate() {
-                if h.trim().is_empty() {
-                    return Err(ManifestError::InvalidField {
-                        field: format!("capabilities.http.client[{i}]"),
-                        reason: "must not be empty".to_owned(),
-                    });
-                }
-                if h.contains("://") {
-                    return Err(ManifestError::InvalidField {
-                        field: format!("capabilities.http.client[{i}]"),
-                        reason: format!("must be `host` or `host:port`, not a URL — got `{h}`"),
-                    });
-                }
-            }
-        }
-
-        // -- env allowlist must not contain wildcards --------------------
-        if let Some(env) = &self.capabilities.env {
-            for (i, v) in env.allow.iter().enumerate() {
-                if v.contains('*') {
-                    return Err(ManifestError::InvalidField {
-                        field: format!("capabilities.env.allow[{i}]"),
-                        reason: "wildcards are not permitted; name each variable, \
-                                 because a blanket inherit is ambient authority"
-                            .to_owned(),
-                    });
-                }
-            }
-        }
+        Self::validate_http_client(self.capabilities.http.as_ref())?;
+        Self::validate_env_allow(self.capabilities.env.as_ref())?;
 
         // -- sql entries name a real connection -----------------------
         // An undressed declaration would grant a connection to
@@ -1392,6 +1364,7 @@ impl Manifest {
         Self::validate_queue(&self.capabilities.queue)?;
         Self::validate_ai(self.capabilities.ai.as_ref())?;
         Self::validate_secret(self.capabilities.secret.as_ref())?;
+        Self::validate_crypto(self.capabilities.crypto.as_ref())?;
 
         // -- unmodelled capability namespaces must still be known -------
         // The `flatten` map lets any `[capabilities.<ns>]` table parse;
@@ -1442,6 +1415,66 @@ impl Manifest {
     /// (missing fields fail earlier, at serde, and unknown fields
     /// fail at the struct's own deny) — trimmed per the file-path
     /// precedent, because spaces grant a connection to nowhere too.
+    /// HTTP client hosts must parse as egress patterns.
+    ///
+    /// `TenantEgress::from_manifest` fail-stops on a pattern that slips past
+    /// validation, so validation enforces the same parser — otherwise `*`,
+    /// `999.1.1.1`, or unicode would parse and then panic.
+    fn validate_http_client(http: Option<&HttpCapability>) -> Result<(), ManifestError> {
+        if let Some(http) = http {
+            for (i, h) in http.client.iter().enumerate() {
+                if h.trim().is_empty() {
+                    return Err(ManifestError::InvalidField {
+                        field: format!("capabilities.http.client[{i}]"),
+                        reason: "must not be empty".to_owned(),
+                    });
+                }
+                if h.contains("://") {
+                    return Err(ManifestError::InvalidField {
+                        field: format!("capabilities.http.client[{i}]"),
+                        reason: format!("must be `host` or `host:port`, not a URL — got `{h}`"),
+                    });
+                }
+                if let Err(reason) = crate::normalize::HostPattern::parse(h) {
+                    return Err(ManifestError::InvalidField {
+                        field: format!("capabilities.http.client[{i}]"),
+                        reason,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Env allowlist must not contain wildcards or blanks.
+    ///
+    /// An empty name would grant `EnvRead` for no variable (fail-open in the
+    /// grant set, fail-late in normalize); blanks are the typo class here, so
+    /// they are rejected at parse like every other stanza.
+    fn validate_env_allow(env: Option<&EnvCapability>) -> Result<(), ManifestError> {
+        if let Some(env) = env {
+            for (i, v) in env.allow.iter().enumerate() {
+                if v.trim().is_empty() {
+                    return Err(ManifestError::InvalidField {
+                        field: format!("capabilities.env.allow[{i}]"),
+                        reason: "must name a variable; an empty entry grants \
+                                 nothing and hides a typo"
+                            .to_owned(),
+                    });
+                }
+                if v.contains('*') {
+                    return Err(ManifestError::InvalidField {
+                        field: format!("capabilities.env.allow[{i}]"),
+                        reason: "wildcards are not permitted; name each variable, \
+                                 because a blanket inherit is ambient authority"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_sql(entries: &[SqlCapability]) -> Result<(), ManifestError> {
         for (i, db) in entries.iter().enumerate() {
             if db.name.trim().is_empty() || db.driver.trim().is_empty() || db.host.trim().is_empty()
@@ -1541,6 +1574,33 @@ impl Manifest {
         Ok(())
     }
 
+    /// A `[capabilities.crypto]` allowlist with blank entries is refused: a
+    /// blank algorithm name would grant the capability at declaration time
+    /// and fail only in normalize — grant-then-fail is the wrong order.
+    /// Each non-empty list must contain only non-blank entries.
+    fn validate_crypto(crypto: Option<&CryptoCapability>) -> Result<(), ManifestError> {
+        if let Some(c) = crypto {
+            for (field, list) in [
+                ("capabilities.crypto.hash", &c.hash),
+                ("capabilities.crypto.hmac", &c.hmac),
+                ("capabilities.crypto.aead", &c.aead),
+                ("capabilities.crypto.sign", &c.sign),
+                ("capabilities.crypto.secrets", &c.secrets),
+            ] {
+                if list.iter().any(|s| s.trim().is_empty()) {
+                    return Err(ManifestError::InvalidField {
+                        field: field.to_owned(),
+                        reason: "algorithm and secret names must be non-blank; \
+                                 an empty entry grants the capability and fails \
+                                 later in normalization"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The `fs` grants from every preopened entry, factored out of
     /// [`Manifest::declared_capabilities`] for the same
     /// `too_many_lines` ratchet as [`Manifest::push_secret_grants`]:
@@ -1611,7 +1671,7 @@ impl Manifest {
             if http.server {
                 push(Capability::HttpServer);
             }
-            if !http.client.is_empty() {
+            if http.client.iter().any(|s| !s.trim().is_empty()) {
                 push(Capability::HttpClient);
             }
         }
@@ -1620,16 +1680,16 @@ impl Manifest {
             if c.random {
                 push(Capability::CryptoRandom);
             }
-            if !c.hash.is_empty() {
+            if c.hash.iter().any(|s| !s.trim().is_empty()) {
                 push(Capability::CryptoHash);
             }
-            if !c.hmac.is_empty() {
+            if c.hmac.iter().any(|s| !s.trim().is_empty()) {
                 push(Capability::CryptoHmac);
             }
-            if !c.aead.is_empty() {
+            if c.aead.iter().any(|s| !s.trim().is_empty()) {
                 push(Capability::CryptoAead);
             }
-            if !c.sign.is_empty() {
+            if c.sign.iter().any(|s| !s.trim().is_empty()) {
                 push(Capability::CryptoSign);
             }
         }
@@ -3436,19 +3496,20 @@ allow_origins = ["https://app.example.com"]
         );
     }
 
-    /// Blank names in the legacy `crypto.secrets` spelling grant nothing:
-    /// the two spellings share one semantics, so a blank that the dedicated
-    /// table refuses must not grant through the nested one either. (Hardening
-    /// shipped with CAP-023: blanks previously granted.)
+    /// Blank names in the legacy `crypto.secrets` spelling are refused at
+    /// parse: the two spellings share one semantics, so a blank that the
+    /// dedicated table refuses must not parse through the nested one either.
+    /// (Hardening shipped with CAP-023 refused blanks at derivation;
+    /// ultra-review r1 closes the gap at parse — grant-then-fail is the
+    /// wrong order.)
     #[test]
     fn crypto_blank_secrets_grant_nothing() {
         let src = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
             [capabilities.crypto]\nsecrets = [\"   \"]\n";
-        let m = Manifest::parse(src).expect("the shape still parses");
+        let e = Manifest::parse(src).expect_err("a blank legacy entry must be refused");
         assert!(
-            !m.declared_capabilities()
-                .contains(&crate::capability::Capability::SecretUse),
-            "a blank legacy entry must grant nothing"
+            e.to_string().contains("non-blank"),
+            "the error must name the blank-entry rule, got: {e}"
         );
     }
 
@@ -4033,6 +4094,28 @@ allow_origins = ["https://app.example.com"]
         assert!(
             msg.contains("not a URL"),
             "should guide the user; got: {msg}"
+        );
+    }
+
+    /// Ultra-review r1 C1: `*`, malformed IPv4, and unicode hosts must be
+    /// refused at parse — otherwise they slip past `validate` and panic in
+    /// `TenantEgress::from_manifest`'s fail-stop `expect`.
+    #[test]
+    fn malformed_http_client_patterns_are_rejected_at_parse() {
+        for bad in ["*", "999.1.1.1", "exämple.com", "host:99999"] {
+            let src = format!("{MINIMAL}\n[capabilities.http]\nclient = [\"{bad}\"]\n");
+            let e = Manifest::parse(&src).unwrap_err();
+            assert!(
+                !e.to_string().is_empty(),
+                "pattern `{bad}` must be refused at parse"
+            );
+        }
+        // A well-formed entry still parses and derives the grant.
+        let src = format!("{MINIMAL}\n[capabilities.http]\nclient = [\"api.example.com\"]\n");
+        let m = Manifest::parse(&src).expect("a valid host must parse");
+        assert!(
+            m.declared_capabilities()
+                .contains(&crate::capability::Capability::HttpClient)
         );
     }
 

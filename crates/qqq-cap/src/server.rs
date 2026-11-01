@@ -571,6 +571,9 @@ impl Server {
             && self.default_auth == AuthMode::Deny
             && self.cors.is_none()
             && self.websocket.is_none()
+            && self.limits.is_none()
+            && self.tls.is_none()
+            && self.tenants.is_none()
     }
 
     /// How many routes are declared.
@@ -650,6 +653,40 @@ mod tests {
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);
         assert!(s.unauthenticated_routes().is_empty());
+    }
+
+    /// Ultra-review r1 C6: `is_empty_unconfigured` must account for every
+    /// optional table — otherwise `[server.limits]`, `[server.tls]`, or
+    /// `[server.tenants]` round-trips away via `skip_serializing_if`.
+    #[test]
+    fn empty_unconfigured_accounts_for_limits_tls_and_tenants() {
+        assert!(Server::default().is_empty_unconfigured());
+        for s in [
+            Server {
+                limits: Some(RequestLimits {
+                    default: None,
+                    per_tenant: std::collections::BTreeMap::new(),
+                }),
+                ..Server::default()
+            },
+            Server {
+                tls: Some(ServerTls {
+                    cert_file: "c".to_owned(),
+                    key_file: "k".to_owned(),
+                    client_ca_file: None,
+                }),
+                ..Server::default()
+            },
+            Server {
+                tenants: Some(crate::manifest::TenantHosts::default()),
+                ..Server::default()
+            },
+        ] {
+            assert!(
+                !s.is_empty_unconfigured(),
+                "an optional table must defeat the empty-unconfigured predicate"
+            );
+        }
     }
 
     /// **`default_auth` defaults to `deny`, not to `none`.**

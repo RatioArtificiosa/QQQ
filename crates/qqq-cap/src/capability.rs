@@ -308,6 +308,13 @@ impl Capability {
     /// can act on is worth more than an error that merely reports failure.
     #[must_use]
     pub fn suggest(input: &str) -> Option<Self> {
+        // Fail fast on adversarial input: `suggest` is reachable from
+        // manifest text, and Levenshtein over 24 names is O(input × name).
+        // No capability name exceeds 16 chars, so anything far longer is a
+        // typo-free rejection — returning None bounds work to 64 chars.
+        if input.len() > 64 {
+            return None;
+        }
         // Distance threshold scales with input length: a 3-char typo in a
         // 12-char name is a different signal from one in a 4-char name.
         let limit = match input.len() {

@@ -232,6 +232,63 @@ pub fn attenuate(sig: [u8; 32], caveat: &[u8]) -> [u8; 32] {
 /// assert!(verify_chain(root_key, capability, &[], &root));
 /// assert!(!verify_chain(b"wrong-key", capability, &[], &root));
 /// ```
+/// Verify authenticity **and** evaluate semantics in one call.
+///
+/// `verify_chain` alone proves the token is genuine but says nothing about
+/// whether it is still valid — an expired-but-genuine token verifies. Every
+/// production call site must also evaluate the caveats, and forgetting the
+/// second step honors expired tokens. This helper performs both: chain replay
+/// first (authenticity), then parse-and-evaluate of every caveat against the
+/// host's clock and counter (validity). Unknown caveats refuse, per
+/// [`parse_caveat`].
+///
+/// ```
+/// use qqq_cap::token::{attenuate, encode_caveat, mint, verify_and_evaluate, Caveat};
+///
+/// let root_key = b"operator-root-key";
+/// let capability = b"http egress to api.example.com";
+/// let root = mint(root_key, capability);
+/// let exp = encode_caveat(&Caveat::Expiry { unix_ms: 2_000 });
+/// let narrowed = attenuate(root, &exp);
+/// assert!(verify_and_evaluate(root_key, capability, &[exp.clone()], &narrowed, 1_999, 0));
+/// assert!(!verify_and_evaluate(root_key, capability, &[exp], &narrowed, 2_000, 0));
+/// ```
+#[must_use]
+pub fn verify_and_evaluate(
+    root_key: &[u8],
+    capability_id: &[u8],
+    caveats: &[Vec<u8>],
+    sig: &[u8; 32],
+    now_ms: u64,
+    calls_used: u64,
+) -> bool {
+    if !verify_chain(root_key, capability_id, caveats, sig) {
+        return false;
+    }
+    caveats
+        .iter()
+        .all(|bytes| parse_caveat(bytes).is_some_and(|c| evaluate_caveat(&c, now_ms, calls_used)))
+}
+
+/// Verify a token by replaying the chain from the root key.
+///
+/// Recomputes every HMAC step and compares the final signature in
+/// constant time (`Mac::verify`); a `false` is untrusted, never
+/// malformed — same shape as checkpoint verification.
+///
+/// Authenticity only: a genuine-but-expired token still verifies. Production
+/// call sites must use [`verify_and_evaluate`] (or check [`evaluate_caveat`])
+/// so expiry is enforced.
+///
+/// ```
+/// use qqq_cap::token::{attenuate, encode_caveat, mint, verify_chain, Caveat};
+///
+/// let root_key = b"operator-root-key";
+/// let capability = b"http egress to api.example.com";
+/// let root = mint(root_key, capability);
+/// assert!(verify_chain(root_key, capability, &[], &root));
+/// assert!(!verify_chain(b"wrong-key", capability, &[], &root));
+/// ```
 #[must_use]
 pub fn verify_chain(
     root_key: &[u8],
@@ -326,6 +383,50 @@ mod tests {
             &Caveat::Expiry { unix_ms: 1_001 },
             1_000,
             0
+        ));
+    }
+
+    /// Ultra-review r1 H: `verify_chain` alone honors expired tokens, so
+    /// production must use `verify_and_evaluate`, which refuses both
+    /// forgeries and expired-but-genuine tokens.
+    #[test]
+    fn verify_and_evaluate_refuses_expired_but_genuine_tokens() {
+        let capability = b"egress to api.example.com";
+        let root = mint(root_key(), capability);
+        let expired = encode_caveat(&Caveat::Expiry { unix_ms: 1_000 });
+        let narrowed = attenuate(root, &expired);
+        // Genuine chain: authenticity alone passes.
+        assert!(verify_chain(
+            root_key(),
+            capability,
+            std::slice::from_ref(&expired),
+            &narrowed
+        ));
+        // Validity fails after expiry — the helper refuses.
+        assert!(!verify_and_evaluate(
+            root_key(),
+            capability,
+            std::slice::from_ref(&expired),
+            &narrowed,
+            1_000,
+            0,
+        ));
+        assert!(verify_and_evaluate(
+            root_key(),
+            capability,
+            std::slice::from_ref(&expired),
+            &narrowed,
+            999,
+            0,
+        ));
+        // Forgery still refuses even before expiry.
+        assert!(!verify_and_evaluate(
+            b"wrong-key",
+            capability,
+            std::slice::from_ref(&expired),
+            &narrowed,
+            999,
+            0,
         ));
     }
 

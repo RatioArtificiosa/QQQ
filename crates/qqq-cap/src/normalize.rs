@@ -89,6 +89,13 @@ pub enum NormalizeError {
         /// Why it is invalid.
         reason: String,
     },
+    /// A filesystem quota could not be parsed or is nonsensical.
+    InvalidQuota {
+        /// The offending quota string.
+        quota: String,
+        /// Why it is invalid.
+        reason: String,
+    },
     /// The normalized configuration contradicts itself — for example the same
     /// path granted twice with different modes, which is ambiguous and would
     /// make the effective authority depend on iteration order.
@@ -124,6 +131,9 @@ impl fmt::Display for NormalizeError {
             Self::InvalidHostPattern { pattern, reason } => {
                 write!(f, "invalid host pattern `{pattern}`: {reason}")
             }
+            Self::InvalidQuota { quota, reason } => {
+                write!(f, "invalid quota `{quota}`: {reason}")
+            }
             Self::ConflictingGrants {
                 subject,
                 first,
@@ -147,7 +157,9 @@ impl NormalizeError {
             | Self::PathNotADirectory { .. }
             | Self::PathUnresolvable { .. } => qqq_core::ErrorCode::CapabilityPathInvalid,
             Self::SecretMissing { .. } => qqq_core::ErrorCode::SecretUnresolvable,
-            Self::InvalidHostPattern { .. } => qqq_core::ErrorCode::CapabilitySyntaxInvalid,
+            Self::InvalidHostPattern { .. } | Self::InvalidQuota { .. } => {
+                qqq_core::ErrorCode::CapabilitySyntaxInvalid
+            }
             Self::ConflictingGrants { .. } => qqq_core::ErrorCode::ManifestSchemaViolation,
         }
     }
@@ -174,6 +186,9 @@ impl NormalizeError {
             Self::InvalidHostPattern { pattern, .. } => e
                 .with_context("pattern", pattern.clone())
                 .with_remediation("use `host` or `host:port`; wildcards are `*.example.com`"),
+            Self::InvalidQuota { quota, .. } => e
+                .with_context("quota", quota.clone())
+                .with_remediation("use a positive size like `5GiB`; `0B` grants nothing"),
             Self::ConflictingGrants { subject, .. } => e
                 .with_context("subject", subject.clone())
                 .with_remediation("grant each path once, with a single mode"),
@@ -293,20 +308,7 @@ impl HostPattern {
         } else {
             None
         };
-        let wildcard = !is_ipv6 && host_lower.starts_with("*.");
-        let bare = if let Some(addr) = literal_ip {
-            addr.to_string()
-        } else if wildcard {
-            host_lower.trim_start_matches("*.").to_owned()
-        } else if host_lower == "*" {
-            // A bare `*` is rejected: it is an unbounded egress grant and the
-            // entire point of an allowlist is that it is bounded.
-            return Err(
-                "a bare `*` is not permitted; name the host or use `*.example.com`".to_owned(),
-            );
-        } else {
-            host_lower.clone()
-        };
+        let (wildcard, bare) = split_wildcard(&host_lower, is_ipv6, literal_ip.as_ref())?;
 
         if bare.is_empty() {
             return Err("host part is empty".to_owned());
@@ -337,7 +339,55 @@ impl HostPattern {
             original,
         })
     }
+}
 
+/// Split the wildcard prefix from the bare host, refusing stacked wildcards
+/// and wildcards over IP literals.
+///
+/// `trim_start_matches("*.")` would collapse `*.*.example.com` into
+/// `example.com`, silently accepting a pattern the author did not write, so
+/// exactly one prefix is stripped and any remaining `*` is refused. A
+/// wildcard over an address (`*.1.2.3.4`) would match a numeric range the
+/// allowlist cannot bound; addresses are named exactly.
+fn split_wildcard(
+    host_lower: &str,
+    is_ipv6: bool,
+    literal_ip: Option<&std::net::IpAddr>,
+) -> Result<(bool, String), String> {
+    let wildcard = !is_ipv6 && host_lower.starts_with("*.");
+    if let Some(addr) = literal_ip {
+        if wildcard {
+            return Err("a wildcard over an IP literal is not permitted; name the \
+                 address exactly or use a hostname pattern"
+                .to_owned());
+        }
+        return Ok((false, addr.to_string()));
+    }
+    if wildcard {
+        let rest = &host_lower["*.".len()..];
+        if rest.contains('*') {
+            return Err("`*` is permitted only as a leading `*.`; a mid-pattern \
+                 wildcard cannot be resolved against the registry at parse time"
+                .to_owned());
+        }
+        if rest.parse::<std::net::Ipv4Addr>().is_ok() {
+            return Err(
+                "a wildcard over an IPv4 address is not permitted; name the \
+                 address exactly"
+                    .to_owned(),
+            );
+        }
+        return Ok((true, rest.to_owned()));
+    }
+    if host_lower == "*" {
+        // A bare `*` is rejected: it is an unbounded egress grant and the
+        // entire point of an allowlist is that it is bounded.
+        return Err("a bare `*` is not permitted; name the host or use `*.example.com`".to_owned());
+    }
+    Ok((false, host_lower.to_owned()))
+}
+
+impl HostPattern {
     /// Whether this pattern permits connecting to `host:port`.
     #[must_use]
     pub fn matches(&self, host: &str, port: u16) -> bool {
@@ -726,15 +776,15 @@ fn normalize_fs(manifest: &Manifest, env: &impl HostEnv) -> Result<Vec<FsGrant>,
             });
         }
 
+        // Canonicalize before classifying: checking `is_dir` on the declared
+        // path and then using the canonical path is a TOCTOU gap (the path
+        // can change between the two). The canonical path is what the host
+        // enforces against, so it is what gets classified. `exists` is kept
+        // first only to preserve the `PathMissing` error kind for absent
+        // paths; canonicalization failure thereafter is unresolvable.
         if !env.exists(&declared_path) {
             return Err(NormalizeError::PathMissing {
                 declared: declared_path,
-            });
-        }
-        if !env.is_dir(&declared_path) {
-            return Err(NormalizeError::PathNotADirectory {
-                declared: declared_path,
-                found: "file".to_owned(),
             });
         }
         let canonical_path = env.canonicalize(&declared_path).map_err(|reason| {
@@ -743,16 +793,31 @@ fn normalize_fs(manifest: &Manifest, env: &impl HostEnv) -> Result<Vec<FsGrant>,
                 reason,
             }
         })?;
+        if !env.is_dir(&canonical_path) {
+            return Err(NormalizeError::PathNotADirectory {
+                declared: declared_path,
+                found: "file".to_owned(),
+            });
+        }
 
         let quota_bytes = match &entry.quota {
-            Some(q) => Some(
-                ByteSize::parse(q)
-                    .map_err(|reason| NormalizeError::InvalidHostPattern {
-                        pattern: q.clone(),
-                        reason: format!("invalid quota: {reason}"),
+            Some(q) => {
+                let bytes = ByteSize::parse(q)
+                    .map_err(|reason| NormalizeError::InvalidQuota {
+                        quota: q.clone(),
+                        reason,
                     })?
-                    .as_bytes(),
-            ),
+                    .as_bytes();
+                if bytes == 0 {
+                    return Err(NormalizeError::InvalidQuota {
+                        quota: q.clone(),
+                        reason: "`0B` grants no bytes; remove the quota or set a \
+                                 positive size"
+                            .to_owned(),
+                    });
+                }
+                Some(bytes)
+            }
             None => None,
         };
 
@@ -1080,6 +1145,10 @@ mod tests {
         }
         fn with_file(mut self, p: &str) -> Self {
             self.files.insert(p.to_owned());
+            // Files canonicalize like dirs on a real host; without this the
+            // fake would report `PathUnresolvable` where production reports
+            // `PathNotADirectory`.
+            self.canonical.insert(p.to_owned(), p.to_owned());
             self
         }
         fn with_var(mut self, v: &str) -> Self {
@@ -1105,7 +1174,7 @@ mod tests {
             if let Some(c) = self.canonical.get(path) {
                 return Ok(c.clone());
             }
-            if self.dirs.contains(path) {
+            if self.dirs.contains(path) || self.files.contains(path) {
                 return Ok(path.to_owned());
             }
             Err("no such file or directory".to_owned())
@@ -1183,6 +1252,20 @@ mod tests {
         assert!(HostPattern::parse("api.example.com/path").is_err());
         let e = HostPattern::parse("*").unwrap_err();
         assert!(e.contains("bare `*`"), "got: {e}");
+    }
+
+    /// Ultra-review r1 H: `*.*.example.com` must not collapse to
+    /// `example.com`, and `*.1.2.3.4` must not wildcard over an address.
+    #[test]
+    fn host_pattern_rejects_stacked_wildcards_and_wildcards_over_ips() {
+        for bad in ["*.*.example.com", "*.1.2.3.4", "*.*.*"] {
+            assert!(
+                HostPattern::parse(bad).is_err(),
+                "`{bad}` must be refused, not collapsed"
+            );
+        }
+        // A single leading wildcard still works.
+        assert!(HostPattern::parse("*.example.com").is_ok());
     }
 
     #[test]
@@ -1707,6 +1790,7 @@ mod tests {
             manifest_with("[[capabilities.fs]]\npath = \"/data/../etc\"\nmode = \"read-only\"\n");
         let env = FakeEnv::default()
             .with_dir("/data/../etc")
+            .with_dir("/etc")
             .with_canonical("/data/../etc", "/etc");
         let n = Normalized::from_manifest(&m, &env).unwrap();
         assert_eq!(n.fs[0].declared_path, "/data/../etc");

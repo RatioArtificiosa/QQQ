@@ -1209,10 +1209,22 @@ impl Policy {
         // in the module and it is the safe one: an `allow` that named something
         // a `deny` also names leaves it denied. The alternative — an order- or
         // specificity-based resolution — is how a policy review misses a rule.
-        let (capabilities, mode) = if !subtract.is_empty() {
+        //
+        // When both are present the result is `allow minus deny` as an
+        // intersection: returning only the deny set would discard the allow
+        // list entirely, widening authority beyond what the allow intended
+        // (e.g. `allow sql.*` plus an unrelated `deny http.client` must keep
+        // only `sql.*`, not everything-minus-http).
+        let (capabilities, mode) = if has_allow {
+            (
+                intersect
+                    .difference(&subtract)
+                    .copied()
+                    .collect::<BTreeSet<Capability>>(),
+                NarrowMode::Intersect,
+            )
+        } else if !subtract.is_empty() {
             (subtract, NarrowMode::Subtract)
-        } else if has_allow {
-            (intersect, NarrowMode::Intersect)
         } else {
             (BTreeSet::new(), NarrowMode::Subtract)
         };
@@ -1308,11 +1320,20 @@ impl Policy {
 
             let (scope, demand) = match &rule.condition {
                 // Split eagerly so an unsound `or` is reported rather than
-                // silently given a reading. The error is dropped here because
-                // `Policy::parse` already split every rule and refused the
-                // unsound shape -- but the split is re-run rather than cached,
-                // so `None` means "no condition", never "the split failed".
-                Some(c) => split_condition(c, "", 0).unwrap_or((None, None)),
+                // silently given a reading. `Policy::parse` already refused
+                // the unsound shape, so a failure here means the rule was
+                // built by hand (not parsed) — fail closed as Unsatisfied
+                // rather than defaulting to Satisfied.
+                Some(c) => match split_condition(c, "", 0) {
+                    Ok(split) => split,
+                    Err(_) => {
+                        return RequirementOutcome::Unsatisfied {
+                            capability,
+                            rule: rule.to_string(),
+                            line: rule.line,
+                        };
+                    }
+                },
                 None => (None, None),
             };
 
@@ -1440,12 +1461,22 @@ fn split_condition(
         // Every other comparison is a demand.
         Expr::Compare { .. } => Ok((None, Some(condition.clone()))),
         Expr::Not(inner) => {
-            let whole = Expr::Not(inner.clone());
-            match inner.as_ref() {
-                Expr::Compare { field, .. } if *field == Field::Capability => {
-                    Ok((Some(whole), None))
-                }
-                _ => Ok((None, Some(whole))),
+            // Recurse so `not not <scope>` stays scope: a negation preserves
+            // the role of a pure half, and a negation of a mixed half has no
+            // sound split (De Morgan would push an `or` across the role
+            // boundary, which `or` handling above refuses).
+            let (inner_scope, inner_demand) = split_condition(inner, source, line)?;
+            match (inner_scope, inner_demand) {
+                (Some(s), None) => Ok((Some(Expr::Not(Box::new(s))), None)),
+                (None, Some(d)) => Ok((None, Some(Expr::Not(Box::new(d))))),
+                (None, None) => Ok((None, None)),
+                (Some(_), Some(_)) => Err(PolicyError::new(
+                    line,
+                    source,
+                    "this `not` wraps a condition mixing a `capability` \
+                     comparison with another field, which has no sound reading. \
+                     Write two rules instead.",
+                )),
             }
         }
         Expr::And(l, r) => {
@@ -1634,7 +1665,35 @@ fn parse_rule(text: &str, line: usize) -> Result<Rule, PolicyError> {
         ));
     }
 
-    let condition = match condition_text {
+    let condition = parse_rule_condition(verb, condition_text, text, line)?;
+
+    // `allow` with a `when`/`to` qualifier would compile to an unconditional
+    // intersection — `overlay()` has no binding to evaluate against — silently
+    // widening authority beyond the qualifier. That is the unsafe direction,
+    // so it is rejected here, *after* parsing the condition so an unknown
+    // field still reports as an unknown field first. (`deny` with a qualifier
+    // errs the safe way: it removes the capability unconditionally, which is
+    // documented on `Policy::overlay`.)
+    reject_qualified_allow(verb, condition.is_some(), destination.is_some(), text, line)?;
+
+    Ok(Rule {
+        verb,
+        selector,
+        destination,
+        requires,
+        condition,
+        line,
+    })
+}
+
+/// Parse a rule's `when` condition, validating the `require` split eagerly.
+fn parse_rule_condition(
+    verb: Verb,
+    condition_text: Option<&str>,
+    text: &str,
+    line: usize,
+) -> Result<Option<Expr>, PolicyError> {
+    match condition_text {
         Some(c) => {
             let expr = parse_expr(c, text, line)?;
             // A `require`'s condition must split into scope and demand, and an
@@ -1645,19 +1704,31 @@ fn parse_rule(text: &str, line: usize) -> Result<Rule, PolicyError> {
             if verb == Verb::Require {
                 split_condition(&expr, text, line)?;
             }
-            Some(expr)
+            Ok(Some(expr))
         }
-        None => None,
-    };
+        None => Ok(None),
+    }
+}
 
-    Ok(Rule {
-        verb,
-        selector,
-        destination,
-        requires,
-        condition,
-        line,
-    })
+/// Reject a qualified `allow`: it would enforce as an unqualified intersection.
+fn reject_qualified_allow(
+    verb: Verb,
+    has_condition: bool,
+    has_destination: bool,
+    text: &str,
+    line: usize,
+) -> Result<(), PolicyError> {
+    if verb == Verb::Allow && (has_condition || has_destination) {
+        return Err(PolicyError::new(
+            line,
+            text,
+            "`allow` does not accept `when` or `to` qualifiers; an allowlist \
+             names capabilities unconditionally, and a qualified allow would be \
+             enforced as an unqualified one. Express the restriction with \
+             `deny`, or with `require`/`permit` for deployment preconditions",
+        ));
+    }
+    Ok(())
 }
 
 /// Parse the `<field> <literal>` of a `to` clause.
@@ -1745,7 +1816,7 @@ fn parse_permit(
         None => (after_in, None),
     };
 
-    let Some(env) = quoted_prefix(env_text.trim()) else {
+    let Some((env, env_rest)) = quoted_prefix(env_text.trim()) else {
         return Err(PolicyError::new(
             line,
             text,
@@ -1753,6 +1824,17 @@ fn parse_permit(
              `in \"staging\"`",
         ));
     };
+    if !env_rest.trim().is_empty() {
+        return Err(PolicyError::new(
+            line,
+            text,
+            format!(
+                "unexpected text after the environment: `{}`; write \
+                 `permit <caps> in \"<env>\"` with nothing after the quote",
+                env_rest.trim(),
+            ),
+        ));
+    }
 
     let destination = match destination_text {
         Some(d) => Some(parse_destination(d, text, line)?),
@@ -1801,17 +1883,23 @@ fn split_word(text: &str) -> (&str, &str) {
 /// Whole-word matching matters: `deny sql.* when capability == "when"` contains
 /// `when` inside a string literal, and a naive `find` would split there.
 fn split_keyword<'a>(text: &'a str, keyword: &str) -> Option<(&'a str, &'a str)> {
+    // Byte-indexed scan with char-boundary guards: `i` advances by whole
+    // chars so `text[i..]` never slices inside a multi-byte sequence
+    // (e.g. `café` — a byte loop with `i += 1` panics there).
     let bytes = text.as_bytes();
     let mut in_string = false;
     let mut i = 0usize;
     while i + keyword.len() <= text.len() {
-        // Total rather than subscripted: the loop guard makes `i` in-bounds,
-        // so the `else` arms below are unreachable structure, not behavior —
-        // they terminate the scan instead of panicking if the invariant ever
-        // lies.
+        if !text.is_char_boundary(i) {
+            // Advance to the next boundary rather than panicking.
+            i += 1;
+            while i < text.len() && !text.is_char_boundary(i) {
+                i += 1;
+            }
+            continue;
+        }
         let Some(&b) = bytes.get(i) else { break };
-        let ch = b as char;
-        if ch == '"' {
+        if b == b'"' {
             in_string = !in_string;
             i += 1;
             continue;
@@ -1823,24 +1911,25 @@ fn split_keyword<'a>(text: &'a str, keyword: &str) -> Option<(&'a str, &'a str)>
                     .is_some_and(|b| (*b as char).is_whitespace());
             let after = i + keyword.len();
             let after_ok = after == text.len()
-                || bytes
-                    .get(after)
-                    .is_some_and(|b| (*b as char).is_whitespace());
+                || text
+                    .get(after..)
+                    .is_some_and(|t| t.starts_with(char::is_whitespace));
             if before_ok && after_ok {
                 return Some((&text[..i], text[after..].trim_start()));
             }
         }
-        i += 1;
+        // Advance by the char at `i` (always at least 1 byte).
+        i += text[i..].chars().next().map_or(1, char::len_utf8);
     }
     None
 }
 
 /// Read a leading quoted string, returning its content.
-fn quoted_prefix(text: &str) -> Option<&str> {
+fn quoted_prefix(text: &str) -> Option<(&str, &str)> {
     let text = text.trim_start();
     let rest = text.strip_prefix('"')?;
     let end = rest.find('"')?;
-    Some(&rest[..end])
+    Some((&rest[..end], &rest[end + 1..]))
 }
 
 fn parse_expr(text: &str, source: &str, line: usize) -> Result<Expr, PolicyError> {
@@ -2036,7 +2125,18 @@ fn parse_literal(
         }
         return Ok(Literal::Boolean(false));
     }
-    if let Some(inner) = quoted_prefix(text) {
+    if let Some((inner, rest)) = quoted_prefix(text) {
+        if !rest.trim().is_empty() {
+            return Err(PolicyError::new(
+                line,
+                source,
+                format!(
+                    "unexpected text after the closing quote: `{}`; a literal \
+                     is one quoted string with nothing after it",
+                    rest.trim(),
+                ),
+            ));
+        }
         if field.is_boolean() {
             return Err(PolicyError::new(
                 line,
@@ -2488,16 +2588,28 @@ mod tests {
     fn deny_wins_when_both_verbs_name_one_capability() {
         let p = parse("allow http.client\nallow sql.*\ndeny http.client");
         let overlay = p.overlay();
-        assert_eq!(overlay.mode, NarrowMode::Subtract);
-        assert!(overlay.capabilities.contains(&Capability::HttpClient));
+        // Allow-plus-deny compiles to an intersection of the allow list minus
+        // the deny set: deny wins *within* the allow, and the allow list is
+        // never discarded. Returning only the deny set would widen (an
+        // unrelated `allow sql.*` plus `deny http.client` would keep
+        // everything-minus-http instead of only sql).
+        assert_eq!(overlay.mode, NarrowMode::Intersect);
         assert!(
-            !overlay.capabilities.contains(&Capability::SqlQuery),
-            "the allow list must not leak into the subtract set"
+            !overlay.capabilities.contains(&Capability::HttpClient),
+            "deny must remove http.client even though allow named it"
+        );
+        assert!(
+            overlay.capabilities.contains(&Capability::SqlQuery),
+            "the allow list must survive a deny that does not name it"
+        );
+        assert!(
+            overlay.capabilities.contains(&Capability::SqlExecute),
+            "sql.* expands to both sql capabilities minus the deny"
         );
         assert_eq!(
             overlay.capabilities.len(),
-            1,
-            "a mixed allow/deny policy subtracts only what was denied"
+            2,
+            "allow {{http.client, sql.*}} minus deny {{http.client}} is exactly sql.*"
         );
     }
 
@@ -2505,9 +2617,12 @@ mod tests {
 
     #[test]
     fn the_termination_proof_measures_the_policy_it_was_built_from() {
+        // `allow` takes no qualifier (a qualified allow would enforce as an
+        // unqualified intersection), so the multi-comparison shape uses `deny`
+        // qualifiers plus a `require` — all of which the proof must measure.
         let p = parse(
-            "deny http.client when mfa == false\n\
-             allow sql.* when tenant == \"acme\" and environment == \"prod\"",
+            "deny http.client to host \"*.onion\" when mfa == false\n\
+             deny sql.query when tenant == \"acme\" and environment == \"prod\"",
         );
         let proof = p.prove_terminating().expect("must prove");
         assert_eq!(proof.rules, 2);
@@ -2535,6 +2650,63 @@ mod tests {
             proof.comparisons >= 2,
             "one for the selector expansion and one for the destination: {}",
             proof.comparisons
+        );
+    }
+
+    /// Ultra-review r1 C4: trailing garbage after a quoted literal must be
+    /// refused — `tenant == "a" garbage` previously parsed as `"a"`.
+    #[test]
+    fn trailing_garbage_after_a_quoted_literal_is_rejected() {
+        let e = err(r#"deny http.client when tenant == "acme" garbage"#);
+        assert!(
+            e.message
+                .contains("unexpected text after the closing quote"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    /// Ultra-review r1 H: `split_keyword` must not panic on multi-byte text.
+    /// A byte loop with `i += 1` slices inside `é` and panics.
+    #[test]
+    fn split_keyword_survives_unicode_without_panicking() {
+        let p = parse("deny http.client");
+        assert_eq!(p.rules().len(), 1);
+        // `when` inside a unicode string is not a keyword split.
+        let p = parse("deny http.client when tenant == \"café\"");
+        assert_eq!(p.rules().len(), 1);
+        let cond = p.rules()[0].condition.as_ref().expect("kept");
+        let binding = Binding::new("http.client", "prod").with_tenant("café");
+        assert!(cond.eval(&binding));
+    }
+
+    /// Ultra-review r1: `not not capability == "x"` is scope, not demand —
+    /// double negation preserves the role of a pure half.
+    #[test]
+    fn double_negation_of_scope_stays_scope() {
+        let p = parse(r#"require mfa when not not capability == "crypto.sign""#);
+        let rule = &p.rules()[0];
+        let (scope, demand) =
+            split_condition(rule.condition.as_ref().expect("kept"), "", 0).expect("sound");
+        assert!(scope.is_some(), "double-negated scope must stay scope");
+        assert!(demand.is_none(), "no demand half expected");
+    }
+
+    /// Ultra-review r1 C3: `allow` with a qualifier is rejected — it would
+    /// otherwise enforce as an unqualified intersection (widening).
+    /// `deny` with a qualifier stays unconditional (fail-closed, documented).
+    #[test]
+    fn allow_with_a_qualifier_is_rejected_deny_with_a_qualifier_is_unconditional() {
+        let e = err(r#"allow sql.* when tenant == "acme""#);
+        assert!(e.message.contains("does not accept"), "got: {}", e.message);
+        let e = err(r#"allow http.client to host "example.com""#);
+        assert!(e.message.contains("does not accept"), "got: {}", e.message);
+        let p = parse(r#"deny http.client to host "*.onion""#);
+        assert!(p.rules()[0].destination.is_some());
+        let overlay = p.overlay();
+        assert!(
+            overlay.capabilities.contains(&Capability::HttpClient),
+            "deny qualifier removes unconditionally (fail-closed)"
         );
     }
 

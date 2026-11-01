@@ -2756,7 +2756,14 @@ async fn serve_flat_request(
     span_seq: &mut u64,
     request_started: std::time::Instant,
 ) -> Option<Served> {
-    let Some((body, body_bytes)) = drain_body(stream, buf, head).await else {
+    let Some((body, body_bytes)) = drain_body(
+        stream,
+        buf,
+        head,
+        effective_body_cap(ctx.limits.map(|v| &**v), ctx.id.tenant),
+    )
+    .await
+    else {
         if let Some(m) = ctx.metrics {
             let label = ctx.tenant_labels.label(tenant);
             m.record_body_limit(label.as_str());
@@ -2816,7 +2823,7 @@ async fn serve_connection(
     config: &ConnectionConfig,
     ctx: &ConnectionContext<'_>,
 ) -> Served {
-    let mut conn = Connection::new(config.clone());
+    let mut conn = Connection::new(config.clone(), Instant::now());
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     // One counter per connection: this is the **span**, the request's ordinal within
     // the conversation, so a keep-alive exchange stays ordered.
@@ -2859,12 +2866,20 @@ async fn serve_connection(
         // Extracted so the failure taxonomy has a name: `reject_parse_error` states which
         // outcomes are the *client's* fault and which are the server's, and why a
         // malformed request line must not become a 500.
-        let head = match read_head(&mut stream, &mut buf, config).await {
+        let head = match read_head(&mut stream, &mut buf, config, ctx.shutdown).await {
             Ok(h) => h,
             Err(ReadOutcome::ClientClosed) => return Served::ClientClosed,
             Err(ReadOutcome::HeaderTimeout) => return Served::HeaderTimeout,
             Err(ReadOutcome::BadRequest(err)) => {
                 return reject_parse_error(&mut stream, &mut conn, &err).await;
+            }
+            Err(ReadOutcome::Shutdown) => {
+                // A shutdown that lands mid-head ends the connection the way
+                // any other drain does: stop reading, close on the way out.
+                // Without this arm a zero-byte connection would sit in
+                // `read_head` past the end of the process.
+                conn.begin_drain(Instant::now());
+                return outcome_of(conn.close_reason().unwrap_or(CloseReason::ShutdownIdle));
             }
         };
 
@@ -3624,6 +3639,7 @@ fn metric_outcome_of(served: Served) -> crate::metrics::Outcome {
 /// the other closes it early.
 ///
 /// The compiler reported it as a dead variant, which is the correct diagnosis.
+#[derive(Debug)]
 enum ReadOutcome {
     /// The client closed between requests, which is normal for HTTP/1.0.
     ClientClosed,
@@ -3635,6 +3651,11 @@ enum ReadOutcome {
     HeaderTimeout,
     /// The request was malformed.
     BadRequest(ParseError),
+    /// Shutdown was signalled while waiting for the head.
+    ///
+    /// The caller drains rather than answering: there is no request to
+    /// answer, and the process is going away.
+    Shutdown,
 }
 
 /// How long to sleep between timeout checks while waiting for bytes.
@@ -3685,8 +3706,13 @@ async fn read_head(
     stream: &mut ConnStream,
     buf: &mut Vec<u8>,
     config: &ConnectionConfig,
+    shutdown: &Shutdown,
 ) -> std::result::Result<RequestHead, ReadOutcome> {
-    let mut header_started: Option<Instant> = None;
+    // Armed at entry, not at the first byte: a connection that never sends
+    // anything must still hit the header deadline (see `Connection::new`),
+    // and this is the timer that fires for it — `Connection::poll` is only
+    // consulted between requests, never from inside this loop.
+    let mut header_started: Option<Instant> = Some(Instant::now());
     // How much of `buf` is already known-scanned for the head terminator.
     // Each loop iteration appends fresh bytes and resumes the scan here rather
     // than from zero, so a slow sender dripping one byte at a time costs
@@ -3719,19 +3745,18 @@ async fn read_head(
             };
         }
 
-        // Two deadlines, and they measure different failures — but only one of
-        // them is checked here.
+        // Two deadlines, and they measure different failures.
         //
         //   * Past `idle_timeout` with nothing read — decided by
         //     `Connection::poll`, which the caller runs before entering this
-        //     function and this loop runs again on each poll tick. Not
-        //     re-checked here, because a second authority on the same deadline
-        //     is how one path holds a connection past it while the other closes
-        //     early.
-        //   * Past `header_timeout` with bytes read — a client mid-request that
-        //     stalled. `Connection` does not model this, because it is a
-        //     property of the *read* rather than of the connection, so the
-        //     deadline is kept here.
+        //     function. Not re-checked here, because a second authority on the
+        //     same deadline is how one path holds a connection past it while
+        //     the other closes early.
+        //   * Past `header_timeout` with the head incomplete — measured from
+        //     entry, whether or not any byte has arrived yet. A zero-byte
+        //     connection and a stalled mid-head connection fail the same way,
+        //     which is what makes a connect-and-send-nothing client unable to
+        //     hold a slot past the header deadline.
         if let Some(started) = header_started
             && Instant::now().duration_since(started) >= config.header_timeout
         {
@@ -3746,6 +3771,11 @@ async fn read_head(
             // so it costs one wakeup per idle connection per interval and never
             // fires early enough to matter.
             () = tokio::time::sleep(POLL_INTERVAL) => continue,
+            // A shutdown that lands mid-head ends the wait the way a drain
+            // does: without this arm a zero-byte connection would sit here
+            // past the end of the process, and the graceful drain would hang
+            // on the quietest client.
+            () = shutdown.wait() => return Err(ReadOutcome::Shutdown),
             r = stream.read(&mut chunk) => r,
         };
 
@@ -3854,6 +3884,7 @@ async fn drain_body(
     stream: &mut ConnStream,
     buf: &mut Vec<u8>,
     head: &RequestHead,
+    max_bytes: u64,
 ) -> Option<(crate::body_bytes::BodyBytes, u64)> {
     // No body declared: anything buffered is the start of the **next** request —
     // a pipelined one. It must be preserved, not cleared, or a client that
@@ -3870,8 +3901,7 @@ async fn drain_body(
         return Some((body, 0));
     }
 
-    let Ok(mut reader) = crate::body::BodyReader::from_head(head, config_max_request_bytes())
-    else {
+    let Ok(mut reader) = crate::body::BodyReader::from_head(head, max_bytes) else {
         // `from_head` refuses a head declaring both framings. `http1` already
         // rejects that at parse time, so reaching here means the two disagree,
         // and the connection is not trustworthy.
@@ -3920,6 +3950,21 @@ async fn drain_body(
 /// ground between them becomes a smuggle window.
 pub(crate) fn config_max_request_bytes() -> u64 {
     http1::MAX_REQUEST_BYTES
+}
+
+/// The effective body cap for one request: the tenant's cap when the manifest
+/// sets one, bounded above by the global ceiling.
+///
+/// Threaded into every streaming reader (not just the declared-length gate),
+/// because a chunked or unframed body has no declared length to check up
+/// front — enforcing only `content_length` would let a tenant's streaming
+/// body bypass its own cap up to the global one.
+#[must_use]
+pub fn effective_body_cap(limits: Option<&crate::limits::TenantLimits>, tenant: TenantKey) -> u64 {
+    let tenant_cap = limits.map_or(u64::MAX, |l| {
+        l.limits_for(tenant).max_body_bytes.unwrap_or(u64::MAX)
+    });
+    config_max_request_bytes().min(tenant_cap)
 }
 
 /// Split a request target into path and query.
@@ -4353,15 +4398,59 @@ mod tests {
         let (stream, _) = listener.accept().await.expect("peer arrives");
         let mut stream = ConnStream::Plain(stream);
         let mut buf = Vec::new();
-        let parsed = read_head(&mut stream, &mut buf, &ConnectionConfig::default()).await;
+        let parsed = read_head(
+            &mut stream,
+            &mut buf,
+            &ConnectionConfig::default(),
+            &Shutdown::new(),
+        )
+        .await;
         writer.await.expect("writer finishes");
         let request = match parsed {
             Ok(request) => request,
             Err(ReadOutcome::ClientClosed) => panic!("dribbled head parses: peer vanished"),
             Err(ReadOutcome::HeaderTimeout) => panic!("dribbled head parses: timed out"),
             Err(ReadOutcome::BadRequest(e)) => panic!("dribbled head parses: {e}"),
+            Err(ReadOutcome::Shutdown) => panic!("dribbled head parses: shut down"),
         };
         assert_eq!(request.target, "/orders");
         assert_eq!(request.host(), Some("example.com"));
+    }
+
+    /// A shutdown that lands mid-head ends the wait promptly: without the
+    /// shutdown arm in `read_head`'s select, a zero-byte connection would sit
+    /// there past the end of the process and the graceful drain would hang
+    /// on the quietest client.
+    #[tokio::test]
+    async fn a_shutdown_during_the_head_read_ends_the_wait() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let addr = listener.local_addr().expect("bound address known");
+
+        // Connect and send nothing: the peer holds the socket open.
+        let _peer = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("peer connects");
+        let (stream, _) = listener.accept().await.expect("peer arrives");
+        let mut stream = ConnStream::Plain(stream);
+        let mut buf = Vec::new();
+
+        let shutdown = Shutdown::new();
+        let config = ConnectionConfig::default();
+        // Boxed: the read future holds an 8 KiB chunk buffer, tripping the
+        // large-future lint if it lives on this test's stack frame.
+        let run = Box::pin(read_head(&mut stream, &mut buf, &config, &shutdown));
+        let out = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            shutdown.signal();
+            run.await
+        })
+        .await
+        .expect("the read must end, not hang");
+        assert!(
+            matches!(out, Err(ReadOutcome::Shutdown)),
+            "a mid-head shutdown must surface, got {out:?}"
+        );
     }
 }

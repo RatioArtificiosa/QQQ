@@ -491,6 +491,57 @@ pub struct ResolvedCertificate {
     pub key: PrivateKeyDer<'static>,
 }
 
+/// The largest PEM file this server reads: 256 KiB.
+///
+/// A certificate chain or key is a few KiB; anything larger is not one of
+/// those. The bound is checked on the file size *before* reading (so a huge
+/// file is never loaded) and on the bytes after (so a file that grew between
+/// the two is still refused) — a metadata check alone would race a writer,
+/// and a post-read check alone would allocate first.
+const MAX_PEM_FILE_BYTES: u64 = 256 * 1024;
+
+/// Read a PEM file with the size bound above, naming the file on failure.
+///
+/// Used for every key and certificate read: a config path pointing at `/dev`
+/// or a multi-gigabyte file must fail at startup with the path in the
+/// message, not with an allocation that takes the process down.
+fn read_bounded(path: &Path, what: &str) -> Result<Vec<u8>> {
+    let too_big = |len: &dyn std::fmt::Display| {
+        tls_error(format!(
+            "the {what} file `{}` is {len} bytes, over the {MAX_PEM_FILE_BYTES}-byte limit",
+            path.display()
+        ))
+        .with_remediation(
+            "point the configuration at the PEM file it names: a certificate \
+             chain or key is a few KiB, so a larger file is the wrong file",
+        )
+        .with_context("file", path.display().to_string())
+    };
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > MAX_PEM_FILE_BYTES => return Err(too_big(&meta.len())),
+        // Missing, unreadable, or small enough: `fs::read` below reports
+        // the first two with the established message shape, and the bound
+        // is re-checked after the read, so one arm covers the rest.
+        _ => {}
+    }
+    let bytes = std::fs::read(path).map_err(|e| {
+        tls_error(format!(
+            "could not read the {what} file `{}`",
+            path.display()
+        ))
+        .with_cause(e.to_string())
+        .with_remediation(
+            "check the path and that the process may read it; a certificate file is \
+                 usually mounted read-only",
+        )
+        .with_context("file", path.display().to_string())
+    })?;
+    if !u64::try_from(bytes.len()).is_ok_and(|len| len <= MAX_PEM_FILE_BYTES) {
+        return Err(too_big(&bytes.len()));
+    }
+    Ok(bytes)
+}
+
 /// Read a PEM certificate chain from a file.
 ///
 /// # Why an empty file is an error rather than an empty chain
@@ -521,19 +572,9 @@ fn load_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     // The bytes are read once and the same error message shape is used for the
     // open and the read, because `fs::read` performs both and a caller cannot act
     // differently on the two: in both cases the file is missing, or is not
-    // readable by this process.
-    let bytes = std::fs::read(path).map_err(|e| {
-        tls_error(format!(
-            "could not read the certificate file `{}`",
-            path.display()
-        ))
-        .with_cause(e.to_string())
-        .with_remediation(
-            "check the path and that the process may read it; a certificate file is \
-                 usually mounted read-only",
-        )
-        .with_context("file", path.display().to_string())
-    })?;
+    // readable by this process. Bounded by [`read_bounded`]: a config path
+    // pointing at `/dev` or a multi-gigabyte file fails before allocating.
+    let bytes = read_bounded(path, "certificate")?;
     let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&bytes)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| {
@@ -672,7 +713,11 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     // The open and the read error are one message for the same reason as in
     // `load_cert_chain`, but the remediation differs: this file holds a secret,
     // so "loosen the permissions" is the wrong advice and the message says why.
-    let bytes = std::fs::read(path).map_err(|e| {
+    // Bounded by [`read_bounded`] like the certificate read.
+    let bytes = read_bounded(path, "private key").map_err(|e| {
+        // `read_bounded` names the file for both its errors; a key path keeps
+        // the secret-specific remediation, so the message is rebuilt here
+        // rather than reused verbatim.
         tls_error(format!(
             "could not read the private key file `{}`",
             path.display()
@@ -720,8 +765,17 @@ pub fn load_trust_roots(path: &Path) -> Result<RootCertStore> {
     let mut added = 0usize;
     for cert in chain {
         // A CA bundle legitimately contains certificates a given verifier
-        // cannot parse, so a single rejection is not fatal — but a bundle where
-        // *nothing* was added is, and that is what `added` checks below.
+        // cannot parse (an algorithm the provider does not implement, a
+        // cross-signed duplicate), so a single rejection is not fatal — but
+        // a bundle where *nothing* was added is, and that is what `added`
+        // checks below.
+        //
+        // The failure mode of a skipped entry is availability, never access:
+        // clients chaining to a skipped CA fail verification and are refused
+        // at the handshake. A bundle whose entries are *all* skipped fails
+        // here, at startup, naming the file. A bundle with a *partial* skip
+        // surfaces as client handshake failures for that CA's clients — if
+        // those appear, the bundle (not the client) is the place to look.
         if roots.add(cert).is_ok() {
             added += 1;
         }
@@ -749,6 +803,17 @@ pub fn load_trust_roots(path: &Path) -> Result<RootCertStore> {
 ///
 /// `SRV-008` / §6.4: *"Client certificates (mTLS) are a supported `default_auth`
 /// mode."*
+///
+/// # No revocation checking, stated not hidden
+///
+/// Client certificates are verified for chain-of-trust and expiry only —
+/// neither CRLs nor OCSP are consulted. A compromised client certificate
+/// stays valid until it expires, so short-lived client certificates (or
+/// re-issuance on incident) are the revocation story, and an operator who
+/// needs online revocation must terminate TLS in front of this server. This
+/// is the documented boundary rather than an oversight: silent, best-effort
+/// revocation that fails open when the responder is down would be worse
+/// than none, because it would look like a control that is not one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientAuth {
     /// No client certificate is requested.
@@ -1141,8 +1206,18 @@ fn walk_rdn_sequence(subject: &[u8]) -> Option<String> {
             }
             let mut parts = children(attr_content);
             let (oid_tag, _, oid) = parts.next()?;
-            let (_, _, value) = parts.next()?;
+            let (value_tag, _, value) = parts.next()?;
             if oid_tag == 0x06 && oid == OID_COMMON_NAME && found.is_none() {
+                // The value must be a string type carrying something: an
+                // empty CN attributes nothing, and a non-string value (an
+                // INTEGER where a name belongs) is malformed input, not a
+                // name. Like every structural violation in this walker, that
+                // is `None` — a name we cannot attribute is not a name.
+                if !matches!(value_tag, 0x0C | 0x13 | 0x14 | 0x1C | 0x1E) || value.is_empty() {
+                    return None;
+                }
+                // Rendered lossily: the tag gate above is the validation, and
+                // this string feeds audit display, not access decisions.
                 found = Some(String::from_utf8_lossy(value).into_owned());
             }
         }
@@ -1312,6 +1387,67 @@ impl TlsConfig {
         self.client_auth.requests_certificate()
     }
 
+    /// Check the ALPN list: every entry must be non-empty and unique.
+    ///
+    /// [`Self::build`] exceeds its line budget with this inline, while
+    /// neither does alone — extracted as a named check so the policy
+    /// reads as policy rather than as code motion.
+    fn check_alpn(&self) -> Result<()> {
+        // An ALPN protocol is length-prefixed on the wire, so an empty entry
+        // is a malformed advertisement — and a duplicated one makes the
+        // preference order a lie. The *list* may be empty (that is the
+        // HTTP/1.1-only deployment, which sends no ALPN extension at all),
+        // but no *entry* may be.
+        if self.alpn.iter().any(Vec::is_empty) {
+            return Err(
+                tls_error("the TLS configuration names an empty ALPN protocol")
+                    .with_remediation(
+                        "remove the empty entry: an ALPN protocol is length-prefixed on \
+                 the wire, so an empty one is malformed. To offer no ALPN at \
+                 all (HTTP/1.1-only), pass an empty list.",
+                    )
+                    .with_context("field", "alpn"),
+            );
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if self.alpn.iter().any(|p| !seen.insert(p)) {
+            return Err(
+                tls_error("the TLS configuration names a duplicated ALPN protocol")
+                    .with_remediation(
+                        "list each protocol once, in preference order: a duplicate makes \
+                 the preference order a lie.",
+                    )
+                    .with_context("field", "alpn"),
+            );
+        }
+        Ok(())
+    }
+
+    /// Pin resumption off on a built `ServerConfig`, explicitly (`SEC-017`).
+    ///
+    /// rustls' builder defaults would otherwise decide this silently:
+    /// `max_early_data_size` is 0 today (no 0-RTT), `send_tls13_tickets`
+    /// is 2, the ticketer produces nothing, and TLS 1.2 gets a 256-entry
+    /// server-side session cache. A resumption policy that changes on a
+    /// dependency bump is not a policy, so every knob is set here:
+    ///
+    /// - 0-RTT stays off. Early data has no anti-replay without
+    ///   application support, and nothing in this server provides it.
+    /// - No TLS 1.3 tickets are sent. Stateless tickets would need a
+    ///   ticket-encryption key with a rotation story; without one, every
+    ///   connection does a full handshake — forward-secret, always.
+    /// - No TLS 1.2 session cache. Same reason: resumption state the
+    ///   operator never configured is state the operator cannot rotate.
+    ///
+    /// Re-enabling resumption is a deliberate change to this function, with
+    /// a rotation story attached — not a default that flips under a
+    /// `cargo update`.
+    fn pin_no_resumption(config: &mut ServerConfig) {
+        config.max_early_data_size = 0;
+        config.send_tls13_tickets = 0;
+        config.session_storage = std::sync::Arc::new(rustls::server::NoServerSessionStorage {});
+    }
+
     /// Build the rustls configuration.
     ///
     /// # Errors
@@ -1321,6 +1457,9 @@ impl TlsConfig {
     ///   silent default, and an empty list is that case: there is no
     ///   "reasonable" subset to substitute, because substituting one is exactly
     ///   the agility §7.4 forbids.
+    /// * `QQQ-2002` — an ALPN entry is empty or listed twice. An empty *list*
+    ///   is the HTTP/1.1-only deployment and is allowed; malformed *entries*
+    ///   are not.
     /// * `QQQ-2002` — the certificate source produced no certificate (see
     ///   [`CertificateSource::resolve`]).
     /// * `QQQ-2002` — rustls rejected the certificate and key together, which in
@@ -1342,20 +1481,19 @@ impl TlsConfig {
     /// [`ServerConfig::builder_with_provider`].
     ///
     /// So [`CIPHER_SUITES`] is installed by constructing a provider from
-    /// `aws_lc_rs::default_provider()` with its `cipher_suites` field replaced.
-    /// Everything else in that provider — the random source, the key-exchange
-    /// groups, the signature-verification algorithms, the key loader — is left as
-    /// the audited default.
+    /// `aws_lc_rs::default_provider()` with its `cipher_suites` **and**
+    /// `kx_groups` fields replaced. Everything else in that provider — the
+    /// random source, the signature-verification algorithms, the key loader —
+    /// is left as the audited default.
     ///
-    /// That is a deliberate boundary, and it is the honest scope of what
-    /// [`CIPHER_SUITES`] pins:
+    /// That is a deliberate boundary, and it is the honest scope of what the
+    /// constants pin:
     ///
     /// * The **suite list** is this server's, and cannot be changed by a rustls
     ///   patch release.
-    /// * The **key-exchange groups** are the provider's. `SEC-021` (hybrid
-    ///   X25519+ML-KEM) will change this field, and when it does the groups
-    ///   become an explicit list here too — for the same reason the suites are
-    ///   one now.
+    /// * The **key-exchange groups** are this server's too
+    ///   ([`SERVER_KX_GROUPS`], hybrid first for `SEC-021`) — and for the same
+    ///   reason as the suites.
     ///
     /// The one provider is built once and used for **both** the suite list and
     /// the client-certificate verifier, so the mTLS path and the suite path
@@ -1385,6 +1523,12 @@ impl TlsConfig {
                 )
                 .with_context("field", "cipher_suites"));
         }
+        // An ALPN protocol is length-prefixed on the wire, so an empty entry
+        // is a malformed advertisement — and a duplicated one makes the
+        // preference order a lie. The *list* may be empty (that is the
+        // HTTP/1.1-only deployment, which sends no ALPN extension at all),
+        // but no *entry* may.
+        self.check_alpn()?;
 
         let resolved = self.certificate.resolve()?;
 
@@ -1431,8 +1575,24 @@ impl TlsConfig {
                     "every suite in `cipher_suites` must belong to a version in \
                          `versions`; rustls refuses a policy with no usable combination",
                 )
-                .with_context("versions", format!("{:?}", self.versions.len()))
-                .with_context("cipher_suites", self.cipher_suites.len().to_string())
+                // The values, not just the counts: a count says "two versions
+                // and eight suites do not combine", which names nothing to
+                // fix; the lists say which two and which eight.
+                .with_context(
+                    "versions",
+                    format!(
+                        "{:?}",
+                        self.versions.iter().map(|v| v.version).collect::<Vec<_>>()
+                    ),
+                )
+                .with_context(
+                    "cipher_suites",
+                    self.cipher_suites
+                        .iter()
+                        .map(|s| s.suite().as_str().unwrap_or("unknown"))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
         })?;
 
         let builder = match self.client_auth.verifier(Arc::clone(&provider))? {
@@ -1456,6 +1616,9 @@ impl TlsConfig {
                     )
                     .with_context("source", self.certificate.describe())
             })?;
+
+        // --- Resumption is pinned off, explicitly (`SEC-017`) ---
+        Self::pin_no_resumption(&mut config);
 
         config.alpn_protocols.clone_from(&self.alpn);
         Ok(Arc::new(config))
@@ -1494,9 +1657,10 @@ impl Negotiated {
     ///
     /// The accessors used here (`protocol_version`, `negotiated_cipher_suite`,
     /// `alpn_protocol`) all return `None` until the handshake completes, which
-    /// the type system does not encode. So this is called after
-    /// `TlsStream` construction / `complete_io`, and a caller that calls it
-    /// early gets `None`-ish values rather than wrong ones.
+    /// the type system does not encode. So this is called after the handshake
+    /// completes (the connection the accept loop wraps in `ConnStream`), and
+    /// a caller that calls it early gets `None`-ish values rather than wrong
+    /// ones.
     #[must_use]
     pub fn of(conn: &rustls::ServerConnection) -> Self {
         use rustls::ProtocolVersion;
@@ -1520,12 +1684,21 @@ impl Negotiated {
     }
 
     /// The fallback for a protocol version this build does not classify.
+    ///
+    /// `None` — the connection has not finished handshaking — reads as
+    /// `"unknown"`, never as `"None"`: a record carrying a version named
+    /// `None` looks like a protocol, and a caller comparing versions would
+    /// compare against a word that is not one.
     fn unclassified(
         other: Option<rustls::ProtocolVersion>,
         conn: &rustls::ServerConnection,
     ) -> Self {
+        let version = match other {
+            None => "unknown".to_owned(),
+            Some(v) => format!("{v:?}"),
+        };
         Self {
-            version: format!("{other:?}"),
+            version,
             cipher_suite: cipher_suite_name(conn.negotiated_cipher_suite()),
             alpn: conn
                 .alpn_protocol()
@@ -1540,6 +1713,7 @@ impl Negotiated {
     /// | `h2` | HTTP/2 |
     /// | `http/1.1` | HTTP/1.1 |
     /// | none | **HTTP/1.1** |
+    /// | anything else | **unknown** |
     ///
     /// # Why "none" is HTTP/1.1, and why that is not a guess
     ///
@@ -1549,23 +1723,35 @@ impl Negotiated {
     /// rather than as a comment so that a server which later supports HTTP/2
     /// has one place to consult, and `None` stays visible on
     /// [`Self::alpn`] for a caller that needs to distinguish.
+    ///
+    /// # Why anything else is "unknown", and why that is not a guess either
+    ///
+    /// This server offers only `h2` and `http/1.1` unless [`TlsConfig::with_alpn`]
+    /// adds more, so a negotiated value outside those two is a configuration
+    /// the driver table does not know. Calling it HTTP/1.1 would route bytes
+    /// to a driver on a claim, and the routing in `serve_hyper_tls` sends
+    /// everything but `"HTTP/2"` to the HTTP/1.1 driver — which is where an
+    /// honest "unknown" belongs until the configuration says otherwise.
     #[must_use]
     pub fn http_version(&self) -> &'static str {
         match self.alpn.as_deref() {
             Some("h2") => "HTTP/2",
-            _ => "HTTP/1.1",
+            Some("http/1.1") | None => "HTTP/1.1",
+            Some(_) => "unknown",
         }
     }
 }
 
 /// The IANA name of a negotiated suite, or `"none"`.
 ///
-/// `SupportedCipherSuite::suite()` returns a `CipherSuite` that formats as its
-/// IANA name (`TLS13_AES_256_GCM_SHA384`), which is what a log and a
-/// `security.txt`-style policy comparison both want.
+/// `CipherSuite::as_str` names the suite exactly as IANA does
+/// (`TLS13_AES_256_GCM_SHA384`), which is what a log and a
+/// `security.txt`-style policy comparison both want — and it returns `None`
+/// for an unrecognised ordinal rather than a formatted guess, so an unknown
+/// suite reads as unknown instead of as a name.
 fn cipher_suite_name(suite: Option<SupportedCipherSuite>) -> String {
     match suite {
-        Some(s) => format!("{:?}", s.suite()),
+        Some(s) => s.suite().as_str().unwrap_or("unknown").to_owned(),
         None => "none".to_owned(),
     }
 }
@@ -1584,6 +1770,7 @@ fn cipher_suite_name(suite: Option<SupportedCipherSuite>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     /// **The policy constants must name suites, and must not be empty** — an empty
     /// list is the "silent default" `SEC-017` forbids, arriving by the back door.
@@ -1945,6 +2132,24 @@ mod tests {
         assert!(e.message.contains("cipher suite"), "got: {}", e.message);
     }
 
+    /// An empty ALPN *entry* is malformed on the wire; an empty *list* is the
+    /// HTTP/1.1-only deployment. The two must not be confused, and neither
+    /// may a doubled entry pass as a preference order.
+    #[test]
+    fn malformed_alpn_entries_are_refused() {
+        let mut c = TlsConfig::new(CertificateSource::files("cert.pem", "key.pem"));
+        c.alpn = vec![b"h2".to_vec(), Vec::new()];
+        let e = c.build().expect_err("an empty entry must be refused");
+        assert_eq!(e.code, ErrorCode::ManifestSchemaViolation);
+        assert!(e.message.contains("empty ALPN"), "got: {}", e.message);
+
+        let mut c = TlsConfig::new(CertificateSource::files("cert.pem", "key.pem"));
+        c.alpn = vec![b"h2".to_vec(), b"h2".to_vec()];
+        let e = c.build().expect_err("a doubled entry must be refused");
+        assert_eq!(e.code, ErrorCode::ManifestSchemaViolation);
+        assert!(e.message.contains("duplicated ALPN"), "got: {}", e.message);
+    }
+
     /// The policy is checked before any file is touched, so a caller who forgot
     /// the policy is told that rather than being told about a missing file.
     #[test]
@@ -1963,6 +2168,22 @@ mod tests {
     }
 
     // -- certificate sources ----------------------------------------------
+
+    /// A file larger than any certificate chain is refused before reading it.
+    ///
+    /// A config path pointing at `/dev` or a multi-gigabyte file must fail at
+    /// startup naming the file — not with an allocation that takes the process
+    /// down. Both the metadata pre-check and the post-read check enforce the
+    /// same bound, so a file that grows between the two is still refused.
+    #[test]
+    fn an_oversized_certificate_file_is_refused_without_reading_it_all() {
+        let dir = tempdir();
+        let big = dir.join("big.pem");
+        std::fs::write(&big, vec![b'A'; 256 * 1024 + 1]).expect("write the oversized fixture");
+        let e = load_cert_chain(&big).expect_err("an oversized file must be refused");
+        assert_eq!(e.code, ErrorCode::ManifestSchemaViolation);
+        assert!(e.message.contains("limit"), "got: {}", e.message);
+    }
 
     /// A missing certificate file is named as the certificate.
     ///
@@ -2304,6 +2525,14 @@ mod tests {
             id.to_string(),
             format!("{} ({})", id.subject(), id.fingerprint())
         );
+        // A known vector, computed outside this crate (Python `hashlib`), so
+        // the test pins the digest rather than the shape: a correct-looking
+        // but wrong hash function passes every assertion above.
+        assert_eq!(
+            id.fingerprint(),
+            "E4:F6:0D:0A:A6:D7:F3:D3:B6:A6:49:4B:1C:86:1B:99:F6:49:C6:F9:EC:51:AB:AF:20:1B:20:F2:97:32:7C:95",
+            "SHA-256 of the two fixture bytes"
+        );
     }
 
     /// The DER walker finds a common name in a real `Name` structure, and
@@ -2383,6 +2612,29 @@ mod tests {
             walk_rdn_sequence(&only_cn),
             None,
             "a whole element is not a Name's content"
+        );
+
+        // An empty CN attributes nothing, so it is unfound rather than empty.
+        let empty_cn = der_sequence(&[&der_set(&der_sequence(&[
+            &der_oid(&[0x55, 0x04, 0x03])[..],
+            &der_utf8("")[..],
+        ]))[..]]);
+        assert_eq!(
+            walk_rdn_sequence(&empty_cn[2..]),
+            None,
+            "an empty common name is not an identity"
+        );
+
+        // A non-string value where a name belongs is malformed input, not a
+        // name: an INTEGER with the CN OID must not decode as one.
+        let int_cn = der_sequence(&[&der_set(&der_sequence(&[
+            &der_oid(&[0x55, 0x04, 0x03])[..],
+            &der_element(0x02, &[0x01])[..],
+        ]))[..]]);
+        assert_eq!(
+            walk_rdn_sequence(&int_cn[2..]),
+            None,
+            "an INTEGER is not a common name"
         );
     }
 
@@ -2567,7 +2819,7 @@ mod tests {
             &der_element(0x03, &[0x00, 0x00])[..],
         ]);
 
-        let b64 = base64_encode(&cert);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&cert);
         let mut out = Vec::new();
         out.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
         for chunk in b64.as_bytes().chunks(64) {
@@ -2578,39 +2830,9 @@ mod tests {
         out
     }
 
-    /// Standard base64, for the PEM wrapper above.
-    ///
-    /// Hand-written rather than pulled in: `base64` is in the tree only as a
-    /// transitive dependency of `rcgen` (a dev-dependency), so using it here
-    /// would mean adding a dependency to the library for a test fixture.
-    fn base64_encode(input: &[u8]) -> String {
-        const ALPHABET: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-        for chunk in input.chunks(3) {
-            let b = [
-                chunk[0],
-                *chunk.get(1).unwrap_or(&0),
-                *chunk.get(2).unwrap_or(&0),
-            ];
-            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-            let idx = [
-                (n >> 18) & 0x3F,
-                (n >> 12) & 0x3F,
-                (n >> 6) & 0x3F,
-                n & 0x3F,
-            ];
-            for (i, &v) in idx.iter().enumerate() {
-                // The final group is padded rather than truncated.
-                if i > chunk.len() {
-                    out.push('=');
-                } else {
-                    out.push(char::from(ALPHABET[v as usize]));
-                }
-            }
-        }
-        out
-    }
+    // base64_encode removed: `base64` is a direct workspace dependency
+    // (used by `ws.rs`), so the test fixture encodes through it rather
+    // than through a hand-rolled copy.
 
     /// A directory removed when it goes out of scope.
     struct TempDir(PathBuf);
@@ -2632,13 +2854,23 @@ mod tests {
     ///
     /// Named from the process id and a counter rather than from `SystemTime`,
     /// so two tests in the same binary cannot collide — the whole reason the
-    /// tests need directories is that they write files.
+    /// tests need directories is that they write files. Created with
+    /// `create_dir` (not `create_dir_all`) so a pre-existing path — a
+    /// leftover from a killed run, or a planted symlink — is a retry rather
+    /// than a directory this test then shares with whoever planted it.
     fn tempdir() -> TempDir {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("qqq-tls-unit-{}-{}", std::process::id(), n));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        TempDir(dir)
+        for _ in 0..100 {
+            let n = N.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("qqq-tls-unit-{}-{}", std::process::id(), n));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return TempDir(dir),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("create temp dir: {e}"),
+            }
+        }
+        panic!("could not create a unique temp dir in 100 tries");
     }
 }

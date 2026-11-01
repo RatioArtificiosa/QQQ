@@ -232,7 +232,20 @@ impl<'a> StreamWriter<'a> {
     ///
     /// Returns `Err` when the client disconnected or the socket failed. The caller
     /// should stop and return rather than retrying.
+    ///
+    /// [`std::io::ErrorKind::InvalidInput`] when the body is already finished:
+    /// bytes after the terminator would corrupt the framing on a socket, and
+    /// silently dropping them on a channel would hide a handler bug. A dropped
+    /// channel receiver is [`std::io::ErrorKind::BrokenPipe`] instead — "hyper
+    /// went away" is a different fact from "this handler wrote too late", and
+    /// the two must not share a variant.
     pub async fn write(&mut self, piece: &[u8]) -> std::io::Result<()> {
+        if self.finished {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "write after finish: the body was already terminated",
+            ));
+        }
         if piece.is_empty() {
             return Ok(());
         }
@@ -294,6 +307,10 @@ impl<'a> StreamWriter<'a> {
 
     /// Write one piece and flush it, so it reaches the client now.
     ///
+    /// An empty piece is a no-op that skips even the flush: there is nothing
+    /// to deliver, and a flush on an idle event stream is a syscall spent
+    /// for no bytes.
+    ///
     /// # Why flushing is not automatic on every write
     ///
     /// Because the caller knows what a "piece" means and this type does not. An
@@ -307,6 +324,9 @@ impl<'a> StreamWriter<'a> {
     ///
     /// As [`Self::write`].
     pub async fn write_now(&mut self, piece: &[u8]) -> std::io::Result<()> {
+        if piece.is_empty() {
+            return Ok(());
+        }
         self.write(piece).await?;
         // A channel send already handed the bytes to hyper's poll,
         // so there is nothing further to flush — and flushing a
@@ -321,12 +341,18 @@ impl<'a> StreamWriter<'a> {
     /// Terminate the body.
     ///
     /// For HTTP/1.1 this writes the zero-length chunk and the empty trailer; for
-    /// HTTP/1.0 it writes nothing, because there the body ends at EOF and the connection
-    /// close that follows is the terminator. Doing it the other way round — sending a
+    /// HTTP/1.0 it closes the connection, because there the body ends at EOF and
+    /// the close is the terminator — without it the client waits for bytes that
+    /// never come. Doing it the other way round — sending a
     /// chunk terminator to an HTTP/1.0 client — would put `0\r\n\r\n` in the body as
     /// data.
     ///
     /// Idempotent: calling it twice writes one terminator.
+    ///
+    /// The flag is set **after** the I/O: a failed terminator must not read as
+    /// a completed body. A retry after a failure returns the failure again
+    /// rather than `Ok`, so a caller that reports `Completed` on `Ok` cannot
+    /// misreport a truncated stream.
     ///
     /// On a channel writer the terminator is the sender being
     /// dropped, so the receiver observes the end of the body
@@ -356,22 +382,29 @@ impl<'a> StreamWriter<'a> {
         if self.finished {
             return Ok(());
         }
-        self.finished = true;
         match &mut self.sink {
             Sink::Socket { stream, version } => {
                 if *version == Version::Http11 {
                     stream.write_all(&response::write_last_chunk()).await?;
                 }
-                stream.flush().await
+                stream.flush().await?;
+                if *version != Version::Http11 {
+                    // EOF terminates the body; the bytes are already flushed,
+                    // so a shutdown failure means the peer is gone rather
+                    // than that data was lost — not actionable, like every
+                    // terminal-path shutdown in `server`.
+                    let _ = stream.shutdown().await;
+                }
             }
             // Closing by dropping: the receiver sees the end of the
             // body exactly once, and a second `finish` is a no-op
             // through the flag above rather than a second close.
             Sink::Channel(tx) => {
                 tx.take();
-                Ok(())
             }
         }
+        self.finished = true;
+        Ok(())
     }
 
     /// How many bytes of body were written, excluding framing.
@@ -576,8 +609,75 @@ mod tests {
         stalled.await.expect("the stall ends when hyper drains");
     }
 
-    /// The two normal endings are `Info`, and only a truncated body is `Error`.
+    /// A write after `finish` is a handler bug, reported as one.
     ///
+    /// Bytes after the terminator would corrupt the framing on a socket, and
+    /// silently dropping them on a channel would hide the bug. The error is
+    /// `InvalidInput` ("this handler wrote too late"), not `BrokenPipe`
+    /// ("hyper went away"): a dropped channel receiver still reports
+    /// `BrokenPipe`, and the two must not share a variant.
+    #[tokio::test]
+    async fn a_write_after_finish_is_refused_as_invalid() {
+        let (mut writer, mut rx) = StreamWriter::channel();
+        writer.write_now(b"x").await.expect("writes");
+        writer.finish().await.expect("finish");
+        let e = writer
+            .write(b"late")
+            .await
+            .expect_err("bytes after the terminator must be refused");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        // And a second finish stays a no-op rather than a second error.
+        writer.finish().await.expect("idempotent");
+        assert!(rx.recv().await.is_some(), "the first piece survives");
+        assert!(rx.recv().await.is_none(), "finish closed the body");
+    }
+
+    /// An HTTP/1.0 stream ends at EOF, so `finish` closes the connection.
+    ///
+    /// Without the close the client waits for bytes that never come: there is
+    /// no chunk terminator on HTTP/1.0, and the close is the terminator.
+    /// HTTP/1.1 keeps the connection (its terminator was already sent).
+    #[tokio::test]
+    async fn an_http10_finish_closes_the_connection() {
+        use tokio::io::AsyncReadExt as _;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback binds");
+        let addr = listener.local_addr().expect("a local address");
+        let client = tokio::spawn(async move {
+            let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            let mut out = Vec::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.read_to_end(&mut out),
+            )
+            .await
+            .expect("EOF must arrive")
+            .expect("the read succeeds");
+            out
+        });
+        let (socket, _) = listener.accept().await.expect("accept");
+        let mut stream = crate::conn_stream::ConnStream::Plain(socket);
+        let response = crate::response::Response::status(200);
+        let mut writer = StreamWriter::begin(&mut stream, &response, Version::Http10)
+            .await
+            .expect("head writes");
+        writer.write(b"hello").await.expect("body writes");
+        writer.finish().await.expect("finish closes");
+        drop(writer);
+        drop(stream);
+
+        let out = client.await.expect("the client task ends");
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("hello"),
+            "the body arrives before the close: {text:?}"
+        );
+    }
+
+    /// The two normal endings are `Info`, and only a truncated body is `Error`.    ///
     /// The distinction is operational: an event stream ends when the *client* goes away,
     /// so logging that as a failure would make the failure count useless.
     #[test]

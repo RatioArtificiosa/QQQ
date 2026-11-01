@@ -144,6 +144,12 @@ impl Assembler {
     /// [`WsLimits`](crate::ws::WsLimits)); a larger cap would let one
     /// connection hold what the default denies to all of them together.
     ///
+    /// # Panics
+    ///
+    /// If `limit` exceeds [`MESSAGE_BYTES_CEILING`]: a direct caller bypassing
+    /// [`WsLimits`](crate::ws::WsLimits) fails here rather than silently
+    /// over-admitting one connection.
+    ///
     /// ```
     /// use qqq_serve::ws_message::Assembler;
     ///
@@ -152,7 +158,10 @@ impl Assembler {
     /// ```
     #[must_use]
     pub fn with_limit(limit: usize) -> Self {
-        debug_assert!(limit <= MESSAGE_BYTES_CEILING);
+        assert!(
+            limit <= MESSAGE_BYTES_CEILING,
+            "message cap {limit} exceeds {MESSAGE_BYTES_CEILING}"
+        );
         Self {
             in_progress: None,
             limit,

@@ -354,6 +354,22 @@ fn validate_websocket(ws: &crate::manifest::WebsocketPolicy) -> Result<(), Manif
             });
         }
     }
+    validate_websocket_timeout(ws.handler_timeout_ms)
+}
+
+/// A zero handler timeout closes every message before the guest runs, so it
+/// is refused the same way a zero byte cap is — but with its own reason: a
+/// 1011 on every message reads as a broken guest rather than a cap, and the
+/// operator must be told which of the two to fix.
+fn validate_websocket_timeout(handler_timeout_ms: Option<u64>) -> Result<(), ManifestError> {
+    if handler_timeout_ms == Some(0) {
+        return Err(ManifestError::InvalidField {
+            field: "server.websocket.handler_timeout_ms".to_owned(),
+            reason: "a zero handler timeout closes every message with 1011 before \
+                 the guest runs: a bound that refuses rather than bounds"
+                .to_owned(),
+        });
+    }
     Ok(())
 }
 

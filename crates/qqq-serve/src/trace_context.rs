@@ -402,6 +402,15 @@ impl TraceContext {
     /// the *inbound* half. Emitting is where propagation continues, and the caller owns the id it
     /// emits — the same separation that keeps the decision host-made.
     ///
+    /// # Why `sampled` is a parameter and not the inbound flag
+    ///
+    /// The `sampled` bit on the wire must be **this server's** decision, taken by
+    /// [`crate::span::Sampler`], never the echo of what upstream sent. Re-emitting
+    /// the inbound bit would let a caller choose whether its own traffic is
+    /// recorded — exactly what §10.4 forbids — laundered through a header that
+    /// looks like propagation. The caller passes its decision in; the other flag
+    /// bits ride unchanged.
+    ///
     /// # Not wired yet, and that is stated rather than implied
     ///
     /// Continuing a trace **downstream** needs an outbound `wasi:http` request, which this server does
@@ -418,22 +427,31 @@ impl TraceContext {
     ///     .expect("parses");
     /// let own = TraceId::span("0123456789abcdef").expect("a span id");
     ///
-    /// let header = ctx.to_header(&own);
+    /// // The host records, so it emits sampled — even though that is also
+    /// // what upstream said, the value below comes from the argument, not
+    /// // from the inbound header.
+    /// let header = ctx.to_header(&own, true);
     /// assert_eq!(header, "00-4bf92f3577b34da6a3ce929d0e0e4736-0123456789abcdef-01");
+    ///
+    /// // And a host that does not record clears the bit upstream set: the
+    /// // emission carries the decision, not the echo.
+    /// let quiet = ctx.to_header(&own, false);
+    /// assert_eq!(quiet, "00-4bf92f3577b34da6a3ce929d0e0e4736-0123456789abcdef-00");
     ///
     /// // And what we emit, we accept: the next hop reads the same trace, with this server as parent.
     /// let next = TraceContext::parse(&header).expect("round-trips");
     /// assert_eq!(next.parent().as_str(), own.as_str());
     /// ```
     #[must_use]
-    pub fn to_header(&self, own_span: &TraceId) -> String {
+    pub fn to_header(&self, own_span: &TraceId, sampled: bool) -> String {
         let mut out = String::new();
+        let flags = (self.flags.bits() & !Flags::SAMPLED) | u8::from(sampled);
         let _ = write!(
             out,
             "{VERSION}-{}-{}-{:02x}",
             self.trace.as_str(),
             own_span.as_str(),
-            self.flags.bits()
+            flags
         );
         out
     }
@@ -465,6 +483,7 @@ fn from_id(error: TraceIdError, field: &'static str) -> TraceContextError {
             TraceContextError::WrongLength { field, got, want }
         }
         TraceIdError::NotHex { .. } => TraceContextError::NotHex { field },
+        TraceIdError::AllZero => TraceContextError::AllZero { field },
     }
 }
 
@@ -630,11 +649,15 @@ mod tests {
     }
 
     /// **What is parsed can be emitted**, so a downstream hop continues the trace.
+    ///
+    /// The emitted `sampled` bit is the caller's decision, not an echo of the
+    /// inbound flag: both values are asserted so a refactor that drops the
+    /// parameter fails here rather than silently re-emitting upstream's bit.
     #[test]
     fn a_context_emits_a_header_for_the_next_hop() {
         let ctx = TraceContext::parse(WELL_FORMED).expect("parses");
         let own = TraceId::span("0123456789abcdef").expect("a span id");
-        let header = ctx.to_header(&own);
+        let header = ctx.to_header(&own, true);
         assert_eq!(
             header,
             "00-4bf92f3577b34da6a3ce929d0e0e4736-0123456789abcdef-01"
@@ -642,6 +665,12 @@ mod tests {
         let next = TraceContext::parse(&header).expect("what we emit, we accept");
         assert_eq!(next.trace().as_str(), ctx.trace().as_str());
         assert_eq!(next.parent().as_str(), own.as_str());
+        // A host that does not record clears the bit upstream set.
+        let quiet = ctx.to_header(&own, false);
+        assert_eq!(
+            quiet,
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-0123456789abcdef-00"
+        );
     }
 
     /// **The header is trimmed**, because a proxy may pad it and a padded id is not a different trace.

@@ -145,6 +145,13 @@ pub enum TraceIdError {
         /// The offending character.
         ch: char,
     },
+    /// The value was all zeros.
+    ///
+    /// W3C defines all-zero trace and parent ids as invalid rather than as
+    /// ids: accepting one would join every request that has not decided its
+    /// trace into **one** trace (see `trace_context`, which already refuses
+    /// them on parse).
+    AllZero,
 }
 
 impl std::fmt::Display for TraceIdError {
@@ -158,6 +165,10 @@ impl std::fmt::Display for TraceIdError {
                 f,
                 "a trace id must be hex, found {ch:?} -- a non-hex character could carry a \
                  newline and forge a log line"
+            ),
+            Self::AllZero => write!(
+                f,
+                "a trace id must not be all zeros -- an unset id joining every request into one trace"
             ),
         }
     }
@@ -202,6 +213,9 @@ impl TraceId {
         if let Some(ch) = value.chars().find(|c| !c.is_ascii_hexdigit()) {
             return Err(TraceIdError::NotHex { ch });
         }
+        if value.bytes().all(|b| b == b'0') {
+            return Err(TraceIdError::AllZero);
+        }
         Ok(Self(value.to_ascii_lowercase()))
     }
 
@@ -217,9 +231,14 @@ impl TraceId {
     /// correlation needs. **Not** random: a value that changes between two runs of
     /// the same input would break the determinism `§10.5` promises, and this is the
     /// id a deterministic-mode run would otherwise have to special-case.
+    ///
+    /// The counter is clamped to at least 1: `from_counter(0)` would emit an
+    /// all-zero id, which the constructors refuse as [`TraceIdError::AllZero`].
+    /// A fallback path that formats a zero count must not produce an id the
+    /// constructors reject.
     #[must_use]
     pub fn from_counter(n: u64) -> Self {
-        Self(format!("{n:032x}"))
+        Self(format!("{:032x}", n.max(1)))
     }
 }
 
@@ -283,12 +302,14 @@ impl Record {
     ///
     /// The name is **not** validated here and must not be empty: an empty name
     /// renders as `"":value`, which is valid JSON and useless to a query. Callers
-    /// pass a literal in every case in this crate; the debug assertion catches a
-    /// computed empty name in tests without adding a runtime branch to a hot path.
+    /// pass a literal in every case in this crate. An empty name is dropped
+    /// rather than recorded: a field no query can name must not reach a log.
     #[must_use]
     pub fn with_field(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         let name = name.into();
-        debug_assert!(!name.is_empty(), "a log field name must not be empty");
+        if name.is_empty() {
+            return self;
+        }
         self.extra.insert(name, value.into());
         self
     }
@@ -352,7 +373,11 @@ impl Record {
         self.extra.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
-    /// Apply a redactor to every string the record carries.
+    /// Apply a redactor to every string the record carries — keys as well as
+    /// values. A secret in an extra field's *name* is as visible as one in
+    /// its value, so both are rewritten; two names that redact alike collapse,
+    /// which is the documented cost of a name that should never have carried
+    /// a secret.
     ///
     /// Returns how many substitutions were made, so a caller can assert that a
     /// fixture actually contained a secret rather than trusting that it did — the
@@ -367,8 +392,11 @@ impl Record {
         if let Some(code) = &mut self.code {
             hits += redactor.apply(code);
         }
-        for value in self.extra.values_mut() {
-            hits += redactor.apply(value);
+        let extra = std::mem::take(&mut self.extra);
+        for (mut name, mut value) in extra {
+            hits += redactor.apply(&mut name);
+            hits += redactor.apply(&mut value);
+            self.extra.insert(name, value);
         }
         hits
     }
@@ -594,10 +622,13 @@ impl Redactor {
             if name.is_empty() {
                 return Err(format!("line {} has an empty name before `=`", i + 1));
             }
-            // A file written on Windows ends its lines with CRLF, and `str::lines` splits on `\n`
-            // while **keeping** the `\r`. A value with a stray `\r` would never match the secret it
-            // is meant to redact -- silently, which is the failure mode this whole function is
-            // arranged to avoid. (`§O-273`, `§O-301`: the third time this repository has paid for a
+            // A file written on Windows ends its lines with CRLF. `str::lines`
+            // splits on `\n` and strips one trailing `\r`, so a value read
+            // through `lines` never carries the carriage return — but a lone
+            // `\r` inside a value survives, and a caller that splits
+            // differently would keep the trailing one. The strip below is
+            // belt-and-braces for that caller, not for `lines`.
+            // (`§O-273`, `§O-301`: the third time this repository has paid for a
             // line-ending assumption.)
             let value = value.strip_suffix('\r').unwrap_or(value);
             let value = value
@@ -616,16 +647,52 @@ impl Redactor {
     }
 
     /// Replace secrets in one string, returning how many were replaced.
+    ///
+    /// Single-pass: the output is built left to right, and markers are never
+    /// rescanned. The naive loop — `replace` per secret over the whole text —
+    /// rewrites its own markers whenever a secret is a substring of one
+    /// (`"a"`, `"red"`, `"ted"` all occur in `"[redacted:1]"`), corrupting
+    /// the log it was redacting and miscounting the hits it introduced.
+    /// At a match the *longest* secret wins, so overlapping secrets redact
+    /// deterministically. No indexing: every advance is by a matched prefix
+    /// or one `char`, so multi-byte text can never split.
     fn apply(&self, text: &mut String) -> usize {
-        let mut hits = 0;
-        for (i, secret) in self.values.iter().enumerate() {
-            if !text.contains(secret.as_str()) {
-                continue;
-            }
-            let marker = format!("[redacted:{}]", i + 1);
-            hits += text.matches(secret.as_str()).count();
-            *text = text.replace(secret.as_str(), &marker);
+        if self.values.is_empty() {
+            return 0;
         }
+        let mut out = String::with_capacity(text.len());
+        let mut hits = 0;
+        let mut rest = text.as_str();
+        while !rest.is_empty() {
+            // Longest match wins: a short secret that prefixes a longer one
+            // must not match first, or the remainder of the long one leaks.
+            // (`best_len` is tracked separately from the marker index — the
+            // two live in different domains and must never be compared.)
+            let mut best: Option<(&str, usize)> = None;
+            let mut best_len = 0;
+            for (i, secret) in self.values.iter().enumerate() {
+                if rest.starts_with(secret.as_str()) && secret.len() > best_len {
+                    best = Some((secret.as_str(), i));
+                    best_len = secret.len();
+                }
+            }
+            if let Some((matched, i)) = best {
+                let _ = std::fmt::write(&mut out, format_args!("[redacted:{}]", i + 1));
+                // `starts_with` matched, so stripping it cannot fail; the
+                // fallback keeps the text (unreachable) rather than panicking.
+                rest = rest.strip_prefix(matched).unwrap_or(rest);
+                hits += 1;
+            } else {
+                let mut chars = rest.chars();
+                if let Some(c) = chars.next() {
+                    out.push(c);
+                    rest = chars.as_str();
+                } else {
+                    break;
+                }
+            }
+        }
+        *text = out;
         hits
     }
 }
@@ -817,12 +884,24 @@ fn truncate(s: &str, max: usize) -> String {
 /// dropping the byte could make two different forged messages render identically.
 #[must_use]
 fn one_line(s: &str) -> String {
-    if s.chars().all(|c| !c.is_control()) {
+    // `is_control` misses U+2028 and U+2029: they are separators, not
+    // controls, but they break lines in terminals and in JavaScript string
+    // literals alike — so they are mapped with the controls rather than
+    // passed through.
+    if s.chars()
+        .all(|c| !c.is_control() && c != '\u{2028}' && c != '\u{2029}')
+    {
         // The common case: no allocation and no copy.
         return s.to_owned();
     }
     s.chars()
-        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -930,6 +1009,39 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
+    }
+
+    /// **An all-zero id is refused, on both lengths.**
+    ///
+    /// W3C defines all-zero as invalid rather than as an id, and
+    /// `trace_context` already refuses it on parse. Accepting it here would
+    /// join every request that has not decided its trace into one trace.
+    #[test]
+    fn an_all_zero_id_is_refused() {
+        let e = TraceId::trace("00000000000000000000000000000000")
+            .expect_err("all-zero must be refused");
+        assert!(matches!(e, TraceIdError::AllZero), "{e}");
+        let e = TraceId::span("0000000000000000").expect_err("all-zero must be refused");
+        assert!(matches!(e, TraceIdError::AllZero), "{e}");
+        // Near-zero is a real id, on both lengths.
+        assert!(TraceId::trace("00000000000000000000000000000001").is_ok());
+        assert!(TraceId::span("0000000000000001").is_ok());
+    }
+
+    /// The counter never emits the id the constructors refuse.
+    ///
+    /// Fallback paths format a raw count, and a zero count must not produce
+    /// an all-zero id — it clamps to 1 instead.
+    #[test]
+    fn the_counter_never_emits_an_all_zero_id() {
+        assert_eq!(
+            TraceId::from_counter(0).as_str(),
+            "00000000000000000000000000000001"
+        );
+        assert_eq!(
+            TraceId::from_counter(1).as_str(),
+            "00000000000000000000000000000001"
         );
     }
 
@@ -1218,6 +1330,51 @@ mod tests {
         assert_eq!(r.msg, "harmless", "the message must be untouched");
     }
 
+    /// A secret in an extra field's *name* is redacted too, not only in values.
+    ///
+    /// Field names are caller-supplied, and a name carrying a secret is as
+    /// visible as a value carrying one. Both halves of every extra field go
+    /// through the redactor.
+    #[test]
+    fn a_secret_in_a_field_name_is_replaced() {
+        let redactor = Redactor::from_values(["hunter2"]);
+        let mut r = record().with_field("hunter2", "v");
+        let hits = r.redact(&redactor);
+        assert_eq!(hits, 1, "the name must be rewritten: {hits}");
+        let json = r.render_json();
+        assert!(!json.contains("hunter2"), "{json}");
+    }
+
+    /// An empty field name is dropped, not recorded.
+    ///
+    /// A `"":value` pair is valid JSON no query can name. Release builds must
+    /// not record what debug builds refuse to construct.
+    #[test]
+    fn an_empty_field_name_is_dropped() {
+        let r = record().with_field("", "v");
+        assert!(
+            r.fields().next().is_none(),
+            "no field may carry an empty name"
+        );
+    }
+
+    /// U+2028 and U+2029 break lines where `is_control` sees nothing wrong.
+    ///
+    /// They are separators, not controls — but a terminal wraps on them and a
+    /// JavaScript string literal ends on them, so both are mapped to U+FFFD
+    /// with the controls rather than passed through.
+    #[test]
+    fn line_and_paragraph_separators_are_neutralised() {
+        let mut r = record();
+        r.msg = "first\u{2028}ERROR forged by U+2028\u{2029}end".to_owned();
+        let line = r.render_human();
+        assert!(
+            !line.contains('\u{2028}') && !line.contains('\u{2029}'),
+            "{line:?}"
+        );
+        assert!(line.contains('\u{FFFD}'), "{line:?}");
+    }
+
     /// **§10.3's rule is a function of the stream, and both branches are asserted — `OBS-007`.**
     ///
     /// > *"Structured JSON by default; human-readable in a TTY."*
@@ -1442,6 +1599,32 @@ mod tests {
             "the tail of the long secret must not survive: {}",
             r.msg
         );
+    }
+
+    /// Markers are never rescanned: a secret that is a substring of the
+    /// marker syntax itself (`"a"`, `"red"`, `"ted"`, `"1"`, `":"`) must
+    /// redact the text without rewriting the markers it just wrote.
+    ///
+    /// The old loop replaced per secret over the whole text, so `"a"` turned
+    /// `"[redacted:1]"` into `"[red[redacted:2]cted:1]"` — corrupting the log
+    /// it was redacting and counting marker-introduced hits.
+    #[test]
+    fn marker_substrings_are_not_rescanned() {
+        let redactor = Redactor::from_values(["redacted", "a", "1", ":"]);
+        let mut text = "a redacted:1 secret".to_owned();
+        let hits = redactor.apply(&mut text);
+        assert!(
+            !text.contains("redacted:1 secret") && !text.contains(" a "),
+            "every secret occurrence must be gone, markers intact: {text}"
+        );
+        // Markers nest properly: each is `[redacted:N]` exactly once opened
+        // and once closed, with no marker text inside another.
+        assert_eq!(
+            text.matches("[redacted:").count(),
+            text.matches(']').count(),
+            "markers must stay balanced: {text}"
+        );
+        assert!(hits >= 3, "each secret occurrence counts: {text}");
     }
 
     // -- the logger ---------------------------------------------------------

@@ -97,34 +97,33 @@ struct Received {
 ///
 /// Written from the specification's algorithm rather than by splitting on `\n\n`,
 /// because the difference is the whole point of these tests: the spec strips **one**
-/// space after the colon, joins multiple `data:` lines with `\n`, and removes the last
-/// one. A naive parser would agree with a naive encoder and both would be wrong
-/// together, which is why the parser here is written independently of the encoder's
-/// implementation.
+/// space after the colon, appends `value + "\n"` to a data buffer for every `data:`
+/// line, and removes exactly one trailing line break at dispatch. A naive parser
+/// that joins the lines with `"\n"` and trims one agrees with a naive encoder and
+/// both are wrong together on a trailing line break — joining `["a", ""]` gives
+/// `"a\n"` and trims to `"a"`, while the specification's append-then-drop-one gives
+/// `"a\n"`. That is why the parser here appends rather than joins.
 fn parse(body: &str) -> Vec<Received> {
     let mut events = Vec::new();
     let mut current = Received::default();
-    let mut data_lines: Vec<String> = Vec::new();
+    let mut data_buf = String::new();
     let mut saw_data = false;
 
     for line in body.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
         if line.is_empty() {
             if saw_data || current.event.is_some() || current.id.is_some() {
-                // The specification's final step: join the data lines, then remove the
-                // trailing line break from the result.
-                let mut joined = data_lines.join("\n");
-                // `pop` on the owned `String` rather than slicing and cloning: the
-                // slice form is what `clippy::assigning_clones` flags, and it is a
-                // genuine second allocation for a one-byte trim.
-                if joined.ends_with('\n') {
-                    joined.pop();
+                // The specification's final step: the buffer already holds
+                // `value + "\n"` per `data:` line (see the `data` arm below),
+                // so dispatch removes exactly one trailing line break.
+                if data_buf.ends_with('\n') {
+                    data_buf.pop();
                 }
-                current.data = joined;
+                current.data = std::mem::take(&mut data_buf);
                 events.push(current.clone());
             }
             current = Received::default();
-            data_lines.clear();
+            data_buf.clear();
             saw_data = false;
             continue;
         }
@@ -139,7 +138,11 @@ fn parse(body: &str) -> Vec<Received> {
         match field {
             "event" => current.event = Some(value.to_owned()),
             "data" => {
-                data_lines.push(value.to_owned());
+                // The specification appends `value + "\n"` per `data:` line and
+                // drops one trailing break at dispatch — it does not join the
+                // lines (see `parse`'s docs for why the difference matters).
+                data_buf.push_str(value);
+                data_buf.push('\n');
                 saw_data = true;
             }
             "id" => {

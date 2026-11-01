@@ -436,6 +436,54 @@ async fn h2_flat_200_matches() {
     let _ = hyper.finish().await;
 }
 
+/// A connection that never sends a request is closed by the header bound,
+/// not held for the whole idle bound.
+///
+/// HTTP/2 has no hyper header-read knob, so the driver enforces the header
+/// tier itself before the first answer (after it, the idle bound applies).
+/// With a 200 ms header bound and a 60 s idle bound, a silent peer must be
+/// gone in seconds — waiting the idle bound would hold the slot 300× longer.
+#[tokio::test]
+async fn a_silent_h2_connection_is_closed_by_the_header_bound() {
+    let routes = [(Method::Get, "/hello", "h")];
+    let limits = HyperLimits {
+        header_read_timeout: Duration::from_millis(200),
+        idle_timeout: Duration::from_secs(60),
+        ..default_limits()
+    };
+    let hyper = HyperH2::start(
+        table_with(&routes),
+        Dispatch::flat(hello_handler()),
+        limits,
+        Pieces::bare(),
+    )
+    .await;
+    // Connect and send nothing — not even the preface.
+    let mut stream = TcpStream::connect(hyper.addr).await.expect("connect");
+    // The server speaks first (its empty SETTINGS), which is not a request:
+    // consume the frame header plus its (empty) payload, then expect EOF.
+    // A server that waits out the idle bound instead holds the slot 300×
+    // longer than the header bound allows.
+    let mut head = [0u8; 9];
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut head))
+        .await
+        .expect("the server preface must arrive")
+        .expect("the server preface is complete");
+    let len = (u32::from(head[0]) << 16) | (u32::from(head[1]) << 8) | u32::from(head[2]);
+    let mut rest = vec![0u8; len as usize];
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut rest))
+        .await
+        .expect("the server preface must complete")
+        .expect("the server preface payload is complete");
+    let mut one = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(20), stream.read_exact(&mut one))
+        .await
+        .expect("the server must close a silent connection promptly")
+        .expect_err("EOF, not bytes: nothing was ever sent");
+    let outcome = hyper.finish().await;
+    assert_eq!(outcome, Served::IdleTimeout);
+}
+
 /// Interleaved answers sort by stream: `/slow` (200ms) opens first
 /// but `/fast` answers first, and reading the slow stream first still
 /// returns the slow answer. The old harness asserted arrival order

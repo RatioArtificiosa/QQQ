@@ -222,12 +222,18 @@ pub struct Connection {
 
 impl Connection {
     /// A new connection.
+    ///
+    /// `now` is the accept time: the header deadline is armed from it, so a
+    /// connection that never sends a byte still hits `HeaderTimeout` rather
+    /// than holding a slot forever. A deadline that started on the first
+    /// *byte* would leave a zero-byte connection ungoverned — the slow-loris
+    /// shape — because no byte ever arrives to arm it.
     #[must_use]
-    pub fn new(config: ConnectionConfig) -> Self {
+    pub fn new(config: ConnectionConfig, now: Instant) -> Self {
         Self {
             config,
             idle_since: None,
-            head_started: None,
+            head_started: Some(now),
             served: 0,
             client_wants_keep_alive: true,
             draining: false,
@@ -259,8 +265,17 @@ impl Connection {
     ///
     /// Separate from [`Self::on_request_parsed`] because a slow client is
     /// detected *during* the head, and the timer has to start before the parse
-    /// completes or the timeout can never fire.
+    /// completes or the timeout can never fire. Keeps the earliest time: the
+    /// deadline is armed at accept ([`Self::new`]), and a later call must not
+    /// move it forward past bytes already waited for.
     pub fn begin_request(&mut self, now: Instant) {
+        // A closed connection accepts no new request: without this a late
+        // call would clear `idle_since` and re-arm the head timer on a dead
+        // connection, and `close_reason` would still read fine only because
+        // `poll` checks `closed` first — masking, not correctness.
+        if self.closed.is_some() {
+            return;
+        }
         if self.head_started.is_none() {
             self.head_started = Some(now);
         }
@@ -269,7 +284,14 @@ impl Connection {
     }
 
     /// Mark that a request head arrived.
+    ///
+    /// A no-op on a closed connection: resurrecting `in_flight` after close
+    /// would let a later `poll` report `WriteResponse` on a dead connection
+    /// (masked today only because `poll` checks `closed` first).
     pub fn on_request_parsed(&mut self, client_wants_keep_alive: bool) {
+        if self.closed.is_some() {
+            return;
+        }
         self.head_started = None;
         self.in_flight = true;
         self.client_wants_keep_alive = client_wants_keep_alive;
@@ -335,6 +357,12 @@ impl Connection {
     /// connection's behaviour directly — two independent observations rather
     /// than one restated.
     pub fn on_response_sent(&mut self, now: Instant, server_wants_close: bool) {
+        // A closed connection stays closed with its reason: overwriting a
+        // `ProtocolError` with `ServerRequested`/`ClientRequested` here would
+        // lie in `close_reason` about why the connection died.
+        if self.closed.is_some() {
+            return;
+        }
         self.in_flight = false;
         self.served = self.served.saturating_add(1);
 
@@ -371,6 +399,11 @@ impl Connection {
     /// keep-alive path. One rule in one place.
     pub fn on_parse_error(&mut self, error: &ParseError) {
         let _ = error;
+        // First close wins: a later parse error must not overwrite the
+        // reason an earlier one already recorded.
+        if self.closed.is_some() {
+            return;
+        }
         self.head_started = None;
         self.in_flight = false;
         self.closed = Some(CloseReason::ProtocolError);
@@ -379,10 +412,12 @@ impl Connection {
     /// Begin a graceful shutdown.
     ///
     /// In-flight requests are allowed to finish; idle connections close at once.
+    /// A connection that is already closed keeps its reason: `ShutdownIdle`
+    /// must not overwrite whatever actually ended it.
     pub fn begin_drain(&mut self, now: Instant) {
         self.draining = true;
         self.drain_deadline = Some(now + self.config.drain_timeout);
-        if !self.in_flight {
+        if !self.in_flight && self.closed.is_none() {
             self.closed = Some(CloseReason::ShutdownIdle);
         }
     }
@@ -608,7 +643,11 @@ mod tests {
     }
 
     fn conn() -> Connection {
-        Connection::new(config())
+        Connection::new(config(), Instant::now())
+    }
+
+    fn conn_at(when: Instant) -> Connection {
+        Connection::new(config(), when)
     }
 
     // -- the happy path ----------------------------------------------------
@@ -738,15 +777,32 @@ mod tests {
     }
 
     /// A connection that has never served a request is governed by the header
-    /// timeout from its first byte — there is no idle period to measure.
+    /// timeout from accept — there is no idle period to measure, and no byte
+    /// needed to arm the deadline.
     #[test]
     fn a_connection_that_never_sends_anything_is_closed_by_the_header_timeout() {
-        let mut c = conn();
         let t0 = Instant::now();
-        c.begin_request(t0);
+        // No `begin_request`: zero bytes ever arrived. The deadline was
+        // armed at accept, so the slot cannot be held forever.
+        let c = conn_at(t0);
         assert_eq!(
             c.poll(t0 + Duration::from_secs(2)),
             Action::Close(CloseReason::HeaderTimeout)
+        );
+    }
+
+    /// One byte then silence is the same deadline, measured the same way:
+    /// `begin_request` keeps the earlier accept time rather than restarting
+    /// the clock on the first byte.
+    #[test]
+    fn a_connection_that_stalls_after_one_byte_is_closed_by_the_header_timeout() {
+        let t0 = Instant::now();
+        let mut c = conn_at(t0);
+        c.begin_request(t0 + Duration::from_millis(100));
+        assert_eq!(
+            c.poll(t0 + Duration::from_secs(2)),
+            Action::Close(CloseReason::HeaderTimeout),
+            "the deadline runs from accept, not from the first byte"
         );
     }
 
@@ -784,6 +840,30 @@ mod tests {
         c.on_parse_error(&ParseError::ConflictingFraming);
         assert_eq!(c.close_reason(), Some(CloseReason::ProtocolError));
         assert_eq!(c.poll(t0), Action::Close(CloseReason::ProtocolError));
+    }
+
+    /// The first close wins: late mutators must not overwrite the reason or
+    /// resurrect the connection. `poll` checks `closed` first, so the
+    /// external behavior was already "stay closed" — but `close_reason`
+    /// lied, reporting `ShutdownIdle` for a connection that died of a
+    /// protocol error.
+    #[test]
+    fn a_closed_connection_keeps_its_reason_and_stays_closed() {
+        let mut c = conn();
+        let t0 = Instant::now();
+        c.begin_request(t0);
+        c.on_parse_error(&ParseError::ConflictingFraming);
+        assert_eq!(c.close_reason(), Some(CloseReason::ProtocolError));
+
+        // None of these may change the outcome or the reason.
+        c.begin_drain(t0);
+        c.begin_request(t0);
+        c.on_request_parsed(true);
+        c.on_response_sent(t0, false);
+        c.on_parse_error(&ParseError::ConflictingFraming);
+        assert_eq!(c.close_reason(), Some(CloseReason::ProtocolError));
+        assert_eq!(c.poll(t0), Action::Close(CloseReason::ProtocolError));
+        assert!(!c.is_open());
     }
 
     /// But a request-scoped error — a bad route, an oversized target — also

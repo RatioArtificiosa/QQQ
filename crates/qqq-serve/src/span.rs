@@ -122,6 +122,10 @@ impl Policy {
     /// A sentence naming what was wrong, so a typo is answered rather than defaulted — a server that
     /// silently ignored `--trace-sample 0.5x` would sample at some other rate and look configured.
     fn parse(s: &str) -> Result<Self, String> {
+        // Operators pad values; whitespace never changes the rate. Trimming
+        // answers a typo-shaped input with the rate it names instead of an
+        // error shaped like a policy rejection.
+        let s = s.trim();
         match s {
             "on" => return Ok(Self::AlwaysOn),
             "off" => return Ok(Self::AlwaysOff),
@@ -131,6 +135,10 @@ impl Policy {
             // A decimal is a fraction of its own length, so `0.25` is 25/100 **without a float**: a
             // float would make the bucket comparison inexact at the boundary, and a sampling rate
             // that is off by one bucket is a rate nobody can reason about.
+            //
+            // A missing whole part reads as zero, so `.5` is `0.5`: the dot
+            // is unambiguous without it, and refusing it would answer a
+            // conventional spelling with an error.
             Some((whole, frac)) if !frac.is_empty() => {
                 // **A fraction this cannot represent is REFUSED, not rescaled.** The old code was
                 // `10u32.pow(u32::try_from(frac.len()).unwrap_or(9))`, so a tenth digit was silently
@@ -149,7 +157,11 @@ impl Policy {
                     u32::try_from(frac.len())
                         .map_err(|_| format!("`{s}` has a fractional part no `u32` can count"))?,
                 );
-                let whole: u32 = whole.parse().map_err(|_| format!("`{s}` is not a rate"))?;
+                let whole: u32 = if whole.is_empty() {
+                    0
+                } else {
+                    whole.parse().map_err(|_| format!("`{s}` is not a rate"))?
+                };
                 let frac: u32 = frac.parse().map_err(|_| format!("`{s}` is not a rate"))?;
                 (whole.saturating_mul(scale).saturating_add(frac), scale)
             }
@@ -452,6 +464,10 @@ mod rate_tests {
         assert!(Sampler::from_rate("0", false).is_ok());
         assert!(Sampler::from_rate("0.0", false).is_ok());
         assert!(Sampler::from_rate("off", false).is_ok());
+
+        // Padding and a missing leading zero change nothing about the rate.
+        assert!(Sampler::from_rate(" 0.25 ", false).is_ok());
+        assert!(Sampler::from_rate(".5", false).is_ok());
     }
 
     /// The typo test the `from_rate` doctest already asserts, kept here so the boundary lives with it.

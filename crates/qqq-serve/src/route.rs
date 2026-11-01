@@ -155,6 +155,26 @@ pub enum RouterError {
         /// How many it declared.
         count: usize,
     },
+    /// Two captures share one name.
+    ///
+    /// `/:id/:id` binds `id` twice, and `Params::get` returns the first —
+    /// the second value is silently unreachable. Two different names for one
+    /// segment cannot be expressed, so a duplicate is always a typo.
+    DuplicateParam {
+        /// The offending pattern.
+        pattern: String,
+        /// The repeated name.
+        name: String,
+    },
+    /// The route named an extension method, which cannot match.
+    ///
+    /// [`Method::parse`] never produces [`Method::Extension`], so a route
+    /// registered for it would sit in the table matching nothing — a silent
+    /// dead route that reads as configured. Refused at registration instead.
+    ExtensionUnsupported {
+        /// The offending pattern.
+        pattern: String,
+    },
     /// The table already holds [`MAX_ROUTES`] routes.
     TooManyRoutes {
         /// The limit.
@@ -188,6 +208,14 @@ impl fmt::Display for RouterError {
                 f,
                 "route `{pattern}` captures {count} parameters, more than the limit of {MAX_PARAMS}"
             ),
+            Self::DuplicateParam { pattern, name } => write!(
+                f,
+                "route `{pattern}` captures `{name}` twice; the second value would be unreachable"
+            ),
+            Self::ExtensionUnsupported { pattern } => write!(
+                f,
+                "route `{pattern}` names an extension method, which cannot match any request"
+            ),
             Self::TooManyRoutes { limit } => {
                 write!(f, "the route table already holds {limit} routes")
             }
@@ -213,6 +241,12 @@ impl RouterError {
             }
             Self::TooManyParams { .. } => {
                 "use fewer captures; each one costs a per-request allocation"
+            }
+            Self::DuplicateParam { .. } => {
+                "rename one of the captures; two names for one segment cannot both be read"
+            }
+            Self::ExtensionUnsupported { .. } => {
+                "use one of the nine methods the table can match; unknown methods are refused with 400 before routing"
             }
             Self::TooManyRoutes { .. } => "split the application, or raise the limit in qqq-serve",
         };
@@ -257,6 +291,14 @@ pub enum Method {
     ///
     /// Carried as a variant rather than folded into `Get` so an extension
     /// method cannot be silently routed to the wrong handler.
+    ///
+    /// Unroutable today, by design: [`Method::parse`] never produces it
+    /// (unknown methods are refused with `400` before routing), so a route
+    /// registered for it could never match — and [`RouteTable::insert`]
+    /// refuses such a route rather than installing a dead one. The variant
+    /// exists so the guest boundary in `qqq-run` has a named refusal instead
+    /// of a wildcard, and so a future parser that produces it distinguishes
+    /// methods instead of collapsing them.
     Extension,
 }
 
@@ -296,11 +338,18 @@ impl Method {
     /// Case-insensitive, because HTTP methods are defined as case-sensitive but
     /// every proxy and client in existence sends the canonical uppercase form,
     /// and rejecting `get` would be pedantry that produces a confusing 400.
-    /// The canonical name is restored on the way out, so the enum is always
+    /// The canonical name is restored on the way out: the enum is always
     /// canonical internally.
+    ///
+    /// Only ASCII space and tab are stripped: `str::trim` also strips Unicode
+    /// whitespace, so a U+2001-prefixed `GET` would trim into a valid method
+    /// where a strict parser refuses it — a differential the fuzzer caught
+    /// in the request line.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
-        let upper = s.trim().to_ascii_uppercase();
+        let upper = s
+            .trim_matches(|c| c == ' ' || c == '\t')
+            .to_ascii_uppercase();
         Self::ALL.into_iter().find(|m| m.as_str() == upper)
     }
 
@@ -442,6 +491,9 @@ fn parse_pattern(pattern: &str) -> std::result::Result<Vec<Segment>, RouterError
     let raw: Vec<&str> = pattern.split('/').skip(1).collect();
     let mut segments = Vec::with_capacity(raw.len());
     let mut params = 0usize;
+    // Owned names: each iteration builds a fresh `String`, so borrowed
+    // references would not live past the iteration that created them.
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for (i, piece) in raw.iter().enumerate() {
         let index = i + 1;
@@ -464,6 +516,12 @@ fn parse_pattern(pattern: &str) -> std::result::Result<Vec<Segment>, RouterError
                         index,
                     });
                 }
+                if !seen.insert(rest.clone()) {
+                    return Err(RouterError::DuplicateParam {
+                        pattern: pattern.to_owned(),
+                        name: rest,
+                    });
+                }
                 params += 1;
                 Segment::Param(rest)
             }
@@ -480,6 +538,12 @@ fn parse_pattern(pattern: &str) -> std::result::Result<Vec<Segment>, RouterError
                 if index != raw.len() {
                     return Err(RouterError::WildcardNotLast {
                         pattern: pattern.to_owned(),
+                    });
+                }
+                if !seen.insert(rest.clone()) {
+                    return Err(RouterError::DuplicateParam {
+                        pattern: pattern.to_owned(),
+                        name: rest,
                     });
                 }
                 params += 1;
@@ -643,8 +707,15 @@ impl RouteTable {
     ///
     /// # Errors
     ///
-    /// As [`RouteTable::build`].
+    /// As [`RouteTable::build`], plus [`RouterError::ExtensionUnsupported`]
+    /// for a route naming [`Method::Extension`]: no request can carry it,
+    /// so installing it would install a route that can never match.
     pub fn insert(&mut self, route: Route) -> std::result::Result<(), RouterError> {
+        if route.method == Method::Extension {
+            return Err(RouterError::ExtensionUnsupported {
+                pattern: route.pattern.clone(),
+            });
+        }
         if self.count >= MAX_ROUTES {
             return Err(RouterError::TooManyRoutes { limit: MAX_ROUTES });
         }
@@ -711,6 +782,11 @@ impl RouteTable {
     /// Only a missing HEAD route falls back.
     #[must_use]
     pub fn match_route(&self, method: Method, path: &str) -> Option<Match> {
+        // Defensive: the serving paths split the target first (`split_target`),
+        // but a direct caller passing `/a?b=c` must not miss a route on `/a`.
+        // A `?` or `#` never belongs to a route pattern, so stripping here
+        // cannot change what a well-formed call matches.
+        let path = strip_query(path);
         let segments: Vec<&str> = if path == "/" {
             Vec::new()
         } else {
@@ -747,6 +823,9 @@ impl RouteTable {
     /// works, and a claim the router contradicts is worse than a shorter list.
     #[must_use]
     pub fn allows(&self, path: &str) -> Vec<Method> {
+        // Same strip as [`Self::match_route`]: a 405 for `/a` must name the
+        // same methods whether the caller split the target or not.
+        let path = strip_query(path);
         let segments: Vec<&str> = if path == "/" {
             Vec::new()
         } else {
@@ -779,6 +858,20 @@ impl RouteTable {
         });
         out
     }
+}
+
+/// Split the query and fragment off a request path before matching.
+///
+/// The serving paths call [`crate::server::split_target`] first, so this is
+/// defense for direct callers: `/a?b=c` and `/a#f` route as `/a`. A `?` or
+/// `#` can never appear in a registered pattern (patterns come from manifest
+/// paths), so the strip cannot change what a well-formed call matches.
+fn strip_query(path: &str) -> &str {
+    let without_fragment = path.split('#').next().unwrap_or(path);
+    without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment)
 }
 
 /// The recursive match, trying candidates in specificity order.
@@ -915,9 +1008,19 @@ fn bind(route: &Route, values: Vec<String>) -> Match {
 
 /// Collect every method that matches a path, ignoring which one was asked
 /// for. Used for the 405 `Allow` header.
+///
+/// Mirrors [`walk`]'s index-exhausted arm, including the wildcard child:
+/// `/files/*rest` answers `/files`, so `Allow` for `/files` must name its
+/// methods — otherwise a `POST /files` gets a bare 404 instead of
+/// `405` + `Allow`.
 fn collect_methods(node: &Node, segments: &[&str], index: usize, out: &mut Vec<Method>) {
     if index == segments.len() {
         out.extend(node.handlers.keys().copied());
+        // A wildcard child matches the empty remainder (see `walk`), so its
+        // methods answer here too.
+        if let Some(child) = &node.wildcard {
+            out.extend(child.handlers.keys().copied());
+        }
         return;
     }
     // As in `walk` above: the early return bounds `index`, so the `else`
@@ -1054,6 +1157,20 @@ mod tests {
         assert!(matches!(e, RouterError::TooManyParams { .. }));
     }
 
+    /// A duplicated capture name is refused: `/:id/:id` would bind `id`
+    /// twice and `get` would return only the first, silently dropping the
+    /// second value.
+    #[test]
+    fn a_duplicate_capture_name_is_refused() {
+        for pattern in ["/:id/:id", "/:a/*a"] {
+            let e = Route::new(Method::Get, pattern, "h").unwrap_err();
+            assert!(
+                matches!(e, RouterError::DuplicateParam { .. }),
+                "{pattern} must be refused, got {e}"
+            );
+        }
+    }
+
     /// [SRV-003 / security] Two routes with the same method and pattern are a
     /// configuration bug: one silently shadows the other, and which one wins
     /// depends on file order.
@@ -1062,6 +1179,21 @@ mod tests {
         let routes = vec![route("/orders", "first"), route("/orders", "second")];
         let e = RouteTable::build(routes).unwrap_err();
         assert!(matches!(e, RouterError::DuplicateRoute { .. }));
+    }
+
+    /// A route naming an extension method is refused at registration: the
+    /// parser never produces `Extension`, so it could never match, and a
+    /// dead route reads as configured.
+    #[test]
+    fn an_extension_method_route_is_refused() {
+        let mut t = RouteTable::new();
+        let e = t
+            .insert(Route::new(Method::Extension, "/orders", "h").expect("pattern parses"))
+            .unwrap_err();
+        assert!(
+            matches!(e, RouterError::ExtensionUnsupported { .. }),
+            "an unroutable method must be refused, got {e}"
+        );
     }
 
     /// The same pattern under *different* methods is not a duplicate — that is
@@ -1080,6 +1212,19 @@ mod tests {
         assert_eq!(
             t.match_route(Method::Post, "/orders").unwrap().handler,
             "create"
+        );
+    }
+
+    /// `allows` mirrors `walk` on the wildcard-empty case: `/files/*rest`
+    /// answers `/files`, so `Allow` for `/files` must name its methods —
+    /// otherwise a `POST /files` gets a bare 404 instead of `405` + `Allow`.
+    #[test]
+    fn allows_covers_a_wildcard_empty_remainder() {
+        let t = table(&[("/files/*rest", "files")]);
+        let allowed = t.allows("/files");
+        assert!(
+            allowed.contains(&Method::Get),
+            "the wildcard's methods answer here: {allowed:?}"
         );
     }
 
@@ -1274,6 +1419,33 @@ mod tests {
         assert!(t.allows("/nope").is_empty());
     }
 
+    /// A query or fragment never changes what matches.
+    ///
+    /// The serving paths split the target first, but a direct caller passing
+    /// `/orders?limit=10` or `/orders#top` must route like `/orders` — and a
+    /// 405 for either must name the same methods.
+    #[test]
+    fn a_query_or_fragment_does_not_change_matching() {
+        let t = table(&[("/orders", "list")]);
+        for target in [
+            "/orders",
+            "/orders?limit=10",
+            "/orders#top",
+            "/orders?a=b#top",
+        ] {
+            assert!(
+                t.match_route(Method::Get, target).is_some(),
+                "{target} must route"
+            );
+            assert_eq!(
+                t.allows(target),
+                vec![Method::Get, Method::Head],
+                "{target} must allow the same methods"
+            );
+        }
+        assert!(t.match_route(Method::Get, "/nope?x=1").is_none());
+    }
+
     // -- introspection -----------------------------------------------------
 
     /// `qqqai inspect` reports what a service exposes, so the listing must be
@@ -1332,6 +1504,16 @@ mod tests {
         assert_eq!(Method::parse("get"), Some(Method::Get));
         assert_eq!(Method::parse("Get"), Some(Method::Get));
         assert_eq!(Method::parse(" POST "), Some(Method::Post));
+    }
+
+    /// Only ASCII space and tab are stripped: `str::trim` would also strip
+    /// Unicode whitespace, letting a U+2001-prefixed method trim into a
+    /// valid one where a strict parser refuses it.
+    #[test]
+    fn method_parsing_does_not_trim_unicode_whitespace() {
+        assert_eq!(Method::parse("\u{2001}GET"), None);
+        assert_eq!(Method::parse("GET\u{2001}"), None);
+        assert_eq!(Method::parse("\tGET\t"), Some(Method::Get));
     }
 
     #[test]
@@ -1420,6 +1602,13 @@ mod tests {
             RouterError::TooManyParams {
                 pattern: "x".to_owned(),
                 count: 99,
+            },
+            RouterError::DuplicateParam {
+                pattern: "x".to_owned(),
+                name: "id".to_owned(),
+            },
+            RouterError::ExtensionUnsupported {
+                pattern: "x".to_owned(),
             },
             RouterError::TooManyRoutes { limit: 1 },
         ];

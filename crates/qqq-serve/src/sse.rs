@@ -241,36 +241,24 @@ impl Event {
             && self.data.is_empty();
 
         if !comment_only {
-            // One `data:` line per line of the payload — **empty lines included** — and one
-            // extra empty `data:` line when the payload ends with a line break.
+            // One `data:` line per line of the payload — **empty lines included**,
+            // and nothing else. `split_lines` keeps the trailing empty field, so
+            // a payload ending in a line break already contributes its final
+            // empty line: `data("a\n")` is two `data:` lines.
             //
-            // # Why the extra line
+            // # Why no extra line
             //
-            // The client's assembler joins the `data:` lines with `"\n"` and then removes
-            // **one** trailing break, as the specification requires. A payload has to
-            // survive that trim, so the wire form must carry one break more than the
-            // payload does: `data("a\n")` is three `data:` lines, which join to `"a\n\n"`
-            // and trim to `"a\n"`.
-            //
-            // The previous version dropped empty lines and then supplied a single `data:`
-            // line if none remained. That handled the concern it was written for — a
-            // newline-only payload must not emit a bare blank line, which an earlier
-            // version did — but it also threw away the line structure, so **every payload
-            // ending in a line break lost it**: `data("a\n")` dispatched `"a"`. Its comment
-            // argued the loss was required, claiming `data("")`, `data("\n")` and
-            // `data("\n\n")` "must" encode identically. They must not: identical bytes
-            // cannot carry three different payloads (`§O-278`).
-            //
-            // A **comment-only** event still emits no `data:` line at all, and that
-            // distinction is what separates a keep-alive from a message: a keep-alive
-            // carrying `data:` would be dispatched by the client as an empty message,
-            // waking every listener on an idle connection — the opposite of what it is
-            // for.
+            // The client's assembler appends `value + "\n"` for every `data:`
+            // line and then removes **one** trailing break. Two lines join to
+            // `"a\n\n"` and trim to `"a\n"` — the payload. An earlier version
+            // appended a third `data:` line "for" the trailing break, which
+            // joined to `"a\n\n\n"` and trimmed to `"a\n\n"`: every payload
+            // ending in a line break gained one. Its comment argued the extra
+            // line was required; it confused the join-model (`values.join("\n")`
+            // then trim one) with the specification's append-model
+            // (`value + "\n"` per line, then trim one).
             for line in split_lines(&self.data) {
                 let _ = writeln!(out, "data:{}", escape_leading_space(line));
-            }
-            if self.data.ends_with(['\n', '\r']) {
-                out.push_str("data:\n");
             }
             // No "at least one line" fallback is needed: `split_lines` never returns an
             // empty sequence, so `data("")` writes `data:\n` above rather than a bare
@@ -762,22 +750,30 @@ mod tests {
             "`data(\"\\n\")` and `data(\"\\n\\n\")` must differ"
         );
 
-        // The specification's assembler rule — join the `data:` lines with `"\n"`, then
-        // drop **one** trailing break — applied to the encoder's own output. This is the
-        // property the encoder has to satisfy, and it is checked here rather than only
-        // in an integration test because a sender's contract is about the bytes it writes.
+        // The specification's assembler rule — append `value + "\n"` for every
+        // `data:` line, then drop **one** trailing break — applied to the
+        // encoder's own output. This is the property the encoder has to
+        // satisfy, and it is checked here rather than only in an integration
+        // test because a sender's contract is about the bytes it writes.
+        //
+        // The loop models the client exactly: one append per `data:` line,
+        // not a join (joining `["a", ""]` gives `"a\n"` before the trim,
+        // which accidentally validates a three-line encoding of `"a\n"`).
         for payload in ["", "\n", "\n\n", "a", "a\n", "a\nb", "a\n\nb", "a\n\n"] {
             let wire = encoded(&Event::data(payload));
-            let mut joined = wire
+            let mut buf = String::new();
+            for line in wire
                 .split('\n')
                 .filter_map(|line| line.strip_prefix("data:"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if joined.ends_with('\n') {
-                joined.pop();
+            {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+            if buf.ends_with('\n') {
+                buf.pop();
             }
             assert_eq!(
-                joined, payload,
+                buf, payload,
                 "payload {payload:?} did not survive the encoder"
             );
         }

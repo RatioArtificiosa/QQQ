@@ -140,6 +140,62 @@ impl CertFiles {
         CertificateSource::files(self.cert.clone(), self.key.clone())
     }
 
+    /// A CA certificate plus a leaf it issued, for chain-building tests.
+    ///
+    /// Self-signed client certificates (every other test here) verify as
+    /// trust anchors directly; nothing in that path builds a chain. A leaf
+    /// issued by a separate CA exercises the actual verification the server
+    /// depends on in production: chain construction to a trusted root, and
+    /// subject extraction from the leaf rather than the CA. Returns the CA's
+    /// certificate files (the trust anchor) and the leaf's (the identity).
+    fn generate_ca_signed(ca_cn: &str, leaf_cn: &str) -> (Self, Self) {
+        let ca_key = rcgen::KeyPair::generate().expect("rcgen must generate a CA key");
+        let mut ca_params =
+            rcgen::CertificateParams::new(Vec::<String>::new()).expect("rcgen accepts no SANs");
+        ca_params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, ca_cn);
+            dn
+        };
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params
+            .self_signed(&ca_key)
+            .expect("rcgen must self-sign the CA");
+        let ca_key_pem = ca_key.serialize_pem();
+        let ca_issuer = rcgen::Issuer::from_params(&ca_params, ca_key);
+
+        let leaf_key = rcgen::KeyPair::generate().expect("rcgen must generate a leaf key");
+        let mut leaf_params =
+            rcgen::CertificateParams::new(vec![leaf_cn.to_owned()]).expect("rcgen accepts the SAN");
+        leaf_params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, leaf_cn);
+            dn
+        };
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &ca_issuer)
+            .expect("the CA must sign the leaf");
+
+        let ca_dir = tempdir::TempDir::new();
+        let ca_cert_path = ca_dir.write("ca-cert.pem", ca_cert.pem().as_bytes());
+        let ca_key_path = ca_dir.write("ca-key.pem", ca_key_pem.as_bytes());
+        let leaf_dir = tempdir::TempDir::new();
+        let leaf_cert_path = leaf_dir.write("leaf-cert.pem", leaf_cert.pem().as_bytes());
+        let leaf_key_path = leaf_dir.write("leaf-key.pem", leaf_key.serialize_pem().as_bytes());
+        (
+            Self {
+                dir: ca_dir,
+                cert: ca_cert_path,
+                key: ca_key_path,
+            },
+            Self {
+                dir: leaf_dir,
+                cert: leaf_cert_path,
+                key: leaf_key_path,
+            },
+        )
+    }
+
     /// The DER of the certificate, for building a client's root store.
     fn cert_der(&self) -> CertificateDer<'static> {
         let pem = std::fs::read(&self.cert).expect("read cert");
@@ -467,6 +523,39 @@ async fn a_valid_certificate_builds_and_a_real_client_negotiates() {
         handshake.negotiated.cipher_suite
     );
     assert_eq!(handshake.negotiated.http_version(), "HTTP/1.1");
+}
+
+/// **Resumption is pinned off, explicitly — not left to rustls' defaults.**
+///
+/// `SEC-017` forbids unspecified policy, and resumption was unspecified: the
+/// builder defaults send TLS 1.3 tickets, keep a TLS 1.2 session cache, and
+/// allow whatever 0-RTT the dependency ships. Every knob is now set in
+/// `TlsConfig::build`, and this test fails if any of them drifts.
+#[test]
+fn resumption_is_pinned_off() {
+    let cert = CertFiles::generate(SERVER_CN);
+    let config = TlsConfig::new(cert.source())
+        .build()
+        .expect("a valid certificate must build");
+
+    assert_eq!(
+        config.max_early_data_size, 0,
+        "no 0-RTT: early data has no anti-replay without application support"
+    );
+    assert_eq!(
+        config.send_tls13_tickets, 0,
+        "no stateless tickets without a ticket-key rotation story"
+    );
+    // `session_storage` is an `Arc<dyn ...>` with no equality to assert, so
+    // the TLS 1.2 cache is pinned by its concrete type name. Deliberately
+    // brittle: if rustls renames the type, this fails and a human
+    // re-confirms the no-cache policy instead of silently inheriting a new
+    // default on a `cargo update`.
+    assert_eq!(
+        format!("{:?}", config.session_storage),
+        "NoServerSessionStorage",
+        "no TLS 1.2 session cache without a rotation story"
+    );
 }
 
 /// The negotiated cipher is a member of the documented policy — asserted against
@@ -1022,6 +1111,45 @@ async fn a_presented_client_certificate_yields_a_peer_identity() {
         peer.fingerprint(),
         expected,
         "the fingerprint must be the SHA-256 of the presented certificate"
+    );
+}
+
+/// **A CA-issued leaf verifies through chain building, and its subject —
+/// not the CA's — becomes the identity.**
+///
+/// Every other mTLS test here presents a self-signed certificate that
+/// verifies as its own trust anchor, so nothing builds a chain. This one
+/// does: the server trusts only the CA, the client presents the leaf, and
+/// the handshake must complete with the *leaf's* common name — proving the
+/// subject comes from the end of the chain, not its root.
+#[tokio::test]
+async fn a_ca_issued_leaf_verifies_and_names_its_subject() {
+    let server_cert = CertFiles::generate(SERVER_CN);
+    let (ca, leaf) = CertFiles::generate_ca_signed("test-ca", CLIENT_CN);
+
+    let config = TlsConfig::new(server_cert.source())
+        .with_required_client_auth(ca.cert.clone())
+        .build()
+        .expect("builds");
+
+    let handshake = handshake(
+        config,
+        client_config_with_identity(
+            roots_trusting(server_cert.cert_der()),
+            &leaf,
+            CLIENT_VERSIONS,
+        ),
+    )
+    .await;
+    assert_connected!(handshake);
+
+    let peer = handshake
+        .peer
+        .expect("a verified leaf must produce an identity");
+    assert_eq!(
+        peer.subject(),
+        CLIENT_CN,
+        "the identity is the leaf's subject, not the CA's"
     );
 }
 

@@ -433,17 +433,39 @@ impl RequestHead {
     /// connections open until they timed out, and one that assumed close would
     /// tear down every 1.1 connection — turning a persistent-connection
     /// protocol into a per-request one.
+    ///
+    /// Every `Connection` header line is inspected, and comma lists split:
+    /// `close` wins wherever it appears. A first-match-only check would hold
+    /// a connection the client asked to close (`Connection: keep-alive,
+    /// close` defaults to keep-alive) — a slot held until `idle_timeout`.
     #[must_use]
     pub fn wants_keep_alive(&self) -> bool {
-        match self.header("connection") {
-            Some(v) if v.eq_ignore_ascii_case("close") => false,
-            Some(v) if v.eq_ignore_ascii_case("keep-alive") => true,
-            // Explicit `Connection: something-else` is a hop-by-hop header list;
-            // the default applies. Newer protocols default to persistent:
-            // spelling every persistent version keeps a future one from
-            // silently inheriting close.
-            _ => matches!(self.version, Version::Http11 | Version::Http2),
+        let mut seen_close = false;
+        let mut seen_keep_alive = false;
+        for (name, value) in &self.headers {
+            if !name.eq_ignore_ascii_case("connection") {
+                continue;
+            }
+            for token in value.split(',') {
+                let token = token.trim();
+                if token.eq_ignore_ascii_case("close") {
+                    seen_close = true;
+                } else if token.eq_ignore_ascii_case("keep-alive") {
+                    seen_keep_alive = true;
+                }
+            }
         }
+        if seen_close {
+            return false;
+        }
+        if seen_keep_alive {
+            return true;
+        }
+        // Explicit `Connection: something-else` is a hop-by-hop header list;
+        // the default applies. Newer protocols default to persistent:
+        // spelling every persistent version keeps a future one from
+        // silently inheriting close.
+        matches!(self.version, Version::Http11 | Version::Http2)
     }
 
     /// Whether this request carries a body.
@@ -534,15 +556,28 @@ pub fn head_end_from(input: &[u8], from: usize) -> Option<usize> {
 ///
 /// Any [`ParseError`]. Every limit in this module is enforced here.
 pub fn parse_head(input: &[u8]) -> std::result::Result<(RequestHead, usize), ParseError> {
-    // -- the overall cap, before scanning anything ------------------------
-    if input.len() > MAX_HEAD_BYTES {
+    // -- find the head first, cap it second --------------------------------
+    //
+    // The cap applies to the *head*, not to the supplied buffer: a small head
+    // followed by a pipelined body (or by body bytes the caller retained) is
+    // legal input, and refusing it for the body's size would mistake a
+    // streaming body for an oversized head — the `SRV-005` bypass shape in
+    // reverse. If no terminator exists in more than the cap, no completion
+    // can fit under it, so that is the only oversized-without-terminator
+    // case that reports too-large rather than incomplete.
+    let Some(end) = head_end(input) else {
+        if input.len() > MAX_HEAD_BYTES {
+            return Err(ParseError::HeadTooLarge {
+                limit: MAX_HEAD_BYTES,
+            });
+        }
+        return Err(ParseError::Incomplete { got: input.len() });
+    };
+    if end > MAX_HEAD_BYTES {
         return Err(ParseError::HeadTooLarge {
             limit: MAX_HEAD_BYTES,
         });
     }
-    let Some(end) = head_end(input) else {
-        return Err(ParseError::Incomplete { got: input.len() });
-    };
 
     // The head is everything up to and including the final CRLF CRLF, minus the
     // terminator itself. Total rather than subscripted: `end` sits four bytes
@@ -694,6 +729,17 @@ fn parse_header_block<'a>(
                 // first and the origin the second.
                 return Err(ParseError::DuplicateContentLength);
             }
+            // Digits only, no sign, no whitespace: `u64::parse` accepts `+5`
+            // and surrounding space is already trimmed, but a proxy that
+            // parses strictly and an origin that parses leniently (or the
+            // reverse) disagree about the body length — the classic
+            // smuggling differential. Reject anything that is not all
+            // digits before converting.
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(ParseError::InvalidContentLength {
+                    value: truncate(value, 64),
+                });
+            }
             let n: u64 = value
                 .parse()
                 .map_err(|_| ParseError::InvalidContentLength {
@@ -807,6 +853,16 @@ fn parse_request_line(line: &str) -> std::result::Result<(Method, String, Versio
     }
 
     let version = match version_str {
+        // No whitespace inside the version: `splitn(3, ' ')` leaves a
+        // trailing or doubled space inside the third part, which is a
+        // malformed request line (400), not an unsupported version (505).
+        // A proxy that trims and a proxy that does not would route the same
+        // bytes differently.
+        v if v.contains(' ') || v.contains('\t') => {
+            return Err(ParseError::BadRequestLine {
+                detail: "whitespace in the version".to_owned(),
+            });
+        }
         "HTTP/1.1" => Version::Http11,
         "HTTP/1.0" => Version::Http10,
         other => {
@@ -979,7 +1035,12 @@ mod tests {
             (
                 "GET / HTTP/1.1 \r\nHost: x\r\n\r\n",
                 "trailing space",
-                is_unsupported_version,
+                is_bad_request_line,
+            ),
+            (
+                "GET / HTTP/1. 1\r\nHost: x\r\n\r\n",
+                "space inside the version",
+                is_bad_request_line,
             ),
             (
                 "GET\t/\tHTTP/1.1\r\nHost: x\r\n\r\n",
@@ -1014,6 +1075,20 @@ mod tests {
         ] {
             let e = parse(bad).expect_err(&format!("must be refused: {bad:?}"));
             assert!(matches!(e, ParseError::InvalidHeaderName { .. }), "{e:?}");
+        }
+        // A signed length is not a length: `u64::parse` accepts `+5`, and a
+        // strict proxy and a lenient origin would disagree about the body.
+        // (Surrounding whitespace is stripped as OWS before this check, so
+        // only the sign is at issue here.)
+        for bad in ["+5", "+0", "++5"] {
+            let e = parse(&format!(
+                "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {bad}\r\n\r\n"
+            ))
+            .expect_err(&format!("signed length {bad:?} must be refused"));
+            assert!(
+                matches!(e, ParseError::InvalidContentLength { .. }),
+                "{bad:?}: wrong refusal: {e:?}"
+            );
         }
         // A line with no colon is not a header.
         let e = parse("GET / HTTP/1.1\r\nNoColonHere\r\n\r\n")
@@ -1130,6 +1205,19 @@ mod tests {
             b"BODYBYTES",
             "the body must be left for the caller"
         );
+    }
+
+    /// The head cap measures the head, not the buffer: a small head followed
+    /// by a body larger than the cap parses, consuming only the head. Capping
+    /// the buffer would mistake a streaming body for an oversized head.
+    #[test]
+    fn a_small_head_with_a_large_body_is_not_head_too_large() {
+        let mut input =
+            b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n".to_vec();
+        input.extend(std::iter::repeat_n(b'x', MAX_HEAD_BYTES));
+        let (h, used) = parse_head(&input).expect("a small head must parse");
+        assert_eq!(h.target, "/upload");
+        assert_eq!(&input[used..], vec![b'x'; MAX_HEAD_BYTES].as_slice());
     }
 
     #[test]
@@ -1259,6 +1347,30 @@ mod tests {
     fn the_connection_header_is_case_insensitive() {
         assert!(!ok("GET / HTTP/1.1\r\nHost: x\r\nconnection: CLOSE\r\n\r\n").wants_keep_alive());
         assert!(ok("GET / HTTP/1.0\r\nConnection: Keep-Alive\r\n\r\n").wants_keep_alive());
+    }
+
+    /// Every `Connection` header line and every comma token is inspected:
+    /// a first-match-only check would hold a connection the client asked to
+    /// close (`keep-alive, close`), and an exact-match check would miss
+    /// lists entirely. `close` wins wherever it appears.
+    #[test]
+    fn connection_lists_and_duplicates_are_honored() {
+        assert!(
+            !ok("GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive, close\r\n\r\n")
+                .wants_keep_alive()
+        );
+        assert!(
+            !ok("GET / HTTP/1.1\r\nHost: x\r\nConnection: close, keep-alive\r\n\r\n")
+                .wants_keep_alive()
+        );
+        assert!(
+            ok("GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade, keep-alive\r\n\r\n")
+                .wants_keep_alive()
+        );
+        assert!(
+            !ok("GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n")
+                .wants_keep_alive()
+        );
     }
 
     // -- the header-bomb limits --------------------------------------------

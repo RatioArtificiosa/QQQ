@@ -85,6 +85,14 @@ pub enum HandshakeError {
         /// Why the value was rejected.
         reason: String,
     },
+    /// A subprotocol name is not a valid token, so echoing it into the `101`
+    /// response would split the stream. Only reachable when a caller passes
+    /// client bytes as the selected protocol instead of one of its own
+    /// strings (see `select_protocol`); refused rather than emitted.
+    InvalidSubprotocol {
+        /// The offending value.
+        value: String,
+    },
 }
 
 impl std::fmt::Display for HandshakeError {
@@ -107,6 +115,10 @@ impl std::fmt::Display for HandshakeError {
                 None => write!(f, "`Sec-WebSocket-Version` is required; only {VERSION} is"),
             },
             Self::BadKey { reason } => write!(f, "`Sec-WebSocket-Key` is invalid: {reason}"),
+            Self::InvalidSubprotocol { value } => write!(
+                f,
+                "subprotocol {value:?} is not a valid token and cannot be echoed"
+            ),
         }
     }
 }
@@ -279,6 +291,41 @@ impl Handshake {
     }
 }
 
+/// Whether a string is a valid HTTP token (RFC 9110 §5.6.2): printable ASCII
+/// without separators or controls.
+///
+/// A subprotocol name is echoed verbatim into the `101` response, so only
+/// tokens may be emitted — anything else splits the response. Checked both
+/// where offers are parsed (`Handshake` keeps the raw strings, verbatim) and
+/// where a selection is written.
+#[must_use]
+pub fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            b > 0x20
+                && b < 0x7f
+                && !matches!(
+                    b,
+                    b'(' | b')'
+                        | b'<'
+                        | b'>'
+                        | b'@'
+                        | b','
+                        | b';'
+                        | b':'
+                        | b'\\'
+                        | b'"'
+                        | b'/'
+                        | b'['
+                        | b']'
+                        | b'?'
+                        | b'='
+                        | b'{'
+                        | b'}'
+                )
+        })
+}
+
 /// Who may open a WebSocket, and who may name a loopback host (`F-14`).
 ///
 /// Browsers do not apply the same-origin policy to `WebSockets`: any page can
@@ -444,9 +491,15 @@ pub fn upgrade_origin_allowed(policy: &WsOriginPolicy, origin: Option<&str>, hos
 /// carries none. Resolving both ports against the *origin's* scheme default
 /// is fail-closed in every realizable case — an `https` page cannot reach a
 /// plaintext socket (the browser blocks mixed content before sending), so a
-/// downgrade mismatch refuses rather than admits.
+/// downgrade mismatch refuses rather than admits. An *unknown* scheme,
+/// though, has no default to resolve against, and `None == None` would call
+/// that a match — so unknown schemes refuse outright rather than comparing
+/// ports that mean nothing.
 fn same_origin(origin: &Origin, host: &str) -> bool {
     let Some((origin_scheme, origin_authority)) = origin.as_str().split_once("://") else {
+        return false;
+    };
+    let Some(default) = default_port(origin_scheme) else {
         return false;
     };
     let (origin_host, origin_port) = split_authority(origin_authority);
@@ -454,10 +507,9 @@ fn same_origin(origin: &Origin, host: &str) -> bool {
     if origin_host != host_host {
         return false;
     }
-    let default = default_port(origin_scheme);
     let origin_port = origin_port.filter(|p| !p.is_empty());
     let host_port = host_port.filter(|p| !p.is_empty());
-    origin_port.as_deref().or(default) == host_port.as_deref().or(default)
+    origin_port.as_deref().or(Some(default)) == host_port.as_deref().or(Some(default))
 }
 
 /// Split `host[:port]` (IPv6 in brackets) into lowercase host and port.
@@ -548,13 +600,14 @@ pub(crate) fn host_name(value: &str) -> String {
 
 /// The per-connection WebSocket buffer limits (`F-14`).
 ///
-/// Three numbers because three different multiplications threaten the heap:
-/// one frame (`max_frame_bytes`), one reassembled message
-/// (`max_message_bytes`), and all connections' buffered bytes together
-/// (`max_total_buffer_bytes`, enforced by a process-wide semaphore). All
-/// three default small (1 MiB / 1 MiB / 64 MiB) and rise only to their
-/// absolute ceilings — the values the crate enforced before `F-14` — so
-/// raising a cap is a conscious choice against a named number.
+/// Four numbers because four different multiplications threaten the heap — or
+/// the liveness: one frame (`max_frame_bytes`), one reassembled message
+/// (`max_message_bytes`), all connections' buffered bytes together
+/// (`max_total_buffer_bytes`, enforced by a process-wide semaphore), and one
+/// guest call (`handler_timeout`). All three byte caps default small
+/// (1 MiB / 1 MiB / 64 MiB) and rise only to their absolute ceilings — the
+/// values the crate enforced before `F-14` — so raising a cap is a conscious
+/// choice against a named number.
 ///
 /// ```
 /// use qqq_serve::ws::WsLimits;
@@ -571,6 +624,18 @@ pub struct WsLimits {
     pub max_message_bytes: usize,
     /// The process-wide buffered-bytes budget, in bytes.
     pub max_total_buffer_bytes: u64,
+    /// How long one guest `on_message` call may run before the connection
+    /// closes with `1011`.
+    ///
+    /// The frame loop answers `Ping`/`Pong`/`Close` itself, but only between
+    /// messages: while a handler runs, liveness probes queue unanswered and
+    /// the peer concludes the server is dead. A handler that parks forever
+    /// would therefore turn one slow guest into a connection the peer resets
+    /// — a timeout converts that into an explicit `1011` with a record,
+    /// naming the cause instead of a network fault. Five seconds default:
+    /// longer than any echo or lookup should take, shorter than any
+    /// intermediary's patience.
+    pub handler_timeout: std::time::Duration,
 }
 
 /// The absolute ceiling for one frame: the pre-`F-14` default.
@@ -599,12 +664,13 @@ pub const MESSAGE_LIMIT_CEILING: usize = crate::ws_message::MESSAGE_BYTES_CEILIN
 pub const TOTAL_BUFFER_CEILING: u64 = 1024 * 1024 * 1024;
 
 impl Default for WsLimits {
-    /// 1 MiB frames, 1 MiB messages, 64 MiB process-wide.
+    /// 1 MiB frames, 1 MiB messages, 64 MiB process-wide, 5 s per guest call.
     fn default() -> Self {
         Self {
             max_frame_bytes: crate::ws_frame::MAX_FRAME_BYTES,
             max_message_bytes: crate::ws_message::MAX_MESSAGE_BYTES,
             max_total_buffer_bytes: 64 * 1024 * 1024,
+            handler_timeout: std::time::Duration::from_secs(5),
         }
     }
 }
@@ -621,7 +687,7 @@ impl WsLimits {
     /// ```
     /// use qqq_serve::ws::WsLimits;
     ///
-    /// let limits = WsLimits::new(65536, 65536, 1048576);
+    /// let limits = WsLimits::new(65536, 65536, 1048576, std::time::Duration::from_secs(5));
     /// assert_eq!(limits.max_frame_bytes, 65536);
     /// ```
     #[must_use]
@@ -629,6 +695,7 @@ impl WsLimits {
         max_frame_bytes: u64,
         max_message_bytes: usize,
         max_total_buffer_bytes: u64,
+        handler_timeout: std::time::Duration,
     ) -> Self {
         assert!(
             max_frame_bytes <= FRAME_LIMIT_CEILING,
@@ -646,6 +713,7 @@ impl WsLimits {
             max_frame_bytes,
             max_message_bytes,
             max_total_buffer_bytes,
+            handler_timeout,
         }
     }
 }
@@ -731,6 +799,9 @@ pub fn accept_for(key: &str) -> String {
 /// happens, instead of here where it cannot be expressed.
 ///
 /// `protocol` is the selected subprotocol, or `None` to decline them all.
+/// A `Some` value must be a token ([`is_token`]): it is echoed verbatim into
+/// the response, and anything else splits the stream. Callers must pass a
+/// value from their own list (see `select_protocol`), never raw client bytes.
 #[must_use]
 pub fn accept_headers(
     handshake: &Handshake,
@@ -757,6 +828,14 @@ pub fn accept_headers(
 /// count frame bytes as content.
 #[must_use]
 pub fn write_upgrade(handshake: &Handshake, protocol: Option<&str>) -> Vec<u8> {
+    // `protocol` is echoed verbatim into the response, so only a token may
+    // be passed here (see `is_token`): anything else splits the stream.
+    // `serve_websocket` enforces this before calling; the debug assertion
+    // catches a direct caller that does not.
+    debug_assert!(
+        protocol.is_none_or(is_token),
+        "only tokens may be echoed into the 101 response"
+    );
     let mut out = String::with_capacity(256);
     out.push_str("HTTP/1.1 101 Switching Protocols\r\n");
     for (name, value) in accept_headers(handshake, protocol) {
@@ -905,6 +984,18 @@ mod tests {
             ),
             "no substring matching, ever"
         );
+        // An unknown scheme has no default port to resolve against, and
+        // `None == None` must not count as a match.
+        for scheme in ["gopher", "file", "ftp"] {
+            assert!(
+                !upgrade_origin_allowed(
+                    &policy,
+                    Some(&format!("{scheme}://127.0.0.1:8080")),
+                    "127.0.0.1:8080"
+                ),
+                "an unknown scheme ({scheme}) is not same-origin"
+            );
+        }
     }
 
     /// **No `Origin` means a non-browser client, which is allowed.**
@@ -1331,6 +1422,33 @@ mod tests {
             text.contains("POST"),
             "the reason names the actual method: {text}"
         );
+    }
+
+    /// Only tokens may be echoed into the `101`: anything else splits the
+    /// response. Separators, controls, whitespace, non-ASCII, and the empty
+    /// string are all refused.
+    #[test]
+    fn only_tokens_pass_is_token() {
+        for ok in ["chat", "superchat", "a-b_c.d~e", "0"] {
+            assert!(is_token(ok), "{ok:?} must be a token");
+        }
+        for bad in [
+            "", "a b", "a\tb", "a\rb", "a\nb", "a,b", "a;b", "a:b", "a/b", "a?b", "a@b", "a=b",
+            "a(b", "a)b", "a<b", "a>b", "a[b", "a]b", "a{b", "a}b", "a\"b", "a\\b", "é", "a\x7fb",
+        ] {
+            assert!(!is_token(bad), "{bad:?} must not be a token");
+        }
+    }
+
+    /// An invalid subprotocol renders as a 400, never as an echo.
+    #[test]
+    fn an_invalid_subprotocol_refuses_with_400() {
+        let err = HandshakeError::InvalidSubprotocol {
+            value: "a\r\nb".to_owned(),
+        };
+        let raw = write_refusal(&err);
+        let text = String::from_utf8(raw).expect("ascii");
+        assert!(text.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{text}");
     }
 
     /// The handshake is deterministic.

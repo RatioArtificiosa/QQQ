@@ -973,6 +973,18 @@
           },
           "type": "array"
         },
+        "handler_timeout_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How long one guest `on_message` call may run before the connection closes with `1011`, in milliseconds. Absent means 5 s."
+        },
         "max_frame_bytes": {
           "anyOf": [
             {

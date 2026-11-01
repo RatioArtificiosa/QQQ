@@ -30,9 +30,11 @@
 //!    discards even bytes already buffered at the peer — so the close frame
 //!    never arrives and a refusal the server meant to explain looks like a
 //!    network fault. (The shutdown and idle paths in `run_frames` use
-//!    `close_with` without a drain: there the server is ending the connection
-//!    on its own behalf rather than answering the peer, so no explanation is
-//!    owed one.)
+//!    `close_with` without a drain but with a write-side half-close: there the
+//!    server is ending the connection on its own behalf rather than answering
+//!    the peer, so no explanation is owed one — and a drain that waited on an
+//!    idle peer would park every closing task for its full timeout. This
+//!    matches the in-house terminal paths, which half-close without draining.)
 //!
 //! # Why the read side and the write side are separate tasks
 //!
@@ -49,7 +51,7 @@ use crate::access_log::{Level, Logger, Record, TraceId};
 use crate::http1::{RequestHead, Version};
 use qqq_io::listener::Shutdown;
 
-use crate::ws::{self, Handshake};
+use crate::ws::{self, Handshake, HandshakeError};
 use crate::ws_frame::{self, Frame, Opcode};
 use crate::ws_message::{Assembler, Message, Progress};
 
@@ -143,7 +145,9 @@ impl WebSocketHandler for Echo {
         _tenant: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            send.send(message.kind, &message.payload).await;
+            // Best-effort: a failed echo means the peer is gone, and the loop
+            // discovers that on its next read. Nothing further to do here.
+            if send.send(message.kind, &message.payload).await.is_err() {}
         })
     }
 }
@@ -162,24 +166,48 @@ pub struct WsSender<'a> {
 
 impl WsSender<'_> {
     /// Send one message.
-    pub async fn send(&mut self, kind: Opcode, payload: &[u8]) {
+    ///
+    /// # Errors
+    ///
+    /// When the write fails — the peer is gone or the socket is closed — or
+    /// when `kind` is a control opcode whose frame would be malformed (over
+    /// 125 bytes, or, were this API to allow it, unfragmented-split): a
+    /// malformed control frame would make the *peer* close the connection
+    /// with `1002`, blaming our framing. `send_frame` stays infallible
+    /// deliberately — tests use it to send malformed frames on purpose —
+    /// so the message-level path is where malformed output is refused.
+    pub async fn send(&mut self, kind: Opcode, payload: &[u8]) -> std::io::Result<()> {
+        if kind.is_control() && payload.len() > 125 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a control frame payload may not exceed 125 bytes (§5.5)",
+            ));
+        }
         let frame = Frame {
             opcode: kind,
             fin: true,
             payload: payload.to_vec(),
         };
-        let _ = self.stream.write_all(&ws_frame::encode(&frame)).await;
-        let _ = self.stream.flush().await;
+        self.stream.write_all(&ws_frame::encode(&frame)).await?;
+        self.stream.flush().await
     }
 
     /// Send a text message.
-    pub async fn send_text(&mut self, text: &str) {
-        self.send(Opcode::Text, text.as_bytes()).await;
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::send`]: the write failed.
+    pub async fn send_text(&mut self, text: &str) -> std::io::Result<()> {
+        self.send(Opcode::Text, text.as_bytes()).await
     }
 
     /// Send a binary message.
-    pub async fn send_binary(&mut self, bytes: &[u8]) {
-        self.send(Opcode::Binary, bytes).await;
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::send`]: the write failed.
+    pub async fn send_binary(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.send(Opcode::Binary, bytes).await
     }
 
     /// Send one frame, without framing it as a message.
@@ -242,6 +270,15 @@ pub struct WsContext {
 /// Returns the outcome rather than an error: every way a WebSocket ends is a normal
 /// result, and a caller distinguishing "the client closed" from "the peer broke the
 /// protocol" needs the value rather than a bool.
+///
+/// # The caller gates `Origin` first
+///
+/// Cross-Site WebSocket Hijacking is not stopped by anything in the handshake
+/// itself, so the server must check `Origin` *before* upgrading (see
+/// [`crate::ws::upgrade_origin_allowed`]; both the in-house path and the
+/// hyper path do). `serve_websocket` assumes that check already ran: it does
+/// not re-check, because a second gate with its own policy copy is how two
+/// callers disagree about which origins may connect.
 pub async fn serve_websocket<S>(
     stream: &mut S,
     head: &RequestHead,
@@ -267,6 +304,25 @@ where
             return WsOutcome::ProtocolError;
         }
     };
+
+    // A subprotocol name is echoed verbatim into the `101` response, so it
+    // must be a token: a value carrying a control byte or separator would
+    // split the response. `select_protocol` only ever returns the server's
+    // own strings, but `serve_websocket` takes the value from its caller,
+    // and a caller passing client bytes straight through would hand the
+    // client a response-splitting primitive. Refuse rather than emit.
+    if let Some(p) = protocol
+        && !crate::ws::is_token(p)
+    {
+        let _ = stream
+            .write_all(&ws::write_refusal(&HandshakeError::InvalidSubprotocol {
+                value: p.to_owned(),
+            }))
+            .await;
+        let _ = stream.flush().await;
+        let _ = stream.shutdown().await;
+        return WsOutcome::ProtocolError;
+    }
 
     if stream
         .write_all(&ws::write_upgrade(&handshake, protocol))
@@ -317,10 +373,14 @@ impl BufferBudget {
     /// Try to charge `n` bytes. `false` sheds rather than waits: waiting on
     /// a shared budget is head-of-line blocking across connections.
     fn acquire(&mut self, n: usize) -> bool {
-        let Ok(permit) = self
-            .sem
-            .try_acquire_many(u32::try_from(n).unwrap_or(u32::MAX))
-        else {
+        // `n` is at most the configured frame cap (16 MiB), so this never
+        // fails today — but a failure must shed, never mint: charging
+        // `u32::MAX` on an unconvertible count would take permits the
+        // budget never issued.
+        let Ok(many) = u32::try_from(n) else {
+            return false;
+        };
+        let Ok(permit) = self.sem.try_acquire_many(many) else {
             return false;
         };
         // Held, not dropped: the permit lives as `held` bytes until released.
@@ -347,8 +407,12 @@ impl Drop for BufferBudget {
 /// A byte count as `usize`.
 ///
 /// All values here are bounded by the configured caps (at most 64 MiB), so
-/// the fallback is unreachable by construction — it names zero rather than
-/// failing, because every call site already enforces the cap first.
+/// the fallback is unreachable by construction — it releases nothing rather
+/// than failing, because every call site already enforced the cap first and
+/// a refusal that kept its permits would let a peer drain the process
+/// budget. The [`BufferBudget`] `Drop` backstop returns any remainder when
+/// the connection ends, so even a miscounted release cannot leak permits
+/// past the connection's life.
 fn u64_to_usize(n: u64) -> usize {
     usize::try_from(n).unwrap_or(0)
 }
@@ -369,6 +433,13 @@ where
 {
     let mut assembler = Assembler::with_limit(ctx.limits.max_message_bytes);
     // Seeded with the leftover bytes rather than empty: see `serve_websocket`.
+    // No cap is checked on the seed, and none is needed: the bytes were
+    // already buffered by the connection layer (a move, not a copy), and the
+    // decoder below refuses an over-cap frame on its length prefix before
+    // copying any payload. A buffer that decodes to nothing is an incomplete
+    // single frame, which is at most one header past the cap — so the buffer
+    // is self-bounding, and a length check here would only refuse
+    // legitimately pipelined frames.
     let mut buf: Vec<u8> = prefix;
     // The process-wide budget this connection currently holds. Acquired per
     // data frame, released when its message completes or is refused, and any
@@ -403,6 +474,7 @@ where
                         &mut assembler,
                         frame,
                         &mut budget,
+                        ctx.limits.handler_timeout,
                         &ctx.tenant,
                     )
                     .await
@@ -544,17 +616,26 @@ where
     }
 }
 
-/// Send a close frame with a code and reason, ignoring a write failure.
+/// Send a close frame with a code and reason, then half-close the write side.
 ///
 /// A close is the last thing written on a connection that is already ending, so a failure
 /// to send it is not actionable -- the peer is gone or the socket is closed, and both mean
 /// the same thing to the caller.
+///
+/// The half-close follows the in-house terminal paths (`write` + `flush` +
+/// `shutdown`): the peer's unread bytes stay unread — unlike `refuse_with`
+/// there is no drain here — because at idle-fire time there is nothing
+/// unread (any arrival would have reset the timer), and at shutdown the
+/// accept loop already bounds the whole teardown by the drain deadline. A
+/// drain that waited on an idle peer would park every closing task for its
+/// full timeout doing nothing.
 async fn close_with<S>(stream: &mut S, code: u16, reason: &str)
 where
     S: tokio::io::AsyncWrite + Unpin + Send,
 {
     let mut sender = WsSender { stream };
     sender.send_frame(&Frame::close(code, reason)).await;
+    let _ = stream.shutdown().await;
 }
 
 /// Handle one decoded frame, returning an outcome when the connection should end.
@@ -569,6 +650,7 @@ async fn dispatch_frame<S>(
     assembler: &mut Assembler,
     frame: Frame,
     budget: &mut BufferBudget,
+    handler_timeout: std::time::Duration,
     tenant: &str,
 ) -> Option<WsOutcome>
 where
@@ -578,8 +660,15 @@ where
         // §5.5.3: a pong carries **the same payload** as the ping. An empty pong is a
         // legal frame and useless: a peer using pings as a liveness probe with a nonce
         // cannot tell its own ping from anyone else's.
+        //
+        // Sent through `send` rather than `send_frame` so a malformed pong is
+        // refused instead of emitted — and a failed write ends the connection
+        // as `ClientGone` rather than a protocol error: nothing the peer did
+        // was wrong, it just left.
         let mut sender = WsSender { stream };
-        sender.send_frame(&Frame::pong(frame.payload)).await;
+        if sender.send(Opcode::Pong, &frame.payload).await.is_err() {
+            return Some(WsOutcome::ClientGone);
+        }
         return None;
     }
 
@@ -592,8 +681,14 @@ where
         // permits: a close with no status means "no status", and replying with 1000 is
         // the defined way to say "normal closure". The drain inside is the same one
         // every refusal uses: the peer may have pipelined messages behind its close,
-        // and they must not turn this clean ending into a reset.
-        let code = frame.close_code().unwrap_or(1000);
+        // and they must not turn this clean ending into a reset. An invalid code can
+        // never arrive here through the decoder (it refuses those with 1007), but a
+        // `Frame` assembled by hand skips that gate — so an off-protocol code falls
+        // back to 1000 rather than echoing the violation back onto the wire.
+        let code = frame
+            .close_code()
+            .filter(|c| ws_frame::is_valid_close_code(*c))
+            .unwrap_or(1000);
         refuse_with(stream, code, "").await;
         return Some(WsOutcome::Closed);
     }
@@ -612,8 +707,28 @@ where
         Ok(Progress::Control(_) | Progress::Accumulating) => None,
         Ok(Progress::Complete(message)) => {
             budget.release(message.payload.len());
-            let mut sender = WsSender { stream };
-            handler.on_message(&message, &mut sender, tenant).await;
+            // Bounded: the frame loop answers `Ping`/`Pong`/`Close` itself,
+            // but only between messages. While a handler runs, liveness
+            // probes queue unanswered and the peer concludes the server is
+            // dead — a parked handler would turn one slow guest into a
+            // connection the peer resets. The timeout converts that into an
+            // explicit `1011` with a record, and the cancelled future drops
+            // the guest call it was running.
+            let timed_out = {
+                let mut sender = WsSender {
+                    stream: &mut *stream,
+                };
+                tokio::time::timeout(
+                    handler_timeout,
+                    handler.on_message(&message, &mut sender, tenant),
+                )
+                .await
+                .is_err()
+            };
+            if timed_out {
+                refuse_with(stream, 1011, "the message handler exceeded its time bound").await;
+                return Some(WsOutcome::ProtocolError);
+            }
             None
         }
         Err(e) => {
@@ -698,6 +813,13 @@ pub const fn supported_version() -> Version {
 }
 
 #[cfg(test)]
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
 mod tests {
     use super::*;
 
@@ -732,6 +854,107 @@ mod tests {
         assert!(
             !text.contains("101"),
             "a request without an upgrade must never be answered with a 101: {text}"
+        );
+    }
+
+    // -- the sender ----------------------------------------------------------
+
+    /// `send` refuses a control payload the peer would refuse.
+    ///
+    /// A 200-byte ping would make the *peer* close the connection with
+    /// `1002`, blaming our framing. Refusing at the call site names the
+    /// handler bug instead of the wire.
+    #[tokio::test]
+    async fn send_refuses_an_oversized_control_payload() {
+        let (_client, mut server) = tokio::io::duplex(64 * 1024);
+        let mut sender = WsSender {
+            stream: &mut server,
+        };
+        let e = sender
+            .send(Opcode::Ping, &[0u8; 126])
+            .await
+            .expect_err("a 126-byte ping must be refused");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        // Data frames of any in-cap size still send.
+        sender
+            .send(Opcode::Binary, &[0u8; 126])
+            .await
+            .expect("a data frame of the same size must send");
+    }
+
+    /// A handler that never answers still ends the connection — with `1011`,
+    /// not with the peer's liveness reset.
+    ///
+    /// While a handler runs, the loop cannot answer pings; without a bound a
+    /// parked guest turns one slow call into a connection the peer resets.
+    /// The timeout converts the stall into an explicit close the record can
+    /// name.
+    #[tokio::test]
+    async fn a_parked_handler_closes_with_1011() {
+        struct Parked;
+        impl WebSocketHandler for Parked {
+            fn on_message<'a>(
+                &'a self,
+                _message: &'a Message,
+                _send: &'a mut WsSender<'a>,
+                _tenant: &str,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+                Box::pin(std::future::pending())
+            }
+        }
+
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        // The server side runs in a task: after the timeout it writes the
+        // close and then drains, which waits for the client — so the client
+        // half must stay readable in this task while the server is parked.
+        let finished = tokio::spawn(async move {
+            let mut server = server;
+            let mut assembler = Assembler::with_limit(1024);
+            let mut budget = BufferBudget::new(std::sync::Arc::new(tokio::sync::Semaphore::new(
+                1024 * 1024,
+            )));
+            let frame = Frame {
+                opcode: Opcode::Text,
+                fin: true,
+                payload: b"hi".to_vec(),
+            };
+            dispatch_frame(
+                &mut server,
+                &Parked,
+                &mut assembler,
+                frame,
+                &mut budget,
+                std::time::Duration::from_millis(50),
+                "test",
+            )
+            .await
+        });
+
+        // The peer reads a close frame naming 1011, not a silent reset.
+        let mut head = [0u8; 4];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut head),
+        )
+        .await
+        .expect("the close must arrive promptly")
+        .expect("the close frame is complete");
+        assert_eq!(head[0], 0x88, "a final close frame: {head:?}");
+        assert!(
+            head[1] >= 2,
+            "a close frame carries at least its code: {head:?}"
+        );
+        assert_eq!(
+            u16::from_be_bytes([head[2], head[3]]),
+            1011,
+            "a timed-out handler is an internal error: {head:?}"
+        );
+        // Dropping the client ends the server's drain, and the loop reports
+        // the policy close.
+        drop(client);
+        assert_eq!(
+            finished.await.expect("the server task ends"),
+            Some(WsOutcome::ProtocolError)
         );
     }
 }

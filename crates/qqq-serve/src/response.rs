@@ -207,9 +207,13 @@ impl OutboundRefusal {
 ///
 /// # Errors
 ///
-/// Returns the first violation found: a status with no wire meaning, a
-/// header name that is not a token, a value carrying a control byte, or
-/// a body past the cap.
+/// Returns the first violation found: a status with no meaning as a *final*
+/// response, a header name that is not a token, a value carrying a control
+/// byte, or a body past the cap.
+///
+/// Only final statuses pass (`200..=599`): a `1xx` interim has no meaning as
+/// the response to a request — a client that receives one waits for the real
+/// response that never comes.
 ///
 /// The header *count* is deliberately not capped here: headers on a serve
 /// `Response` are handler-built (host side), not attacker-controlled wire
@@ -217,10 +221,10 @@ impl OutboundRefusal {
 /// emission. The body cap is the enforced bound; see
 /// [`crate::transport::HyperLimits::max_response_body_bytes`].
 pub fn validate_outbound(response: &Response, body_cap_bytes: u64) -> Result<(), OutboundRefusal> {
-    if !(100..=599).contains(&response.status) {
+    if !(200..=599).contains(&response.status) {
         return Err(OutboundRefusal {
             detail: format!(
-                "status {} has no meaning on the wire (100-599 only)",
+                "status {} has no meaning as a final response (200-599 only)",
                 response.status
             ),
         });
@@ -313,6 +317,21 @@ pub fn write_response(
 /// [`response_body_for_wire`] and [`write_response`].
 #[must_use]
 pub fn write_response_head(resp: &Response, version: Version, keep_alive: bool) -> Vec<u8> {
+    // Validated at the point of emission: a handler-controlled header
+    // carrying CRLF would split the keep-alive stream, and the hyper path
+    // already refuses such responses — the in-house path must agree rather
+    // than emit them. The body cap is `u64::MAX` here on purpose: bodies are
+    // already in memory (nothing streams through this function), so the size
+    // question was settled when they were read; what is enforced here is
+    // structure (status, names, controls), never size.
+    let safe;
+    let resp = match validate_outbound(resp, u64::MAX) {
+        Ok(()) => resp,
+        Err(refusal) => {
+            safe = refusal.replacement();
+            &safe
+        }
+    };
     // The body is measured, not the declared header, so a caller cannot
     // desynchronise the stream by setting a `Content-Length` that disagrees
     // with what it passes in.
@@ -427,6 +446,17 @@ pub fn response_body_for_wire(resp: &Response, head_request: bool) -> &[u8] {
 /// more to write.
 #[must_use]
 pub fn write_stream_head(resp: &Response, version: Version, keep_alive: bool) -> Vec<u8> {
+    // Same emission gate as `write_response_head`: a streaming head splits a
+    // stream exactly the way a flat head does. (`StreamWriter::begin` routes
+    // through here, so writer-constructed heads are covered too.)
+    let safe;
+    let resp = match validate_outbound(resp, u64::MAX) {
+        Ok(()) => resp,
+        Err(refusal) => {
+            safe = refusal.replacement();
+            &safe
+        }
+    };
     let mut out = String::with_capacity(128 + resp.headers.len() * 32);
     let _ = write!(
         out,
@@ -461,8 +491,14 @@ pub fn write_stream_head(resp: &Response, version: Version, keep_alive: bool) ->
             }
         }
         Version::Http10 => {
-            // No chunked encoding exists in HTTP/1.0, so EOF must delimit the body.
-            out.push_str("Content-Length: 0\r\n");
+            // No chunked encoding exists in HTTP/1.0, so EOF must delimit
+            // the body. `Content-Length: 0` is emitted only when no body is
+            // allowed at all: emitting it before a real body would tell the
+            // client the body is empty, and the bytes after it would parse
+            // as the next response.
+            if forbids_body(resp.status) {
+                out.push_str("Content-Length: 0\r\n");
+            }
         }
     }
 
@@ -984,6 +1020,17 @@ mod tests {
         }
     }
 
+    /// Interim statuses are not final responses: emitting `103` and stopping
+    /// leaves the client waiting for a response that never comes.
+    #[test]
+    fn outbound_refuses_interim_statuses() {
+        for status in [100u16, 101, 103] {
+            let r = Response::status(status);
+            super::validate_outbound(&r, 1 << 20)
+                .expect_err(&format!("{status} is interim, not final"));
+        }
+    }
+
     #[test]
     fn outbound_refuses_a_splitting_header_name() {
         let mut r = Response::text(200, "hi");
@@ -1012,6 +1059,32 @@ mod tests {
             refusal.detail.contains("1048577"),
             "detail carries the length"
         );
+    }
+
+    /// The writers enforce the gate, not just the validator: a guest-
+    /// controlled header value with CRLF becomes a 500 *replacement* on
+    /// the wire, never a split stream.
+    #[test]
+    fn writers_replace_splitting_responses_instead_of_emitting_them() {
+        for make in [Response::status(103), {
+            let mut r = Response::text(200, "ok");
+            r.set_header("X-Evil", "a\r\nContent-Length: 0\r\n\r\npwned");
+            r
+        }] {
+            for version in [Version::Http11, Version::Http10] {
+                let bytes = write_response(&make, version, true, false);
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(
+                    text.starts_with("HTTP/1.1 500 Internal Server Error")
+                        || text.starts_with("HTTP/1.0 500 Internal Server Error"),
+                    "a bad response must become a 500, got: {text:?}"
+                );
+                assert!(
+                    !text.contains("pwned"),
+                    "attacker bytes must not reach the wire: {text:?}"
+                );
+            }
+        }
     }
 
     // -- status line and framing -------------------------------------------
@@ -1110,10 +1183,13 @@ mod tests {
 
     /// A status that forbids a body must not carry one: a client reading it
     /// would desynchronise and treat the bytes as the next response's status
-    /// line.
+    /// line. (`100` is not written here — it is not a final response at all
+    /// and `validate_outbound` refuses it before emission; `forbids_body`
+    /// still classifies it, asserted below.)
     #[test]
     fn a_status_that_forbids_a_body_gets_none() {
-        for status in [204, 304, 100] {
+        assert!(forbids_body(100), "100 must forbid a body");
+        for status in [204, 304] {
             assert!(forbids_body(status), "{status} must forbid a body");
             let r = Response::text(status, "this must not appear");
             let bytes = write_response(&r, Version::Http11, true, false);
@@ -1844,6 +1920,24 @@ mod tests {
             Some("close"),
             "EOF is the only way an HTTP/1.0 client learns the body ended"
         );
+        // The regression assertion the old output passed: a `Content-Length:
+        // 0` before a real body tells the client the body is empty, and the
+        // bytes after it parse as the next response.
+        assert_eq!(
+            header(&headers, "Content-Length"),
+            None,
+            "an HTTP/1.0 streaming body is delimited by EOF, not by a lying length"
+        );
+    }
+
+    /// ...while a bodyless status keeps its explicit zero: `forbids_body`
+    /// means no bytes follow, so the length is true rather than a lie.
+    #[test]
+    fn an_http10_bodyless_status_keeps_content_length_zero() {
+        let resp = Response::status(204);
+        let head = write_stream_head(&resp, Version::Http10, true);
+        let (_, headers, _) = parse_response(&head);
+        assert_eq!(header(&headers, "Content-Length"), Some("0"));
     }
 
     /// A status that forbids a body is not framed chunked.

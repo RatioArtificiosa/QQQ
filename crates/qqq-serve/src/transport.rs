@@ -3,9 +3,9 @@
 //! The serving transport abstraction (`F-16` Option A, Wave 8).
 //!
 //! One narrow seam between the socket and QQQ policy: every transport
-//! yields a [`RequestHead`], streams the body, and takes a response
-//! through [`Responder`]. The in-house HTTP/1.1 path implements it today;
-//! the hyper path implements it next; the dispatch pipeline above the
+//! yields a [`RequestHead`], streams the body, and takes a response to
+//! render. The in-house HTTP/1.1 path and the hyper HTTP/1.1 and HTTP/2
+//! paths all implement it; the dispatch pipeline above the
 //! seam never learns which one served the connection.
 //!
 //! # Why head / body-stream / responder, and nothing else
@@ -251,6 +251,13 @@ pub struct HyperLimits {
     pub max_concurrent_streams: u32,
     /// Streams awaiting reset-acknowledgement (Rapid Reset budget).
     ///
+    /// A count of streams, not a rate: hyper closes the connection when more
+    /// than this many resets are pending at once. The distributed shape —
+    /// many connections each resetting just under its cap — is bounded one
+    /// layer up, by the process-wide admission budget (`F-13`, on by default
+    /// in `ServerConfig`): per-connection caps times an admission-bounded
+    /// connection count is a bounded total, so no second limiter lives here.
+    ///
     /// ```
     /// use qqq_serve::transport::HyperLimits;
     ///
@@ -258,6 +265,10 @@ pub struct HyperLimits {
     /// ```
     pub max_pending_reset_streams: usize,
     /// Server-initiated resets before the connection closes (`MadeYouReset`).
+    ///
+    /// A count of streams on this connection, like
+    /// [`Self::max_pending_reset_streams`], and composed with the same
+    /// admission bound — not a per-second rate.
     ///
     /// ```
     /// use qqq_serve::transport::HyperLimits;
@@ -428,6 +439,10 @@ impl Default for HyperLimits {
 /// this reads it the same way. Periods come from the connection
 /// config; byte caps from the parser constants they mirror.
 ///
+/// # Panics
+///
+/// If `header_timeout` is not under `idle_timeout`.
+///
 /// ```
 /// use qqq_serve::conn::ConnectionConfig;
 /// use qqq_serve::transport::hyper_limits_for;
@@ -441,11 +456,12 @@ impl Default for HyperLimits {
 #[must_use]
 pub fn hyper_limits_for(config: &crate::conn::ConnectionConfig) -> HyperLimits {
     // Slow-loris order, enforced where authors will trip it: a head
-    // must time out before idleness could misattribute it. Debug-only
-    // because the map cannot refuse a config (it returns bounds, not
-    // a verdict) — but an inverted deployment deserves a loud test
-    // failure rather than a quietly misattributed timeout in prod.
-    debug_assert!(
+    // must time out before idleness could misattribute it. A hard assert
+    // rather than a debug one: this runs once per listener at startup, not
+    // per connection, so a failure is a fail-fast misconfiguration — and a
+    // mapping test pins the relationship, so the assert fires only on a
+    // config the tests already refuse.
+    assert!(
         config.header_timeout < config.idle_timeout,
         "header {:?} must be under idle {:?}, or slow heads misattribute",
         config.header_timeout,
@@ -470,6 +486,15 @@ pub fn hyper_limits_for(config: &crate::conn::ConnectionConfig) -> HyperLimits {
 /// panics when `header_read_timeout` is configured without one (hyper
 /// 1.12.0 `http1.rs` and `common/time.rs`: "Panics if ... configured
 /// without a `Timer`"), and that panic lands on the serving task.
+///
+/// The strictness knobs are pinned, not inherited: hyper's defaults are
+/// strict today (`false` on every leniency), and a hyper upgrade that
+/// flipped one would silently widen what this transport parses past what
+/// the in-house parser accepts — the differential the `F-04` rows exist
+/// to prevent. The `Date` header stays on: hyper adds it and the in-house
+/// writer does not, which is a known, accepted emission difference (a
+/// clock reading, never a framing fact), recorded here rather than
+/// discovered in a capture.
 pub fn apply_http1(builder: &mut hyper::server::conn::http1::Builder, limits: &HyperLimits) {
     builder.timer(hyper_util::rt::TokioTimer::new());
     builder.header_read_timeout(Some(limits.header_read_timeout));
@@ -477,6 +502,13 @@ pub fn apply_http1(builder: &mut hyper::server::conn::http1::Builder, limits: &H
     builder.max_headers(limits.http1_max_headers);
     builder.max_header_size(limits.http1_max_header_size);
     builder.keep_alive(true);
+    builder.half_close(false);
+    builder.title_case_headers(false);
+    builder.preserve_header_case(false);
+    builder.allow_multiple_spaces_in_request_line_delimiters(false);
+    builder.ignore_invalid_headers(false);
+    builder.auto_date_header(true);
+    builder.pipeline_flush(false);
 }
 
 /// Apply the knobs to a hyper HTTP/2 server builder (`F-16`).
@@ -486,10 +518,19 @@ pub fn apply_http1(builder: &mut hyper::server::conn::http1::Builder, limits: &H
 /// `u32`-typed field carries that, so no conversion exists to get wrong.
 /// The timer is set for the same reason as in [`apply_http1`]: without
 /// it the PING cadence is inert and the bound it promises is §11-shaped.
+///
+/// `max_frame_size` is pinned to the RFC 9113 default (16 KiB): it bounds
+/// the largest single DATA frame hyper buffers before the body reader
+/// sees it, and an unpinned default that grew would grow per-frame memory
+/// past what the in-house path ever holds. Window sizes stay hyper's
+/// (flow-control tuning, not a memory bound), and the `Date` header
+/// follows [`apply_http1`]: on, and a known emission difference from the
+/// in-house writer.
 pub fn apply_http2<E>(builder: &mut hyper::server::conn::http2::Builder<E>, limits: &HyperLimits) {
     builder.timer(hyper_util::rt::TokioTimer::new());
     builder.max_concurrent_streams(limits.max_concurrent_streams);
     builder.max_header_list_size(limits.h2_max_header_list_bytes);
+    builder.max_frame_size(Some(16 * 1024u32));
     builder.max_pending_accept_reset_streams(limits.max_pending_reset_streams);
     builder.max_local_error_reset_streams(limits.max_local_error_reset_streams);
     builder.keep_alive_interval(Some(limits.h2_ping_interval));

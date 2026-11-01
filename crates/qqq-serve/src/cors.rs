@@ -113,18 +113,50 @@ impl Origin {
             return Err(CorsError::BadOrigin(format!("`{value}` has no host")));
         }
         let scheme = scheme.to_ascii_lowercase();
+        if scheme.is_empty() {
+            return Err(CorsError::BadOrigin(format!(
+                "`{value}` has no scheme before `://`"
+            )));
+        }
+        if !scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
+        {
+            return Err(CorsError::BadOrigin(format!(
+                "`{value}` has a scheme (`{scheme}`) with characters a scheme cannot carry"
+            )));
+        }
 
         // Split the authority into host and port. A bare IPv6 literal is bracketed, so
         // a colon is the port separator only when what follows it is all digits — which
         // excludes every colon inside `[...]`, since those are followed by hex.
         let (host, port) = match rest.rfind(':') {
-            Some(i) if rest[i + 1..].chars().all(|c| c.is_ascii_digit()) => {
+            Some(i)
+                if !rest[i + 1..].is_empty()
+                    && rest[i + 1..].chars().all(|c| c.is_ascii_digit()) =>
+            {
                 (&rest[..i], Some(&rest[i + 1..]))
             }
             _ => (rest, None),
         };
         if host.is_empty() {
             return Err(CorsError::BadOrigin(format!("`{value}` has no host")));
+        }
+        // Userinfo is never part of an `Origin`: browsers do not send it, so a
+        // value carrying one was crafted, and matching it could grant an
+        // attacker-chosen suffix.
+        if host.contains('@') {
+            return Err(CorsError::BadOrigin(format!(
+                "`{value}` carries userinfo; an Origin is scheme, host and port only"
+            )));
+        }
+        // A colon outside a bracketed IPv6 literal is a second port separator
+        // or garbage — either way the authority is malformed, and accepting it
+        // would match a host the operator did not configure.
+        if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+            return Err(CorsError::BadOrigin(format!(
+                "`{value}` has a malformed authority: `:` outside `[...]`"
+            )));
         }
         // A path, query or fragment in an Origin is a malformed header: the value is an
         // origin, not a URL. Accepting one would mean matching a prefix of a URL, which
@@ -449,11 +481,15 @@ impl Cors {
         let Some(raw) = origin else {
             return deny(Reason::NotACorsRequest);
         };
-        if self.allowed.is_empty() {
-            return deny(Reason::NoPolicy);
-        }
+        // `null` is checked before the policy: an empty policy denies with
+        // `NoPolicy`, which would mask a sandboxed-iframe origin behind a
+        // configuration remark. The denial is the same either way, but the
+        // *reason* is what tells the operator which of the two to fix.
         if Origin::is_null(raw) {
             return deny(Reason::NullOrigin);
+        }
+        if self.allowed.is_empty() {
+            return deny(Reason::NoPolicy);
         }
         let Ok(parsed) = Origin::parse(raw) else {
             return deny(Reason::OriginNotAllowed(raw.to_owned()));
@@ -545,6 +581,18 @@ impl Cors {
         headers.push(("Access-Control-Allow-Methods", method.clone()));
         if !requested.is_empty() {
             headers.push(("Access-Control-Allow-Headers", requested.join(", ")));
+        }
+        // The preflight answer varies by the requested method and headers as
+        // well as the origin: a cache that keys only on `Origin` serves one
+        // origin's `DELETE`-grant to another origin's `GET` preflight. The
+        // simple-request `Vary: Origin` is widened here, where the extra
+        // dimensions appear.
+        if let Some((_, vary)) = headers
+            .iter_mut()
+            .find(|(k, _)| k.eq_ignore_ascii_case("vary"))
+        {
+            "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+                .clone_into(vary);
         }
         if let Some(age) = self.max_age {
             headers.push(("Access-Control-Max-Age", age.to_string()));
@@ -824,9 +872,22 @@ mod tests {
         );
     }
 
-    // -- Vary ---------------------------------------------------------------
+    /// **`null` is reported as `null`, even with no policy configured.**
+    ///
+    /// The denial is the same either way, but the reason tells the operator
+    /// which of the two to fix: an empty policy denies with `NoPolicy`, which
+    /// would mask a sandboxed-iframe origin behind a configuration remark.
+    #[test]
+    fn the_null_origin_keeps_its_reason_without_a_policy() {
+        let cors = Cors::none();
+        let decision = cors.simple(Some("null"));
+        assert!(
+            matches!(decision.reason(), Some(Reason::NullOrigin)),
+            "{decision:?}"
+        );
+    }
 
-    /// **`Vary: Origin` is emitted on a denial too.**
+    // -- Vary ---------------------------------------------------------------    /// **`Vary: Origin` is emitted on a denial too.**
     ///
     /// A denial is origin-dependent. Without `Vary`, a shared cache stores the denial
     /// for one origin and serves it to an origin that should have been granted — so the
@@ -909,6 +970,32 @@ mod tests {
             Some("content-type, x-trace")
         );
         assert_eq!(decided(h, "Access-Control-Max-Age").as_deref(), Some("600"));
+    }
+
+    /// **A granted preflight varies on the requested method and headers.**
+    ///
+    /// The answer depends on `Access-Control-Request-Method` and
+    /// `Access-Control-Request-Headers` as well as `Origin`: a cache keyed
+    /// only on `Origin` would serve one origin's grant to another origin's
+    /// differently-shaped preflight.
+    #[test]
+    fn a_granted_preflight_widens_vary() {
+        let cors = Cors::from_manifest(["https://app.example.com"])
+            .expect("valid")
+            .with_methods(["GET", "POST"])
+            .with_allowed_headers(["content-type"]);
+        let decision = cors.preflight(
+            Some("https://app.example.com"),
+            Some("POST"),
+            Some("content-type"),
+        );
+        assert!(decision.is_granted(), "{decision:?}");
+        assert_eq!(
+            decided(decision.headers(), "Vary").as_deref(),
+            Some("Origin, Access-Control-Request-Method, Access-Control-Request-Headers"),
+            "{:?}",
+            decision.headers()
+        );
     }
 
     /// **A preflight for a method the policy does not allow is denied.**
@@ -1056,6 +1143,21 @@ mod tests {
             "https://example.com?q=1",
             "https://example.com#frag",
             "null",
+            // An empty scheme is not a scheme.
+            "://example.com",
+            // A scheme carries alphanumerics and `+-.`; a space is a
+            // malformed header, not a scheme to normalize.
+            "ht tp://example.com",
+            // An empty port is not "no port": `host:` must not parse to a
+            // host of `host:` or to `host` with an empty port.
+            "https://example.com:",
+            // Userinfo is never part of an Origin; browsers do not send it.
+            "https://user@example.com",
+            "https://user:pass@example.com",
+            // A colon outside a bracketed literal is a second separator.
+            "https://example.com:pa:80",
+            "https://[::1",
+            "https://example.com:80:80",
         ] {
             let err = Origin::parse(bad).expect_err("must refuse");
             assert!(matches!(err, CorsError::BadOrigin(_)), "{bad:?}: {err:?}");

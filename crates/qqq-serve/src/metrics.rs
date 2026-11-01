@@ -368,6 +368,27 @@ impl TenantLabels {
         u16::try_from(seen.len()).unwrap_or(u16::MAX)
     }
 
+    /// The index for a name that is already tracked, without allocating.
+    ///
+    /// Read paths ([`HttpMetrics::bytes_in_for`] and friends) must not call
+    /// [`Self::index`]: a read that allocates a slot mutates the cardinality
+    /// it reports — a tenant that never sent a byte would appear in the
+    /// exposition the first time anyone asked about it.
+    #[must_use]
+    pub fn lookup_index(&self, name: &str) -> Option<u16> {
+        if name.is_empty() || name == "default" {
+            return Some(0);
+        }
+        let seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        let i = seen.iter().position(|s| s == name)?;
+        let index = u16::try_from(i).unwrap_or(u16::MAX).saturating_add(1);
+        // Past the ceiling shares one bucket; only named tenants have one.
+        if usize::from(index) > Self::MAX_TENANTS {
+            return None;
+        }
+        Some(index)
+    }
+
     /// The name behind an [`Self::index`], for rendering a series back to something readable.
     ///
     /// `None` for the past-the-ceiling bucket, whose members deliberately share one label.
@@ -422,6 +443,13 @@ pub struct Latency {
     /// over a long-running process the way a float sum would.
     sum_micros: AtomicU64,
 }
+
+// `Relaxed` throughout this type, deliberately: each counter is individually
+// atomic, and a scrape races with recording no matter the ordering — a scrape
+// taken mid-`observe` can see the new `count` with the old `sum`, and the next
+// scrape resolves it. No decision reads two of these counters as one
+// consistent snapshot (the mean divides whatever the scrape saw), so stronger
+// ordering would cost synchronization for consistency nothing consumes.
 
 impl Latency {
     /// The upper bounds, in microseconds.
@@ -554,21 +582,31 @@ impl HttpMetrics {
     ) {
         {
             let mut m = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
-            *m.entry((method, StatusClass::of(status))).or_insert(0) += 1;
+            // Saturating, never wrapping or panicking: debug and release must
+            // agree, and a counter that wraps corrupts every rate built on
+            // it. Overflow is unreachable (2^64 requests), so saturation is
+            // a divergence fix, not a behavior choice.
+            m.entry((method, StatusClass::of(status)))
+                .and_modify(|n| *n = n.saturating_add(1))
+                .or_insert(1);
         }
         {
             let mut m = self
                 .body_bytes_in
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            *m.entry(self.tenants.index(tenant)).or_insert(0) += bytes_in;
+            m.entry(self.tenants.index(tenant))
+                .and_modify(|n| *n = n.saturating_add(bytes_in))
+                .or_insert(bytes_in);
         }
         {
             let mut m = self
                 .body_bytes_out
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            *m.entry(self.tenants.index(tenant)).or_insert(0) += bytes_out;
+            m.entry(self.tenants.index(tenant))
+                .and_modify(|n| *n = n.saturating_add(bytes_out))
+                .or_insert(bytes_out);
         }
         self.latency.observe(latency_micros);
     }
@@ -586,7 +624,9 @@ impl HttpMetrics {
             .body_limit_hits
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        *m.entry(self.tenants.index(tenant)).or_insert(0) += 1;
+        m.entry(self.tenants.index(tenant))
+            .and_modify(|n| *n = n.saturating_add(1))
+            .or_insert(1);
     }
 
     /// Record a request refused by the process-wide admission budget.
@@ -670,7 +710,9 @@ impl HttpMetrics {
             .connections
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        *m.entry(outcome).or_insert(0) += 1;
+        m.entry(outcome)
+            .and_modify(|n| *n = n.saturating_add(1))
+            .or_insert(1);
     }
 
     /// Open connections right now.
@@ -701,34 +743,52 @@ impl HttpMetrics {
     }
 
     /// Bytes read for a tenant.
+    ///
+    /// A name that was never recorded reads 0 — without allocating a slot
+    /// for it (see [`TenantLabels::lookup_index`]). A tenant past the label
+    /// ceiling shares one bucket by design, and that bucket is readable only
+    /// in the exposition, not by name.
     #[must_use]
     pub fn bytes_in_for(&self, tenant: &str) -> u64 {
+        let Some(index) = self.tenants.lookup_index(tenant) else {
+            return 0;
+        };
         self.body_bytes_in
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&self.tenants.index(tenant))
+            .get(&index)
             .copied()
             .unwrap_or(0)
     }
 
     /// Bytes written for a tenant.
+    ///
+    /// As [`Self::bytes_in_for`]: unknown names read 0 without allocating.
     #[must_use]
     pub fn bytes_out_for(&self, tenant: &str) -> u64 {
+        let Some(index) = self.tenants.lookup_index(tenant) else {
+            return 0;
+        };
         self.body_bytes_out
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&self.tenants.index(tenant))
+            .get(&index)
             .copied()
             .unwrap_or(0)
     }
 
     /// Body-limit refusals for a tenant.
+    ///
+    /// As [`Self::bytes_in_for`]: unknown names read 0 without allocating.
     #[must_use]
     pub fn body_limit_hits_for(&self, tenant: &str) -> u64 {
+        let Some(index) = self.tenants.lookup_index(tenant) else {
+            return 0;
+        };
         self.body_limit_hits
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&self.tenants.index(tenant))
+            .get(&index)
             .copied()
             .unwrap_or(0)
     }
@@ -1011,6 +1071,11 @@ fn prometheus_escape(value: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
+            // A raw CR splits the exposition line exactly like an LF —
+            // `tenant "a\r\nb"` would forge a second metric line — and a tab
+            // is whitespace the parser does not expect inside a label.
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
             c => out.push(c),
         }
     }
@@ -1112,6 +1177,10 @@ mod tests {
         assert_eq!(prometheus_escape("a\"b"), "a\\\"b");
         assert_eq!(prometheus_escape("a\\b"), "a\\\\b");
         assert_eq!(prometheus_escape("a\nb"), "a\\nb");
+        // A raw CR splits the exposition line like an LF, and a tab is
+        // whitespace the parser does not expect inside a label.
+        assert_eq!(prometheus_escape("a\rb"), "a\\rb");
+        assert_eq!(prometheus_escape("a\tb"), "a\\tb");
 
         let m = HttpMetrics::new();
         // A name with a quote and a backslash, recorded as a real tenant would be.
@@ -1509,6 +1578,31 @@ mod tests {
         assert_eq!(m.bytes_out_for("acme"), 2_000);
         assert_eq!(m.bytes_out_for("globex"), 8);
         assert_eq!(m.bytes_in_for("nobody"), 0);
+    }
+
+    /// A read that allocates would corrupt the cardinality it reports.
+    ///
+    /// Asking about a tenant that never sent a byte must not create its
+    /// series: the getter returns 0 and the label set is unchanged, so a
+    /// scrape before and after the question is identical.
+    #[test]
+    fn a_read_for_an_unknown_tenant_allocates_nothing() {
+        let m = HttpMetrics::new();
+        m.record_request(Method::Post, 200, 1, "acme", 100, 1_000);
+        let before = m.render_prometheus();
+        assert_eq!(m.bytes_in_for("nobody"), 0);
+        assert_eq!(m.bytes_out_for("nobody"), 0);
+        assert_eq!(m.body_limit_hits_for("nobody"), 0);
+        assert_eq!(
+            m.render_prometheus(),
+            before,
+            "a read must not change the exposition"
+        );
+        // And a lookup for a name nobody recorded is empty, not zero-indexed.
+        let labels = TenantLabels::new();
+        assert_eq!(labels.lookup_index("nobody"), None);
+        assert_eq!(labels.lookup_index("default"), Some(0));
+        assert_eq!(labels.lookup_index(""), Some(0));
     }
 
     /// **A refused body is counted separately from a completed request.**

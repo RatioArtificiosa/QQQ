@@ -23,7 +23,8 @@
 //! | TLS, mTLS | **implemented** (`SRV-007`, `SRV-008`) |
 //! | Per-route authentication policy (refuse-by-default) | **implemented** (`auth`) |
 //! | Authenticators (`bearer-jwt`, `mtls`, `signed-request`) | **not implemented** — refused, never served |
-//! | `WebSockets`, SSE | not implemented (`SRV-009`, `SRV-010`) |
+//! | `WebSockets` over HTTP/1.1 and HTTP/2 | **implemented** (`SRV-009`; in-house `serve_ws_route`, hyper `serve_upgrade`/`serve_h2_connect`, `ws`/`ws_frame`/`ws_message`/`ws_conn`) |
+//! | SSE | **implemented** (`SRV-010`; `serve_sse_route`, hyper `answer_sse`, `sse`) |
 //!
 //! Each of those is named rather than silently absent. A listener that accepted
 //! connections without the limits `SRV-005` and `SRV-011` require would be worse
@@ -45,11 +46,13 @@
 //!
 //! ## The one place this crate deliberately closes a connection
 //!
-//! `server::drain_body` returns `false` for a `chunked` request body, ending the
-//! connection. De-chunking is `SRV-004`'s job and does not exist yet, and
-//! reading-and-discarding a chunked body without decoding it would leave the
-//! connection at an offset only a decoder knows — a request-smuggling shape.
-//! Closing is the honest answer until the decoder lands.
+//! `server::drain_body` returns `None` — and the connection closes — when the
+//! body's framing leaves the offset untrustworthy: a malformed chunked body,
+//! or one past the cap. Well-formed bodies, chunked included, are decoded
+//! through `BodyReader` (`SRV-004`, `SRV-005`); closing is the answer only
+//! where decoding cannot honestly continue, because reading-and-discarding a
+//! body without decoding it would leave the connection at an offset only a
+//! decoder knows — a request-smuggling shape.
 //!
 //! ## Why the route table is first
 //!

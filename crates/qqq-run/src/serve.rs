@@ -917,6 +917,9 @@ fn build_ws(server: &qqq_cap::manifest::Server) -> Result<qqq_serve::ws::WsConfi
     let total = declared
         .and_then(|w| w.max_total_buffer_bytes)
         .unwrap_or(defaults.max_total_buffer_bytes);
+    let handler_timeout = declared
+        .and_then(|w| w.handler_timeout_ms)
+        .map_or(defaults.handler_timeout, std::time::Duration::from_millis);
     for (name, value, ceiling) in [
         ("max_frame_bytes", frame, qqq_serve::ws::FRAME_LIMIT_CEILING),
         (
@@ -940,7 +943,7 @@ fn build_ws(server: &qqq_cap::manifest::Server) -> Result<qqq_serve::ws::WsConfi
             ));
         }
     }
-    let limits = WsLimits::new(frame, message, total);
+    let limits = WsLimits::new(frame, message, total, handler_timeout);
 
     Ok(WsConfig {
         origins,
@@ -1903,7 +1906,8 @@ mod tests {
             "[server.websocket]\n\
              allowed_origins = [\"https://app.example.com\", \"*\"]\n\
              allowed_hosts = [\"devbox.local\"]\n\
-             max_frame_bytes = 262144\n",
+             max_frame_bytes = 262144\n\
+             handler_timeout_ms = 500\n",
         ))
         .expect("a websocket table builds");
         assert!(ws.origins.allows_any(), "the explicit `*` opts in");
@@ -1914,6 +1918,19 @@ mod tests {
             ws.limits.max_message_bytes,
             1024 * 1024,
             "absent caps keep their defaults"
+        );
+        assert_eq!(
+            ws.limits.handler_timeout,
+            std::time::Duration::from_millis(500),
+            "the handler timeout is operator-tunable"
+        );
+        assert_eq!(
+            build_ws(&manifest_server(""))
+                .expect("defaults build")
+                .limits
+                .handler_timeout,
+            std::time::Duration::from_secs(5),
+            "absent means 5 s"
         );
     }
 

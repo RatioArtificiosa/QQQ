@@ -389,6 +389,14 @@ pub enum HpackError {
         /// The offending name, truncated for the message.
         name: String,
     },
+    /// A decoded string was not valid UTF-8.
+    ///
+    /// The HTTP/1.1 path refuses non-UTF-8 heads as `InvalidUtf8` rather than
+    /// decoding lossily, so this path must refuse too: lossy decoding maps
+    /// `\xff` and `U+FFFD` to one `String`, and routing and auth would then
+    /// see one value for two different wire bytes — a transport differential
+    /// a strict proxy on the other side does not share.
+    InvalidUtf8,
 }
 
 impl HpackError {
@@ -417,6 +425,7 @@ impl HpackError {
             Self::InvalidIndex { .. }
             | Self::TableSizeTooLarge { .. }
             | Self::BadHuffman { .. }
+            | Self::InvalidUtf8
             | Self::StringOverrun { .. } => Some(super::error::ErrorCode::CompressionError),
             // An over-large list is the peer's declared limit being broken, which
             // is a protocol matter rather than a compression one.
@@ -459,6 +468,7 @@ impl fmt::Display for HpackError {
                 )
             }
             Self::InvalidName { name } => write!(f, "invalid header field name `{name}`"),
+            Self::InvalidUtf8 => f.write_str("a header string is not valid UTF-8"),
         }
     }
 }
@@ -649,8 +659,8 @@ pub fn encode_string(value: &str) -> Vec<u8> {
 ///
 /// # Errors
 ///
-/// [`HpackError::StringOverrun`], [`HpackError::StringTooLong`] or
-/// [`HpackError::BadHuffman`].
+/// [`HpackError::StringOverrun`], [`HpackError::StringTooLong`],
+/// [`HpackError::BadHuffman`] or [`HpackError::InvalidUtf8`].
 pub fn decode_string(input: &[u8], at: usize) -> Result<(String, usize), HpackError> {
     let Some(&first) = input.get(at) else {
         return Err(HpackError::Truncated { at });
@@ -690,14 +700,17 @@ pub fn decode_string(input: &[u8], at: usize) -> Result<(String, usize), HpackEr
 
     if huffman {
         let decoded = huffman_decode(raw)?;
-        // Header field values are octets, not necessarily UTF-8 (RFC 9110 §5.5).
-        // Decoding lossily rather than rejecting keeps an octet-valued header
-        // parseable instead of refusing it for an encoding rule HTTP does not
-        // impose — the same choice `http1::parse_head` makes, and for the same
-        // reason.
-        Ok((String::from_utf8_lossy(&decoded).into_owned(), i))
+        // Strict UTF-8, like `http1::parse_head`: decoding lossily would map
+        // two different wire bytes (`\xff` and U+FFFD) to one `String`, and
+        // routing and auth would see one value where the peer sent two.
+        String::from_utf8(decoded)
+            .map_err(|_| HpackError::InvalidUtf8)
+            .map(|s| (s, i))
     } else {
-        Ok((String::from_utf8_lossy(raw).into_owned(), i))
+        // Same rule for the raw form: no encoding exempts a string from it.
+        String::from_utf8(raw.to_vec())
+            .map_err(|_| HpackError::InvalidUtf8)
+            .map(|s| (s, i))
     }
 }
 
@@ -2605,6 +2618,31 @@ mod tests {
         ));
     }
 
+    /// A non-UTF-8 string is refused, never decoded lossily.
+    ///
+    /// Lossy decoding maps `\xff` and `U+FFFD` to one `String`, so routing
+    /// and auth would see one value for two different wire bytes — the
+    /// transport differential the HTTP/1.1 path refuses as `InvalidUtf8`.
+    /// Both forms are covered: a raw literal and a Huffman-coded one.
+    #[test]
+    fn a_non_utf8_string_is_refused() {
+        // Raw literal, length 1: a single 0xFF byte.
+        let raw = [0x01, 0xff];
+        let e = decode_string(&raw, 0).expect_err("0xFF is not UTF-8");
+        assert!(matches!(e, HpackError::InvalidUtf8), "{e:?}");
+        assert_eq!(
+            e.code(),
+            Some(super::super::error::ErrorCode::CompressionError)
+        );
+        // Huffman-coded: encode 0xFF through the real encoder, then wrap it
+        // as a Huffman string so the test cannot drift from the table.
+        let encoded = huffman_encode(&[0xff]);
+        let mut block = encode_integer(encoded.len() as u64, 7, 0x80);
+        block.extend_from_slice(&encoded);
+        let e = decode_string(&block, 0).expect_err("Huffman 0xFF is not UTF-8");
+        assert!(matches!(e, HpackError::InvalidUtf8), "{e:?}");
+    }
+
     // -- name validation ----------------------------------------------------
 
     /// RFC 9113 §8.2.1: *"A request or response that contains a field name that
@@ -2890,6 +2928,7 @@ mod tests {
             HpackError::InvalidName {
                 name: "Foo".to_owned(),
             },
+            HpackError::InvalidUtf8,
         ];
         for e in &errors {
             let s = e.to_string();

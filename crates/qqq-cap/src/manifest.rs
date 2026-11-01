@@ -2317,6 +2317,16 @@ pub struct WebsocketPolicy {
     /// The process-wide buffered-bytes budget. Absent means 64 MiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_total_buffer_bytes: Option<u64>,
+    /// How long one guest `on_message` call may run before the connection
+    /// closes with `1011`, in milliseconds. Absent means 5 s.
+    ///
+    /// While a handler runs, the frame loop cannot answer pings — a parked
+    /// guest turns one slow call into a connection the peer resets, so the
+    /// bound converts the stall into an explicit close. Tune it for guests
+    /// whose legitimate work is slow; zero is refused (it would 1011 every
+    /// message, which is a cap that refuses rather than bounds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handler_timeout_ms: Option<u64>,
 }
 
 /// `[server.cors]` — the cross-origin policy.
@@ -3043,6 +3053,22 @@ allow_origins = ["https://app.example.com"]
         assert_eq!(ws.allowed_origins, vec!["https://app.example.com", "*"]);
         assert_eq!(ws.allowed_hosts, vec!["devbox.local"]);
         assert_eq!(ws.max_frame_bytes, Some(262_144));
+    }
+
+    /// A `[server.websocket]` handler timeout parses, and zero is refused.
+    #[test]
+    fn a_websocket_handler_timeout_parses() {
+        let src = format!("{MINIMAL}\n[server.websocket]\nhandler_timeout_ms = 500\n");
+        let m = Manifest::parse(&src).expect("a handler timeout must parse");
+        let ws = m.server.websocket.expect("websocket");
+        assert_eq!(ws.handler_timeout_ms, Some(500));
+
+        let src = format!("{MINIMAL}\n[server.websocket]\nhandler_timeout_ms = 0\n");
+        let err = Manifest::parse(&src).expect_err("a zero timeout must be refused");
+        assert!(
+            err.to_string().contains("handler_timeout_ms"),
+            "the refusal must name the field: {err}"
+        );
     }
 
     /// Malformed websocket values are refused at parse time, by name.

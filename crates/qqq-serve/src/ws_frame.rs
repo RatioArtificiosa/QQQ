@@ -113,6 +113,16 @@ pub enum FrameError {
         /// The value received.
         opcode: u8,
     },
+    /// A reserved bit was set without a negotiated extension.
+    ///
+    /// Distinct from [`Self::ReservedOpcode`]: an unknown *opcode* (§5.2) and
+    /// a set *reserved bit* (§4.3) are different violations, and conflating
+    /// them sends an extension-negotiation failure to the unknown-opcode
+    /// branch of a diagnostic.
+    ReservedBits {
+        /// The opcode nibble the bits arrived with.
+        opcode: u8,
+    },
     /// A client frame was not masked. §5.1.
     UnmaskedClientFrame,
     /// A control frame was fragmented, or exceeded 125 bytes. §5.4, §5.5.
@@ -203,6 +213,12 @@ impl std::fmt::Display for FrameError {
             }
             Self::ReservedOpcode { opcode } => {
                 write!(f, "opcode 0x{opcode:X} is reserved")
+            }
+            Self::ReservedBits { opcode } => {
+                write!(
+                    f,
+                    "reserved bits set with no negotiated extension (opcode 0x{opcode:X})"
+                )
             }
             Self::UnmaskedClientFrame => f.write_str(
                 "a client frame must be masked; an unmasked one is a protocol error and \
@@ -350,6 +366,53 @@ fn take<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
     bytes.get(offset..offset.checked_add(N)?)?.try_into().ok()
 }
 
+/// Read the §5.2 length prefix at `offset` for a `short_len` marker byte.
+///
+/// Returns the payload length and the offset past the prefix. `Ok(None)` on a
+/// short read, exactly like the decoder: framing over TCP arrives in pieces,
+/// and a split length field is incomplete rather than malformed. Every refusal
+/// is [`FrameError::NonMinimalLength`]: the length field's three forms (7 /
+/// 7+16 / 7+64 bits) are minimal-only, and two encodings of one payload let
+/// two peers disagree about what was sent — a smuggling primitive.
+///
+/// Extracted from [`decode_server_frame_with_limit`] because that function
+/// exceeds its line budget with the two extended forms inline.
+fn read_length_prefix(
+    bytes: &[u8],
+    short_len: u8,
+    offset: usize,
+) -> Result<Option<(u64, usize)>, FrameError> {
+    match short_len {
+        126 => {
+            let Some(raw) = take::<2>(bytes, offset) else {
+                return Ok(None);
+            };
+            let v = u64::from(u16::from_be_bytes(raw));
+            // The 16-bit form is only for lengths that do not fit in 7 bits.
+            if v < 126 {
+                return Err(FrameError::NonMinimalLength { length: v });
+            }
+            Ok(Some((v, offset.saturating_add(2))))
+        }
+        127 => {
+            let Some(raw) = take::<8>(bytes, offset) else {
+                return Ok(None);
+            };
+            let v = u64::from_be_bytes(raw);
+            // The most significant bit MUST be 0: it is not part of
+            // the length, and a peer setting it disagrees about the framing.
+            if v & 0x8000_0000_0000_0000 != 0 {
+                return Err(FrameError::NonMinimalLength { length: v });
+            }
+            if v < 65_536 {
+                return Err(FrameError::NonMinimalLength { length: v });
+            }
+            Ok(Some((v, offset.saturating_add(8))))
+        }
+        n => Ok(Some((u64::from(n), offset))),
+    }
+}
+
 /// Decode one client frame with an explicit per-connection cap.
 ///
 /// `limit` bounds this frame's payload; see [`WsLimits`](crate::ws::WsLimits)
@@ -360,6 +423,10 @@ fn take<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
 ///
 /// [`FrameError::TooLarge`] when the declared payload exceeds `limit`;
 /// any other [`FrameError`] exactly as [`decode_server_frame`] reports it.
+///
+/// # Panics
+///
+/// If `limit` exceeds [`FRAME_BYTES_CEILING`] (see [`WsLimits`](crate::ws::WsLimits)).
 ///
 /// ```
 /// use qqq_serve::ws_frame::decode_server_frame_with_limit;
@@ -376,10 +443,13 @@ pub fn decode_server_frame_with_limit(
     bytes: &[u8],
     limit: u64,
 ) -> Result<Option<(Frame, usize)>, FrameError> {
-    // Every configured limit is at most `FRAME_BYTES_CEILING` (see
-    // [`WsLimits`](crate::ws::WsLimits)); a larger limit would break the
-    // `as usize` conversion below on 32-bit targets.
-    debug_assert!(limit <= FRAME_BYTES_CEILING);
+    // A hard assert, not a debug assert: `WsLimits::new` upholds this at
+    // construction, but this function is `pub` and a direct caller bypassing
+    // that choke point must fail loudly rather than truncate on 32-bit.
+    assert!(
+        limit <= FRAME_BYTES_CEILING,
+        "frame cap {limit} exceeds {FRAME_BYTES_CEILING}"
+    );
     if bytes.len() < 2 {
         return Ok(None);
     }
@@ -400,7 +470,7 @@ pub fn decode_server_frame_with_limit(
     // failing the connection rather than ignoring them: a peer that set one expects a
     // meaning this server did not agree to, so continuing would misinterpret its frames.
     if rsv != 0 {
-        return Err(FrameError::ReservedOpcode { opcode: opcode_raw });
+        return Err(FrameError::ReservedBits { opcode: opcode_raw });
     }
 
     let Some(opcode) = Opcode::from_u8(opcode_raw) else {
@@ -426,35 +496,10 @@ pub fn decode_server_frame_with_limit(
     }
 
     let mut offset = 2;
-    let payload_len: u64 = match short_len {
-        126 => {
-            let Some(raw) = take::<2>(bytes, offset) else {
-                return Ok(None);
-            };
-            let v = u64::from(u16::from_be_bytes(raw));
-            offset = offset.saturating_add(2);
-            // §5.2: the 16-bit form is only for lengths that do not fit in 7 bits. A
-            // smaller value here is a protocol error, and accepting it is a smuggling
-            // primitive — two encodings of one payload mean two peers can disagree about
-            // what was sent.
-            if v < 126 {
-                return Err(FrameError::NonMinimalLength { length: v });
-            }
-            v
-        }
-        127 => {
-            let Some(raw) = take::<8>(bytes, offset) else {
-                return Ok(None);
-            };
-            let v = u64::from_be_bytes(raw);
-            offset = offset.saturating_add(8);
-            if v < 65_536 {
-                return Err(FrameError::NonMinimalLength { length: v });
-            }
-            v
-        }
-        n => u64::from(n),
+    let Some((payload_len, next)) = read_length_prefix(bytes, short_len, offset)? else {
+        return Ok(None);
     };
+    offset = next;
 
     if payload_len > limit {
         return Err(FrameError::TooLarge {
@@ -510,6 +555,22 @@ pub fn decode_server_frame_with_limit(
     )))
 }
 
+/// Whether a close code may appear on the wire.
+///
+/// §7.4.1 reserves `1005`, `1006` and `1015` for internal use (they must never be sent),
+/// and leaves `1004`, `1016`–`2999` and `5000`+ unassigned. A peer sending one disagrees
+/// about the protocol, so the frame is refused with [`FrameError::InvalidClosePayload`]
+/// (close code 1007) rather than echoed back — echoing `1005` would put the server's own
+/// reply off-protocol too.
+///
+/// Shared with [`crate::ws_conn`]'s close echo: a `Frame` built literally (rather than
+/// decoded) skips [`validate_close_payload`], so the echo filters through this as
+/// defense-in-depth instead of trusting the constructor path.
+#[must_use]
+pub const fn is_valid_close_code(code: u16) -> bool {
+    matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)
+}
+
 /// §5.5.1: a close payload, if present, is a 2-byte code followed by UTF-8.
 fn validate_close_payload(payload: &[u8]) -> Result<(), FrameError> {
     if payload.is_empty() {
@@ -525,6 +586,20 @@ fn validate_close_payload(payload: &[u8]) -> Result<(), FrameError> {
     }
     // Total rather than subscripted: the checks above leave at least two
     // bytes, so the `else` is unreachable structure with the UTF-8 error.
+    let Some([b0, b1]) = payload.get(..2) else {
+        return Err(FrameError::InvalidClosePayload {
+            reason: "the close reason after the status code must be UTF-8".to_owned(),
+        });
+    };
+    let code = u16::from_be_bytes([*b0, *b1]);
+    if !is_valid_close_code(code) {
+        return Err(FrameError::InvalidClosePayload {
+            reason: format!(
+                "close code {code} is not valid on the wire (§7.4.1): \
+                 sendable codes are 1000-1003, 1007-1014 and 3000-4999"
+            ),
+        });
+    }
     let Some(reason) = payload.get(2..) else {
         return Err(FrameError::InvalidClosePayload {
             reason: "the close reason after the status code must be UTF-8".to_owned(),
@@ -554,6 +629,20 @@ fn validate_close_payload(payload: &[u8]) -> Result<(), FrameError> {
 // crate builds for. A `try_into` per arm would state the same thing less clearly.
 #[allow(clippy::cast_possible_truncation)]
 pub fn encode(frame: &Frame) -> Vec<u8> {
+    // Control frames are the caller's contract, not the peer's: §5.4 requires them
+    // final and §5.5 caps them at 125 bytes. A debug assert rather than an error
+    // because `encode` is infallible by design (see above) — a server composing its
+    // own close frame has no peer to blame, so the violation must surface in tests
+    // rather than at runtime. Both in-house constructors (`Frame::close`, `Frame::pong`)
+    // uphold this; a hand-built `Frame` that does not trips these in test builds.
+    debug_assert!(
+        frame.fin || !frame.opcode.is_control(),
+        "a control frame must not be fragmented (§5.4)"
+    );
+    debug_assert!(
+        !frame.opcode.is_control() || frame.payload.len() <= 125,
+        "a control frame payload may not exceed 125 bytes (§5.5)"
+    );
     let mut out = Vec::with_capacity(frame.payload.len().saturating_add(10));
     let b0 = (if frame.fin { 0x80 } else { 0 }) | frame.opcode.as_u8();
     out.push(b0);
@@ -605,6 +694,14 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
 /// [`FrameError::InvalidClosePayload`] is not used here — this returns the same error type
 /// so a caller has one thing to handle, with the reason naming the actual problem.
 pub fn text_of(frame: &Frame) -> Result<&str, FrameError> {
+    if frame.opcode != Opcode::Text {
+        return Err(FrameError::InvalidClosePayload {
+            reason: format!(
+                "a text payload must come from a Text frame (§5.6), not {:?}",
+                frame.opcode
+            ),
+        });
+    }
     std::str::from_utf8(&frame.payload).map_err(|e| FrameError::InvalidClosePayload {
         reason: format!("a text payload must be UTF-8 (§8.1): {e}"),
     })
@@ -923,6 +1020,80 @@ mod tests {
         );
     }
 
+    /// **Only sendable close codes appear on the wire.** §7.4.1.
+    ///
+    /// `1005`, `1006` and `1015` are reserved for internal use and must never be
+    /// sent; `1004`, `1016`–`2999` and `5000`+ are unassigned. Accepting one and
+    /// echoing it back would put the server's own reply off-protocol too.
+    #[test]
+    fn only_sendable_close_codes_are_accepted() {
+        for code in [
+            1000u16, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 3000, 3999,
+            4999,
+        ] {
+            let mut payload = code.to_be_bytes().to_vec();
+            payload.extend_from_slice(b"bye");
+            let raw = client_frame(Opcode::Close, true, &payload, [1, 2, 3, 4]);
+            let (frame, _) = decode_server_frame(&raw)
+                .unwrap_or_else(|e| panic!("code {code}: {e}"))
+                .unwrap_or_else(|| panic!("code {code}: incomplete"));
+            assert_eq!(frame.close_code(), Some(code), "code {code}");
+        }
+        for code in [
+            0u16, 999, 1004, 1005, 1006, 1015, 1016, 2000, 2999, 5000, 5001, 65_535,
+        ] {
+            let mut payload = code.to_be_bytes().to_vec();
+            payload.extend_from_slice(b"bye");
+            let raw = client_frame(Opcode::Close, true, &payload, [1, 2, 3, 4]);
+            let err = decode_server_frame(&raw).expect_err("must refuse");
+            assert!(
+                matches!(err, FrameError::InvalidClosePayload { .. }),
+                "code {code}: {err:?}"
+            );
+            assert_eq!(err.close_code(), 1007, "code {code}: {err:?}");
+            assert!(
+                err.to_string().contains("§7.4.1"),
+                "code {code}: the message must cite the section: {err}"
+            );
+        }
+    }
+
+    /// The close-code predicate agrees with the decoder at every boundary.
+    #[test]
+    fn the_close_code_predicate_matches_the_wire_rule() {
+        for code in [
+            999u16, 1000, 1003, 1004, 1006, 1007, 1014, 1015, 2999, 3000, 4999, 5000,
+        ] {
+            let wire_accepts = {
+                let payload = code.to_be_bytes().to_vec();
+                let raw = client_frame(Opcode::Close, true, &payload, [1, 2, 3, 4]);
+                decode_server_frame(&raw).is_ok()
+            };
+            assert_eq!(
+                is_valid_close_code(code),
+                wire_accepts,
+                "predicate and decoder disagree on {code}"
+            );
+        }
+    }
+
+    /// **The 64-bit length's most significant bit must be zero.** §5.2.
+    ///
+    /// The bit is not part of the length. A peer setting it disagrees about the
+    /// framing, and reading it as length would turn a flag into a 9-exabyte
+    /// allocation attempt.
+    #[test]
+    fn a_64_bit_length_with_the_high_bit_set_is_refused() {
+        let mut raw = vec![0x82u8, 0x80 | 0x7F];
+        raw.extend_from_slice(&0x8000_0000_0000_0001u64.to_be_bytes());
+        raw.extend_from_slice(&[1, 2, 3, 4]); // mask: never reached
+        let err = decode_server_frame(&raw).expect_err("must refuse");
+        assert!(
+            matches!(err, FrameError::NonMinimalLength { .. }),
+            "{err:?}"
+        );
+    }
+
     // -- encoding ----------------------------------------------------------
 
     /// **A server frame is never masked.** §5.1.
@@ -1028,6 +1199,32 @@ mod tests {
         assert_eq!(last[0] & 0x80, 0x80);
     }
 
+    /// A fragmented control frame trips the encoder contract in test builds.
+    ///
+    /// `encode` is infallible by design, so the check is a debug assert rather
+    /// than an error — but the contract still has teeth: a hand-built
+    /// `Ping { fin: false }` panics here instead of emitting bytes §5.4 forbids.
+    #[test]
+    #[should_panic(expected = "must not be fragmented")]
+    fn a_fragmented_control_frame_trips_the_encoder_contract() {
+        let _ = encode(&Frame {
+            opcode: Opcode::Ping,
+            fin: false,
+            payload: b"x".to_vec(),
+        });
+    }
+
+    /// An over-long control payload trips the encoder contract in test builds.
+    #[test]
+    #[should_panic(expected = "may not exceed 125 bytes")]
+    fn an_oversized_control_payload_trips_the_encoder_contract() {
+        let _ = encode(&Frame {
+            opcode: Opcode::Ping,
+            fin: true,
+            payload: vec![0u8; 126],
+        });
+    }
+
     // -- close construction ------------------------------------------------
 
     /// A close frame carries the code and reason, and fits §5.5's ceiling.
@@ -1096,6 +1293,32 @@ mod tests {
         );
     }
 
+    /// `text_of` refuses a frame that is not `Text`, even with valid UTF-8.
+    ///
+    /// Without the opcode gate a binary message carrying `"hi"` would read as text,
+    /// misattributing the peer's kind — and a `Close` frame's two code bytes would
+    /// decode as C0 controls rather than being rejected.
+    #[test]
+    fn text_of_refuses_a_non_text_frame() {
+        for opcode in [
+            Opcode::Binary,
+            Opcode::Close,
+            Opcode::Ping,
+            Opcode::Continuation,
+        ] {
+            let f = Frame {
+                opcode,
+                fin: true,
+                payload: b"hi".to_vec(),
+            };
+            let err = text_of(&f).expect_err("must refuse");
+            assert!(
+                matches!(err, FrameError::InvalidClosePayload { .. }),
+                "{opcode:?}: {err:?}"
+            );
+        }
+    }
+
     /// **A fragmented text message validates as a whole, not per fragment.**
     ///
     /// §8.1: a multi-byte character split across two frames is valid only as a whole, so
@@ -1135,12 +1358,17 @@ mod tests {
     // -- reserved bits -----------------------------------------------------
 
     /// A frame with a reserved bit set is refused. §5.2.
+    ///
+    /// Distinct from a reserved *opcode*: a set bit negotiates a meaning (an
+    /// extension) this server never agreed to, while an unknown opcode is a
+    /// different violation — and conflating them sends an extension failure to
+    /// the unknown-opcode branch of a diagnostic.
     #[test]
     fn a_reserved_bit_is_refused() {
         let mut raw = client_frame(Opcode::Text, true, b"x", [1, 2, 3, 4]);
         raw[0] |= 0x40; // RSV1
         let err = decode_server_frame(&raw).expect_err("must refuse");
-        assert!(matches!(err, FrameError::ReservedOpcode { .. }), "{err:?}");
+        assert!(matches!(err, FrameError::ReservedBits { .. }), "{err:?}");
     }
 
     /// A reserved opcode is refused rather than ignored.

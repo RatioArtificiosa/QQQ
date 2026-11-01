@@ -411,16 +411,30 @@ impl BodyReader {
     ///
     /// Discarded rather than exposed — see the module docs for why a trailer is
     /// a trust-boundary problem and not a feature to add casually.
+    ///
+    /// Counted all the same: each trailer line is charged against the cap like
+    /// any other body byte, and the section is bounded in lines as well as in
+    /// bytes. Uncounted trailers would let an attacker stream without limit
+    /// past a `0\r\n` terminator — the same hole `TooLarge` exists to close,
+    /// one framing step later.
     async fn read_trailers<R>(&mut self, io: &mut R) -> Result<(), BodyError>
     where
         R: AsyncRead + Unpin,
     {
-        loop {
+        // Enough for real trailers (a signature, a checksum, a digest); small
+        // enough that a trailer flood fails fast instead of reading forever.
+        const MAX_TRAILER_LINES: usize = 100;
+        for _ in 0..MAX_TRAILER_LINES {
             let line = self.read_line(io, MAX_CHUNK_SIZE_LINE).await?;
+            // +2 for the CRLF the line arrived with.
+            self.account(line.len().saturating_add(2))?;
             if line.is_empty() {
                 return Ok(());
             }
         }
+        Err(BodyError::BadFraming {
+            reason: "too many trailer lines",
+        })
     }
 
     /// Read one CRLF-terminated line, excluding the terminator.
@@ -444,12 +458,21 @@ impl BodyReader {
                 return Err(BodyError::Truncated);
             }
             if byte[0] == b'\n' {
-                // Tolerate a bare LF: some clients send it, and rejecting it
-                // costs a connection for a request that is otherwise fine. The
-                // `\r` is stripped if present.
-                if out.last() == Some(&b'\r') {
-                    out.pop();
+                // CRLF only: the head parser refuses bare LF as a terminator
+                // (`bare_lf_does_not_terminate_the_head`), and the data
+                // terminator requires it (`expect_crlf`). A chunk line that
+                // tolerated what the head and the data both refuse would let
+                // a strict proxy and this origin disagree about the chunk
+                // boundaries — the smuggling shape. RFC 9112 permits
+                // tolerance, but agreement beats robustness here: a client
+                // sending bare LF gets a 400 naming the line, not a silent
+                // desync.
+                if out.last() != Some(&b'\r') {
+                    return Err(BodyError::BadFraming {
+                        reason: "a chunk line must end with CRLF, not a bare LF",
+                    });
                 }
+                out.pop();
                 return String::from_utf8(out).map_err(|_| BodyError::BadFraming {
                     reason: "non-UTF-8 line",
                 });
@@ -525,5 +548,196 @@ where
             BodyChunk::Data(_) => total = reader.bytes_read(),
             BodyChunk::End => return Ok(total),
         }
+    }
+}
+
+// Test indexing (`F-18`): assertions index vectors built inline above.
+// One module-level reason, not per-site noise; shipping code above
+// carries no such allowance.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "test assertions index inline vectors"
+)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http1::RequestHead;
+
+    /// An async reader that yields at most one byte per poll: the dribble
+    /// case. Chunk boundaries must not depend on read boundaries.
+    struct Dribble<'a> {
+        rest: &'a [u8],
+    }
+
+    impl tokio::io::AsyncRead for Dribble<'_> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.rest.is_empty() {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            buf.put_slice(&self.rest[..1]);
+            self.rest = &self.rest[1..];
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    fn chunked_head() -> RequestHead {
+        crate::http1::parse_head(
+            b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        .expect("fixture must parse")
+        .0
+    }
+
+    async fn collect_all(reader: &mut BodyReader, io: &mut &[u8]) -> Result<Vec<u8>, BodyError> {
+        let mut out = Vec::new();
+        loop {
+            match reader.poll_chunk(io, 8 * 1024).await? {
+                BodyChunk::Data(chunk) => out.extend_from_slice(&chunk),
+                BodyChunk::End => return Ok(out),
+            }
+        }
+    }
+
+    /// A chunked body split across reads assembles identically to one
+    /// arriving whole: framing boundaries must not depend on read
+    /// boundaries.
+    #[tokio::test]
+    async fn a_chunk_split_across_reads_assembles() {
+        let wire: &[u8] = b"5\r\nhello\r\n5\r\n worl\r\n2\r\nd!\r\n0\r\n\r\n";
+        let mut reader = BodyReader::from_head(&chunked_head(), u64::MAX).expect("framing ok");
+        let mut dribble = Dribble { rest: wire };
+        let mut out = Vec::new();
+        loop {
+            match reader.poll_chunk(&mut dribble, 8 * 1024).await {
+                Ok(BodyChunk::Data(chunk)) => out.extend_from_slice(&chunk),
+                Ok(BodyChunk::End) => break,
+                Err(e) => panic!("dribbled chunks must assemble: {e}"),
+            }
+        }
+        assert_eq!(out, b"hello world!");
+    }
+
+    /// A bare LF does not terminate a chunk line: the head parser refuses it
+    /// and the data terminator requires CRLF, so the chunk lines must agree
+    /// with both rather than tolerating what neither accepts.
+    #[tokio::test]
+    async fn a_bare_lf_chunk_line_is_refused() {
+        let wire: &[u8] = b"5\nhello\r\n0\r\n\r\n";
+        let mut reader = BodyReader::from_head(&chunked_head(), u64::MAX).expect("framing ok");
+        let mut io: &[u8] = wire;
+        let e = loop {
+            match reader.poll_chunk(&mut io, 8 * 1024).await {
+                Ok(BodyChunk::Data(_)) => {}
+                Ok(BodyChunk::End) => panic!("a bare-LF line must not parse as a size"),
+                Err(e) => break e,
+            }
+        };
+        assert!(
+            matches!(e, BodyError::BadFraming { .. }),
+            "bare LF names the line, not the terminator: {e:?}"
+        );
+    }
+
+    /// A missing chunk terminator is refused, not skipped: without the CRLF
+    /// the framing offset is unknowable.
+    #[tokio::test]
+    async fn a_missing_chunk_terminator_is_refused() {
+        let wire: &[u8] = b"5\r\nhelloXX0\r\n\r\n";
+        let mut reader = BodyReader::from_head(&chunked_head(), u64::MAX).expect("framing ok");
+        let mut io: &[u8] = wire;
+        let e = loop {
+            match reader.poll_chunk(&mut io, 8 * 1024).await {
+                Ok(BodyChunk::Data(_)) => {}
+                Ok(BodyChunk::End) => panic!("a missing terminator must not read as End"),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(e, BodyError::MissingChunkTerminator);
+    }
+
+    /// Chunk extensions are parsed away: `5;ext=1` is a five-byte chunk, and
+    /// the extension never reaches the payload.
+    #[tokio::test]
+    async fn a_chunk_extension_does_not_change_the_size() {
+        let wire: &[u8] = b"5;ext=1\r\nhello\r\n0\r\n\r\n";
+        let mut reader = BodyReader::from_head(&chunked_head(), u64::MAX).expect("framing ok");
+        let mut io: &[u8] = wire;
+        let body = collect_all(&mut reader, &mut io).await.expect("must parse");
+        assert_eq!(body, b"hello");
+    }
+
+    /// Streaming enforcement: a chunked body past the cap fails *while*
+    /// arriving — the tenant cap from `effective_body_cap` rides this path,
+    /// so this is the regression test for a per-tenant bypass.
+    #[tokio::test]
+    async fn a_chunked_body_past_the_cap_is_refused_while_streaming() {
+        let wire: &[u8] = b"a\r\n0123456789\r\n0\r\n\r\n";
+        let mut reader = BodyReader::from_head(&chunked_head(), 5).expect("framing ok");
+        let mut io: &[u8] = wire;
+        let e = loop {
+            match reader.poll_chunk(&mut io, 8 * 1024).await {
+                Ok(BodyChunk::Data(_)) => {}
+                Ok(BodyChunk::End) => panic!("an over-cap body must not complete"),
+                Err(e) => break e,
+            }
+        };
+        assert!(matches!(e, BodyError::TooLarge { .. }), "got {e:?}");
+    }
+
+    /// Trailers count against the cap: bytes past a `0\r\n` terminator are
+    /// still body bytes for accounting purposes.
+    #[tokio::test]
+    async fn trailer_bytes_count_against_the_cap() {
+        let wire: &[u8] = b"0\r\nX-Sig: abcdef\r\n\r\n";
+        let mut reader = BodyReader::from_head(&chunked_head(), 10).expect("framing ok");
+        let mut io: &[u8] = wire;
+        let e = loop {
+            match reader.poll_chunk(&mut io, 8 * 1024).await {
+                Ok(BodyChunk::Data(_)) => {}
+                Ok(BodyChunk::End) => panic!("over-cap trailers must not complete"),
+                Err(e) => break e,
+            }
+        };
+        assert!(matches!(e, BodyError::TooLarge { .. }), "got {e:?}");
+    }
+
+    /// A trailer flood is refused by count as well as by bytes.
+    #[tokio::test]
+    async fn a_trailer_flood_is_refused() {
+        let mut wire = b"0\r\n".to_vec();
+        for _ in 0..101 {
+            wire.extend_from_slice(b"X: y\r\n");
+        }
+        wire.extend_from_slice(b"\r\n");
+        let mut reader = BodyReader::from_head(&chunked_head(), u64::MAX).expect("framing ok");
+        let mut io: &[u8] = &wire;
+        let e = loop {
+            match reader.poll_chunk(&mut io, 8 * 1024).await {
+                Ok(BodyChunk::Data(_)) => {}
+                Ok(BodyChunk::End) => panic!("a trailer flood must not complete"),
+                Err(e) => break e,
+            }
+        };
+        assert!(matches!(e, BodyError::BadFraming { .. }), "got {e:?}");
+    }
+
+    /// Declaring both framings is refused before any byte is read.
+    /// (http1 already rejects this at parse time; the reader repeats the
+    /// check so a future caller that trusts the head cannot smuggle.)
+    #[test]
+    fn dual_framing_is_refused_up_front() {
+        let head = crate::http1::RequestHead {
+            method: crate::route::Method::Post,
+            target: "/x".to_owned(),
+            version: crate::http1::Version::Http11,
+            headers: vec![],
+            content_length: Some(5),
+            chunked: true,
+        };
+        assert!(BodyReader::from_head(&head, u64::MAX).is_err());
     }
 }

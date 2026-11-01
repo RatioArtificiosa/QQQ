@@ -153,7 +153,10 @@ impl WebSocketHandler for GuestWsBridge {
             // the connection, with 1011.
             match tokio::task::spawn_blocking(move || dispatch(&head, &body, &tenant)).await {
                 Ok(response) => {
-                    send.send(kind, &response.body).await;
+                    // Best-effort: a failed send means the peer is gone, and
+                    // the frame loop discovers that on its next read. Nothing
+                    // further to do for this message.
+                    if send.send(kind, &response.body).await.is_err() {}
                 }
                 Err(_) => {
                     send.send_frame(&Frame::close(1011, "host task failed"))

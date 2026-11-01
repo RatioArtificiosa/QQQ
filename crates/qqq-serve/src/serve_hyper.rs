@@ -78,8 +78,8 @@ use crate::response::{self, Response, validate_outbound};
 use crate::route::{Method, RouteTable};
 use crate::server::{
     ConnectionContext, Dispatch, RouteMatch, Served, TenantDispatch, apply_cors,
-    config_max_request_bytes, dispatch_off_thread, emit_record, emit_span_sampled, is_head,
-    micros_since, record_metrics, split_target,
+    dispatch_off_thread, emit_record, emit_span_sampled, is_head, micros_since, record_metrics,
+    split_target,
 };
 use crate::span::Sampler;
 use crate::transport::HyperLimits;
@@ -408,7 +408,23 @@ where
                 break Served::Drained;
             }
             _ = ticker.tick() => {
-                if state.watch.is_idle(idle) {
+                // Two-tier bound: before the first answer the connection
+                // holds only an unread preface, so the header bound applies
+                // as well as the idle one — otherwise a trickling preface
+                // holds a slot for the whole idle bound. The HTTP/1 driver
+                // gets the header tier from hyper's `header_read_timeout`;
+                // HTTP/2 has no such knob, so the driver enforces it here.
+                // After the first answer only the idle bound applies,
+                // exactly as on HTTP/1. The minimum (not the header bound
+                // alone) so a test-scale idle below the header bound still
+                // fires — the mapping asserts header-under-idle for
+                // production configs, but the driver does not assume it.
+                let bound = if state.served.load(Ordering::SeqCst) == 0 {
+                    state.limits.header_read_timeout.min(idle)
+                } else {
+                    idle
+                };
+                if state.watch.is_idle(bound) {
                     break Served::IdleTimeout;
                 }
             }
@@ -524,6 +540,17 @@ struct State {
     dispatch: TenantDispatch,
     limits: HyperLimits,
     ctx: OwnedCtx,
+    /// Requests answered on this connection: `answer()`'s ticket source.
+    ///
+    /// # The span derives from the ticket, never from a second load
+    ///
+    /// The request's record span is `served.wrapping_add(1)` — computed once
+    /// from the `fetch_add` ticket and threaded as `span` through every gate,
+    /// arm and render path. A second atomic `load` for the record would hand
+    /// two multiplexed h2 futures the same span (each sees the counter after
+    /// the other ticketed), breaking the "request ordinal within the
+    /// conversation" invariant the in-house `span_seq` holds. There is
+    /// deliberately no `served.load()` anywhere on a record path.
     served: Arc<AtomicU64>,
     protocol: Protocol,
     watch: Arc<IdleWatch>,
@@ -567,8 +594,9 @@ struct State {
 /// bytes: hyper owns the bytes, so codec-level traffic (`PING`s,
 /// `WINDOW_UPDATE`s) does not reset the bound, exactly as `Connection`
 /// ignores non-request traffic for idleness. The head-arrival window
-/// is covered by `header_read_timeout` on HTTP/1; on HTTP/2 it rides
-/// with the scheduled header-phase hardening (the field doc says so).
+/// is covered by `header_read_timeout` on HTTP/1; on HTTP/2 the driver
+/// polls a two-tier bound itself (header timeout before the first
+/// answer, idle after), because hyper offers no header knob for h2.
 struct IdleWatch {
     in_flight: AtomicU64,
     last_activity: std::sync::Mutex<Instant>,
@@ -778,6 +806,7 @@ fn refuse_ceiling(
                 Some((&head, path)),
                 &response,
                 0,
+                served.wrapping_add(1),
                 started,
             ))
         }
@@ -818,6 +847,7 @@ fn refuse_early(
                 Some((head, path)),
                 &response,
                 0,
+                span,
                 started,
             )));
         }
@@ -838,6 +868,7 @@ fn refuse_early(
             Some((head, path)),
             &response,
             0,
+            span,
             started,
         )));
     }
@@ -851,11 +882,15 @@ fn refuse_early(
 }
 
 /// Render a refusal: record it, map it, mark the connection to close.
+///
+/// `span` is the request's ticket-derived ordinal from `answer`, threaded
+/// rather than re-loaded: see `render_recorded`.
 fn render_refusal(
     state: &State,
     head: &RequestHead,
     path: &str,
     response: &Response,
+    span: u64,
     started: Instant,
 ) -> hyper::Response<WatchBody> {
     close_after(render_recorded(
@@ -863,6 +898,7 @@ fn render_refusal(
         Some((head, path)),
         response,
         0,
+        span,
         started,
     ))
 }
@@ -894,7 +930,7 @@ fn refuse_tenant_limits(
             metrics.record_body_limit(label.as_str());
         }
         let response = Response::text(413, "this tenant's request body exceeded its limit");
-        return Some(render_refusal(state, head, path, &response, started));
+        return Some(render_refusal(state, head, path, &response, span, started));
     }
     let limit_started = Instant::now();
     let over = limits.check_and_record(tenant_key, Instant::now()).is_err();
@@ -910,7 +946,7 @@ fn refuse_tenant_limits(
     );
     if over {
         let response = Response::text(429, "this tenant has exceeded its request limit");
-        return Some(render_refusal(state, head, path, &response, started));
+        return Some(render_refusal(state, head, path, &response, span, started));
     }
     None
 }
@@ -951,7 +987,7 @@ fn refuse_auth_policy(
         let mut response = Response::text(403, body);
         response.set_header("X-QQQ-Error", "unauthenticated");
         response.set_header("X-QQQ-Auth-Mode", mode);
-        return Some(render_refusal(state, head, path, &response, started));
+        return Some(render_refusal(state, head, path, &response, span, started));
     }
     None
 }
@@ -966,6 +1002,7 @@ fn serve_special(
     state: &State,
     head: &RequestHead,
     path: &str,
+    span: u64,
     started: Instant,
 ) -> Option<hyper::Response<WatchBody>> {
     let ctx = &state.ctx;
@@ -980,6 +1017,7 @@ fn serve_special(
             Some((head, path)),
             &response,
             0,
+            span,
             started,
         )));
     }
@@ -996,6 +1034,7 @@ fn serve_special(
                 Some((head, path)),
                 &response,
                 0,
+                span,
                 started,
             )));
         }
@@ -1013,6 +1052,7 @@ fn serve_special(
             Some((head, path)),
             &response,
             0,
+            span,
             started,
         )));
     }
@@ -1168,7 +1208,7 @@ async fn serve_upgrade(
     // is what makes this function async while nothing else in it
     // awaits.
     if crate::server::special_route_has_body(&head) {
-        return Ok(refuse_special_body(state, request, &head, started).await);
+        return Ok(refuse_special_body(state, request, &head, span, started).await);
     }
     // Not an upgrade at all: answered as ordinary HTTP, never hijacked.
     if !crate::ws_conn::is_upgrade_request(&head) {
@@ -1178,6 +1218,7 @@ async fn serve_upgrade(
             400,
             &crate::ws::HandshakeError::NotAnUpgrade.to_string(),
             &[],
+            span,
             started,
         ));
     }
@@ -1188,7 +1229,7 @@ async fn serve_upgrade(
         head.header("origin"),
         head.header("host").unwrap_or(""),
     ) {
-        return Ok(upgrade_refusal(state, &head, 403, "", &[], started));
+        return Ok(upgrade_refusal(state, &head, 403, "", &[], span, started));
     }
     let handshake = match crate::ws::Handshake::parse(head.method.as_str(), |name| {
         head.header(name).map(str::to_owned)
@@ -1212,6 +1253,7 @@ async fn serve_upgrade(
                 status,
                 &error.to_string(),
                 &extra,
+                span,
                 started,
             ));
         }
@@ -1355,6 +1397,7 @@ async fn serve_h2_connect(
             400,
             &crate::ws::HandshakeError::NotAnUpgrade.to_string(),
             &[],
+            span,
             started,
         ));
     }
@@ -1363,7 +1406,7 @@ async fn serve_h2_connect(
     // is the client's first frames arriving early — hyper routes
     // them to the upgraded stream, so there is nothing to drain.
     if head.content_length.is_some_and(|n| n > 0) {
-        return Ok(refuse_special_body(state, request, &head, started).await);
+        return Ok(refuse_special_body(state, request, &head, span, started).await);
     }
     // The mechanism gate: only websocket bootstrapping is served.
     if let Err((status, message)) = check_extended_connect_protocol(&request) {
@@ -1373,6 +1416,7 @@ async fn serve_h2_connect(
             status,
             &message,
             &[],
+            span,
             started,
         ));
     }
@@ -1383,7 +1427,7 @@ async fn serve_h2_connect(
         head.header("origin"),
         head.header("host").unwrap_or(""),
     ) {
-        return Ok(upgrade_refusal(state, &head, 403, "", &[], started));
+        return Ok(upgrade_refusal(state, &head, 403, "", &[], span, started));
     }
     let handshake = match crate::ws::Handshake::parse_extended_connect(|name| {
         head.header(name).map(str::to_owned)
@@ -1407,6 +1451,7 @@ async fn serve_h2_connect(
                 status,
                 &error.to_string(),
                 &extra,
+                span,
                 started,
             ));
         }
@@ -1451,6 +1496,7 @@ fn upgrade_refusal(
     status: u16,
     body: &str,
     extra: &[(&str, String)],
+    span: u64,
     started: Instant,
 ) -> hyper::Response<WatchBody> {
     let (path, _query) = split_target(&head.target);
@@ -1458,7 +1504,7 @@ fn upgrade_refusal(
     for (name, value) in extra {
         response.set_header(name, value.as_str());
     }
-    close_after(render_refusal(state, head, path, &response, started))
+    close_after(render_refusal(state, head, path, &response, span, started))
 }
 
 /// Drain a refused chunked body, bounded like in-house.
@@ -1501,6 +1547,7 @@ async fn refuse_special_body(
     state: &State,
     request: hyper::Request<Incoming>,
     head: &RequestHead,
+    span: u64,
     started: Instant,
 ) -> hyper::Response<WatchBody> {
     drain_hyper_body(request.into_body()).await;
@@ -1513,6 +1560,7 @@ async fn refuse_special_body(
         Some((head, path)),
         &response,
         0,
+        span,
         started,
     ))
 }
@@ -1538,11 +1586,12 @@ async fn serve_streaming_hyper(
     stream_handler: crate::stream::StreamingHandler,
     tenant: &str,
     span: u64,
+    started: Instant,
     start: crate::stream::StreamStart,
 ) -> Result<hyper::Response<WatchBody>, hyper::Error> {
     use crate::stream::{StreamError, StreamOutcome};
     if crate::server::special_route_has_body(&head) {
-        return Ok(refuse_special_body(state, request, &head, Instant::now()).await);
+        return Ok(refuse_special_body(state, request, &head, span, started).await);
     }
     let (mut writer, rx) = crate::stream::StreamWriter::channel();
     // The head the gate committed (status plus the event-stream framing),
@@ -1767,10 +1816,11 @@ fn misdirected_refusal(
     state: &State,
     head: &RequestHead,
     path: &str,
+    span: u64,
     started: Instant,
 ) -> hyper::Response<WatchBody> {
     let response = crate::response::misdirected(head.header("host").unwrap_or(""));
-    render_refusal(state, head, path, &response, started)
+    render_refusal(state, head, path, &response, span, started)
 }
 
 /// The SSE arm when the table and dispatch agree: the matched route names
@@ -1837,7 +1887,14 @@ async fn answer_sse(
     .await
     .unwrap_or_else(|_| crate::response::handler_panicked());
     if gate.status != 200 {
-        return Ok(render_refusal(state, &head, path, &gate, request_started));
+        return Ok(render_refusal(
+            state,
+            &head,
+            path,
+            &gate,
+            span,
+            request_started,
+        ));
     }
     let mut gate = gate;
     let first = std::mem::take(&mut gate.body);
@@ -1849,6 +1906,7 @@ async fn answer_sse(
         stream_handler,
         &tenant,
         span,
+        request_started,
         crate::stream::StreamStart { head: gate, first },
     )
     .await
@@ -1876,6 +1934,7 @@ fn gated_tenant<'a>(
                 state,
                 head,
                 path,
+                span,
                 request_started,
             )));
         }
@@ -1902,7 +1961,6 @@ async fn answer(
     // `Drop` unholds on every exit — response, refusal, or hyper
     // cancelling a reset stream mid-answer.
     let _flight = state.watch.hold();
-    let ctx = &state.ctx;
     let request_started = Instant::now();
 
     // The per-connection ceiling first, mirroring `Connection`'s
@@ -1920,7 +1978,12 @@ async fn answer(
         Err(refusal) => return Ok(*refusal),
     };
     let (path, _query) = split_target(&head.target);
-    let span = state.served.load(Ordering::SeqCst);
+    // Derived from the `fetch_add` ticket, never re-loaded: over multiplexed
+    // h2 two `answer()` futures interleave, and a second atomic load can hand
+    // both the same span — breaking the "request ordinal within the
+    // conversation" invariant the in-house `span_seq` holds. `served` is the
+    // unique ticket; `served + 1` is its 1-based ordinal.
+    let span = served.wrapping_add(1);
 
     // --- Tenant plus the gates that must run before anything is read ----
     //
@@ -1983,42 +2046,26 @@ async fn answer(
             stream_handler,
             tenant,
             span,
+            request_started,
             crate::stream::StreamStart::flat(),
         )
         .await;
     }
-    if let Some(special) = serve_special(state, &head, path, request_started) {
+    if let Some(special) = serve_special(state, &head, path, span, request_started) {
         return Ok(special);
     }
 
     // --- The body, through the shared reader ------------------------------
     //
     // `request` is consumed here; every head fact needed below was
-    // extracted above the move.
-    let collected = match state.protocol {
-        Protocol::H1 => collect_body(request.into_body(), &head).await,
-        Protocol::H2 => collect_h2_body(request.into_body(), &head).await,
-    };
-    let Some((body, body_bytes)) = collected else {
-        if let Some(metrics) = ctx.metrics.as_ref() {
-            let label = ctx.tenant_labels.label(tenant);
-            metrics.record_body_limit(label.as_str());
-        }
-        let response = response::from_error(&response::error_response(
-            &qqq_core::Error::new(
-                qqq_core::ErrorCode::RequestBodyTooLarge,
-                "the request body exceeded max_request_bytes while arriving",
-            ),
-            false,
-        ));
-        return Ok(close_after(render_recorded(
-            state,
-            Some((&head, path)),
-            &response,
-            0,
-            request_started,
-        )));
-    };
+    // extracted above the move. The cap is the tenant's when the manifest
+    // sets one — a chunked or unframed body has no declared length, so the
+    // global-only check in `refuse_tenant_limits` cannot see it.
+    let (body, body_bytes) =
+        match collect_or_refuse(state, request, &head, path, tenant, span, request_started).await {
+            Ok(ok) => ok,
+            Err(refusal) => return Ok(*refusal),
+        };
 
     // --- Dispatch, CORS, record, render ------------------------------------
     // Owned: `path` borrows `head`, and both cross into the flat tail.
@@ -2036,6 +2083,56 @@ async fn answer(
         request_started,
     )
     .await);
+}
+
+/// Collect the request body through the shared reader, or answer its refusal.
+///
+/// The body arm of `answer`: cap computation, protocol-specific collection,
+/// and the over-cap refusal. Extracted because the pipeline exceeds its line
+/// budget with the arm inline, while neither does alone (see `answer_flat`).
+/// The refusal rides in a `Box` because a response is at least 160 bytes and
+/// returning it by value trips `result_large_err`; the box allocates only on
+/// the refusal path, never on a served request.
+async fn collect_or_refuse(
+    state: &State,
+    request: hyper::Request<Incoming>,
+    head: &RequestHead,
+    path: &str,
+    tenant: &str,
+    span: u64,
+    request_started: Instant,
+) -> Result<(crate::body_bytes::BodyBytes, u64), Box<hyper::Response<WatchBody>>> {
+    let ctx = &state.ctx;
+    let tenant_cap = ctx.limits.as_ref().map_or(u64::MAX, |l| {
+        l.limits_for(ctx.tenant).max_body_bytes.unwrap_or(u64::MAX)
+    });
+    let effective_cap = crate::server::config_max_request_bytes().min(tenant_cap);
+    let collected = match state.protocol {
+        Protocol::H1 => collect_body(request.into_body(), head, effective_cap).await,
+        Protocol::H2 => collect_h2_body(request.into_body(), head, effective_cap).await,
+    };
+    let Some((body, body_bytes)) = collected else {
+        if let Some(metrics) = ctx.metrics.as_ref() {
+            let label = ctx.tenant_labels.label(tenant);
+            metrics.record_body_limit(label.as_str());
+        }
+        let response = response::from_error(&response::error_response(
+            &qqq_core::Error::new(
+                qqq_core::ErrorCode::RequestBodyTooLarge,
+                "the request body exceeded max_request_bytes while arriving",
+            ),
+            false,
+        ));
+        return Err(Box::new(close_after(render_recorded(
+            state,
+            Some((head, path)),
+            &response,
+            0,
+            span,
+            request_started,
+        ))));
+    };
+    Ok((body, body_bytes))
 }
 
 /// Dispatch a buffered request, apply CORS, and record the exchange.
@@ -2075,6 +2172,7 @@ async fn answer_flat(
         Some((&head, path)),
         &response,
         body_bytes,
+        span,
         request_started,
     );
     // The ceiling warning, mirroring `Connection`: on HTTP/1 the
@@ -2099,6 +2197,7 @@ fn render_recorded(
     known: Option<(&RequestHead, &str)>,
     response: &Response,
     body_bytes: u64,
+    span: u64,
     started: Instant,
 ) -> hyper::Response<WatchBody> {
     let ctx = &state.ctx;
@@ -2115,7 +2214,6 @@ fn render_recorded(
     // the log for a 500 on the socket.
     let effective = effective_response(response, &state.limits);
     if let Some((head, path)) = known {
-        let span = state.served.load(Ordering::SeqCst);
         emit_record(
             &ctx.logger,
             crate::server::access_record(head, path, &effective, tenant, ctx.trace, span),
@@ -2282,6 +2380,15 @@ fn framing_of(headers: &hyper::HeaderMap) -> Result<Framing, ParseError> {
             if content_length.is_some() {
                 return Err(ParseError::DuplicateContentLength);
             }
+            // Digits only, like `http1::parse_head`: `u64::parse` accepts a
+            // leading `+`, and a proxy that rejects `+5` while this path
+            // reads `5` is a length disagreement — the smuggling-adjacent
+            // leniency the in-house parser already refuses.
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(ParseError::InvalidContentLength {
+                    value: truncate_head(value, 64),
+                });
+            }
             let n: u64 = value
                 .parse()
                 .map_err(|_| ParseError::InvalidContentLength {
@@ -2399,6 +2506,20 @@ fn map_head_h2<B>(request: &hyper::Request<B>) -> Result<RequestHead, ParseError
     };
     let target = check_target(&target, method)?;
     let framing = framing_of(request.headers())?;
+    // No `Transfer-Encoding` on HTTP/2, ever (RFC 9113 §8.2.2): h2 frames
+    // carry their own lengths, and `framing_of` is shared with the HTTP/1.1
+    // map, so without this a `TE: chunked` would set `chunked` on a version
+    // that has no chunked framing — contradicting the documented contract
+    // below and disagreeing with every strict h2 peer about what arrived.
+    if framing
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
+    {
+        return Err(ParseError::UnsupportedTransferEncoding {
+            value: "h2 must not carry Transfer-Encoding".to_owned(),
+        });
+    }
     let mut headers = framing.headers;
     // `:authority` is the h2 host: it sorts first, like a request line
     // the client actually addressed to us. A `host` header beside it
@@ -2476,7 +2597,11 @@ fn truncate_head(s: &str, max: usize) -> String {
 /// length — goes through [`collect_streamed`], counted frame by frame
 /// against the same cap. Returns the body with the byte count, so the
 /// metric cannot drift from what arrived.
-async fn collect_body(incoming: Incoming, head: &RequestHead) -> Option<(BodyBytes, u64)> {
+async fn collect_body(
+    incoming: Incoming,
+    head: &RequestHead,
+    max_bytes: u64,
+) -> Option<(BodyBytes, u64)> {
     if !head.chunked && head.content_length.is_none_or(|n| n == 0) {
         let body = if head.content_length == Some(0) {
             BodyBytes::Buffered(Vec::new())
@@ -2489,9 +2614,9 @@ async fn collect_body(incoming: Incoming, head: &RequestHead) -> Option<(BodyByt
     // through the counter; declared lengths go through the shared
     // reader with identical counts and refusals.
     if head.chunked {
-        return collect_streamed(incoming).await;
+        return collect_streamed(incoming, max_bytes).await;
     }
-    collect_framed(incoming, head).await
+    collect_framed(incoming, head, max_bytes).await
 }
 
 /// Collect an HTTP/2 body: declared lengths go through the shared
@@ -2503,12 +2628,16 @@ async fn collect_body(incoming: Incoming, head: &RequestHead) -> Option<(BodyByt
 /// keeps both promises, and an empty stream still reports `Absent`
 /// (not an empty buffer), preserving the distinction dispatch relies
 /// on without sniffing the method.
-async fn collect_h2_body(incoming: Incoming, head: &RequestHead) -> Option<(BodyBytes, u64)> {
+async fn collect_h2_body(
+    incoming: Incoming,
+    head: &RequestHead,
+    max_bytes: u64,
+) -> Option<(BodyBytes, u64)> {
     match head.content_length {
         Some(0) => Some((BodyBytes::Buffered(Vec::new()), 0)),
-        Some(_) => collect_framed(incoming, head).await,
+        Some(_) => collect_framed(incoming, head, max_bytes).await,
         None => {
-            let (body, received) = collect_streamed(incoming).await?;
+            let (body, received) = collect_streamed(incoming, max_bytes).await?;
             if received == 0 {
                 return Some((BodyBytes::Absent, 0));
             }
@@ -2519,8 +2648,12 @@ async fn collect_h2_body(incoming: Incoming, head: &RequestHead) -> Option<(Body
 
 /// Collect through the shared [`BodyReader`]: caps, chunked decoding,
 /// and refusal shapes identical to the in-house path.
-async fn collect_framed(incoming: Incoming, head: &RequestHead) -> Option<(BodyBytes, u64)> {
-    let Ok(mut reader) = BodyReader::from_head(head, config_max_request_bytes()) else {
+async fn collect_framed(
+    incoming: Incoming,
+    head: &RequestHead,
+    max_bytes: u64,
+) -> Option<(BodyBytes, u64)> {
+    let Ok(mut reader) = BodyReader::from_head(head, max_bytes) else {
         return None;
     };
     let mut transport = IncomingReader::new(incoming);
@@ -2543,8 +2676,8 @@ async fn collect_framed(incoming: Incoming, head: &RequestHead) -> Option<(BodyB
 /// bound. A body past the cap, a transport error, or a truncation all
 /// refuse the same way the shared reader refuses: no partial body ever
 /// reaches a handler.
-async fn collect_streamed(incoming: Incoming) -> Option<(BodyBytes, u64)> {
-    let cap = config_max_request_bytes();
+async fn collect_streamed(incoming: Incoming, max_bytes: u64) -> Option<(BodyBytes, u64)> {
+    let cap = max_bytes;
     let mut stream = BodyStream::new(incoming);
     let mut body = Vec::new();
     loop {
@@ -2764,6 +2897,25 @@ mod tests {
         assert!(matches!(head(&dup_host), Err(ParseError::DuplicateHost)));
     }
 
+    /// A `+`-prefixed length refuses on the hyper path, like the parser.
+    ///
+    /// `u64::parse` accepts `+5`, and a proxy that rejects it while this path
+    /// reads `5` disagrees about the framing — the smuggling-adjacent
+    /// leniency `http1::parse_head` already refuses.
+    #[test]
+    fn plus_prefixed_content_length_refuses() {
+        let plus = hyper::Request::builder()
+            .method("POST")
+            .uri("/a")
+            .header("content-length", "+5")
+            .body(())
+            .unwrap_or_else(|_| hyper::Request::new(()));
+        assert!(matches!(
+            head(&plus),
+            Err(ParseError::InvalidContentLength { .. })
+        ));
+    }
+
     /// Absolute-form is not routable: a scheme means a proxy wrote this.
     #[test]
     fn absolute_form_refuses() {
@@ -2867,5 +3019,23 @@ mod tests {
             map_head_h2(&h2_get(&long, &[])),
             Err(ParseError::TargetTooLong { .. })
         ));
+    }
+
+    /// `Transfer-Encoding` never appears on h2 (RFC 9113 §8.2.2).
+    ///
+    /// `framing_of` is shared with the HTTP/1.1 map, so without this a
+    /// `TE: chunked` would set `chunked` on a version that has no chunked
+    /// framing — disagreeing with every strict h2 peer about what arrived.
+    #[test]
+    fn transfer_encoding_refuses_on_h2() {
+        for te in ["chunked", "gzip"] {
+            assert!(
+                matches!(
+                    map_head_h2(&h2_get("http://localhost/a", &[("transfer-encoding", te)])),
+                    Err(ParseError::UnsupportedTransferEncoding { .. })
+                ),
+                "TE: {te} on h2"
+            );
+        }
     }
 }

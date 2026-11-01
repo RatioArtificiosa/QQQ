@@ -7,7 +7,7 @@ h1-components-default-200 sha256=4fb03b57242702caa46caaa063ccb10bcf2f521b3f42798
 h1-components-loopback-421 sha256=78897fda146fa98b09994b845f340ae65bcd71919539cb8df801c056131ebac5
 h2-components-shop-200-body sha256=2caab218b37f6dcd699177d2e18c7f78347dc52ecd7f60ee1b19dee66aa6803b
 h2-sse-200-body sha256=2caab218b37f6dcd699177d2e18c7f78347dc52ecd7f60ee1b19dee66aa6803b
-h2-negotiated-alpn-200-data sha256=460a0796f5a636299337e24a79df659d90c8d3eb1442ad4d81450580f1f6639
+h2-negotiated-alpn-200-data sha256=460a0796f5a636299337e24a79df659d90c8d3eb1442ad44d81450580f1f6639
 # ALPN/status/authority observations for the entry above (asserted by
 # production_serve_h2_tenant_sse_live, not hashed): alpn=h2 status=200
 # tenant-unknown-authority-status=421 — see h2-negotiated-alpn-200.log.

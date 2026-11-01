@@ -716,6 +716,10 @@ pub const MAX_BODY_BYTES: usize = 8 << 20;
 /// allocated, encoded, and transmitted by the *harness* — self-inflicted memory
 /// pressure measured as server latency. 1 MiB is three orders of magnitude of
 /// headroom over every row in the table.
+///
+/// ```
+/// assert!(qqq_bench::loadgen::MAX_REQUEST_BODY_BYTES >= 1024);
+/// ```
 pub const MAX_REQUEST_BODY_BYTES: usize = 1 << 20;
 
 /// The most workers one run will spawn.
@@ -726,6 +730,10 @@ pub const MAX_REQUEST_BODY_BYTES: usize = 1 << 20;
 /// is really a harness problem. 4096 allows raised-limit machines while
 /// keeping a typo'd `connections: u32::MAX` from attempting four billion
 /// spawns.
+///
+/// ```
+/// assert!(qqq_bench::loadgen::MAX_CONNECTIONS >= 1);
+/// ```
 pub const MAX_CONNECTIONS: u32 = 4096;
 
 /// Where the head ends: just past the first blank line, or `None`.

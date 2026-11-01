@@ -38,7 +38,9 @@
 //! regression suite**, and it is the reason this file exists.
 
 use qqq_cap::manifest::Manifest;
-use qqq_cap::resolve::GrantSet;
+use qqq_cap::normalize::HostPattern;
+use qqq_cap::policy::Policy;
+use qqq_cap::resolve::{GrantSet, Layer};
 
 /// Documents that exercise the manifest parser's shapes.
 ///
@@ -199,6 +201,65 @@ fn the_manifest_corpus_holds_every_invariant() {
          tested",
         MANIFESTS.len()
     );
+}
+
+/// Ultra-review r1: the policy language and host patterns get the same
+/// no-panic + determinism treatment as manifests — both parse
+/// attacker-influenced text (policy files, manifest allowlists).
+#[test]
+fn the_policy_and_host_corpus_never_panics_and_is_deterministic() {
+    let policies = [
+        "deny http.client",
+        "allow sql.*",
+        "deny http.client\nallow sql.*\ndeny http.client",
+        "require mfa when capability == \"crypto.sign\"",
+        "permit crypto.sign in \"staging\"",
+        "deny http.client to host \"*.onion\"",
+        "deny http.client to host \"*.onion\" when mfa == false",
+        "allow sql.* when tenant == \"acme\"",
+        "deny http.client when tenant == \"a\" garbage",
+        "allow http.client to host \"example.com\"",
+        "deny http.client when not not capability == \"http.client\"",
+        "deny caf\u{e9}.example.com",
+        "",
+        "permit",
+        "allow *",
+        "deny",
+        "require",
+        "deny http.client when",
+        "deny http.client to",
+        "deny http.client to host",
+    ];
+    for src in policies {
+        let a = std::panic::catch_unwind(|| Policy::parse(Layer::Organization, src));
+        let a = a.unwrap_or_else(|_| panic!("policy parser PANICKED on {src:?}"));
+        let b = Policy::parse(Layer::Organization, src);
+        assert_eq!(
+            a.is_ok(),
+            b.is_ok(),
+            "policy parse is nondeterministic on {src:?}"
+        );
+    }
+    let hosts = [
+        "api.example.com",
+        "*.example.com",
+        "api.example.com:443",
+        "[::1]",
+        "[::1]:8080",
+        "*.*.example.com",
+        "*.1.2.3.4",
+        "*",
+        "",
+        "999.1.1.1",
+        "010.1.1.1",
+        "ex\u{e4}mple.com",
+        "a:b:c",
+        "host:99999",
+    ];
+    for h in hosts {
+        let outcome = std::panic::catch_unwind(|| HostPattern::parse(h));
+        assert!(outcome.is_ok(), "host parser PANICKED on {h:?}");
+    }
 }
 
 /// **Every syntax error reports a line that is inside the file — `§O-072`.**

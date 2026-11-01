@@ -363,18 +363,13 @@ impl GrantSet {
     /// ```
     #[must_use]
     pub fn narrow(&self, overlay: &Overlay) -> Self {
-        // Defence in depth: an overlay that claims granting authority is a
-        // programming error, not a user error. Refuse it outright rather than
-        // applying it — a layer that may not grant simply has no effect.
-        if overlay.layer.may_grant() && overlay.layer != Layer::Manifest {
-            debug_assert!(
-                false,
-                "non-manifest layer {} attempted to grant",
-                overlay.layer
-            );
-            return self.clone();
-        }
-
+        // No layer check here by design: `Overlay` has no granting mode —
+        // both `Intersect` and `Subtract` can only shrink — so there is no
+        // "granting overlay" to refuse at the layer level. (An earlier
+        // revision checked `may_grant() && != Manifest`, which is always
+        // false since only `Manifest` may grant; it was dead code removed
+        // in ultra-review r1.) The subset assertion below is the live
+        // enforcement: any narrowing that is not a subset fails loudly.
         let capabilities: BTreeSet<Capability> = match overlay.mode {
             NarrowMode::Intersect => self
                 .capabilities
@@ -388,12 +383,21 @@ impl GrantSet {
                 .collect(),
         };
 
-        // The narrowing guarantee, checked in debug builds. In release this
-        // costs nothing; the tests cover it exhaustively.
+        // The narrowing guarantee: intersection/difference are subsets by
+        // construction, so this cannot fire unless the set implementation
+        // itself is broken. Checked loudly in debug; in release, fail closed
+        // to the empty set — keeping the pre-narrow set would retain
+        // authority the overlay meant to remove, while empty grants nothing.
         debug_assert!(
             capabilities.is_subset(&self.capabilities),
             "narrow() produced a set that is not a subset — the security model is broken"
         );
+        if !capabilities.is_subset(&self.capabilities) {
+            return Self {
+                capabilities: BTreeSet::new(),
+                applied_layers: self.applied_layers.clone(),
+            };
+        }
 
         let mut applied_layers = self.applied_layers.clone();
         if !applied_layers.contains(&overlay.layer) {
@@ -414,7 +418,12 @@ impl GrantSet {
     #[must_use]
     pub fn digest(&self) -> String {
         // Sorted iteration makes this stable across runs and platforms, which
-        // matters because the digest is compared across hosts.
+        // matters because the digest is compared across hosts — and across
+        // versions: `linker` pins the empty digest to the SHA-256 of nothing,
+        // so no domain prefix or version tag may be added here without a
+        // migration. The separator keeps names unambiguous within this one
+        // use; confusion with other SHA-256 uses is prevented by the labeled
+        // `grant-digest` context at the call site, not by the hash itself.
         let mut hasher = Sha256::new();
         for c in &self.capabilities {
             hasher.update(c.name().as_bytes());
@@ -536,7 +545,11 @@ impl Resolution {
             }
         }
 
-        if overlay.layer == Layer::Developer && !before.is_empty() {
+        // Warn on every developer overlay, even over an empty grant set: the
+        // overlay existing at all means local-iteration authority is in play,
+        // and gating the warning on non-emptiness would let an empty-base
+        // run look production-clean.
+        if overlay.layer == Layer::Developer {
             self.warnings.push(format!(
                 "developer overlay active — NOT for production ({} rule)",
                 overlay.reason

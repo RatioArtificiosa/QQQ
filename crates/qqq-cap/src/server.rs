@@ -303,11 +303,32 @@ fn validate_websocket(ws: &crate::manifest::WebsocketPolicy) -> Result<(), Manif
         }
     }
     for host in &ws.allowed_hosts {
-        if host.trim().is_empty() {
+        // Bare-host discipline, mirroring `validate_tenants` keys: the
+        // upgrade check compares `Host` headers case-insensitively without a
+        // port, so a value that cannot match there is dead configuration.
+        let value = host.trim();
+        if value.is_empty() {
             return Err(ManifestError::InvalidField {
                 field: "server.websocket.allowed_hosts".to_owned(),
                 reason: "an empty host admits nothing and documents nothing; remove it".to_owned(),
             });
+        }
+        if value != value.to_ascii_lowercase() {
+            return Err(ManifestError::InvalidField {
+                field: "server.websocket.allowed_hosts".to_owned(),
+                reason: format!("`{value}` must be lowercase; hosts compare case-insensitively"),
+            });
+        }
+        for bad in [':', '/', '?', '#', '[', ']', ' ', '\t'] {
+            if value.contains(bad) {
+                return Err(ManifestError::InvalidField {
+                    field: "server.websocket.allowed_hosts".to_owned(),
+                    reason: format!(
+                        "`{value}` must be a bare host, without a port, path, \
+                         brackets, or whitespace"
+                    ),
+                });
+            }
         }
     }
     for (name, cap) in [
@@ -362,6 +383,44 @@ fn validate_cors(cors: &Cors) -> Result<(), ManifestError> {
                      classic CORS bypass"
                 .to_owned(),
         });
+    }
+    // Same shape discipline as `[server.websocket]`: an origin is
+    // `scheme://host[:port]`, never `null` and never carrying a path, query,
+    // or fragment. A value that cannot match is dead configuration reading
+    // as policy.
+    for origin in &cors.allow_origins {
+        let value = origin.trim();
+        if value.eq_ignore_ascii_case("null") {
+            return Err(ManifestError::InvalidField {
+                field: "server.cors.allow_origins".to_owned(),
+                reason: "`null` is sent by sandboxed iframes and `file://` pages: \
+                         admitting it grants exactly the callers least able to be trusted"
+                    .to_owned(),
+            });
+        }
+        let Some((scheme, rest)) = value.split_once("://") else {
+            return Err(ManifestError::InvalidField {
+                field: "server.cors.allow_origins".to_owned(),
+                reason: format!(
+                    "`{value}` is not `scheme://host[:port]`; origins compare \
+                     exactly, so this entry could never match"
+                ),
+            });
+        };
+        if scheme.is_empty() || rest.is_empty() {
+            return Err(ManifestError::InvalidField {
+                field: "server.cors.allow_origins".to_owned(),
+                reason: format!("`{value}` has no scheme or no host"),
+            });
+        }
+        if rest.contains('/') || rest.contains('?') || rest.contains('#') {
+            return Err(ManifestError::InvalidField {
+                field: "server.cors.allow_origins".to_owned(),
+                reason: format!(
+                    "`{value}` carries a path, query or fragment; an origin is not a URL"
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -430,7 +489,42 @@ impl Server {
 
         Ok(())
     }
+}
 
+/// Whether two route paths can match the same request.
+///
+/// Normalizes a trailing `/` (except the root) and treats `:param` and `*`
+/// segments as matching any one segment. Exact equality is the common case;
+/// the segment rule catches `/orders/:id` vs `/orders/*`, which would
+/// otherwise route the same request to two handlers.
+fn paths_overlap(a: &str, b: &str) -> bool {
+    fn normalized(p: &str) -> &str {
+        if p.len() > 1 {
+            p.strip_suffix('/').unwrap_or(p)
+        } else {
+            p
+        }
+    }
+    let (a, b) = (normalized(a), normalized(b));
+    if a == b {
+        return true;
+    }
+    let (mut ai, mut bi) = (a.split('/'), b.split('/'));
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) => {
+                let wild = |s: &str| s == "*" || s.starts_with(':');
+                if x != y && !wild(x) && !wild(y) {
+                    return false;
+                }
+            }
+            (None, Some(_)) | (Some(_), None) => return false,
+        }
+    }
+}
+
+impl Server {
     /// Check one route, returning its canonical method list.
     ///
     /// `declared` is what earlier routes in the list already handle, so a duplicate is
@@ -512,9 +606,12 @@ impl Server {
 
         // A duplicate is an error rather than a last-wins merge: two entries for
         // the same path and method mean the author has two intentions, and picking
-        // one silently is how the other is discovered in production.
+        // one silently is how the other is discovered in production. Paths
+        // compare normalized (a trailing `/` is not a different route) and
+        // segment-wise (`:id` and `*` both match any one segment, so
+        // `/orders/:id` overlaps `/orders/*` and `/orders/:name`).
         for (path, earlier) in declared {
-            if *path != route.path {
+            if !paths_overlap(path, &route.path) {
                 continue;
             }
             if let Some(overlap) = methods.iter().find(|m| earlier.contains(m)) {
@@ -531,16 +628,29 @@ impl Server {
 
         // A `ws` route upgrades from `GET`: the handshake is a `GET` with
         // `Upgrade: websocket`, so a `ws` route without `GET` is a route no
-        // handshake can reach. Refused here rather than as a runtime `400`,
-        // where the author would debug the client instead of the manifest.
-        if route.kind == crate::manifest::RouteKind::Ws && !methods.contains(&"GET") {
-            return Err(ManifestError::InvalidField {
-                field: format!("{where_}.methods"),
-                reason: "a `ws` route must list `GET`: the WebSocket handshake \
-                         is a `GET` with `Upgrade: websocket`, so without it \
-                         no client can ever upgrade"
-                    .to_owned(),
-            });
+        // handshake can reach — and any non-`GET` method on a `ws` route is
+        // dead for the same reason (no upgrade ever arrives as `POST`).
+        // Refused here rather than as a runtime `400`, where the author
+        // would debug the client instead of the manifest.
+        if route.kind == crate::manifest::RouteKind::Ws {
+            if !methods.contains(&"GET") {
+                return Err(ManifestError::InvalidField {
+                    field: format!("{where_}.methods"),
+                    reason: "a `ws` route must list `GET`: the WebSocket handshake \
+                             is a `GET` with `Upgrade: websocket`, so without it \
+                             no client can ever upgrade"
+                        .to_owned(),
+                });
+            }
+            if methods.iter().any(|m| *m != "GET") {
+                return Err(ManifestError::InvalidField {
+                    field: format!("{where_}.methods"),
+                    reason: "a `ws` route must list only `GET`: the handshake \
+                             never arrives as another method, so any other \
+                             entry is dead configuration"
+                        .to_owned(),
+                });
+            }
         }
 
         Ok(methods)
@@ -852,6 +962,72 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("already handles"), "{text}");
         assert!(text.contains("POST"), "{text}");
+    }
+
+    /// Ultra-review r1: trailing-slash and parameter-segment duplicates are
+    /// refused too — `/orders/` is `/orders`, and `:id` overlaps `*`.
+    #[test]
+    fn trailing_slash_and_parameter_duplicates_are_refused() {
+        let s = server(vec![
+            route("/orders", &["GET"]),
+            route("/orders/", &["GET"]),
+        ]);
+        assert!(
+            s.validate().is_err(),
+            "trailing slash is not a different route"
+        );
+        let s = server(vec![
+            route("/orders/:id", &["GET"]),
+            route("/orders/*", &["GET"]),
+        ]);
+        assert!(s.validate().is_err(), ":id overlaps *");
+        // Different segment counts do not overlap.
+        let s = server(vec![route("/a", &["GET"]), route("/a/b", &["GET"])]);
+        assert!(
+            s.validate().is_ok(),
+            "different depths are different routes"
+        );
+    }
+
+    /// Ultra-review r1: a `ws` route must list only `GET` — any other method
+    /// is dead configuration (no upgrade ever arrives as `POST`).
+    #[test]
+    fn a_ws_route_with_a_non_get_method_is_refused() {
+        let mut r = route("/socket", &["GET", "POST"]);
+        r.kind = crate::manifest::RouteKind::Ws;
+        assert!(server(vec![r]).validate().is_err());
+        let mut r = route("/socket", &["GET"]);
+        r.kind = crate::manifest::RouteKind::Ws;
+        assert!(server(vec![r]).validate().is_ok());
+    }
+
+    /// Ultra-review r1: CORS origins follow the websocket shape discipline —
+    /// `null` and path/query/fragment entries are dead configuration.
+    #[test]
+    fn cors_origins_with_null_or_paths_are_refused() {
+        for bad in [
+            "null",
+            "NULL",
+            "https://app.example.com/path",
+            "https://a.com?q=1",
+        ] {
+            let s = Server {
+                cors: Some(Cors {
+                    allow_origins: vec![bad.to_owned()],
+                    ..Cors::default()
+                }),
+                ..Server::default()
+            };
+            assert!(s.validate().is_err(), "{bad} must be refused");
+        }
+        let s = Server {
+            cors: Some(Cors {
+                allow_origins: vec!["https://app.example.com".to_owned()],
+                ..Cors::default()
+            }),
+            ..Server::default()
+        };
+        assert!(s.validate().is_ok());
     }
 
     /// The same path with **disjoint** methods is fine.

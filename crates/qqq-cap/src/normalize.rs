@@ -96,6 +96,13 @@ pub enum NormalizeError {
         /// Why it is invalid.
         reason: String,
     },
+    /// A secret reference could not be parsed.
+    InvalidSecret {
+        /// The offending reference string.
+        reference: String,
+        /// Why it is invalid.
+        reason: String,
+    },
     /// The normalized configuration contradicts itself — for example the same
     /// path granted twice with different modes, which is ambiguous and would
     /// make the effective authority depend on iteration order.
@@ -134,6 +141,9 @@ impl fmt::Display for NormalizeError {
             Self::InvalidQuota { quota, reason } => {
                 write!(f, "invalid quota `{quota}`: {reason}")
             }
+            Self::InvalidSecret { reference, reason } => {
+                write!(f, "invalid secret reference `{reference}`: {reason}")
+            }
             Self::ConflictingGrants {
                 subject,
                 first,
@@ -157,9 +167,9 @@ impl NormalizeError {
             | Self::PathNotADirectory { .. }
             | Self::PathUnresolvable { .. } => qqq_core::ErrorCode::CapabilityPathInvalid,
             Self::SecretMissing { .. } => qqq_core::ErrorCode::SecretUnresolvable,
-            Self::InvalidHostPattern { .. } | Self::InvalidQuota { .. } => {
-                qqq_core::ErrorCode::CapabilitySyntaxInvalid
-            }
+            Self::InvalidHostPattern { .. }
+            | Self::InvalidQuota { .. }
+            | Self::InvalidSecret { .. } => qqq_core::ErrorCode::CapabilitySyntaxInvalid,
             Self::ConflictingGrants { .. } => qqq_core::ErrorCode::ManifestSchemaViolation,
         }
     }
@@ -189,6 +199,9 @@ impl NormalizeError {
             Self::InvalidQuota { quota, .. } => e
                 .with_context("quota", quota.clone())
                 .with_remediation("use a positive size like `5GiB`; `0B` grants nothing"),
+            Self::InvalidSecret { reference, .. } => e
+                .with_context("secret", reference.clone())
+                .with_remediation("use `env:VARIABLE_NAME` with an upper-case name"),
             Self::ConflictingGrants { subject, .. } => e
                 .with_context("subject", subject.clone())
                 .with_remediation("grant each path once, with a single mode"),
@@ -961,6 +974,9 @@ fn normalize_list(items: Option<&[String]>, lowercase: bool) -> Vec<String> {
     let Some(items) = items else {
         return Vec::new();
     };
+    // Blanks are refused at parse; filtering here as well keeps a
+    // hand-built manifest (which bypasses validation) honest too — an empty
+    // entry grants nothing and must not appear in the normalized set.
     let mut out: Vec<String> = items
         .iter()
         .map(|s| {
@@ -971,6 +987,7 @@ fn normalize_list(items: Option<&[String]>, lowercase: bool) -> Vec<String> {
                 t.to_owned()
             }
         })
+        .filter(|s| !s.is_empty())
         .collect();
     out.sort();
     out.dedup();
@@ -1003,8 +1020,8 @@ fn normalize_secrets(
         .map_or(&[], |c| c.secrets.as_slice());
     let mut secrets = Vec::with_capacity(dedicated.len() + legacy.len());
     for s in dedicated.iter().chain(legacy) {
-        let r = SecretRef::parse(s).map_err(|reason| NormalizeError::InvalidHostPattern {
-            pattern: s.clone(),
+        let r = SecretRef::parse(s).map_err(|reason| NormalizeError::InvalidSecret {
+            reference: s.clone(),
             reason,
         })?;
         if !env.has_env(&r.env_var) {
@@ -1067,6 +1084,11 @@ fn normalize_secrets(
 /// defence-in-depth re-check for a mis-built preopen table.
 #[must_use]
 pub fn path_is_within(candidate: &str, root: &str) -> bool {
+    // An empty root or candidate never authorizes: with components stripped,
+    // an empty root would otherwise match every absolute path below.
+    if candidate.is_empty() || root.is_empty() {
+        return false;
+    }
     if candidate == root {
         return true;
     }
@@ -1869,7 +1891,7 @@ mod tests {
     fn normalization_rejects_malformed_dedicated_secret_refs() {
         let m = manifest_with("[capabilities.secret]\nsecrets = [\"vault:x\"]\n");
         let e = Normalized::from_manifest(&m, &FakeEnv::default()).unwrap_err();
-        assert!(matches!(e, NormalizeError::InvalidHostPattern { .. }));
+        assert!(matches!(e, NormalizeError::InvalidSecret { .. }));
     }
 
     /// Both spellings union in normalization too: one entry from each
@@ -1960,6 +1982,13 @@ mod tests {
             (
                 NormalizeError::InvalidHostPattern {
                     pattern: "x".into(),
+                    reason: "y".into(),
+                },
+                qqq_core::ErrorCode::CapabilitySyntaxInvalid,
+            ),
+            (
+                NormalizeError::InvalidSecret {
+                    reference: "x".into(),
                     reason: "y".into(),
                 },
                 qqq_core::ErrorCode::CapabilitySyntaxInvalid,

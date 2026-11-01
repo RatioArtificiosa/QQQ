@@ -1769,6 +1769,20 @@ fn parse_destination(text: &str, source: &str, line: usize) -> Result<Expr, Poli
             ),
         ));
     };
+    // Only `host` is a destination: `to mfa "x"` would parse and then be
+    // silently ignored by the overlay compiler (which has no binding), so a
+    // non-host field here is refused rather than rendered as meaningful.
+    if field != Field::Host {
+        return Err(PolicyError::new(
+            line,
+            source,
+            format!(
+                "a `to` clause constrains the destination host, so only `host` \
+                 is accepted here — not `{field_text}`; state a subject \
+                 condition with `when`"
+            ),
+        ));
+    }
 
     let value = parse_literal(literal_text, field, source, line)?;
     // A glob if the author wrote one, an equality otherwise -- see above.
@@ -1906,9 +1920,10 @@ fn split_keyword<'a>(text: &'a str, keyword: &str) -> Option<(&'a str, &'a str)>
         }
         if !in_string && text[i..].starts_with(keyword) {
             let before_ok = i == 0
-                || bytes
-                    .get(i - 1)
-                    .is_some_and(|b| (*b as char).is_whitespace());
+                || text[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace);
             let after = i + keyword.len();
             let after_ok = after == text.len()
                 || text
@@ -2193,6 +2208,13 @@ fn check_operator_type(
 
 /// Split on a keyword at paren depth zero, outside strings.
 fn split_top_level<'a>(text: &'a str, keyword: &str) -> Vec<&'a str> {
+    // Byte-indexed scan with whole-char steps: `i` is always at a char
+    // boundary (it starts at 0 and advances by `len_utf8`), so `text[i..]`
+    // never slices inside a multi-byte sequence. A byte loop with `i += 1`
+    // panicked on non-ASCII outside strings (e.g. a unicode field name).
+    // Boundary checks read chars, not raw bytes: a continuation byte like
+    // `0xA0` decodes (as `char`) to NBSP whitespace, so byte-sniffing
+    // misclassifies boundaries after non-ASCII letters.
     let mut parts = Vec::new();
     let mut depth = 0i32;
     let mut in_string = false;
@@ -2200,26 +2222,24 @@ fn split_top_level<'a>(text: &'a str, keyword: &str) -> Vec<&'a str> {
     let bytes = text.as_bytes();
     let mut i = 0usize;
     while i < text.len() {
-        // As in `split_keyword`: the loop guard bounds `i`, so the `else`
-        // terminates rather than panics on a lying invariant.
         let Some(&b) = bytes.get(i) else { break };
-        let ch = b as char;
-        match ch {
-            '"' => in_string = !in_string,
-            '(' if !in_string => depth += 1,
-            ')' if !in_string => depth -= 1,
+        match b {
+            b'"' => in_string = !in_string,
+            b'(' if !in_string => depth += 1,
+            b')' if !in_string => depth -= 1,
             _ => {}
         }
         if !in_string && depth == 0 && text[i..].starts_with(keyword) {
             let before_ok = i == 0
-                || bytes
-                    .get(i - 1)
-                    .is_some_and(|b| (*b as char).is_whitespace());
+                || text[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace);
             let after = i + keyword.len();
             let after_ok = after == text.len()
-                || bytes
-                    .get(after)
-                    .is_some_and(|b| (*b as char).is_whitespace());
+                || text
+                    .get(after..)
+                    .is_some_and(|t| t.starts_with(char::is_whitespace));
             if before_ok && after_ok {
                 parts.push(&text[start..i]);
                 start = after;
@@ -2227,7 +2247,7 @@ fn split_top_level<'a>(text: &'a str, keyword: &str) -> Vec<&'a str> {
                 continue;
             }
         }
-        i += 1;
+        i += text[i..].chars().next().map_or(1, char::len_utf8);
     }
     if parts.is_empty() {
         return vec![text];
@@ -2237,26 +2257,26 @@ fn split_top_level<'a>(text: &'a str, keyword: &str) -> Vec<&'a str> {
 }
 
 /// Find an operator at paren depth zero, outside strings.
+///
+/// Whole-char stepping like [`split_top_level`]: `i` stays on char
+/// boundaries so `text[i..]` cannot slice inside a multi-byte sequence.
 fn find_top_level(text: &str, op: &str) -> Option<usize> {
     let mut depth = 0i32;
     let mut in_string = false;
     let bytes = text.as_bytes();
     let mut i = 0usize;
     while i + op.len() <= text.len() {
-        // As in `split_keyword` above: loop-guarded, so the `else` is
-        // unreachable structure rather than behavior.
         let Some(&b) = bytes.get(i) else { break };
-        let ch = b as char;
-        match ch {
-            '"' => in_string = !in_string,
-            '(' if !in_string => depth += 1,
-            ')' if !in_string => depth -= 1,
+        match b {
+            b'"' => in_string = !in_string,
+            b'(' if !in_string => depth += 1,
+            b')' if !in_string => depth -= 1,
             _ => {}
         }
         if !in_string && depth == 0 && text[i..].starts_with(op) {
             return Some(i);
         }
-        i += 1;
+        i += text[i..].chars().next().map_or(1, char::len_utf8);
     }
     None
 }
@@ -2664,6 +2684,26 @@ mod tests {
             "got: {}",
             e.message
         );
+    }
+
+    /// Ultra-review r2 H1: `split_top_level` and `find_top_level` stepped
+    /// bytes (`i += 1`) and sliced `text[i..]` — panicking on non-ASCII
+    /// *outside* strings (e.g. a unicode field name). Round 1 fixed only
+    /// `split_keyword`; this pins all three splitters.
+    #[test]
+    fn all_splitters_survive_unicode_outside_strings() {
+        // Unicode outside any string: must be an unknown-field error, never
+        // a panic. (`café` also exercises the NBSP-continuation boundary
+        // case: byte `0xA0` decodes as whitespace-as-char.)
+        let e = err("deny http.client when caf\u{e9} == \"x\"");
+        assert!(
+            e.message.contains("not a field") || e.message.contains("café"),
+            "got: {}",
+            e.message
+        );
+        // Unicode inside strings still parses and evaluates.
+        let p = parse("deny http.client when tenant == \"caf\u{e9}\"");
+        assert_eq!(p.rules().len(), 1);
     }
 
     /// Ultra-review r1 H: `split_keyword` must not panic on multi-byte text.

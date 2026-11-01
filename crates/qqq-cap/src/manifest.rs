@@ -909,6 +909,11 @@ pub mod limit_bounds {
     /// from one request is an outage aimed at somebody else. The ceiling is the
     /// range check's job — the operator picks the real number.
     pub const SUBREQUESTS_MAX: u32 = 10_000;
+    /// Maximum instances polled per scheduler tick.
+    ///
+    /// A zero poll budget would never poll (hang), and an unbounded one would
+    /// starve the scheduler; the range check keeps both mistakes at parse time.
+    pub const POLL_MAX: u32 = 10_000;
 }
 
 /// Test whether a limit error applies, generating the message from the same
@@ -1213,13 +1218,13 @@ impl Manifest {
             // nonsense. `qqqai add` (which links `qqq-pkg`) validates the real
             // grammar before writing, which is where the user can still be
             // told about a typo.
-            if req.len() > 64 {
+            if req.chars().count() > 64 {
                 return Err(ManifestError::InvalidField {
                     field: format!("{table}.{name}"),
                     reason: format!(
                         "`{req}` is {} characters; a version requirement is far shorter \
                          than that, which suggests the wrong value was pasted here",
-                        req.len()
+                        req.chars().count()
                     ),
                 });
             }
@@ -1284,6 +1289,12 @@ impl Manifest {
             &0,
             &limit_bounds::SUBREQUESTS_MAX,
         )?;
+        check_range(
+            "limits.max_poll_per_tick",
+            &self.limits.max_poll_per_tick,
+            &1,
+            &limit_bounds::POLL_MAX,
+        )?;
         Ok(())
     }
 
@@ -1344,10 +1355,21 @@ impl Manifest {
                 });
             }
             if let Some(q) = &fs.quota {
-                ByteSize::parse(q).map_err(|reason| ManifestError::InvalidField {
+                let bytes = ByteSize::parse(q).map_err(|reason| ManifestError::InvalidField {
                     field: format!("capabilities.fs[{i}].quota"),
                     reason,
                 })?;
+                // Mirror normalize's `InvalidQuota`: `0B` grants no bytes,
+                // so it is a typo (or a misunderstanding) rather than a
+                // policy. Refuse at parse, where the author can still fix it.
+                if bytes.as_bytes() == 0 {
+                    return Err(ManifestError::InvalidField {
+                        field: format!("capabilities.fs[{i}].quota"),
+                        reason: "`0B` grants no bytes; remove the quota or set a \
+                                 positive size"
+                            .to_owned(),
+                    });
+                }
             }
         }
 
@@ -1393,8 +1415,12 @@ impl Manifest {
                 });
             }
             if !value.is_table() {
+                // `all()` on an empty array is vacuously true, so `ns = []`
+                // would pass as an "array of tables" while declaring nothing
+                // — an empty declaration that reads as configuration. Refuse
+                // it: remove the stanza or declare something in it.
                 let array_of_tables = matches!(value, toml::Value::Array(items)
-                    if items.iter().all(toml::Value::is_table));
+                    if !items.is_empty() && items.iter().all(toml::Value::is_table));
                 if !array_of_tables {
                     return Err(ManifestError::InvalidField {
                         field: format!("capabilities.{key}"),

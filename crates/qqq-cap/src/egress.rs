@@ -174,28 +174,30 @@ impl TenantEgress {
     /// Derive the policy from a parsed manifest (`I-01`).
     ///
     /// No `[capabilities.http]` section means no declared
-    /// destinations: deny-all, not unrestricted. `expect` with a
-    /// reason rather than `unwrap_or_else(deny_all)`: `Manifest::parse`
-    /// already rejects malformed client patterns, so a failure here
-    /// means the parser's guarantee broke — fail-stop, never silent
-    /// narrowing.
+    /// destinations: deny-all, not unrestricted. `Manifest::parse`
+    /// already rejects malformed client patterns, so for parsed manifests
+    /// every pattern lands in the allowlist.
     ///
-    /// # Panics
-    ///
-    /// When a client pattern fails to parse after `Manifest::parse`
-    /// accepted it, which contradicts the parser's contract and is a
-    /// host bug rather than a guest error.
+    /// Fail-closed on hand-built manifests: `Manifest` fields are `pub`, so
+    /// a host can construct one without running `validate`. An invalid
+    /// pattern is dropped (narrowing — fewer allowed hosts) rather than
+    /// panicking the process, because a panic on host-constructed data is a
+    /// denial of service and a narrower policy is always the safe direction.
     #[must_use]
     pub fn from_manifest(manifest: &crate::manifest::Manifest) -> Self {
         let Some(http) = manifest.capabilities.http.as_ref() else {
             return Self::deny_all();
         };
-        #[expect(
-            clippy::expect_used,
-            reason = "manifest client patterns already validated at parse"
-        )]
-        let mut policy = TenantEgress::allowing_hosts(&http.client)
-            .expect("manifest client patterns already validated at parse");
+        let mut policy = TenantEgress {
+            allow: http
+                .client
+                .iter()
+                .filter_map(|h| HostPattern::parse(h).ok())
+                .collect(),
+            allow_cleartext: false,
+            allow_ip_literals: false,
+            max_redirect_hops: 0,
+        };
         if http.cleartext {
             policy = policy.allowing_cleartext();
         }
@@ -247,16 +249,21 @@ impl TenantEgress {
         self
     }
 
+    /// Protocol ceiling for redirect hops: the connector re-vets every hop
+    /// and never follows more than this, regardless of the grant below.
+    pub const MAX_REDIRECT_HOPS: u8 = 3;
+
     /// Permit following redirect hops, up to `max_hops`.
     ///
     /// Each followed hop is re-vetted through the full policy by the
     /// connector; `https` to `http` downgrades refuse regardless of
-    /// this grant, and the protocol ceiling (3) applies on top, so a
-    /// larger grant behaves as 3. Zero (the default) refuses every
-    /// redirect at the first `Location`.
+    /// this grant. Grants above [`Self::MAX_REDIRECT_HOPS`] are clamped:
+    /// a larger grant behaves as 3 at the connector, so it is stored as 3
+    /// here rather than as a value that reads larger than it enforces.
+    /// Zero (the default) refuses every redirect at the first `Location`.
     #[must_use]
     pub fn allowing_redirects(mut self, max_hops: u8) -> Self {
-        self.max_redirect_hops = max_hops;
+        self.max_redirect_hops = max_hops.min(Self::MAX_REDIRECT_HOPS);
         self
     }
 
@@ -615,15 +622,19 @@ impl EgressPolicy {
     ///    consulted — the engine has already refused, and this module cannot
     ///    reverse that. Checking it first also means the cheapest and most
     ///    authoritative answer is the one reported.
-    /// 2. **Tenant existence.** A tenant with no policy may reach nothing. This is
+    /// 2. **Host syntax.** Empty, whitespace, path separators, NUL bytes,
+    ///    userinfo (`@`), and zone IDs (`%`) are refused as malformed before
+    ///    any tenant lookup: a malformed host is malformed for every tenant,
+    ///    and reporting `NoTenantPolicy` for it would send the operator to
+    ///    configure a tenant when the destination itself is the fault.
+    /// 3. **Tenant existence.** A tenant with no policy may reach nothing. This is
     ///    reported distinctly from "policy exists but did not match", because
     ///    "tenant B was never configured" and "tenant B was configured and this
     ///    host is not in it" are different operator problems.
-    /// 3. **Host shape.** A literal address is refused before matching, because it
-    ///    would not match any pattern anyway and reporting "host not allowed" would
-    ///    obscure the actual reason.
-    /// 4. **Scheme.** Cleartext is refused before the allowlist match for the same
-    ///    reason.
+    /// 4. **Literal and scheme.** A literal address is refused before matching,
+    ///    because it would not match any pattern anyway and reporting "host
+    ///    not allowed" would obscure the actual reason. Cleartext is refused
+    ///    before the allowlist match for the same reason.
     /// 5. **Allowlist.** The pattern match, which is the decision the operator
     ///    wrote.
     ///
@@ -655,6 +666,19 @@ impl EgressPolicy {
         if destination.host.contains('/') {
             return Decision::Deny(Denial::MalformedHost(
                 "it contains a path separator; a destination is a host, not a URL".to_owned(),
+            ));
+        }
+        if destination.host.contains('\0') {
+            return Decision::Deny(Denial::MalformedHost("it contains a NUL byte".to_owned()));
+        }
+        if destination.host.contains('@') {
+            return Decision::Deny(Denial::MalformedHost(
+                "it contains userinfo; a destination is a host, not `user@host`".to_owned(),
+            ));
+        }
+        if destination.host.contains('%') {
+            return Decision::Deny(Denial::MalformedHost(
+                "it contains a zone ID, which this policy does not support".to_owned(),
             ));
         }
 
@@ -748,6 +772,16 @@ mod tests {
             TenantEgress::allowing_hosts(hosts).expect("the test's patterns are valid"),
         );
         policy
+    }
+
+    /// Ultra-review r1: redirect grants clamp to the protocol ceiling —
+    /// a grant of 255 must store (and enforce) 3, not read larger.
+    #[test]
+    fn redirect_grants_clamp_to_the_protocol_ceiling() {
+        let t = TenantEgress::deny_all().allowing_redirects(255);
+        assert_eq!(t.max_redirect_hops(), TenantEgress::MAX_REDIRECT_HOPS);
+        let t = TenantEgress::deny_all().allowing_redirects(2);
+        assert_eq!(t.max_redirect_hops(), 2);
     }
 
     // -- The capability check is not reviewable ----------------------------

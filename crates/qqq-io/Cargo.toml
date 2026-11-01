@@ -16,6 +16,12 @@ qqq-core = { path = "../qqq-core", version = "0.1.1" }
 # The only crate in the workspace that depends on the async runtime. Everything
 # above it is synchronous and pure; see the crate documentation for why.
 tokio = { workspace = true }
+# `libc` is used for exactly one thing: the `EMFILE`/`ENFILE` numbers for the
+# accept loop's transient-error classifier. `std::io::ErrorKind` has no stable
+# spelling for descriptor exhaustion on this toolchain, and matching the raw
+# errno is the only portable way to tell "try again shortly" from "the socket
+# is dead".
+libc = "0.2"
 
 [dev-dependencies]
 # The integration tests bind real sockets, so they need the runtime's test

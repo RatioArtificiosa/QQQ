@@ -27,8 +27,9 @@
 //! | Area | State |
 //! |---|---|
 //! | Listen-address parsing and validation | **implemented** |
-//! | Round-robin shard assignment | **implemented** |
-//! | Accept admission (backpressure at the accept point) | **implemented** |
+//! | Round-robin shard assignment (the `ShardSet` primitive) | **implemented** |
+//! | Listener wiring of shards to accepted connections | caller-owned: `accept_stream` hands over live streams in accept order; the caller assigns them with `ShardSet` |
+//! | Accept admission (backpressure at the accept point) | **not** implemented — the batch bound yields but does not bound in-flight connections; see `ListenerConfig::accept_batch` |
 //! | Cooperative shutdown signalling | **implemented** |
 //! | Accept loop over `TcpListener` | **implemented** |
 //! | `io_uring` backend | not implemented — Linux-only, tracked as `FUT-*` |

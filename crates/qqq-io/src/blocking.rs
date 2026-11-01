@@ -29,8 +29,9 @@
 //! * Nothing in this program can accidentally spawn work onto a pool that outlives
 //!   the call. The runtime is created, used and dropped within one function.
 //!
-//! The cost is one thread. For a process whose whole job is to serve until
-//! interrupted, that is the correct trade.
+//! There is no extra thread: the runtime drives futures on the calling thread
+//! itself. The cost is runtime setup per call, not a thread — the right trade
+//! for a process whose whole job is to serve until interrupted.
 
 // Edition 2024 puts `Future` in the prelude, so the explicit import is
 // redundant here.
@@ -38,25 +39,42 @@ use qqq_core::{Error, ErrorCode, Result};
 
 /// Run a future to completion on a fresh current-thread runtime.
 ///
+/// Must be called from synchronous code: entering `block_on` from inside an
+/// async runtime would panic (a runtime cannot drive a future while another
+/// runtime is driving the thread), so that misuse is detected up front and
+/// reported as an error instead.
+///
 /// # Errors
 ///
-/// `QQQ-6004` when the runtime cannot be constructed. That is a genuine "cannot do
-/// the work at all" condition — typically no threads left to create — and it is
-/// reported rather than panicking, because a CLI that panics on a resource
-/// exhaustion gives the operator a backtrace instead of a reason.
+/// `QQQ-6004` when called from inside an async runtime — that is always a
+/// wiring bug (sync code calling the bridge from an async context), and
+/// panicking on it would give a backtrace instead of a reason.
 ///
-/// The future's own error is returned unchanged; this function only adds the
+/// `QQQ-6005` when the runtime cannot be constructed. That is a genuine "cannot
+/// do the work at all" condition — typically no threads left to create — and
+/// it is retryable after backoff, unlike a wiring bug.
+///
+/// The future's own error is returned unchanged: this function only adds the
 /// capability to *wait* for it.
 pub fn block_on<F>(future: F) -> Result<F::Output>
 where
     F: Future,
 {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(Error::new(
+            ErrorCode::InternalInvariantViolated,
+            "block_on called from inside an async runtime",
+        )
+        .with_remediation(
+            "call block_on only from synchronous code; inside async code, await the future directly",
+        ));
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| {
             Error::new(
-                ErrorCode::InternalInvariantViolated,
+                ErrorCode::HostResourceExhausted,
                 "could not start the async runtime",
             )
             .with_cause(e.to_string())
@@ -77,6 +95,21 @@ mod tests {
     fn a_future_is_driven_to_completion_and_its_value_returned() {
         let got = block_on(async { 7u32 }).expect("the runtime should start");
         assert_eq!(got, 7);
+    }
+
+    #[test]
+    fn calling_from_inside_a_runtime_is_an_error_not_a_panic() {
+        // `block_on` inside an async context would panic ("cannot start a
+        // runtime from within a runtime"). The guard above turns that misuse
+        // into a `QQQ-6004` instead — a wiring bug with a name, not a crash.
+        let outer = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the outer runtime should start");
+        let err = outer
+            .block_on(async { block_on(async { 1 }) })
+            .expect_err("a nested block_on must be refused");
+        assert_eq!(err.code, ErrorCode::InternalInvariantViolated);
     }
 
     #[test]

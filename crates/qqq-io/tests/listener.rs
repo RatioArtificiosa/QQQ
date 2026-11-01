@@ -69,6 +69,15 @@ use tokio::net::TcpStream;
 /// handed out; on Windows the same sequence does not fail, which is why the
 /// defect only ever appeared on one platform.
 async fn ephemeral_listener() -> Listener {
+    ephemeral_listener_with(|_| {}).await
+}
+
+/// Bind a listener on an ephemeral loopback port, with a configuration tweak.
+///
+/// The configurator runs between address selection and bind, so tests can
+/// exercise non-default configs (like `accept_batch = 0`) without
+/// reimplementing the probe-and-retry dance — or the race it exists to survive.
+async fn ephemeral_listener_with(modify: impl Fn(&mut ListenerConfig)) -> Listener {
     // Port 0 is not expressible through `ListenAddr` — that is the point of the
     // validation — so the test builds the `SocketAddr` directly.
     let mut last = String::from("no attempt was made");
@@ -89,7 +98,9 @@ async fn ephemeral_listener() -> Listener {
 
         let addr =
             qqq_io::ListenAddr::parse(&local.to_string()).expect("the bound address must parse");
-        match Listener::bind(ListenerConfig::for_addr(addr)).await {
+        let mut config = ListenerConfig::for_addr(addr);
+        modify(&mut config);
+        match Listener::bind(config).await {
             Ok(listener) => return listener,
             // `local` was taken between the drop and the bind. Try another.
             Err(e) => last = e.to_string(),
@@ -123,8 +134,11 @@ async fn the_accept_loop_accepts_a_real_connection() {
         listener
             .accept_stream(&shutdown_for_loop, move |_stream, peer| {
                 // `try_send` rather than `blocking_send`: the callback is
-                // synchronous and must not block the acceptor.
-                let _ = tx.try_send(peer);
+                // synchronous and must not block the acceptor. The expect
+                // documents the test's own contract — one connection against
+                // a buffer of eight cannot fail — so a failure here names the
+                // test, not the loop.
+                tx.try_send(peer).expect("the test channel must accept");
             })
             .await
     });
@@ -195,7 +209,14 @@ async fn the_accept_loop_accepts_many_connections() {
 
     drop(clients);
     shutdown.signal();
-    let _ = tokio::time::timeout(Duration::from_secs(2), accept_task).await;
+    // A wedged loop must fail here, not pass silently: the timeout proves the
+    // loop stops, the join proves it did not panic, and `Ok` proves a clean
+    // shutdown is not an error.
+    let result = tokio::time::timeout(Duration::from_secs(2), accept_task)
+        .await
+        .expect("the accept loop must stop after shutdown")
+        .expect("the task must not panic");
+    assert!(result.is_ok(), "a clean shutdown is not an error");
 }
 
 /// A shutdown signalled *before* the loop starts must stop it immediately rather
@@ -268,6 +289,39 @@ async fn binding_an_occupied_port_fails_with_a_remediation() {
     );
 }
 
+/// A zero batch is raised to one: a count of zero would accept nothing while
+/// still spinning the loop, which is a configuration mistake rather than an
+/// intent — and silently refusing every connection would be hard to diagnose.
+#[tokio::test]
+async fn a_zero_accept_batch_still_accepts() {
+    let listener = ephemeral_listener_with(|c| c.accept_batch = 0).await;
+    let addr = listener.local_addr();
+    let shutdown = Shutdown::new();
+    let shutdown_for_loop = shutdown.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+    let accept_task = tokio::spawn(async move {
+        listener
+            .accept_stream(&shutdown_for_loop, move |_stream, _peer| {
+                tx.try_send(()).expect("the test channel must accept");
+            })
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _client = TcpStream::connect(addr).await.expect("must connect");
+    tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("the accept loop must not hang")
+        .expect("a connection must be accepted even with accept_batch = 0");
+
+    shutdown.signal();
+    let result = tokio::time::timeout(Duration::from_secs(2), accept_task)
+        .await
+        .expect("the accept loop must stop after shutdown")
+        .expect("the task must not panic");
+    assert!(result.is_ok(), "a clean shutdown is not an error");
+}
+
 /// The accepted stream must be usable, not merely returned. A loop that handed
 /// over a dropped or half-initialised socket would pass a count-based test.
 #[tokio::test]
@@ -282,7 +336,9 @@ async fn an_accepted_stream_carries_data() {
     let accept_task = tokio::spawn(async move {
         listener
             .accept_stream(&shutdown_for_loop, move |stream, _peer| {
-                let _ = tx.try_send(stream);
+                // One connection against a buffer of one, with the receiver
+                // waiting: a failure here names the test, not the loop.
+                tx.try_send(stream).expect("the test channel must accept");
             })
             .await
     });
@@ -308,9 +364,22 @@ async fn an_accepted_stream_carries_data() {
     .expect("read must succeed");
 
     assert_eq!(&buf[..n], b"ping", "the accepted stream must carry data");
+    // The acceptor sets TCP_NODELAY on the accepted socket, not just on the
+    // listener: Nagle's algorithm would add up to 40 ms to every small reply.
+    assert!(
+        server.nodelay().expect("nodelay must be queryable"),
+        "the accepted socket must have TCP_NODELAY set"
+    );
 
     shutdown.signal();
-    let _ = tokio::time::timeout(Duration::from_secs(2), accept_task).await;
+    // A wedged loop must fail here, not pass silently: the timeout proves the
+    // loop stops, the join proves it did not panic, and `Ok` proves a clean
+    // shutdown is not an error.
+    let result = tokio::time::timeout(Duration::from_secs(2), accept_task)
+        .await
+        .expect("the accept loop must stop after shutdown")
+        .expect("the task must not panic");
+    assert!(result.is_ok(), "a clean shutdown is not an error");
 }
 
 /// The shard set must balance real connections, not just synthetic calls. This
@@ -376,5 +445,12 @@ async fn real_connections_are_balanced_across_shards() {
 
     drop(clients);
     shutdown.signal();
-    let _ = tokio::time::timeout(Duration::from_secs(2), accept_task).await;
+    // A wedged loop must fail here, not pass silently: the timeout proves the
+    // loop stops, the join proves it did not panic, and `Ok` proves a clean
+    // shutdown is not an error.
+    let result = tokio::time::timeout(Duration::from_secs(2), accept_task)
+        .await
+        .expect("the accept loop must stop after shutdown")
+        .expect("the task must not panic");
+    assert!(result.is_ok(), "a clean shutdown is not an error");
 }

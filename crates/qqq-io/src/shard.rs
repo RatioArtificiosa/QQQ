@@ -111,13 +111,17 @@ pub struct ShardAssignment {
 
 /// A clone starts its own cursor at zero.
 ///
-/// # Why cloning does not copy the cursor
+/// Cloned assignments are *independent* sequences for independent acceptors:
+/// each clone cycles 0, 1, … on its own, which stays balanced as long as each
+/// acceptor keeps accepting. Sharing one cursor across acceptors needs a
+/// shared `Arc<ShardAssignment>`, not a clone — a clone deliberately does not
+/// observe the original's progress, so handing two clones the same stream of
+/// connections would assign both to the same shards.
 ///
-/// `AtomicUsize` is not `Clone`, and copying the value would be wrong anyway: a
-/// cloned assignment exists to be handed to a second acceptor, and two acceptors
-/// sharing a cursor position is exactly what round-robin does not want. Each
-/// gets its own cycle. Deriving `Clone` is therefore impossible *and* would be a
-/// bug if it worked.
+/// `AtomicUsize` is not `Clone`, and copying the value would be wrong anyway:
+/// two acceptors reading the same starting point is exactly what an
+/// independent sequence must not do. Deriving `Clone` is therefore impossible
+/// *and* would be a bug if it worked — the manual impl below is the contract.
 impl Clone for ShardAssignment {
     fn clone(&self) -> Self {
         Self::new(self.shards)
@@ -144,7 +148,9 @@ impl ShardAssignment {
         self.shards
     }
 
-    /// Whether there are no shards. Always false after construction.
+    /// Whether there are no shards. Always false after construction: the count
+    /// is raised to at least one, so this exists for API completeness (code
+    /// generic over shard sets can ask) rather than as a reachable state.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         false
@@ -180,6 +186,15 @@ impl ShardAssignment {
 /// arrive. Keeping the counts in one place means the assignment decision and the
 /// accounting cannot disagree — and a shard counter that drifts from reality is
 /// how a "balanced" server turns out to be sending everything to one core.
+///
+/// # Why cloning restarts the cycle but keeps the counts
+///
+/// `Clone` is derived, and the derived `assignment` starts its own cycle from
+/// zero (see [`ShardAssignment`]'s `Clone` impl) while the per-shard counts
+/// are copied. A clone is therefore an *independent* set with pre-seeded
+/// history — the right thing to hand to an independent acceptor, and the wrong
+/// thing to share between two acceptors serving one stream (share one set
+/// behind a lock for that).
 #[derive(Debug, Clone)]
 pub struct ShardSet {
     shards: Vec<Shard>,
@@ -207,13 +222,20 @@ impl ShardSet {
         self.shards.len()
     }
 
-    /// Whether the set is empty. Always false after construction.
+    /// Whether the set is empty. Always false after construction, for the same
+    /// reason as [`ShardAssignment::is_empty`]: the count is raised to at
+    /// least one, so this is API completeness rather than a reachable state.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.shards.is_empty()
     }
 
     /// The total connections assigned.
+    ///
+    /// Always the sum of the per-shard counts: `assign` increments both
+    /// together, or neither when the index is somehow out of range (which
+    /// cannot happen — the index is always `cursor % shards` — but the code
+    /// refuses to silently diverge rather than asserting it).
     #[must_use]
     pub const fn total(&self) -> usize {
         self.total
@@ -224,8 +246,19 @@ impl ShardSet {
         let index = self.assignment.next();
         if let Some(shard) = self.shards.get_mut(index) {
             shard.assigned += 1;
+            self.total += 1;
+        } else {
+            // Unreachable: `next` returns `cursor % shards` and the set never
+            // empties (`new` raises 0 to 1). Counting the total only on a real
+            // assignment keeps `total == sum(assigned)` in every build, debug
+            // or not — a silent increment here would make the metric lie about
+            // work that went nowhere.
+            debug_assert!(
+                false,
+                "shard index {index} out of range for {} shards",
+                self.shards.len()
+            );
         }
-        self.total += 1;
         index
     }
 
@@ -312,6 +345,18 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(a.next(), 0);
         }
+    }
+
+    /// A clone starts its own cycle: it does not observe the original's
+    /// progress, and the original does not observe the clone.
+    #[test]
+    fn a_clone_starts_its_own_cycle() {
+        let a = ShardAssignment::new(4);
+        assert_eq!(a.next(), 0);
+        assert_eq!(a.next(), 1);
+        let b = a.clone();
+        assert_eq!(b.next(), 0, "a clone restarts at zero");
+        assert_eq!(a.next(), 2, "the original is unaffected by the clone");
     }
 
     /// A count of zero is a configuration mistake, not an intent: a listener
@@ -456,5 +501,19 @@ mod tests {
         assert_eq!(s.spread(), 0);
         assert_eq!(s.max_assigned(), 0);
         assert_eq!(s.min_assigned(), 0);
+    }
+
+    /// The total always equals the sum of the per-shard counts: `assign`
+    /// increments both together or neither, so the metric can never describe
+    /// work that went nowhere.
+    #[test]
+    fn total_always_equals_the_sum_of_shards() {
+        let mut s = ShardSet::new(3);
+        for _ in 0..100 {
+            s.assign();
+            let sum: usize = (0..s.len()).map(|i| s.assigned_to(i)).sum();
+            assert_eq!(s.total(), sum);
+        }
+        assert_eq!(s.total(), 100);
     }
 }

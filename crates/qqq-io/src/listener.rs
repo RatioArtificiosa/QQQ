@@ -48,12 +48,19 @@ impl ListenAddr {
     /// |---|---|
     /// | IPv4 | `127.0.0.1:3000`, `0.0.0.0:80` |
     /// | IPv6 | `[::1]:8080`, `[::]:8080` |
+    /// | Unbracketed IPv6 with port | `::1:8080` (the port is the last colon) |
     /// | `localhost` | `localhost:3000` |
+    ///
+    /// A bare `::1` without a port is refused with a message naming the
+    /// bracketed form: without brackets the colons are ambiguous, and guessing
+    /// would bind somewhere the operator did not name.
     ///
     /// # Errors
     ///
-    /// `QQQ-6005` naming the specific problem: no colon, an unparsable port, a
-    /// port of zero, or a host that is not a literal or `localhost`.
+    /// `QQQ-6002` naming the specific problem: no colon, an unparsable port, a
+    /// port of zero, or a host that is not a literal or `localhost`. A malformed
+    /// address fails identically on retry — the input is deterministic, so the
+    /// fix is to correct the manifest, not to retry.
     pub fn parse(s: &str) -> Result<Self> {
         let s = s.trim();
         if s.is_empty() {
@@ -76,8 +83,11 @@ impl ListenAddr {
                 )
                 .with_remediation("a bracketed IPv6 address looks like `[::1]:8080`")
             })?;
-            let host = &rest[..close];
-            let after = &rest[close + 1..];
+            // Trimmed: whitespace around the separators belongs to neither the
+            // host nor the port, and would otherwise fail the literal checks
+            // below with a confusing message.
+            let host = rest[..close].trim();
+            let after = rest[close + 1..].trim();
             let port = after.strip_prefix(':').ok_or_else(|| {
                 Error::new(
                     ErrorCode::ListenerBindFailed,
@@ -85,7 +95,7 @@ impl ListenAddr {
                 )
                 .with_remediation("a bracketed IPv6 address looks like `[::1]:8080`")
             })?;
-            (host, port)
+            (host, port.trim())
         } else {
             // `rsplit_once` rather than `split_once`: an unbracketed IPv6
             // literal has many colons, and the port is the *last* one. Splitting
@@ -94,6 +104,29 @@ impl ListenAddr {
                 Error::new(ErrorCode::ListenerBindFailed, format!("`{s}` has no port"))
                     .with_remediation("a listen address looks like `127.0.0.1:3000`")
             })?;
+            // Surrounding whitespace belongs to the separator, not the host: it
+            // is trimmed here so the error below names the real problem.
+            let host = host.trim();
+            let port = port.trim();
+            // A trailing colon means the port is missing, not that the host is
+            // wrong: `127.0.0.1:` split at the last colon leaves an empty port.
+            if port.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::ListenerBindFailed,
+                    format!("`{s}` is missing a port after the colon"),
+                )
+                .with_remediation("a listen address looks like `127.0.0.1:3000`"));
+            }
+            // An unbracketed host containing a colon must be a complete IPv6
+            // literal (`::1:8080`); anything else is a missing port or a
+            // missing pair of brackets, not a hostname.
+            if host.contains(':') && host.parse::<Ipv6Addr>().is_err() {
+                return Err(Error::new(
+                    ErrorCode::ListenerBindFailed,
+                    format!("`{s}` is ambiguous: an unbracketed IPv6 literal needs a port"),
+                )
+                .with_remediation("a bracketed IPv6 address looks like `[::1]:8080`"));
+            }
             (host, port)
         };
 
@@ -105,7 +138,14 @@ impl ListenAddr {
             .with_remediation("use `0.0.0.0` to listen on every interface"));
         }
 
-        let port: u16 = port_str.trim().parse().map_err(|_| {
+        if port_str.starts_with('+') {
+            return Err(Error::new(
+                ErrorCode::ListenerBindFailed,
+                format!("`{port_str}` is not a valid port"),
+            )
+            .with_remediation("a port is a number from 1 to 65535, without a sign"));
+        }
+        let port: u16 = port_str.parse().map_err(|_| {
             Error::new(
                 ErrorCode::ListenerBindFailed,
                 format!("`{port_str}` is not a valid port"),
@@ -160,21 +200,33 @@ impl ListenAddr {
 
     /// Whether this address binds every interface.
     ///
-    /// `0.0.0.0` or `[::]`. Worth distinguishing because it is the difference
-    /// between "reachable from this machine" and "reachable from the network",
-    /// and a dev server that binds every interface by accident is a security
-    /// problem rather than a convenience.
+    /// `0.0.0.0`, `[::]`, or any written form of the unspecified address
+    /// (including expanded zeros). Worth distinguishing because it is the
+    /// difference between "reachable from this machine" and "reachable from
+    /// the network", and a dev server that binds every interface by accident
+    /// is a security problem rather than a convenience.
     #[must_use]
     pub fn is_any_interface(&self) -> bool {
-        self.host == "0.0.0.0" || self.host == "::" || self.host == "[::]"
+        if self.host == "0.0.0.0" {
+            return true;
+        }
+        // The stored host never carries brackets (parsing strips them), but
+        // tolerate either written form; `is_unspecified` covers the expanded
+        // `0:0:…:0` spellings a string comparison would miss.
+        self.host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_unspecified())
     }
 
     /// Whether this binds a loopback interface.
     ///
     /// `127.0.0.1`, `localhost` and `::1` are reachable only from this
     /// machine — which is exactly what makes DNS rebinding against them
-    /// dangerous, and why the server applies its `Host` allow-list here
-    /// (`F-14`) and nowhere else.
+    /// dangerous. The serving layer applies its `Host` allow-list to
+    /// loopback-bound listeners (see `qqq-serve`'s rebinding guard, `F-14`);
+    /// this predicate names the set that guard applies to.
     ///
     /// ```
     /// use qqq_io::listener::ListenAddr;
@@ -228,10 +280,14 @@ impl ListenAddr {
         Ok(addrs)
     }
 
-    /// The conventional rendering, re-bracketing IPv6.
+    /// The canonical rendering, re-bracketing IPv6.
+    ///
+    /// The stored host never carries brackets (parsing strips them), so any
+    /// colon means an IPv6 literal that must be re-bracketed for the output
+    /// to re-parse.
     #[must_use]
     pub fn render(&self) -> String {
-        if self.host.contains(':') && !self.host.starts_with('[') {
+        if self.host.contains(':') {
             format!("[{}]:{}", self.host, self.port)
         } else {
             format!("{}:{}", self.host, self.port)
@@ -265,6 +321,9 @@ pub struct ListenerConfig {
     pub addr: ListenAddr,
     /// The number of shards.
     ///
+    /// A sizing hint for the caller's own [`ShardSet`][crate::shard::ShardSet]:
+    /// this crate never assigns connections itself — `accept_stream` hands over
+    /// live streams in accept order and the caller maps them to shards.
     /// Defaults to the machine's available parallelism. Not
     /// `SystemTime`-derived and not a fixed constant: shard-per-core is the
     /// point of §4.2, and hardcoding a number would either waste cores on a big
@@ -342,22 +401,30 @@ impl Shutdown {
     ///
     /// Idempotent, because a signal can arrive twice (a second Ctrl-C, a
     /// supervisor and an operator) and the second must not be an error.
+    /// Release ordering suffices: signalled-ness is a flag, and no other
+    /// memory is published through it.
     pub fn signal(&self) {
-        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.flag.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Whether shutdown has been requested.
     #[must_use]
     pub fn is_signalled(&self) -> bool {
-        self.flag.load(std::sync::atomic::Ordering::SeqCst)
+        self.flag.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Wait until shutdown is requested.
     ///
+    /// Must be called from async code: it sleeps in 5 ms steps, so calling it
+    /// with no executor running panics. Blocking callers
+    /// should poll [`is_signalled`][Self::is_signalled] instead — the check
+    /// is a single atomic load.
+    ///
     /// Polls rather than awaiting a notification, which is a deliberate trade:
     /// a notifier would need the runtime's channel type, and the thing being
     /// waited on is a process teardown that happens once. A 5 ms poll costs
-    /// nothing over a shutdown and keeps this module runtime-agnostic.
+    /// nothing over a shutdown and keeps this module runtime-agnostic in its
+    /// *types*, even though waiting itself needs an executor to sleep on.
     pub async fn wait(&self) {
         while !self.is_signalled() {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -419,6 +486,11 @@ pub struct Listener {
 impl Listener {
     /// Bind.
     ///
+    /// Tries every resolved address in order and returns the first success.
+    /// `localhost` typically resolves to both `[::1]` and `127.0.0.1`, and only
+    /// the first one wins — the other family is silently unserved. Bind an
+    /// explicit IP literal when both stacks matter.
+    ///
     /// # Errors
     ///
     /// `QQQ-6002` when the address cannot be resolved or the bind fails, with
@@ -426,7 +498,7 @@ impl Listener {
     /// common case and deserves to be visible rather than paraphrased.
     pub async fn bind(config: ListenerConfig) -> Result<Self> {
         let addrs = config.addr.resolve()?;
-        let mut last: Option<std::io::Error> = None;
+        let mut failures: Vec<String> = Vec::new();
 
         for addr in &addrs {
             match bind_one(addr).await {
@@ -444,11 +516,18 @@ impl Listener {
                         inner,
                     });
                 }
-                Err(e) => last = Some(e),
+                // Every address is tried even after failures, and every failure
+                // is reported: with multi-stack resolves (`localhost` → v6+v4)
+                // reporting only the last error hides which families failed.
+                Err(e) => failures.push(format!("{addr}: {e}")),
             }
         }
 
-        let detail = last.map_or_else(|| "no address was tried".to_owned(), |e| e.to_string());
+        let detail = if failures.is_empty() {
+            "no address was tried".to_owned()
+        } else {
+            failures.join("; ")
+        };
         Err(Error::new(
             ErrorCode::ListenerBindFailed,
             format!("could not bind `{}`", config.addr),
@@ -474,17 +553,28 @@ impl Listener {
     /// # Errors
     ///
     /// [`AcceptError::ListenerFailed`] for a socket-level failure, which is
-    /// fatal rather than per-connection.
+    /// fatal rather than per-connection. Per-connection failures (a client
+    /// that vanishes mid-handshake, a momentarily exhausted descriptor table)
+    /// are handled inside [`accept_stream`]; this entry point reports every
+    /// failure the same way so a direct caller cannot mistake a dead socket
+    /// for a dead client.
     pub async fn accept(
         &self,
     ) -> std::result::Result<(tokio::net::TcpStream, SocketAddr), AcceptError> {
-        let (stream, peer) =
-            self.inner
-                .accept()
-                .await
-                .map_err(|e| AcceptError::ListenerFailed {
-                    detail: e.to_string(),
-                })?;
+        self.accept_one()
+            .await
+            .map_err(|e| AcceptError::ListenerFailed {
+                detail: e.to_string(),
+            })
+    }
+
+    /// Accept one connection, reporting the raw I/O error.
+    ///
+    /// Split from [`accept`] so the accept loop can tell a dead listening
+    /// socket from a doomed connection: the former ends the server, the
+    /// latter costs a few milliseconds of backoff.
+    async fn accept_one(&self) -> std::io::Result<(tokio::net::TcpStream, SocketAddr)> {
+        let (stream, peer) = self.inner.accept().await?;
 
         // `TCP_NODELAY` on the accepted socket, not the listening one: the
         // option is inherited on Linux but not on every platform, so setting it
@@ -506,6 +596,11 @@ impl Listener {
     /// accepted connection is passed to `on_accept`, which is where shard
     /// assignment happens.
     ///
+    /// Shard assignment is deliberately caller-owned: the loop hands over live
+    /// streams in accept order, and the caller decides the mapping (see
+    /// [`ShardSet`]). `ListenerConfig.shards` sizes that decision; it does not
+    /// perform it.
+    ///
     /// # Why the batch bound is inside the loop rather than around it
     ///
     /// Yielding only when there is no work is not enough: under a flood there is
@@ -513,9 +608,18 @@ impl Listener {
     /// forces a yield at a fixed point regardless of load, which is what keeps
     /// the rest of the runtime responsive.
     ///
+    /// A zero batch behaves as one: a count of zero would accept nothing while
+    /// still spinning the loop, which is a configuration mistake rather than an
+    /// intent, so the floor is applied here rather than trusted to the caller.
+    ///
     /// # Errors
     ///
     /// [`AcceptError::ListenerFailed`] when the socket fails.
+    /// [`AcceptError::ShuttingDown`] when a *non-transient* socket failure
+    /// arrives while a shutdown was already signalled: the loop was on its way
+    /// out, and reporting a crash during a normal deploy restart would be a
+    /// false alarm. (Transient failures take the backoff path above and end
+    /// the loop cleanly at the top, never as `ShuttingDown`.)
     pub async fn accept_stream<F>(
         &self,
         shutdown: &Shutdown,
@@ -524,18 +628,58 @@ impl Listener {
     where
         F: FnMut(tokio::net::TcpStream, SocketAddr),
     {
+        // `max(1)`: see the batch-bound note above.
+        let batch = self.config.accept_batch.max(1);
+        // One shutdown future for the whole loop, rather than a fresh
+        // `wait()` (and its 5 ms timer) per accepted connection: the future
+        // resolves once, when shutdown is signalled, and `select!` polls it
+        // without consuming it until then.
+        let shutdown_fut = shutdown.wait();
+        tokio::pin!(shutdown_fut);
         loop {
             if shutdown.is_signalled() {
                 return Ok(());
             }
-            for _ in 0..self.config.accept_batch {
+            for _ in 0..batch {
                 // `select!` so a shutdown during a quiet period is noticed
                 // immediately rather than after the next connection arrives.
                 tokio::select! {
                     biased;
-                    () = shutdown.wait() => return Ok(()),
-                    result = self.accept() => {
-                        let (stream, peer) = result?;
+                    () = &mut shutdown_fut => return Ok(()),
+                    result = self.accept_one() => {
+                        let (stream, peer) = match result {
+                            Ok(v) => v,
+                            // A doomed connection, not a doomed socket: back
+                            // off briefly and keep serving rather than taking
+                            // the whole server down for one connection's bad
+                            // luck. A client that connects and immediately
+                            // disconnects, or a momentarily exhausted
+                            // descriptor table, must cost milliseconds, not
+                            // the process.
+                            Err(e) if is_transient_accept_error(&e) => {
+                                // Backoff, but stay interruptible: a signal during
+                                // the sleep must stop the loop at once rather than
+                                // waiting it out and noticing at the top.
+                                tokio::select! {
+                                    biased;
+                                    () = &mut shutdown_fut => return Ok(()),
+                                    () = tokio::time::sleep(
+                                        std::time::Duration::from_millis(10)
+                                    ) =>
+                                    {
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(_e) if shutdown.is_signalled() => {
+                                return Err(AcceptError::ShuttingDown);
+                            }
+                            Err(e) => {
+                                return Err(AcceptError::ListenerFailed {
+                                    detail: e.to_string(),
+                                });
+                            }
+                        };
                         on_accept(stream, peer);
                     }
                 }
@@ -544,6 +688,27 @@ impl Listener {
             // was not full.
             tokio::task::yield_now().await;
         }
+    }
+}
+
+/// Whether an accept failure is transient — a doomed connection, not a doomed
+/// socket.
+///
+/// A client that connects and immediately disconnects, or a momentarily
+/// exhausted file-descriptor table, must cost a few milliseconds of backoff,
+/// not the server. Anything else means the listening socket itself is broken
+/// and the caller must decide loudly.
+fn is_transient_accept_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset, Interrupted};
+    match e.kind() {
+        ConnectionRefused | ConnectionAborted | ConnectionReset | Interrupted => true,
+        // No stable `ErrorKind` spelling exists for resource exhaustion on this
+        // toolchain, so it is matched by number: EMFILE (this process is out
+        // of descriptors), ENFILE (the system table is full) and ENOMEM (out
+        // of memory) all mean "try again shortly", not "the socket is dead".
+        _ => e
+            .raw_os_error()
+            .is_some_and(|n| n == libc::EMFILE || n == libc::ENFILE || n == libc::ENOMEM),
     }
 }
 
@@ -703,6 +868,29 @@ mod tests {
     }
 
     #[test]
+    fn inner_whitespace_around_the_separator_is_tolerated() {
+        let a = ListenAddr::parse("127.0.0.1 :3000").expect("must parse");
+        assert_eq!(a.host(), "127.0.0.1");
+        assert_eq!(a.port(), 3000);
+        let a = ListenAddr::parse("[::1] :8080").expect("must parse");
+        assert_eq!(a.host(), "::1");
+    }
+
+    #[test]
+    fn a_signed_port_is_refused() {
+        // `u16::from_str` accepts a leading `+`; a port is unsigned with no
+        // sign, so it is refused explicitly rather than by accident.
+        let e = ListenAddr::parse("127.0.0.1:+80").unwrap_err();
+        assert!(e.message.contains("+80"), "got: {}", e.message);
+    }
+
+    #[test]
+    fn an_expanded_unspecified_address_counts_as_any_interface() {
+        let a = ListenAddr::parse("[0:0:0:0:0:0:0:0]:80").expect("must parse");
+        assert!(a.is_any_interface());
+    }
+
+    #[test]
     fn an_unclosed_bracket_is_refused_with_the_right_hint() {
         let e = ListenAddr::parse("[::1:8080").unwrap_err();
         assert!(e.message.contains("bracket"), "got: {}", e.message);
@@ -712,6 +900,79 @@ mod tests {
                 .unwrap_or("")
                 .contains("[::1]:8080")
         );
+    }
+
+    #[test]
+    fn a_trailing_colon_is_a_missing_port() {
+        // `127.0.0.1:` split at the last colon leaves an empty port — a typo,
+        // not an ambiguous host, so the error must name the port.
+        let e = ListenAddr::parse("127.0.0.1:").unwrap_err();
+        assert!(e.message.contains("port"), "got: {}", e.message);
+    }
+
+    #[test]
+    fn a_bare_ipv6_literal_is_missing_its_port() {
+        // `::1` split at the last colon leaves host `":"` — which must be
+        // reported as a missing port with the bracketed form, not as "not an
+        // IP address".
+        let e = ListenAddr::parse("::1").unwrap_err();
+        assert!(
+            e.message.contains("bracket") || e.message.contains("port"),
+            "got: {}",
+            e.message
+        );
+        assert!(
+            e.remediation.as_deref().unwrap_or("").contains("[::1]"),
+            "the remediation must name the bracketed form: {:?}",
+            e.remediation
+        );
+    }
+
+    #[test]
+    fn a_bracketed_ipv4_address_parses_and_normalises() {
+        // Explicit brackets around IPv4 are unusual but unambiguous, so they
+        // are accepted and normalised away rather than refused.
+        let a = ListenAddr::parse("[127.0.0.1]:8080").expect("must parse");
+        assert_eq!(a.host(), "127.0.0.1");
+        assert_eq!(a.render(), "127.0.0.1:8080");
+    }
+
+    /// Transient failures must be distinguished from a dead socket, because the
+    /// accept loop's whole behaviour turns on the distinction.
+    #[test]
+    fn transient_accept_errors_are_recognised() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+            ErrorKind::Interrupted,
+        ] {
+            assert!(
+                is_transient_accept_error(&Error::new(kind, "test")),
+                "{kind:?} must be transient"
+            );
+        }
+        // Resource exhaustion has no stable `ErrorKind` spelling, so it is
+        // constructed from the raw errno — the same path the OS error takes.
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOMEM] {
+            assert!(
+                is_transient_accept_error(&Error::from_raw_os_error(errno)),
+                "errno {errno} must be transient"
+            );
+        }
+        for kind in [
+            ErrorKind::AddrInUse,
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidInput,
+            ErrorKind::NotFound,
+            ErrorKind::BrokenPipe,
+        ] {
+            assert!(
+                !is_transient_accept_error(&Error::new(kind, "test")),
+                "{kind:?} must be fatal"
+            );
+        }
     }
 
     #[test]

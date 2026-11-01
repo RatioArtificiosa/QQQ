@@ -3079,7 +3079,7 @@ fn write_live_probe_project(s: &Sandbox) {
          [build]\nlanguage = \"rust\"\ntarget = \"wasm32-wasip2\"\n\
          [capabilities.http]\nserver = true\n\
          [server]\nroutes = [\n\
-         \x20 { path = \"/\", methods = [\"GET\"], handler = \"echo\", auth = \"none\" },\n\
+         \x20 { path = \"/\", methods = [\"GET\", \"POST\"], handler = \"echo\", auth = \"none\" },\n\
          \x20 { path = \"/ws\", methods = [\"GET\"], handler = \"chat\", kind = \"ws\", auth = \"none\" },\n\
          \x20 { path = \"/events\", methods = [\"GET\"], handler = \"feed\", kind = \"sse\", auth = \"none\" },\n\
          ]\n",
@@ -3186,6 +3186,24 @@ fn probe_h1(addr: &std::net::SocketAddr) -> Vec<u8> {
     read_head(&mut stream)
 }
 
+/// One probe: POST a body through the guest; returns head plus body.
+///
+/// The echo guest answers with the request bytes, so the caller asserts
+/// the body round-trips — guest bytes on the wire, not an empty 200.
+fn probe_h1_post(addr: &std::net::SocketAddr, body: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut stream = connect(addr);
+    let head = format!(
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("send head");
+    stream.write_all(body).expect("send body");
+    let head = read_head(&mut stream);
+    let rest = read_rest(&mut stream, 5);
+    [head, rest].concat()
+}
+
 /// One probe: WebSocket upgrade plus guest echo; returns the open socket
 /// so the caller closes it after the remaining probes.
 fn probe_ws_echo(addr: &std::net::SocketAddr) -> std::net::TcpStream {
@@ -3281,6 +3299,25 @@ fn production_serve_live_transcript() {
     assert!(
         root.starts_with(b"HTTP/1.1 200"),
         "GET / must answer 200 through the production dispatch: {root:?}"
+    );
+
+    // 1b. A POST body through the same guest: the echo guest returns the
+    // request bytes, so a non-empty round trip proves guest bytes reached
+    // the wire on the H1 production path (a GET echo is empty by shape,
+    // not by failure).
+    let echoed = probe_h1_post(&addr, b"guest-bytes-h1");
+    let head_end = echoed
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("the POST echo must carry a head terminator");
+    assert!(
+        echoed.starts_with(b"HTTP/1.1 200"),
+        "POST / must answer 200 through the production dispatch: {echoed:?}"
+    );
+    assert_eq!(
+        &echoed[head_end + 4..],
+        b"guest-bytes-h1",
+        "POST / must echo the guest's answer bytes exactly on H1"
     );
 
     // 2. WebSocket upgrade answered by the guest, per manifest kind.
@@ -3892,6 +3929,11 @@ fn assert_h2_serves_guest_events(port: u16, der: &[u8]) {
         "the H2 stream must carry guest events, not a refusal: {:?}",
         String::from_utf8_lossy(&answer)
     );
+    assert!(
+        answer.starts_with(b"data: hello\n\n".as_slice()),
+        "the H2 stream must carry the guest's exact event bytes: {:?}",
+        String::from_utf8_lossy(&answer)
+    );
 }
 
 // The same guest answer over H1: one dispatcher, two protocols.
@@ -3993,12 +4035,19 @@ fn production_serve_h2_tenant_sse_live() {
         unmapped.contains("tenant-unknown-host"),
         "the 421 must name the tenant table: {unmapped:?}"
     );
-    let (_, h2_unmapped_status, _) =
+    let (_, h2_unmapped_status, h2_unmapped_body) =
         cli_h2_request(port, &der, "evil.example.com", "/events", None, None);
     assert_eq!(
         h2_unmapped_status,
         Some(421),
         "tenant-resolve must refuse on the H2 driver too, not only H1"
+    );
+    assert!(
+        h2_unmapped_body
+            .windows(b"evil.example.com".len())
+            .any(|w| w == b"evil.example.com"),
+        "the H2 421 body must name the unmapped host, like H1: {:?}",
+        String::from_utf8_lossy(&h2_unmapped_body)
     );
 
     // 4. The access log recorded the served exchanges on this listener.

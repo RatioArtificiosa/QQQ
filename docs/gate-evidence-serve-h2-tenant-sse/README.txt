@@ -52,9 +52,19 @@ Digests (`digests.txt`, sha256 over the exact response bytes named):
 - h2-components-shop-200-body: the H2 POST answer is the shop
   component's bytes, digest-equal to h2-sse-200-body - per-tenant
   selection runs identically on the hyper H2 driver.
-- h2-negotiated-alpn=h2 h2-sse-200-status=200
-  h2-tenant-unknown-status=421: the H2 driver negotiates, serves, and
-  refuses exactly like H1.
+- h2-negotiated-alpn-200-data: the H2 DATA payload bytes of one
+  `GET https://shop.example.com/events` stream over negotiated ALPN `h2`
+  with HEADERS `:status 200` — three `data: hello` events (39 bytes,
+  digest-equal to h2-sse-3events-body: same guest bytes, second capture).
+  The ALPN (`h2`), status (`200`), and unmapped-authority refusal (`421`
+  with a body naming the unmapped host) are asserted live by the committed test
+  `production_serve_h2_tenant_sse_live` via `assert_h2_serves_guest_events`
+  and recorded as observations in h2-negotiated-alpn-200.log; a status
+  string is not a digest, so only the guest bytes are hashed. The test pins
+  the stream shape (exact first-event prefix plus event count) while the
+  digest pins the 39 captured bytes, per the streaming-capture convention
+  below. Re-run the test to reproduce; reparse the hex dump and rehash
+  to verify.
 - run-access.log: earlier sample (mapped 200s, unmapped 421s).
 - run-access-components.log: this slice's listener. Every exchange is
   attributed to its resolved tenant - `shop` for the shop identity
@@ -63,6 +73,11 @@ Digests (`digests.txt`, sha256 over the exact response bytes named):
   mapping exists.
 
 What the transcripts do NOT show (proven by tests, not bytes):
+- The H1 GET / echo is empty by guest shape (a GET carries no body, so the
+  echo guest answers empty): guest bytes on the H1 production path are
+  proven by the POST / echo in `production_serve_live_transcript`
+  (`probe_h1_post` asserts `guest-bytes-h1` round-trips) and by the
+  tenant-mapped H1 captures above, which carry the guest's event bytes.
 - The certificate-less handshake failure: under TLS 1.3 the client's
   `connect` can return before the server's alert arrives, so the probe
   asserts on first read (`AlertReceived(CertificateRequired)`, zero
@@ -109,7 +124,11 @@ per-component dispatch, manifest-rev beyond `unknown`, or performance.
   with the RFC 6455 canonical accept key, two per-message guest echoes
   (`hello-ws`, `second-message`, one guest execution each), and the
   close echo. The digest pins the 159 response bytes (head + 3 server
-  frames); reparse the hex dumps and rehash to verify.
+  frames); reparse the hex dumps and rehash to verify. Per-message guest
+  execution (bytes alone cannot distinguish a fresh call from a replay)
+  is proven by the in-process audit count in
+  `guest_ws.rs::a_message_round_trips_through_the_guest`: two messages
+  produce exactly two guest-call audit rows.
 
 Stability note (root cause found and fixed): the earlier
 readiness-timeout failures (60s, `TLS GET / never answered 200` with

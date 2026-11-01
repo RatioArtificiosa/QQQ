@@ -184,9 +184,13 @@ mod tests {
     use crate::guest_handler::GuestApp;
 
     /// The echo guest answers every message with its own bytes, so the
-    /// round trip measures the bridge rather than the guest. Per-message
-    /// guest execution is proven separately: the audit row count below
-    /// rises by exactly one row per message sent.
+    /// byte equality below proves the bridge delivered each message to
+    /// the guest and returned its answer. Byte equality alone cannot
+    /// distinguish a fresh guest execution from a bridge-side replay of
+    /// the first answer, so per-message guest execution is proven by the
+    /// audit row count below: every guest call appends exactly one audit
+    /// row, and the test asserts the count rises by exactly one row per
+    /// message sent.
     fn echo_app() -> std::sync::Arc<GuestApp> {
         let source = include_str!("../tests/fixtures/echo-http.wat");
         let manifest = qqq_cap::Manifest::parse(

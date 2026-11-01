@@ -1,0 +1,71 @@
+# H2 negotiated-ALPN 200 with guest bytes, production listener.
+#
+# Captured by driving the REAL `qqqai serve` binary (debug build of this tree)
+# over real loopback TCP against the H2/SSE fixture project (qqq.toml with
+# an `sse` /events route backed by the sse-event.wat guest, TLS cert with
+# SAN localhost). The test client offers ALPN `h2` and speaks a hand-rolled
+# H2 frame layer (preface, SETTINGS, HEADERS; connection-level frames ACKed
+# like a real client), exactly as `cli_h2_events` does in
+# `crates/qqq-run/tests/cli.rs`.
+#
+# Observed on the wire for `GET https://shop.example.com/events`:
+# - TLS negotiated ALPN: h2
+# - H2 HEADERS frame, stream 1: :status 200
+# - H2 DATA frames, stream 1: three `data: hello` events (39 payload bytes)
+# - H2 tenant refusal control: :authority evil.example.com draws 421
+#
+# The committed test asserting every line below is
+# `production_serve_h2_tenant_sse_live` (via `assert_h2_serves_guest_events`
+# and the tenant-resolve block): negotiated == Some("h2"), status ==
+# Some(200), the DATA answer starts with the guest's exact first-event
+# bytes and carries >= 3 `data:` events; the unmapped-authority refusal
+# asserts status == Some(421) with a body naming the unmapped host (the
+# `tenant-unknown-host` marker travels in the `X-QQQ-Error` header on both
+# drivers — the H1 test asserts it in the raw head, the H2 client reads
+# de-framed DATA, so the H2 test asserts the host-naming body instead).
+# The test pins shape (exact first-event prefix + event count), not the
+# full 39 bytes: a poll-loop stream has no end, so the hex dump below is a
+# bounded-capture pin like the other streaming entries, while the digest
+# pins the guest bytes of that capture. Re-run to reproduce; reparse the
+# hex dump and rehash to verify.
+#
+# The DATA payload digest below equals h2-sse-3events-body in digests.txt:
+# same 39 guest bytes, second capture. The ALPN/status/authority lines are
+# asserted by the test, not hashed — a status string is not a digest, so it
+# is recorded here as an observation with its asserting test, while the
+# digest pins the guest bytes that crossed the H2 DATA frames.
+
+### alpn (TLS negotiation)
+--- utf8 ---
+h2
+--- hex ---
+00000000  68 32
+
+### status (H2 HEADERS :status, stream 1)
+--- utf8 ---
+200
+--- hex ---
+00000000  32 30 30
+
+### data-payload (H2 DATA, stream 1, de-framed, 39 bytes)
+--- utf8 ---
+data: hello
+
+data: hello
+
+data: hello
+
+
+--- hex ---
+00000000  64 61 74 61 3a 20 68 65 6c 6c 6f 0a 0a 64 61 74
+00000010  61 3a 20 68 65 6c 6c 6f 0a 0a 64 61 74 61 3a 20
+00000020  68 65 6c 6c 6f 0a 0a
+
+### tenant-refusal control (H2, :authority evil.example.com)
+--- utf8 ---
+421 body: no tenant is configured for host `evil.example.com`
+--- hex ---
+00000000  6e 6f 20 74 65 6e 61 6e 74 20 69 73 20 63 6f 6e
+00000010  66 69 67 75 72 65 64 20 66 6f 72 20 68 6f 73 74
+00000020  20 60 65 76 69 6c 2e 65 78 61 6d 70 6c 65 2e 63
+00000030  6f 6d 60 0a

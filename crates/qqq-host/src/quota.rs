@@ -387,7 +387,10 @@ impl HandleQuota {
     ///
     /// The same single decision point as [`try_open`](Self::try_open): the
     /// refusal and the count happen in one call. A batch of zero opens
-    /// nothing and always succeeds.
+    /// nothing and succeeds — unless the table is already at or past the
+    /// limit, which can only happen if a mint skipped the gate: then even
+    /// a no-op batch is refused (and counted) rather than blessing the
+    /// drift with an `Ok`.
     ///
     /// # Example
     ///
@@ -402,8 +405,23 @@ impl HandleQuota {
     ///
     /// # Errors
     ///
-    /// `QQQ-2005` when the batch would take the table past `limit`.
+    /// `QQQ-2005` when the batch would take the table past `limit`, or when
+    /// the table is already there.
     pub fn try_open_batch(&mut self, table_len: u32, additional: u32) -> Result<()> {
+        if table_len >= self.limit {
+            self.exhaustion_attempts = self.exhaustion_attempts.saturating_add(1);
+            return Err(Error::new(
+                ErrorCode::LimitOutOfRange,
+                format!(
+                    "the guest holds {table_len} handles against a limit of {}",
+                    self.limit
+                ),
+            )
+            .with_remediation(
+                "close handles that are no longer needed, or raise \
+                 `limits.max_open_handles` in `qqq.toml`",
+            ));
+        }
         if additional > 0 {
             let last_index = table_len.saturating_add(additional).saturating_sub(1);
             if last_index >= self.limit {
@@ -693,8 +711,20 @@ mod tests {
         // 2 held + 3 more would land past the limit: refused whole.
         assert!(q.try_open_batch(2, 3).is_err());
         assert_eq!(q.exhaustion_attempts(), 1);
-        // An empty batch opens nothing and always succeeds.
-        assert!(q.try_open_batch(4, 0).is_ok());
+        // An empty batch opens nothing and succeeds — unless the table is
+        // already at the limit.
+        assert!(q.try_open_batch(3, 0).is_ok());
+        assert_eq!(q.exhaustion_attempts(), 1);
+    }
+
+    #[test]
+    fn try_open_batch_refuses_a_table_already_past_the_limit() {
+        // `table_len` past `limit` means a mint skipped the gate: even a
+        // zero-add batch must fail closed (and count) rather than bless
+        // the drift with an `Ok`.
+        let mut q = HandleQuota::new(4);
+        assert!(q.try_open_batch(5, 0).is_err());
+        assert_eq!(q.exhaustion_attempts(), 1);
     }
 
     #[test]

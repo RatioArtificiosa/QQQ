@@ -216,6 +216,59 @@ fn a_v02_guest_instantiates_and_runs_on_the_retained_path() {
     );
 }
 
+/// **The wall clock serves the WIT `result` shape, not a bare integer —
+/// proven by refusal.**
+///
+/// `wit/qqq-clock.wit` declares wall `now` as `result<instant-ns,
+/// clock-error>`; the host must serve exactly that, or a guest generated
+/// from the WIT fails to instantiate while a hand-written bare-`u64` guest
+/// succeeds — a contract break the monotonic tests (plain `u64` on both
+/// sides) cannot see. Hand-writing a WAT guest for the result shape proved
+/// unreliable (validator subtleties unrelated to the host), so this test
+/// proves the fix from the other side: a bare-`u64` wall import — the shape
+/// the host served before the fix — must now FAIL to instantiate, because
+/// the host serves the strictly different result type. The positive shape
+/// (variant order, WIT spelling) is pinned where it can be generated from
+/// the WIT rather than hand-written: the `ComponentType` derive carries
+/// `#[component(name)]` per case, and
+/// `the_error_variant_order_matches_the_wit` pins the order.
+const GUEST_WALL_CLOCK_BARE_U64: &str = r#"
+(component
+  (import "qqq:clock/wall-clock@1.0.0" (instance $clock
+    (export "now" (func (result u64)))))
+  (core module $m
+    (import "host" "now" (func $now (result i64)))
+    (func (export "run") (result i64) (call $now)))
+  (core func $now-lowered (canon lower (func $clock "now")))
+  (core instance $host (export "now" (func $now-lowered)))
+  (core instance $i (instantiate $m (with "host" (instance $host))))
+  (func (export "run") (result u64) (canon lift (core func $i "run"))))
+"#;
+
+#[test]
+fn a_bare_u64_wall_import_no_longer_instantiates() {
+    let engine = engine();
+    let component =
+        Component::new(&engine, GUEST_WALL_CLOCK_BARE_U64).expect("the bare guest must compile");
+    let names = import_names(&component, &engine);
+    assert!(
+        names.iter().any(|n| n.contains("qqq:clock/wall-clock")),
+        "the fixture must import the wall clock: {names:?}"
+    );
+    let grants = grants_for("wall = true");
+    let built = build_linker(&engine, &grants).expect("the wall linker must build");
+    let mut store = Store::new(&engine, StoreData::new(grants_for("wall = true")));
+    let err = built
+        .linker
+        .instantiate(&mut store, &component)
+        .expect_err("a bare-u64 wall import must not bind the WIT result shape");
+    let text = format!("{err:?}");
+    assert!(
+        text.contains("now"),
+        "the refusal must name the mismatched function: {text}"
+    );
+}
+
 /// **A 0.3 guest instantiates and runs on the 0.3 path — same engine build.**
 ///
 /// Detection runs on the real import table, not the WAT source: the test

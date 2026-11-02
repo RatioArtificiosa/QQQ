@@ -177,6 +177,30 @@ impl TestState {
     pub fn all_passed(&self) -> bool {
         self.data().failures.is_empty()
     }
+
+    /// Record one failure, bounded.
+    ///
+    /// Refuses (rather than truncates or drops) past the message bound or
+    /// the count cap: a truncated failure could hide the distinguishing
+    /// detail, and a dropped one would make `all_passed` lie. The caller
+    /// turns the refusal into `NotAssertable`, which is loud by design.
+    fn record_failure(&self, message: String) -> std::result::Result<(), String> {
+        if message.len() > crate::host_log::MAX_LOG_FIELD_BYTES {
+            return Err(format!(
+                "failure message is {} bytes, past the {}-byte bound",
+                message.len(),
+                crate::host_log::MAX_LOG_FIELD_BYTES
+            ));
+        }
+        let mut data = self.data();
+        if data.failures.len() >= MAX_TEST_FAILURES {
+            return Err(format!(
+                "failure table is full at {MAX_TEST_FAILURES} reports"
+            ));
+        }
+        data.failures.push(message);
+        Ok(())
+    }
 }
 
 /// The WIT package this module implements.
@@ -191,6 +215,23 @@ impl TestState {
 /// assert_eq!(INTERFACE, "qqq:test/assertions@1.0.0");
 /// ```
 pub const INTERFACE: &str = "qqq:test/assertions@1.0.0";
+
+/// The most marks one run may hold.
+///
+/// A mark is a guest-controlled name plus a fuel reading. Without a bound a
+/// guest loops `mark-fuel` with fresh names until the runner OOMs; the fuel
+/// meter bounds the loop, not the accumulation. Past the cap the mark is
+/// refused loudly (`NotAssertable`), never silently dropped — a dropped mark
+/// would make `fuel-since` report `no-fuel-baseline` for a mark the guest
+/// did set, which reads as a guest bug instead of a full table.
+const MAX_TEST_MARKS: usize = 256;
+
+/// The most failure reports one run may hold.
+///
+/// Same shape as the marks cap, with a worse failure mode: a silently
+/// dropped failure would make `all_passed` return true over a run that
+/// failed. Past the cap the report is refused loudly instead.
+const MAX_TEST_FAILURES: usize = 128;
 
 /// Register the interface.
 ///
@@ -252,8 +293,31 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                             .to_owned(),
                     )),));
                 };
-                let remaining = store.get_fuel()?;
-                state.data().marks.insert(name, remaining);
+                let Ok(remaining) = store.get_fuel() else {
+                    // Fuel accounting is the point of the mark: without fuel
+                    // the mark cannot be evaluated, and trapping would blame
+                    // the host for a runner configuration choice.
+                    return Ok((Err(AssertionError::NotAssertable(
+                        "fuel is not configured for this store, so fuel cannot be marked"
+                            .to_owned(),
+                    )),));
+                };
+                if name.len() > crate::host_log::MAX_LOG_FIELD_BYTES {
+                    return Ok((Err(AssertionError::NotAssertable(format!(
+                        "mark name is {} bytes, past the {}-byte bound",
+                        name.len(),
+                        crate::host_log::MAX_LOG_FIELD_BYTES
+                    ))),));
+                }
+                {
+                    let mut data = state.data();
+                    if data.marks.len() >= MAX_TEST_MARKS && !data.marks.contains_key(&name) {
+                        return Ok((Err(AssertionError::NotAssertable(format!(
+                            "mark table is full at {MAX_TEST_MARKS} marks"
+                        ))),));
+                    }
+                    data.marks.insert(name, remaining);
+                }
                 Ok((Ok(()),))
             })
         },
@@ -294,7 +358,15 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                             .to_owned(),
                     )),));
                 };
-                let remaining = store.get_fuel()?;
+                let Ok(remaining) = store.get_fuel() else {
+                    // A `fuel-since` without fuel has no baseline to subtract
+                    // from; trapping would blame the host for the runner's
+                    // configuration.
+                    return Ok((Err(AssertionError::NotAssertable(
+                        "fuel is not configured for this store, so fuel cannot be compared"
+                            .to_owned(),
+                    )),));
+                };
                 // `.copied()` before the `match`, because the scrutinee's temporary guard would
                 // otherwise be dropped while an arm still borrowed from it -- E0597. The same
                 // expression is written this way in `assert-fuel-below` below.
@@ -338,7 +410,14 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                             .to_owned(),
                     )),));
                 };
-                let remaining = store.get_fuel()?;
+                let Ok(remaining) = store.get_fuel() else {
+                    // Same as `mark-fuel` and `fuel-since`: no fuel means no
+                    // measurement, not a host fault.
+                    return Ok((Err(AssertionError::NotAssertable(
+                        "fuel is not configured for this store, so fuel cannot be compared"
+                            .to_owned(),
+                    )),));
+                };
                 let Some(at) = state.data().marks.get(&mark).copied() else {
                     return Ok((Err(AssertionError::NoFuelBaseline),));
                 };
@@ -346,9 +425,11 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 if consumed < limit {
                     Ok((Ok(()),))
                 } else {
-                    state.data().failures.push(format!(
+                    if let Err(reason) = state.record_failure(format!(
                         "`{mark}` consumed {consumed} fuel, which is not below {limit}"
-                    ));
+                    )) {
+                        return Ok((Err(AssertionError::NotAssertable(reason)),));
+                    }
                     Ok((Ok(()),))
                 }
             })
@@ -388,7 +469,11 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 };
                 // Every name has to resolve, or a typo would assert nothing and pass -- which the WIT
                 // calls *"the one error here that is almost always a test bug"*.
-                let mut wanted = Vec::with_capacity(allowed.len());
+                // No `with_capacity(allowed.len())`: the list arrives whole
+                // from the guest, so the host must not pre-allocate for its
+                // unvalidated length. Pushing validated entries grows the
+                // same vector pay-as-you-go instead.
+                let mut wanted = Vec::new();
                 for name in &allowed {
                     match capability_named(name) {
                         Some(c) => wanted.push(c),
@@ -405,10 +490,12 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                     Ok((Ok(()),))
                 } else {
                     let names: Vec<String> = outside.iter().map(ToString::to_string).collect();
-                    state.data().failures.push(format!(
+                    if let Err(reason) = state.record_failure(format!(
                         "the code under test attempted {} outside the allowed set",
                         names.join(", ")
-                    ));
+                    )) {
+                        return Ok((Err(AssertionError::NotAssertable(reason)),));
+                    }
                     Ok((Ok(()),))
                 }
             })
@@ -453,11 +540,11 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                     Ok(v) => v,
                     Err(e) => return Ok((Err(e),)),
                 };
-                if outside.contains(&c) {
-                    state
-                        .data()
-                        .failures
-                        .push(format!("the code under test attempted {c}"));
+                if outside.contains(&c)
+                    && let Err(reason) =
+                        state.record_failure(format!("the code under test attempted {c}"))
+                {
+                    return Ok((Err(AssertionError::NotAssertable(reason)),));
                 }
                 Ok((Ok(()),))
             })
@@ -496,9 +583,12 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                     )),));
                 };
                 if !passed {
-                    match location {
-                        Some(at) => state.data().failures.push(format!("{message} (at {at})")),
-                        None => state.data().failures.push(message),
+                    let failure = match location {
+                        Some(at) => format!("{message} (at {at})"),
+                        None => message,
+                    };
+                    if let Err(reason) = state.record_failure(failure) {
+                        return Ok((Err(AssertionError::NotAssertable(reason)),));
                     }
                 }
                 Ok((Ok(()),))
@@ -604,6 +694,31 @@ fn capability_named(name: &str) -> Option<Capability> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure table is bounded and loud at the bound: past
+    /// `MAX_TEST_FAILURES` the report is refused, never silently dropped
+    /// (a dropped failure would make `all_passed` lie), and an oversize
+    /// message is refused, never truncated.
+    #[test]
+    fn failure_reports_are_bounded_and_loud() {
+        let state = TestState::default();
+        for i in 0..MAX_TEST_FAILURES {
+            state.record_failure(format!("f{i}")).expect("room remains");
+        }
+        let err = state
+            .record_failure("one too many".to_owned())
+            .expect_err("a full table must refuse");
+        assert!(
+            err.contains(&MAX_TEST_FAILURES.to_string()),
+            "the refusal names the bound: {err}"
+        );
+        assert_eq!(state.failures().len(), MAX_TEST_FAILURES);
+        let big = "x".repeat(crate::host_log::MAX_LOG_FIELD_BYTES + 1);
+        assert!(
+            state.record_failure(big).is_err(),
+            "an oversize message must refuse, not truncate"
+        );
+    }
 
     /// Every assertion must refuse when the store carries no state — the call-site half.
     ///

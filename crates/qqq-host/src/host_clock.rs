@@ -39,6 +39,7 @@
 
 use wasmtime::StoreContextMut;
 use wasmtime::component::Linker;
+use wasmtime::component::{ComponentType, Lift, Lower};
 
 use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;
@@ -60,13 +61,18 @@ pub const MONOTONIC_CLOCK: &str = "qqq:clock/monotonic-clock@1.0.0";
 /// `variant` is an indexed type, so `not-granted` is case 0. Swapping two cases
 /// would make a guest interpret a denial as an out-of-range error — a silent,
 /// security-relevant miscommunication that no type system catches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ComponentType, Lower, Lift)]
+#[component(variant)]
+#[repr(u8)]
 pub enum ClockError {
     /// The capability was not granted by any configuration layer.
+    #[component(name = "not-granted")]
     NotGranted = 0,
     /// The instant is not representable, or precedes the epoch.
+    #[component(name = "out-of-range")]
     OutOfRange = 1,
     /// The host is shutting down.
+    #[component(name = "shutting-down")]
     ShuttingDown = 2,
 }
 
@@ -104,8 +110,12 @@ fn register_wall_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     // The capability check is repeated here even though registration is already
     // conditional. This is the defence-in-depth check: if a future change ever
     // registers this function unconditionally, the guest still cannot read the
-    // clock without the grant. `recheck` in the linker module documents the
-    // same reasoning for capabilities generally.
+    // clock without the grant. Unlike `resolution`/`timezone` (plain returns,
+    // so a misbuilt linker traps loudly), this function serves the WIT
+    // `result`: the grant failure answers `not-granted` exactly as the
+    // interface documents, because the type gives it a case to use. A
+    // replay-log failure still traps instead — the log is harness state, and
+    // no `clock-error` case describes it honestly.
     //
     // **Every body is wrapped in `guard` (`HOST-011`).** A host function is
     // called from inside Wasmtime's execution of guest code, so a panic here
@@ -117,16 +127,23 @@ fn register_wall_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     // function without further context.
     inst.func_wrap(
         "now",
-        |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
+        |store: StoreContextMut<'_, StoreData>,
+         (): ()|
+         -> wasmtime::Result<(Result<u64, ClockError>,)> {
             crate::guard::guard("qqq:clock@1.0.0/wall-clock.now", || {
-                // Through `ambient::require`, not an inline grant check: the
-                // seam writes the capability-use row (`Granted`/`Denied`) the
-                // audit stream — and `assert-caps-only` — read. An inline
-                // check would answer identically while leaving no record,
-                // making a clock-using guest look capability-clean (H10).
-                crate::ambient::require(store.data(), Capability::ClockWall, "wall_clock_now")
-                    .map_err(|_| denied(Capability::ClockWall))?;
-                Ok((store.data().ambient.read_wall_nanos()?,))
+                // Through `ambient::require` (audit seam, H10): the seam
+                // writes the capability-use row the audit stream reads. A
+                // misbuilt linker reaches `not-granted` here instead of
+                // trapping — the interface's own documented answer.
+                if crate::ambient::require(store.data(), Capability::ClockWall, "wall_clock_now")
+                    .is_err()
+                {
+                    return Ok((Err(ClockError::NotGranted),));
+                }
+                let value = store.data().ambient.read_wall_nanos().map_err(|error| {
+                    wasmtime::Error::msg(format!("host clock read failed: {error}"))
+                })?;
+                Ok((Ok(value),))
             })
         },
     )?;

@@ -3004,21 +3004,47 @@ mod tests {
     // values would let a swap or a live read pass.
     const REPLAY_WAT: &str = r#"
         (component
-          (import "qqq:clock/wall-clock@1.0.0" (instance $wclock
-            (export "now" (func (result u64)))))
+          (type $wall (instance
+            (type $clock-error (variant (case "not-granted") (case "out-of-range") (case "shutting-down")))
+            (export "clock-error" (type $clock-error-export (eq $clock-error)))
+            (type $wall-result (result u64 (error $clock-error-export)))
+            (type $now-func (func (result $wall-result)))
+            (export "now" (func (type $now-func)))))
+          (import "qqq:clock/wall-clock@1.0.0" (instance $wclock (type $wall)))
           (import "qqq:clock/monotonic-clock@1.0.0" (instance $mclock
             (export "now" (func (result u64)))))
           (core module $m
-            (import "w" "now" (func $wnow (result i64)))
+            (import "w" "now" (func $wnow (param i32)))
             (import "m" "now" (func $mnow (result i64)))
-            (func (export "getw") (result i64) (call $wnow))
+            (import "mem" "memory" (memory 1))
+            (func (export "getw") (result i64)
+              ;; Indirect call: address 0 is the return area in the shared
+              ;; memory. A nonzero discriminant traps rather than returning
+              ;; a silent zero as a reading.
+              (call $wnow (i32.const 0))
+              (i32.load (i32.const 0)) (if (then unreachable))
+              (i64.load (i32.const 8)))
             (func (export "getm") (result i64) (call $mnow)))
-          (core func $wlower (canon lower (func $wclock "now")))
+          ;; Lowering a `result` routes the discriminant and payload through
+          ;; a return pointer: the canonical ABI writes them to the memory
+          ;; named here, so the guest passes an address in that same memory
+          ;; and reads the fields back. A dedicated module breaks the cycle
+          ;; (the main module cannot supply the memory its own imports are
+          ;; lowered with); one page is ample for a 16-byte result.
+          (core module $memmod
+            (memory (export "memory") 1))
+          (core instance $mem (instantiate $memmod))
+          (core func $wlower
+            (canon lower (func $wclock "now")
+              (memory (core memory $mem "memory"))))
           (core func $mlower (canon lower (func $mclock "now")))
           (core instance $hostw (export "now" (func $wlower)))
           (core instance $hostm (export "now" (func $mlower)))
           (core instance $i
-            (instantiate $m (with "w" (instance $hostw)) (with "m" (instance $hostm))))
+            (instantiate $m
+              (with "w" (instance $hostw))
+              (with "m" (instance $hostm))
+              (with "mem" (instance $mem))))
           (func (export "read-wall") (result u64) (canon lift (core func $i "getw")))
           (func (export "read-mono") (result u64) (canon lift (core func $i "getm")))
         )

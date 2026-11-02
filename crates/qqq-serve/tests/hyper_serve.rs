@@ -675,6 +675,90 @@ async fn hyper_parked_flat_handler_times_out_on_both_paths() {
     assert!(b.closed, "hyper closes after the timeout");
 }
 
+/// `Expect: 100-continue` draws the same interim answer on both paths:
+/// the client sends the head, waits for `100 Continue`, then sends the
+/// body. Hyper's H1 driver sends the interim automatically when the
+/// service polls the body; the in-house path says it explicitly in
+/// `drain_body` — silence there would stall a waiting client (and
+/// fingerprint the transports). Without `Expect`, neither path speaks
+/// first.
+#[tokio::test]
+async fn hyper_expect_continue_matches_in_house() {
+    let routes = [(Method::Post, "/echo", "echo")];
+    let inhouse = Inhouse::start_with(table_with(&routes), echo_handler(), |_| {}).await;
+    let hyper = Hyper::start(
+        table_with(&routes),
+        Dispatch::flat(echo_handler()),
+        default_limits(),
+        Pieces::bare(),
+    )
+    .await;
+    for (side, addr) in [("in-house", inhouse.addr), ("hyper", hyper.addr)] {
+        // With Expect: head first, interim before the body moves.
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        stream
+            .write_all(
+                b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\n",
+            )
+            .await
+            .expect("head sends");
+        stream.flush().await.expect("flush");
+        let (interim, _) = read_response_head(&mut stream).await;
+        assert_eq!(
+            interim, "HTTP/1.1 100 Continue",
+            "{side} answers the expectation before the body"
+        );
+        stream.write_all(b"hello").await.expect("body sends");
+        stream.flush().await.expect("flush");
+        let (status, _, body) = read_response(&mut stream, false).await;
+        assert_eq!(status, "HTTP/1.1 200 OK", "{side} serves after the body");
+        assert_eq!(body, b"len=5", "{side} saw the declared body");
+        // Without Expect: the server stays silent until the full answer.
+        let mut plain = TcpStream::connect(addr).await.expect("connect");
+        plain
+            .write_all(b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+            .await
+            .expect("request sends");
+        plain.flush().await.expect("flush");
+        let (only, _) = read_response_head(&mut plain).await;
+        assert!(
+            only.starts_with("HTTP/1.1 200"),
+            "{side} sends no interim without Expect: {only}"
+        );
+    }
+}
+
+/// A bare `CONNECT` is refused on H1 too: authority-form is not
+/// origin-form, so the target never routes — 400, connection closed.
+/// The H2 twin (`h2_bare_connect_without_protocol_is_refused`) answers
+/// 4xx on its own taxonomy; both paths refuse, neither tunnels.
+#[tokio::test]
+async fn hyper_bare_connect_is_refused() {
+    let routes = [(Method::Get, "/hello", "h")];
+    let inhouse = Inhouse::start_with(table_with(&routes), hello_handler(), |_| {}).await;
+    let hyper = Hyper::start(
+        table_with(&routes),
+        Dispatch::flat(hello_handler()),
+        default_limits(),
+        Pieces::bare(),
+    )
+    .await;
+    let request =
+        b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    for (side, addr) in [("in-house", inhouse.addr), ("hyper", hyper.addr)] {
+        match refuse_exchange(addr, request).await {
+            Refusal::Answered(wire) => assert_eq!(
+                code_of(&wire.status),
+                "HTTP/1.1 400",
+                "{side} refuses authority-form CONNECT"
+            ),
+            // Windows RST race: a refused-and-closed connection may die
+            // before the answer arrives; death is also a refusal.
+            Refusal::Dead => {}
+        }
+    }
+}
+
 /// The same `GET` answers the same on both paths.
 #[tokio::test]
 async fn hyper_flat_200_matches_in_house() {

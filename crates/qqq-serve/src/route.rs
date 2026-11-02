@@ -1446,6 +1446,36 @@ mod tests {
         assert!(t.match_route(Method::Get, "/nope?x=1").is_none());
     }
 
+    /// Encoded bytes match literally: the router never decodes, so there
+    /// is no smuggling differential between what matched and what the
+    /// handler sees — `/a%2Fb` routes only a literal `/a%2Fb` pattern,
+    /// never `/a/b`; `..`, `//` and embedded NULs (`%00`) are literal
+    /// segments too. A normalizer that decoded first would have to prove
+    /// every encoding maps back to the same route; matching raw text
+    /// needs no such proof.
+    #[test]
+    fn encoded_bytes_match_literally_never_decoded() {
+        let t = table(&[("/a/b", "ab"), ("/a%2Fb", "encoded")]);
+        assert_eq!(
+            t.match_route(Method::Get, "/a%2Fb").unwrap().handler,
+            "encoded",
+            "an encoded target matches only a literal encoded pattern"
+        );
+        assert_eq!(
+            t.match_route(Method::Get, "/a/b").unwrap().handler,
+            "ab",
+            "the decoded shape still matches its own pattern"
+        );
+        let plain = table(&[("/a/b", "ab")]);
+        assert!(
+            plain.match_route(Method::Get, "/a%2Fb").is_none(),
+            "no decode means no traversal"
+        );
+        assert!(plain.match_route(Method::Get, "/a/../b").is_none());
+        assert!(plain.match_route(Method::Get, "//a//b").is_none());
+        assert!(plain.match_route(Method::Get, "/a%00b").is_none());
+    }
+
     // -- introspection -----------------------------------------------------
 
     /// `qqqai inspect` reports what a service exposes, so the listing must be

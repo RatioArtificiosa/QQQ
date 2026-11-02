@@ -101,11 +101,20 @@ impl Server {
     }
 
     async fn start(dispatch: Dispatch) -> Self {
+        Self::start_with_idle(dispatch, std::time::Duration::from_secs(75)).await
+    }
+
+    /// A server with a custom connection idle bound: the streaming
+    /// watchdog reaps a parked handler against this bound, so tests
+    /// pin it at milliseconds rather than waiting out production
+    /// three-quarters of a minute.
+    async fn start_with_idle(dispatch: Dispatch, idle: std::time::Duration) -> Self {
         let dispatch = TenantDispatch::new(dispatch);
         let addr = free_addr();
         let listen = ListenAddr::parse(&addr.to_string()).expect("parses");
         let shutdown = Shutdown::new();
-        let config = ServerConfig::for_addr(listen);
+        let mut config = ServerConfig::for_addr(listen);
+        config.connection.idle_timeout = idle;
         let local = shutdown.clone();
         tokio::spawn(async move {
             if let Err(e) = serve(
@@ -596,6 +605,88 @@ async fn a_handler_that_fails_mid_body_truncates_rather_than_lies() {
         got.contains("200 OK"),
         "the status was already sent and cannot be revised: {got:?}"
     );
+}
+
+/// **A streaming handler that parks without writing is reaped by the
+/// idle bound.** A stream is meant to be long-lived, so there is no
+/// flat-style duration bound — but a slot held by a handler that never
+/// produces is indistinguishable from a leaked one, and the hyper
+/// driver already reaps stalled streams through its idle watch. The
+/// in-house path watches progress the same way: bytes written reset
+/// the bound, silence past it closes the connection.
+#[tokio::test]
+async fn a_parked_streaming_handler_is_reaped_by_the_idle_bound() {
+    let handler: qqq_serve::stream::StreamingHandler = Arc::new(
+        |_head: &RequestHead,
+         _m: &RouteMatch,
+         _w: &mut StreamWriter<'_>|
+         -> Pin<Box<dyn std::future::Future<Output = Result<(), StreamError>> + Send + '_>> {
+            Box::pin(async move {
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        },
+    );
+    let dispatch = Dispatch::flat(flat_handler()).with_streaming("stream", handler);
+    let server = Server::start_with_idle(dispatch, Duration::from_millis(300)).await;
+
+    let mut client = server.open("/events").await;
+    // The head was committed before the handler parked, so the status
+    // line arrives; then nothing ever does.
+    let got = read_until(&mut client, "200 OK").await;
+    assert!(got.contains("200 OK"), "the head commits: {got:?}");
+    // EOF, not a timeout: `read_until_eof` swallows the distinction
+    // (it returns whatever arrived), so this loop names it — `Ok(0)`
+    // is the server closing, anything else is still-open.
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut chunk = [0u8; 1024];
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut client, &mut chunk).await {
+                Ok(0) | Err(_) => break true,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        closed,
+        "a parked stream must be reaped by the idle bound, not held forever"
+    );
+}
+
+/// **A slow-but-writing stream is never reaped.** Progress, not
+/// duration, is the bound: three events 100 ms apart on a 500 ms idle
+/// bound all arrive, because every write restarts the deadline.
+#[tokio::test]
+async fn a_slow_but_writing_stream_is_not_reaped() {
+    let handler: qqq_serve::stream::StreamingHandler = Arc::new(
+        |_head: &RequestHead,
+         _m: &RouteMatch,
+         w: &mut StreamWriter<'_>|
+         -> Pin<Box<dyn std::future::Future<Output = Result<(), StreamError>> + Send + '_>> {
+            Box::pin(async move {
+                for n in 0..3 {
+                    w.write_now(format!("data: tick{n}\n\n").as_bytes())
+                        .await
+                        .map_err(|e| StreamError::Transport(e.to_string()))?;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Ok(())
+            })
+        },
+    );
+    let dispatch = Dispatch::flat(flat_handler()).with_streaming("stream", handler);
+    let server = Server::start_with_idle(dispatch, Duration::from_millis(500)).await;
+
+    let mut client = server.open("/events").await;
+    let got = read_until(&mut client, "data: tick2").await;
+    for n in 0..3 {
+        assert!(
+            got.contains(&format!("data: tick{n}")),
+            "every slow event must arrive: {got:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

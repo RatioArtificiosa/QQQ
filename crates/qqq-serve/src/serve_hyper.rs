@@ -73,7 +73,7 @@ use crate::body_bytes::BodyBytes;
 use crate::cors::Cors;
 use crate::http1::{MAX_REQUEST_BYTES, MAX_TARGET_BYTES, ParseError, RequestHead, Version};
 use crate::limits::{GlobalBucket, TenantLimits};
-use crate::metrics::{HttpMetrics, TenantLabels};
+use crate::metrics::HttpMetrics;
 use crate::response::{self, Response, validate_outbound};
 use crate::route::{Method, RouteTable};
 use crate::server::{
@@ -544,8 +544,6 @@ pub(crate) struct OwnedCtx {
     pub ws_extra_hosts: Vec<String>,
     /// Whether this listener is loopback, hence under the allow-list.
     pub loopback_only: bool,
-    /// The bounded tenant labels for metrics.
-    pub tenant_labels: Arc<TenantLabels>,
     /// The host-to-tenant map, or `None` for peer-derived tenants.
     ///
     /// Cloned like every other `Arc` here: one table shared by every
@@ -589,7 +587,6 @@ impl OwnedCtx {
             global_requests: ctx.global_requests.cloned(),
             ws_extra_hosts: ctx.ws.extra_hosts.clone(),
             loopback_only: ctx.loopback_only,
-            tenant_labels: Arc::clone(ctx.tenant_labels),
             tenant_hosts: ctx.tenant_hosts.cloned(),
             peer_identity: ctx.peer_identity.clone(),
             peer: ctx.id.peer,
@@ -1011,8 +1008,8 @@ fn refuse_tenant_limits(
         && limits.check_body(tenant_key, declared).is_err()
     {
         if let Some(metrics) = ctx.metrics.as_ref() {
-            let label = ctx.tenant_labels.label(tenant);
-            metrics.record_body_limit(label.as_str());
+            // The name, not a pre-resolved label (see `record_metrics`).
+            metrics.record_body_limit(tenant);
         }
         let response = Response::text(413, "this tenant's request body exceeded its limit");
         return Some(render_refusal(state, head, path, &response, span, started));
@@ -2200,8 +2197,8 @@ async fn collect_or_refuse(
     };
     let Some((body, body_bytes)) = collected else {
         if let Some(metrics) = ctx.metrics.as_ref() {
-            let label = ctx.tenant_labels.label(tenant);
-            metrics.record_body_limit(label.as_str());
+            // The name, not a pre-resolved label (see `record_metrics`).
+            metrics.record_body_limit(tenant);
         }
         let response = response::from_error(&response::error_response(
             &qqq_core::Error::new(
@@ -2329,15 +2326,7 @@ fn render_recorded(
             crate::server::access_record(head, path, &effective, tenant, ctx.trace, span),
         );
         if let Some(metrics) = ctx.metrics.as_ref() {
-            record_metrics(
-                metrics,
-                &ctx.tenant_labels,
-                head,
-                &effective,
-                started,
-                tenant,
-                body_bytes,
-            );
+            record_metrics(metrics, head, &effective, started, tenant, body_bytes);
         }
         render_inner(&effective, is_head(head), &state.watch)
     } else {
@@ -2607,8 +2596,9 @@ fn map_head<B>(request: &hyper::Request<B>) -> Result<RequestHead, ParseError> {
 /// Map hyper's parsed HTTP/2 head to the in-house taxonomy.
 ///
 /// Pseudo-headers arrive decoded: `:method` and `:path` through
-/// hyper's method/URI, `:scheme` ignored (any scheme reaches dispatch;
-/// routing never sees it), `:authority` synthesised as the `host`
+/// hyper's method/URI, `:scheme` pinned to the web schemes (anything
+/// else is not a request this server routes — and routing must never
+/// see it), `:authority` synthesised as the `host`
 /// header the loopback check and handlers read. Framing rules are the
 /// shared ones. A `te` announcement (e.g. `trailers`) passes through
 /// as an ordinary header on both protocols — the flat path has no
@@ -2621,6 +2611,18 @@ fn map_head_h2<B>(request: &hyper::Request<B>) -> Result<RequestHead, ParseError
         Method::parse(request.method().as_str()).ok_or_else(|| ParseError::UnknownMethod {
             method: truncate_head(request.method().as_str(), 32),
         })?;
+    // `:scheme` is `http` or `https` on every real client; anything
+    // else is not routable. The H1 map refuses absolute-form targets
+    // the same way (`TargetNotAbsolute`), so both drivers agree that a
+    // non-web scheme is not a request.
+    if let Some(scheme) = request.uri().scheme_str()
+        && scheme != "http"
+        && scheme != "https"
+    {
+        return Err(ParseError::TargetNotAbsolute {
+            target: truncate_head(&request.uri().to_string(), 64),
+        });
+    }
     let target = if let Some(path_query) = request.uri().path_and_query() {
         path_query.as_str().to_owned()
     } else {
@@ -2811,20 +2813,19 @@ async fn collect_h2_body(
 /// and refusal shapes identical to the in-house path.
 ///
 /// `strict_end` is the H2-only overrun check: after a declared length
-/// completes, the transport must be cleanly done (no buffered
-/// remainder, end-of-stream seen) or the request refuses. Extra DATA
-/// past `Content-Length` on the same H2 stream would otherwise be
+/// completes, trailer blocks are drained (and discarded - the flat path
+/// has no trailer contract, matching the in-house reader, which consumes
+/// and discards trailers without surfacing them) and then the stream must
+/// be done. Extra DATA past `Content-Length` on the same H2 stream would otherwise be
 /// silently dropped while the handler receives first-N bytes as a
 /// complete body — RFC 9110 calls that mismatch malformed. H1 passes
 /// `false`: excess bytes there are the next pipelined request, which
 /// is correct framing, not an overrun.
 ///
 /// A stream the client never ends (exact bytes, no `END_STREAM`, idle
-/// after) also refuses: it is indistinguishable from an overrun in
-/// progress, and failing closed is the safe direction. H2 trailers
-/// arriving after the declared length likewise refuse — the flat path
-/// has no trailer contract, and silently skipping them already
-/// discards them today, so refusing is explicit rather than new.
+/// after) hangs here exactly as an unfinished chunked body hangs the
+/// in-house reader: an incomplete body is not a complete one on either
+/// transport, so the wait is parity rather than a new hang.
 async fn collect_framed(
     incoming: Incoming,
     head: &RequestHead,
@@ -2840,7 +2841,7 @@ async fn collect_framed(
         match reader.poll_chunk(&mut transport, 8 * 1024).await {
             Ok(BodyChunk::Data(chunk)) => body.extend_from_slice(&chunk),
             Ok(BodyChunk::End) => {
-                if strict_end && !transport.is_end_stream() {
+                if strict_end && !transport.drain_past_trailers().await {
                     return None;
                 }
                 let received = reader.bytes_read();
@@ -2911,13 +2912,53 @@ impl IncomingReader {
         }
     }
 
-    /// Whether the transport is cleanly done with no unread bytes: the
-    /// inner body ended AND no frame remainder sits in `leftover`. A
-    /// `false` here after a declared length completed means the peer
-    /// sent more than it declared (or never ended the stream, which is
-    /// indistinguishable from an overrun in progress).
-    fn is_end_stream(&self) -> bool {
-        self.leftover.is_none() && self.body.is_end_stream()
+    /// Drain trailer blocks after a declared length completed.
+    ///
+    /// Trailer `HEADERS` are consumed and discarded — the flat path has
+    /// no trailer contract, matching the in-house reader — up to 100
+    /// blocks, mirroring the in-house trailer-line bound. Returns
+    /// whether the stream is cleanly done: DATA past the declared
+    /// length, a transport error, an excess of trailers, or a buffered
+    /// remainder all refuse, and a stream that never ends hangs here
+    /// exactly as an unfinished chunked body hangs the in-house reader.
+    async fn drain_past_trailers(&mut self) -> bool {
+        if self.leftover.is_some() {
+            return false;
+        }
+        for _ in 0..100 {
+            match self.next_frame().await {
+                // End of stream: clean, trailers or none.
+                None => return true,
+                Some(Err(_)) => return false,
+                // Any body byte past the declared length is the overrun
+                // this check exists for. Empty DATA carries nothing.
+                Some(Ok(data)) if !data.is_empty() => return false,
+                Some(Ok(_)) => {}
+            }
+        }
+        false
+    }
+
+    /// One body frame: DATA bytes, or `None` at end of stream.
+    ///
+    /// Trailer and informational frames are skipped — like [`AsyncRead`]
+    /// above, which must also never surface them as body bytes.
+    async fn next_frame(&mut self) -> Option<Result<Bytes, std::io::Error>> {
+        loop {
+            let frame = std::future::poll_fn(|cx| self.body.as_mut().poll_frame(cx)).await?;
+            match frame {
+                Ok(frame) if frame.is_data() => {
+                    return Some(Ok(frame.into_data().unwrap_or_default()));
+                }
+                // Trailer or informational: skipped, like above.
+                Ok(_) => {}
+                Err(error) => {
+                    return Some(Err(std::io::Error::other(format!(
+                        "hyper body failed: {error}"
+                    ))));
+                }
+            }
+        }
     }
 }
 
@@ -3123,6 +3164,30 @@ mod tests {
             head(&absolute),
             Err(ParseError::TargetNotAbsolute { .. })
         ));
+    }
+
+    /// A non-web `:scheme` is not routable on H2 either: `http` and
+    /// `https` are the only schemes this server routes, mirroring the
+    /// H1 absolute-form refusal above. Anything else fails closed
+    /// rather than reaching dispatch under a scheme no policy names.
+    #[test]
+    fn h2_non_web_scheme_refuses() {
+        for uri in ["gopher://localhost/a", "ftp://localhost/a"] {
+            let request = hyper::Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(())
+                .unwrap_or_else(|_| hyper::Request::new(()));
+            assert!(
+                matches!(
+                    map_head_h2(&request),
+                    Err(ParseError::TargetNotAbsolute { .. })
+                ),
+                "{uri} must not route"
+            );
+        }
+        let plain = h2_get("http://localhost/a", &[]);
+        assert!(map_head_h2(&plain).is_ok(), "http still routes");
     }
 
     /// Unknown methods refuse; known ones map, case-insensitively like the parser.

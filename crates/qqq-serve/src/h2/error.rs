@@ -93,13 +93,19 @@ pub enum ErrorCode {
     RefusedStream = 0x07,
     /// `0x08` — the stream is no longer needed and is being cancelled.
     Cancel = 0x08,
-    /// `0x09` — the connection is being torn down and the stream cannot be
-    /// completed.
-    CompressionError = 0x09,
-    /// `0x0a` — the connection is being torn down.
+    /// `0x09` — the header compression context failed (HPACK).
     ///
-    /// Distinct from [`ErrorCode::NoError`]: this one says the *stream* failed
-    /// because of the connection, not because of anything about the request.
+    /// RFC 9113 §7: the compression context is out of sync or cannot be
+    /// maintained. A connection error — the decoder state is shared, so
+    /// the frame is answered with `GOAWAY`, not a stream reset.
+    CompressionError = 0x09,
+    /// `0x0a` — an extended-CONNECT stream failed.
+    ///
+    /// RFC 9113 §7 (RFC 8441 §8): the connection established by an
+    /// extended `CONNECT` was reset or abnormally closed. A stream
+    /// error — answered with `RST_STREAM`, leaving the connection up.
+    /// Distinct from [`ErrorCode::NoError`]: this one says the *stream*
+    /// failed, not that anything about the request was wrong.
     ConnectError = 0x0a,
     /// `0x0b` — excessive load, or a limit such as `MAX_CONCURRENT_STREAMS` was
     /// exceeded.

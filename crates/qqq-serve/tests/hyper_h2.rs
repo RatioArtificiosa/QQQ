@@ -46,7 +46,7 @@ use qqq_serve::serve_hyper::serve_hyper_h2;
 use qqq_serve::server::{
     ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served, TenantDispatch,
 };
-use qqq_serve::transport::{hyper_limits_for, HyperLimits};
+use qqq_serve::transport::{HyperLimits, hyper_limits_for};
 use qqq_serve::ws::WsConfig;
 use qqq_serve::{ConnectionConfig, Response};
 
@@ -510,11 +510,21 @@ async fn h2_garbage_preface_is_a_protocol_error() {
     // Wait for the server to end it: finishing first would race the
     // shutdown signal against the handshake failure and report
     // `Drained` for a connection the server had already condemned.
-    let mut one = [0u8; 1];
-    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut one))
-        .await
-        .expect("the server must end a garbage handshake promptly")
-        .expect_err("EOF, not bytes: the handshake failed");
+    // Drain first, then assert the close: the server may speak first
+    // (its SETTINGS preface can win the race against our garbage),
+    // so a single unread byte is housekeeping, not a verdict — EOF is.
+    let mut buf = [0u8; 1024];
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
+                Ok(0) | Err(_) => break true,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(closed, "the server must end a garbage handshake promptly");
     match hyper.finish().await {
         Served::BadRequest => {}
         other => panic!("expected BadRequest, got {other:?}"),
@@ -664,6 +674,55 @@ async fn h2_other_transfer_encoding_is_refused() {
     let (status, _, body) = h2.response(again).await;
     assert_eq!(status, 200);
     assert_eq!(body, b"hello from h");
+    let _ = hyper.finish().await;
+}
+
+/// A bare `CONNECT` is not a tunnel on H2: `:path` on a CONNECT
+/// without `:protocol` is malformed at the h2 layer itself, so the
+/// transport resets the stream before the service ever sees it — no
+/// 200, no proxy, connection alive. The H1 twin refuses the
+/// authority-form target with 400 (`hyper_bare_connect_is_refused`);
+/// both paths refuse, each at its own layer.
+#[tokio::test]
+async fn h2_bare_connect_without_protocol_is_refused() {
+    let routes = [(Method::Get, "/hello", "h")];
+    let hyper = HyperH2::start(
+        table_with(&routes),
+        Dispatch::flat(hello_handler()),
+        default_limits(),
+        Pieces::bare(),
+    )
+    .await;
+    let mut h2 = H2::connect(hyper.addr).await;
+    let id = h2.next_stream;
+    h2.next_stream += 2;
+    // Extended-CONNECT shape but no `:protocol`: proxying, not a handshake.
+    let block = h2.encoder.encode(&[
+        HeaderField::new(":method", "CONNECT"),
+        HeaderField::new(":path", "/"),
+        HeaderField::new(":scheme", "http"),
+        HeaderField::new(":authority", "localhost"),
+    ]);
+    h2.stream
+        .write_all(&frame(HEADERS, END_HEADERS | END_STREAM, id, &block))
+        .await
+        .expect("connect headers send");
+    // The stream dies by reset — never a tunnel, never a 200.
+    let reset = loop {
+        match read_frame_timeout(&mut h2.stream, Duration::from_secs(10))
+            .await
+            .expect("the transport must end a malformed CONNECT promptly")
+        {
+            frame if frame.stream == id && frame.ftype == RST_STREAM => break frame,
+            frame if frame.stream == 0 => {}
+            frame => panic!("bare CONNECT must reset, not answer: type={}", frame.ftype),
+        }
+    };
+    assert_eq!(reset.payload.len(), 4, "reset carries a code");
+    // And the connection survives its reset stream.
+    let again = h2.get("/hello").await;
+    let (ok, _, _) = h2.response(again).await;
+    assert_eq!(ok, 200);
     let _ = hyper.finish().await;
 }
 
@@ -1748,6 +1807,56 @@ async fn h2_content_length_overrun_is_refused() {
         .expect("exact data");
     let (ok, _, body) = h2.response(small).await;
     assert_eq!(ok, 200);
+    assert_eq!(body, b"len=5");
+    let _ = hyper.finish().await;
+}
+
+/// Trailers after a declared length do not fail the overrun check:
+/// the declared bytes are exact, the trailer block is consumed and
+/// discarded (the flat path has no trailer contract, matching the
+/// in-house reader), and the stream ends cleanly — a 200, not a reset.
+/// Without the drain, the pending trailer HEADERS reads as "stream not
+/// ended" and a legal trailer-bearing request refuses.
+#[tokio::test]
+async fn h2_trailers_after_a_declared_body_serve() {
+    let routes = [(Method::Post, "/echo", "echo")];
+    let echo: Handler = Arc::new(|head, _m: &RouteMatch| {
+        let len = head.content_length.unwrap_or(0);
+        Response::text(200, format!("len={len}"))
+    });
+    let hyper = HyperH2::start(
+        table_with(&routes),
+        Dispatch::flat(echo),
+        default_limits(),
+        Pieces::bare(),
+    )
+    .await;
+    let mut h2 = H2::connect(hyper.addr).await;
+    let id = h2.next_stream;
+    h2.next_stream += 2;
+    let block = h2.encoder.encode(&[
+        HeaderField::new(":method", "POST"),
+        HeaderField::new(":path", "/echo"),
+        HeaderField::new(":scheme", "http"),
+        HeaderField::new(":authority", "localhost"),
+        HeaderField::new("content-length", "5"),
+    ]);
+    h2.stream
+        .write_all(&frame(HEADERS, END_HEADERS, id, &block))
+        .await
+        .expect("headers");
+    h2.stream
+        .write_all(&frame(DATA, 0, id, b"hello"))
+        .await
+        .expect("exact data, stream still open");
+    // A trailer block, then end: consumed and discarded, not refused.
+    let trailers = h2.encoder.encode(&[HeaderField::new("x-checksum", "abc")]);
+    h2.stream
+        .write_all(&frame(HEADERS, END_HEADERS | END_STREAM, id, &trailers))
+        .await
+        .expect("trailers end the stream");
+    let (status, _, body) = h2.response(id).await;
+    assert_eq!(status, 200, "trailers are drained, not refused");
     assert_eq!(body, b"len=5");
     let _ = hyper.finish().await;
 }

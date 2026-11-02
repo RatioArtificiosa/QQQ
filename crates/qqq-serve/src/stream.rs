@@ -43,6 +43,7 @@
 //!    close, which is what [`StreamOutcome`] records so an access log can say so.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::AsyncWriteExt;
 
@@ -115,8 +116,12 @@ pub struct StreamWriter<'a> {
     sink: Sink<'a>,
     /// Whether the body has been terminated, so `finish` is idempotent.
     finished: bool,
-    /// How many bytes of body were written, for the access log.
-    written: u64,
+    /// How many bytes of body were written, for the access log — and for
+    /// the idle watchdog, which reaps a stream that stops producing.
+    /// Shared rather than plain so the serving loop can observe progress
+    /// while the handler holds the only `&mut` borrow: a plain counter
+    /// cannot be read through a mutable borrow held elsewhere.
+    written: std::sync::Arc<AtomicU64>,
 }
 
 /// Where a streaming body goes.
@@ -143,6 +148,14 @@ enum Sink<'a> {
 /// exactly as on the socket path, where one arbitrarily large
 /// `write_all` is equally possible.
 const STREAM_CHANNEL_PIECES: usize = 16;
+
+/// Largest single piece a streaming write accepts.
+///
+/// One capped response body (`HyperLimits::max_response_body_bytes`):
+/// the scale every other body bound in this crate already uses, so a
+/// streaming piece that dwarfs a whole flat response is refused rather
+/// than queued sixteen deep.
+const STREAM_MAX_PIECE_BYTES: usize = 1 << 20;
 
 impl<'a> StreamWriter<'a> {
     /// Write the response head and flush it.
@@ -173,7 +186,7 @@ impl<'a> StreamWriter<'a> {
         Ok(Self {
             sink: Sink::Socket { stream, version },
             finished: false,
-            written: 0,
+            written: std::sync::Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -216,7 +229,7 @@ impl<'a> StreamWriter<'a> {
             Self {
                 sink: Sink::Channel(Some(tx)),
                 finished: false,
-                written: 0,
+                written: std::sync::Arc::new(AtomicU64::new(0)),
             },
             rx,
         )
@@ -244,6 +257,19 @@ impl<'a> StreamWriter<'a> {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "write after finish: the body was already terminated",
+            ));
+        }
+        if piece.len() > STREAM_MAX_PIECE_BYTES {
+            // One capped response body, not sixteen arbitrary ones: the
+            // channel holds `STREAM_CHANNEL_PIECES` pieces, so an uncapped
+            // piece size queues 16× whatever the handler emits behind a
+            // slow consumer — memory the socket path cannot spend, since
+            // a full socket stalls `write_all` instead of buffering.
+            // SSE events are bytes; a handler emitting more than this in
+            // one piece fragments the budget, not the stream.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "streaming piece exceeds the per-piece budget",
             ));
         }
         if piece.is_empty() {
@@ -301,7 +327,8 @@ impl<'a> StreamWriter<'a> {
                     })?;
             }
         }
-        self.written += piece.len() as u64;
+        self.written
+            .fetch_add(piece.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -409,8 +436,18 @@ impl<'a> StreamWriter<'a> {
 
     /// How many bytes of body were written, excluding framing.
     #[must_use]
-    pub const fn written(&self) -> u64 {
-        self.written
+    pub fn written(&self) -> u64 {
+        self.written.load(Ordering::Relaxed)
+    }
+
+    /// The byte counter, shared so the serving loop can watch for progress
+    /// while the handler holds the only `&mut` borrow.
+    ///
+    /// `pub(crate)`: watching a handler's progress is the serving loop's
+    /// job, not API — embedders drive `write` and read `written`.
+    #[must_use]
+    pub(crate) fn activity(&self) -> std::sync::Arc<AtomicU64> {
+        std::sync::Arc::clone(&self.written)
     }
 }
 
@@ -630,6 +667,25 @@ mod tests {
         writer.finish().await.expect("idempotent");
         assert!(rx.recv().await.is_some(), "the first piece survives");
         assert!(rx.recv().await.is_none(), "finish closed the body");
+    }
+
+    /// A single piece past the per-piece budget is refused, on both sinks:
+    /// sixteen uncapped pieces behind a slow consumer is gigabytes the
+    /// socket path cannot spend. Exactly-at-cap still flows.
+    #[tokio::test]
+    async fn an_over_budget_piece_is_refused_as_invalid() {
+        let (mut writer, _rx) = StreamWriter::channel();
+        let big = vec![0xA5u8; (1 << 20) + 1];
+        let e = writer
+            .write(&big)
+            .await
+            .expect_err("a piece past one capped response must be refused");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        let exact = vec![0xA5u8; 1 << 20];
+        writer
+            .write(&exact)
+            .await
+            .expect("exactly one capped body still flows");
     }
 
     /// An HTTP/1.0 stream ends at EOF, so `finish` closes the connection.

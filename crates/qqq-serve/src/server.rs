@@ -2461,6 +2461,17 @@ async fn serve_sse_route(
     .await
 }
 
+/// How a watched streaming handler ended: completed normally, or cut
+/// by the server on shutdown or an idle stall.
+///
+/// A named outcome rather than a bare marker so the watch loop reads
+/// as named outcomes, not booleans.
+enum StreamWatch {
+    Done(std::result::Result<(), crate::stream::StreamError>),
+    Shutdown,
+    IdleStall,
+}
+
 /// Serve one request through a streaming handler.
 ///
 /// # Why this is separate from `serve_connection`
@@ -2510,7 +2521,66 @@ async fn serve_streaming(
     // Scoped so the mutable borrow of `writer` ends before `finish` needs it.
     // `StreamingHandler` takes `&'s mut StreamWriter<'w>` and returns a future borrowing
     // it, so the borrow spans the whole call; capturing only the `Result` releases it.
-    let handler_result = stream_handler(head, matched, &mut writer).await;
+    //
+    // Watched, not awaited bare: a handler that never returns and never
+    // writes would otherwise hold its slot forever — there is no flat-path
+    // handler bound here because a stream is *meant* to be long-lived.
+    // The bound is progress, not duration: shutdown ends it at once, and
+    // an idle bound with no bytes written since the last check ends it as
+    // `IdleTimeout`, exactly as the hyper driver reaps a stalled stream
+    // through `IdleWatch`. A handler that keeps writing, however slowly,
+    // never trips: only silence counts. `None` idle means no bound, the
+    // same heartbeat contract the WebSocket path documents.
+    //
+    // The watch arms never touch the stream or the writer: both are
+    // mutably borrowed by the handler future, so the arms only report
+    // and the tail below — past the handler future's scope, where the
+    // borrows have ended — does the closing. That is also why the idle
+    // and shutdown ends skip the stream record: like the hyper driver's
+    // abort path, a server-side cut has no handler outcome to report.
+    let activity = writer.activity();
+    let check_every = ctx
+        .idle_timeout
+        .map(|idle| (idle / 10).max(std::time::Duration::from_millis(1)));
+    let mut last_written = activity.load(std::sync::atomic::Ordering::Relaxed);
+    let mut last_progress = std::time::Instant::now();
+    let watched = {
+        let handler_future = stream_handler(head, matched, &mut writer);
+        tokio::pin!(handler_future);
+        loop {
+            tokio::select! {
+                result = &mut handler_future => break StreamWatch::Done(result),
+                () = ctx.shutdown.wait() => break StreamWatch::Shutdown,
+                () = async {
+                    match check_every {
+                        Some(every) => tokio::time::sleep(every).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let now_written = activity.load(std::sync::atomic::Ordering::Relaxed);
+                    if now_written != last_written {
+                        last_written = now_written;
+                        last_progress = std::time::Instant::now();
+                    } else if let Some(bound) = ctx.idle_timeout
+                        && last_progress.elapsed() >= bound
+                    {
+                        break StreamWatch::IdleStall;
+                    }
+                }
+            }
+        }
+    };
+    let handler_result = match watched {
+        StreamWatch::Done(result) => result,
+        StreamWatch::Shutdown => {
+            let _ = stream.shutdown().await;
+            return Served::Drained;
+        }
+        StreamWatch::IdleStall => {
+            let _ = stream.shutdown().await;
+            return Served::IdleTimeout;
+        }
+    };
     let outcome = match handler_result {
         Ok(()) => match writer.finish().await {
             Ok(()) => crate::stream::StreamOutcome::Completed,
@@ -2802,8 +2872,11 @@ async fn serve_flat_request(
     .await
     else {
         if let Some(m) = ctx.metrics {
-            let label = ctx.tenant_labels.label(tenant);
-            m.record_body_limit(label.as_str());
+            // The name, not a pre-resolved label: `record_body_limit`
+            // indexes through the metric registry once. Resolving through
+            // the connection's separate labels first could disagree (see
+            // `record_metrics`).
+            m.record_body_limit(tenant);
         }
         return Some(reject_body(stream, head).await);
     };
@@ -2860,7 +2933,6 @@ async fn serve_flat_request(
     if let Some(metrics) = ctx.metrics {
         record_metrics(
             metrics,
-            ctx.tenant_labels,
             head,
             &response,
             request_started,
@@ -3638,23 +3710,30 @@ async fn refuse_limits(
 /// metric measure the network and call it the handler.
 pub(crate) fn record_metrics(
     metrics: &crate::metrics::HttpMetrics,
-    tenant_labels: &crate::metrics::TenantLabels,
     head: &RequestHead,
     response: &crate::response::Response,
     started: Instant,
     tenant: &str,
     body_bytes: u64,
 ) {
-    let label = tenant_labels.label(tenant);
-    // Saturating rather than a raw cast: `as_micros` returns `u128`, and a saturating
-    // conversion states that the ceiling is unreachable rather than silently truncating a
-    // value that a overflowed `Instant` difference could in principle produce.
+    // The name goes straight to `record_request`, which resolves it through
+    // the metric registry's own bounded index exactly once. Resolving it
+    // first through the connection's separate `TenantLabels` and then
+    // re-resolving inside the metric meant two registries with two fill
+    // states could disagree about the same tenant — the log naming one
+    // bucket while the counter filled another. One lookup, one answer.
+    // (`index` treats "", "default" and the reserved "other" exactly as
+    // `label` renders them, so no normalization is lost.)
+    // Saturating rather than a raw cast: `as_micros` returns `u128`, and a
+    // saturating conversion states that the ceiling is unreachable rather
+    // than silently truncating a value that an overflowed `Instant`
+    // difference could in principle produce.
     let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     metrics.record_request(
         crate::metrics::Method::parse(head.method.as_str()),
         response.status,
         micros,
-        label.as_str(),
+        tenant,
         body_bytes,
         response.body.len() as u64,
     );
@@ -3953,6 +4032,17 @@ async fn read_head(
 /// `tests/streaming_route.rs`. The control matters because the streaming handler ignores
 /// the body, so "the body was not read" is only observable against a route that is not
 /// streaming — which the first version of this comment did not say.
+/// Send the interim `100 Continue` a waiting client asked for.
+///
+/// Extracted so `drain_body` stays a pipeline: one named step for the one
+/// interim response this server ever sends. An `Err` means the peer is
+/// gone — the caller closes, exactly as for a body that fails to arrive.
+async fn drain_send_continue(stream: &mut ConnStream) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+    stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+    stream.flush().await
+}
+
 async fn drain_body(
     stream: &mut ConnStream,
     buf: &mut Vec<u8>,
@@ -3980,6 +4070,20 @@ async fn drain_body(
         // and the connection is not trustworthy.
         return None;
     };
+
+    // Interim `100 Continue` before reading: hyper's H1 driver sends this
+    // automatically when the service first polls the body, so the in-house
+    // path must say it explicitly — a client waiting on it stalls
+    // otherwise, and the two transports fingerprint differently. Other
+    // expectations are ignored on both paths (hyper only acts on exactly
+    // `100-continue`), and HTTP/1.0 never gets a `100` (RFC 9110 §15.2).
+    if head.version == Version::Http11
+        && let Some(expect) = head.header("expect")
+        && expect.eq_ignore_ascii_case("100-continue")
+        && drain_send_continue(stream).await.is_err()
+    {
+        return None;
+    }
 
     // Take the buffered prefix out, leaving `buf` empty for the next request.
     let prefix = std::mem::take(buf);

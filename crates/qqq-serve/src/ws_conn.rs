@@ -437,31 +437,33 @@ where
     outcome
 }
 
-/// How many pings one connection may send per window before the server
-/// stops answering and closes instead.
-const MAX_PINGS_PER_WINDOW: u32 = 20;
+/// How many control frames one connection may send per window before the
+/// server stops answering and closes instead.
+const MAX_CONTROLS_PER_WINDOW: u32 = 20;
 
-/// The window the ping budget refills over.
-const PING_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+/// The window the control budget refills over.
+const CONTROL_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// One connection's ping budget.
+/// One connection's control-frame budget.
 ///
 /// Every ping is answered with a same-payload pong — a `write_all` plus a
-/// flush per ping — and pongs bypass the process budget, so an unbounded
-/// ping rate is unbounded write syscalls with no shed path. Legitimate
-/// keepalives tick every tens of seconds; twenty per ten seconds is two
-/// orders of magnitude of headroom, and past it the connection closes with
-/// `1011` rather than answering forever. The budget also stops a ping
-/// trickle from holding the connection past the idle bound for free: each
-/// answered ping is activity, but only budgeted ones are answered.
-struct PingGate {
+/// flush per ping — and control frames bypass the process budget, so an
+/// unbounded control rate is unbounded decode work and write syscalls with
+/// no shed path. Pongs cost no answer but still cost a decode, so they
+/// share the budget: twenty per ten seconds is two orders of magnitude of
+/// headroom past any keepalive cadence, and past it the connection closes
+/// with `1011` rather than being serviced forever. The budget also stops a
+/// control trickle from holding the connection past the idle bound for
+/// free: each serviced control frame is activity, but only budgeted ones
+/// are serviced.
+struct ControlGate {
     /// When the current window started.
     window_start: tokio::time::Instant,
     /// Pings answered in the current window.
     count: u32,
 }
 
-impl PingGate {
+impl ControlGate {
     /// A fresh budget, opening its first window now.
     fn new(now: tokio::time::Instant) -> Self {
         Self {
@@ -470,17 +472,17 @@ impl PingGate {
         }
     }
 
-    /// Whether this ping may be answered.
+    /// Whether this control frame may be serviced.
     ///
-    /// The window slides: a ping past the window starts a new one rather
+    /// The window slides: a frame past the window starts a new one rather
     /// than being counted against the old, so a steady legitimate cadence
     /// never trips no matter how long the connection lives.
     fn admit(&mut self, now: tokio::time::Instant) -> bool {
-        if now.duration_since(self.window_start) >= PING_WINDOW {
+        if now.duration_since(self.window_start) >= CONTROL_WINDOW {
             self.window_start = now;
             self.count = 0;
         }
-        if self.count >= MAX_PINGS_PER_WINDOW {
+        if self.count >= MAX_CONTROLS_PER_WINDOW {
             return false;
         }
         self.count += 1;
@@ -585,9 +587,9 @@ where
     // remainder returned when the connection ends — permits are exact, so
     // every path must settle its account exactly once.
     let mut budget = BufferBudget::new(std::sync::Arc::clone(&ctx.buffer));
-    // Pings bypass the budget (control frames are never charged), so they
-    // get their own bound — see `PingGate`.
-    let mut pings = PingGate::new(tokio::time::Instant::now());
+    // Control frames bypass the budget (they are never charged), so they
+    // get their own bound — see `ControlGate`.
+    let mut controls = ControlGate::new(tokio::time::Instant::now());
 
     loop {
         // Decode as many whole frames as the buffer holds. A single read can carry
@@ -597,12 +599,17 @@ where
             match ws_frame::decode_server_frame_with_limit(&buf, ctx.limits.max_frame_bytes) {
                 Ok(Some((frame, used))) => {
                     buf.drain(..used);
-                    if frame.opcode == Opcode::Ping && !pings.admit(tokio::time::Instant::now()) {
-                        // Answered pings are activity, so an unbounded rate
-                        // holds the slot and the syscalls with it. Past the
-                        // budget the connection closes with 1011 rather than
-                        // answering forever.
-                        refuse_with(stream, 1011, "ping rate exceeded", ctx.tenant_key).await;
+                    if (frame.opcode == Opcode::Ping || frame.opcode == Opcode::Pong)
+                        && !controls.admit(tokio::time::Instant::now())
+                    {
+                        // Serviced control frames are activity, so an
+                        // unbounded rate holds the slot and the syscalls
+                        // with it. Past the budget the connection closes
+                        // with 1011 rather than being serviced forever.
+                        // Pongs share the ping budget: they cost no answer
+                        // but still cost a decode, and an unbounded pong
+                        // rate is the same slot-hold with no answer at all.
+                        refuse_with(stream, 1011, "control rate exceeded", ctx.tenant_key).await;
                         return WsOutcome::ProtocolError;
                     }
                     if !frame.opcode.is_control() && !budget.acquire(frame.payload.len()) {
@@ -1417,6 +1424,54 @@ mod tests {
         };
         assert!(pongs <= 20, "at most the budget is answered: {pongs}");
         assert_eq!(code, 1011, "a ping flood is a policy close");
+        drop(client);
+        assert_eq!(
+            finished.await.expect("the server task ends"),
+            WsOutcome::ProtocolError
+        );
+    }
+
+    /// A pong flood shares the ping budget: pongs cost no answer but still
+    /// cost a decode, and an unbounded rate holds the slot with no answer
+    /// at all. Twenty-five masked empty pongs draw no pong and then the
+    /// same `1011` policy close.
+    #[tokio::test]
+    async fn a_pong_flood_closes_with_1011() {
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let finished = tokio::spawn(async move {
+            let mut server = server;
+            run_frames(&mut server, &Echo, Vec::new(), &test_ctx()).await
+        });
+
+        // Twenty-five masked empty pongs in one write: [0x8a, 0x80, mask×4].
+        let mut flood = Vec::with_capacity(25 * 6);
+        for i in 0..25u8 {
+            flood.extend_from_slice(&[0x8a, 0x80, i, i, i, i]);
+        }
+        tokio::io::AsyncWriteExt::write_all(&mut client, &flood)
+            .await
+            .expect("the flood must send");
+
+        // No pong is ever answered — the only wire event is the close.
+        let mut head = [0u8; 2];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut head),
+        )
+        .await
+        .expect("the server must close promptly")
+        .expect("frames, not EOF");
+        assert_eq!(head[0], 0x88, "the refusal must be a close frame: {head:?}");
+        let len = usize::from(head[1] & 0x7f);
+        let mut rest = vec![0u8; len];
+        tokio::io::AsyncReadExt::read_exact(&mut client, &mut rest)
+            .await
+            .expect("the close payload must arrive");
+        assert_eq!(
+            u16::from_be_bytes([rest[0], rest[1]]),
+            1011,
+            "a pong flood is a policy close"
+        );
         drop(client);
         assert_eq!(
             finished.await.expect("the server task ends"),

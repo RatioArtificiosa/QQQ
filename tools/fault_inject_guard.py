@@ -45,6 +45,8 @@ SRC = Path("crates/qqq-host/src/host_clock.rs")
 # The `timezone` body: swap the guarded form for a bare expression with the same
 # return type. Valid Rust, same behaviour, no guard.
 BEFORE = """            crate::guard::guard("qqq:clock@1.0.0/wall-clock.timezone", || {
+                crate::ambient::require(store.data(), Capability::ClockWall, "wall_clock_timezone")
+                    .map_err(|_| denied(Capability::ClockWall))?;
                 // Always UTC. A host that applied its local timezone would make
                 // guest output depend on deployment configuration, which the WIT
                 // documentation explicitly forbids.

@@ -2446,6 +2446,17 @@ mod tests {
     /// the check on a comment. Every real registration is a method call on an
     /// instance or linker, so the dot keeps prose out without a comment
     /// stripper that would itself need auditing.
+    ///
+    /// # The known gap: `bindgen!` trait methods
+    ///
+    /// This audit covers the six `func_wrap` modules only. The `bindgen!`
+    /// capability modules (`http`, `kv`, `log`, `queue`, `dns`, `sql`,
+    /// `trace`, `wasi`) implement generated traits instead of registering
+    /// closures, so a panicking trait method reaches no `guard` and this
+    /// test cannot see it. That is host-b review input, not a closed item:
+    /// each bindgen module must wrap its methods or prove the generated
+    /// bindings contain panics — and a method added there today is unaudited
+    /// until that loop lands.
     #[test]
     fn every_host_function_is_panic_guarded() {
         // Every file that registers host functions through `func_wrap`.

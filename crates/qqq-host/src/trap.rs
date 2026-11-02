@@ -15,6 +15,9 @@
 //! | Epoch deadline exceeded | `QQQ-3003` | no | **no** — discard |
 //! | Invalid resource handle | `QQQ-3005` | no | **no** — discard |
 //! | Guest panic (`unreachable` from a panic path) | `QQQ-3006` | no | **no** — discard |
+//! | Guest out of bounds (buffer overrun, not a limit) | `QQQ-3007` | no | **no** — discard |
+//! | Contained host panic (host bug, never the guest's fault) | `QQQ-6007` | no | **no** — discard |
+//! | Host allocation failure (host OOM, not guest usage) | `QQQ-6005` | yes | **no** — discard |
 //! | Anything else | `QQQ-3004` | no | **no** — discard |
 //!
 //! # Why every trap discards the instance
@@ -88,8 +91,28 @@ pub fn classify_trap(detail: &str) -> ErrorCode {
         .to_ascii_lowercase();
 
     // -- Fuel (most specific; its backtrace may mention anything) --------
-    if d.contains("fuel") {
+    // Anchored to consumption/exhaustion wording, not the bare word: a bare
+    // `contains("fuel")` matches `refuel` and any guest-echoed text, and the
+    // engine's own signals all name consuming or exhausting the budget.
+    if d.contains("fuel")
+        && (d.contains("consum")
+            || d.contains("exhaust")
+            || d.contains("out of")
+            || d.contains("limit"))
+    {
         return ErrorCode::FuelExhausted;
+    }
+
+    // -- Host allocation failure -------------------------------------------
+    // The engine could not allocate host memory (not guest linear memory,
+    // which is `MemoryLimitExceeded` above). Reporting that as a guest trap
+    // would send an operator to `--debug` a guest for a host-side OOM, so it
+    // maps to the retryable host-resource code instead.
+    if d.contains("out of memory")
+        || d.contains("failed to allocate")
+        || d.contains("allocation failed")
+    {
+        return ErrorCode::HostResourceExhausted;
     }
 
     // -- Epoch preemption ------------------------------------------------
@@ -182,6 +205,25 @@ fn frame_message(line: &str) -> &str {
         Some((_, message)) => message,
         None => "",
     }
+}
+
+/// The first classifiable message in an error chain, outermost first.
+///
+/// A chain of pure traps yields the top message, preserving the old
+/// behaviour for errors with no engine signal anywhere in them.
+#[must_use]
+fn first_signal_in_chain(err: &wasmtime::Error) -> String {
+    let mut top = String::new();
+    for (depth, cause) in err.chain().enumerate() {
+        let message = cause.to_string();
+        if depth == 0 {
+            top.clone_from(&message);
+        }
+        if classify_trap(&message) != ErrorCode::GuestTrap {
+            return message;
+        }
+    }
+    top
 }
 
 /// A guest failure, with everything needed to diagnose it.
@@ -318,7 +360,20 @@ impl Trap {
     /// from the module's name section without any DWARF at all.
     #[must_use]
     pub fn from_wasmtime_error(err: &wasmtime::Error) -> Self {
+        // Classify from the error CHAIN, not the formatted string: chain
+        // sources are engine diagnostics, while the alternate-format string
+        // embeds backtrace frames whose module/function names are
+        // guest-controlled. Classifying the formatted text lets a guest name
+        // containing `": "` plus a signal word forge another class; walking
+        // the chain keeps guest names out of the match entirely. The first
+        // non-trap source wins (outermost first); a chain of pure traps falls
+        // back to the top message, exactly as before. The stored `detail`
+        // stays the full formatted error — the backtrace text belongs in
+        // diagnostics even though it must not drive classification.
         let mut trap = Self::from_engine_error(&format!("{err:#}"));
+        let code = classify_trap(&first_signal_in_chain(err));
+        trap.code = code;
+        human_message(code).clone_into(&mut trap.message);
 
         let frames: Vec<WasmFrame> = err
             .downcast_ref::<wasmtime::WasmBacktrace>()
@@ -414,6 +469,7 @@ pub const fn human_message(code: ErrorCode) -> &'static str {
         ErrorCode::InvalidResourceHandle => "the guest used an invalid or closed resource handle",
         ErrorCode::GuestPanic => "the guest panicked",
         ErrorCode::HostPanicContained => "a host function panicked and was contained",
+        ErrorCode::HostResourceExhausted => "the host ran out of a system resource",
         ErrorCode::GuestOutOfBounds => "the guest accessed memory outside its linear memory",
         _ => "the guest trapped",
     }
@@ -440,6 +496,10 @@ pub const fn remediation_for(code: ErrorCode) -> &'static str {
         ErrorCode::HostPanicContained => {
             "this is a host bug, not a guest bug: fix the panicking host function. \
              The SEV1 `host-panic-contained` log line names it"
+        }
+        ErrorCode::HostResourceExhausted => {
+            "the host ran out of memory or file descriptors, not the guest out of \
+             its budget: retry after backoff, otherwise raise OS limits"
         }
         ErrorCode::GuestOutOfBounds => {
             "this is a guest bug, not a limit to raise — fix the indexing or pointer arithmetic"
@@ -589,6 +649,40 @@ mod tests {
         assert_eq!(
             classify_trap("panicked at src/lib.rs:42: assertion failed"),
             ErrorCode::GuestPanic
+        );
+    }
+
+    #[test]
+    fn a_host_allocation_failure_is_not_a_guest_trap() {
+        for detail in [
+            "failed to allocate 1073741824 bytes for linear memory",
+            "memory allocation failed: out of memory",
+        ] {
+            assert_eq!(
+                classify_trap(detail),
+                ErrorCode::HostResourceExhausted,
+                "host OOM must not blame the guest: {detail:?}"
+            );
+        }
+        let trap = Trap::from_engine_error("failed to allocate 64 bytes");
+        assert!(
+            trap.to_error().is_retryable(),
+            "host OOM is transient: retry"
+        );
+    }
+
+    #[test]
+    fn a_bare_fuel_mention_is_not_a_classification() {
+        // The anchor is consumption/exhaustion wording: "refuel" and bare
+        // mentions must not trip the fuel metric or remediation.
+        assert_eq!(
+            classify_trap("call refuel() before continuing"),
+            ErrorCode::GuestTrap
+        );
+        // While the engine's own signals still fire.
+        assert_eq!(
+            classify_trap("all fuel consumed by WebAssembly"),
+            ErrorCode::FuelExhausted
         );
     }
 
@@ -744,11 +838,10 @@ mod tests {
         let e = t.to_error();
         assert_eq!(e.code, ErrorCode::FuelExhausted);
         assert!(e.context.iter().any(|(k, _)| k == "fuel-consumed"));
-        assert!(
-            e.context
-                .iter()
-                .any(|(k, v)| k == "memory-peak" && v.contains("MiB"))
-        );
+        assert!(e
+            .context
+            .iter()
+            .any(|(k, v)| k == "memory-peak" && v.contains("MiB")));
         assert!(
             e.cause.iter().any(|c| c.contains("handle_request")),
             "the backtrace must reach the error: {:?}",

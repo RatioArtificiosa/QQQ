@@ -759,6 +759,56 @@ async fn hyper_bare_connect_is_refused() {
     }
 }
 
+/// A body that never arrives is refused on both paths: declaring
+/// `Content-Length` and then going silent must not hold the slot past
+/// the idle bound. Each poll re-arms the bound, so only a stall trips
+/// it — a slow-but-moving body is unaffected. The refusal answers 500
+/// and closes on both transports, matching the established
+/// arriving-over-cap taxonomy (and never calling the handler).
+#[tokio::test]
+async fn hyper_stalled_body_is_refused_on_both_paths() {
+    let routes = [(Method::Post, "/echo", "echo")];
+    let inhouse = Inhouse::start_with(table_with(&routes), echo_handler(), |config| {
+        config.connection.idle_timeout = Duration::from_millis(300);
+    })
+    .await;
+    let mut hyper_limits = default_limits();
+    hyper_limits.idle_timeout = Duration::from_millis(300);
+    let hyper = Hyper::start(
+        table_with(&routes),
+        Dispatch::flat(echo_handler()),
+        hyper_limits,
+        Pieces::bare(),
+    )
+    .await;
+    for (side, addr) in [("in-house", inhouse.addr), ("hyper", hyper.addr)] {
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        stream
+            .write_all(b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n")
+            .await
+            .expect("head sends");
+        stream.flush().await.expect("flush");
+        // Nothing more: the body stalls on byte zero.
+        let mut out = Vec::new();
+        let closed = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut chunk = [0u8; 1024];
+            loop {
+                match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break true,
+                    Ok(n) => out.extend_from_slice(&chunk[..n]),
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            closed && text.contains(" 500 "),
+            "{side} must answer 500 and close a stalled body, got: {text:?}"
+        );
+    }
+}
+
 /// The same `GET` answers the same on both paths.
 #[tokio::test]
 async fn hyper_flat_200_matches_in_house() {

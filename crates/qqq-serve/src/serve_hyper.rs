@@ -2191,9 +2191,14 @@ async fn collect_or_refuse(
         l.limits_for(ctx.tenant).max_body_bytes.unwrap_or(u64::MAX)
     });
     let effective_cap = crate::server::config_max_request_bytes().min(tenant_cap);
+    // The idle bound, per poll inside the collectors (not one deadline
+    // for the whole body): a body that keeps moving re-arms with every
+    // chunk or frame, so only a stalled peer trips it — mirroring the
+    // in-house `drain_body`, whose per-poll bound is the same rule.
+    let idle = state.limits.idle_timeout;
     let collected = match state.protocol {
-        Protocol::H1 => collect_body(request.into_body(), head, effective_cap).await,
-        Protocol::H2 => collect_h2_body(request.into_body(), head, effective_cap).await,
+        Protocol::H1 => collect_body(request.into_body(), head, effective_cap, idle).await,
+        Protocol::H2 => collect_h2_body(request.into_body(), head, effective_cap, idle).await,
     };
     let Some((body, body_bytes)) = collected else {
         if let Some(metrics) = ctx.metrics.as_ref() {
@@ -2764,6 +2769,7 @@ async fn collect_body(
     incoming: Incoming,
     head: &RequestHead,
     max_bytes: u64,
+    idle: std::time::Duration,
 ) -> Option<(BodyBytes, u64)> {
     if !head.chunked && head.content_length.is_none_or(|n| n == 0) {
         let body = if head.content_length == Some(0) {
@@ -2777,9 +2783,9 @@ async fn collect_body(
     // through the counter; declared lengths go through the shared
     // reader with identical counts and refusals.
     if head.chunked {
-        return collect_streamed(incoming, max_bytes).await;
+        return collect_streamed(incoming, max_bytes, idle).await;
     }
-    collect_framed(incoming, head, max_bytes, false).await
+    collect_framed(incoming, head, max_bytes, false, idle).await
 }
 
 /// Collect an HTTP/2 body: declared lengths go through the shared
@@ -2795,12 +2801,13 @@ async fn collect_h2_body(
     incoming: Incoming,
     head: &RequestHead,
     max_bytes: u64,
+    idle: std::time::Duration,
 ) -> Option<(BodyBytes, u64)> {
     match head.content_length {
         Some(0) => Some((BodyBytes::Buffered(Vec::new()), 0)),
-        Some(_) => collect_framed(incoming, head, max_bytes, true).await,
+        Some(_) => collect_framed(incoming, head, max_bytes, true, idle).await,
         None => {
-            let (body, received) = collect_streamed(incoming, max_bytes).await?;
+            let (body, received) = collect_streamed(incoming, max_bytes, idle).await?;
             if received == 0 {
                 return Some((BodyBytes::Absent, 0));
             }
@@ -2831,6 +2838,7 @@ async fn collect_framed(
     head: &RequestHead,
     max_bytes: u64,
     strict_end: bool,
+    idle: std::time::Duration,
 ) -> Option<(BodyBytes, u64)> {
     let Ok(mut reader) = BodyReader::from_head(head, max_bytes) else {
         return None;
@@ -2838,7 +2846,17 @@ async fn collect_framed(
     let mut transport = IncomingReader::new(incoming);
     let mut body = Vec::new();
     loop {
-        match reader.poll_chunk(&mut transport, 8 * 1024).await {
+        // Each poll is bounded, like the in-house `drain_body`: a body
+        // that keeps moving re-arms the bound with every chunk, so only
+        // a stalled peer trips it — and a stall refuses exactly like a
+        // malformed body (500 plus close on both transports, handler
+        // never runs).
+        let Ok(chunk) =
+            tokio::time::timeout(idle, reader.poll_chunk(&mut transport, 8 * 1024)).await
+        else {
+            return None;
+        };
+        match chunk {
             Ok(BodyChunk::Data(chunk)) => body.extend_from_slice(&chunk),
             Ok(BodyChunk::End) => {
                 if strict_end && !transport.drain_past_trailers().await {
@@ -2858,12 +2876,21 @@ async fn collect_framed(
 /// bound. A body past the cap, a transport error, or a truncation all
 /// refuse the same way the shared reader refuses: no partial body ever
 /// reaches a handler.
-async fn collect_streamed(incoming: Incoming, max_bytes: u64) -> Option<(BodyBytes, u64)> {
+async fn collect_streamed(
+    incoming: Incoming,
+    max_bytes: u64,
+    idle: std::time::Duration,
+) -> Option<(BodyBytes, u64)> {
     let cap = max_bytes;
     let mut stream = BodyStream::new(incoming);
     let mut body = Vec::new();
     loop {
-        let Some(next) = stream.frame().await else {
+        // Bounded per frame like the length-delimited path above: a
+        // stream that keeps moving re-arms with every frame.
+        let Ok(next) = tokio::time::timeout(idle, stream.frame()).await else {
+            return None;
+        };
+        let Some(next) = next else {
             let received = body.len() as u64;
             return Some((BodyBytes::Buffered(body), received));
         };

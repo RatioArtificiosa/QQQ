@@ -2868,6 +2868,7 @@ async fn serve_flat_request(
         buf,
         head,
         effective_body_cap(ctx.limits.map(|v| &**v), ctx.id.tenant),
+        ctx.idle_timeout,
     )
     .await
     else {
@@ -3437,8 +3438,8 @@ async fn refuse_before_reading(
             && limits.check_body(tenant_key, declared).is_err()
         {
             if let Some(m) = ctx.metrics {
-                let label = ctx.tenant_labels.label(tenant);
-                m.record_body_limit(label.as_str());
+                // The name, not a pre-resolved label (see `record_metrics`).
+                m.record_body_limit(tenant);
             }
             return Some(
                 refuse_limits(stream, head, path, tenant, ctx, *span_seq + 1, false).await,
@@ -4048,6 +4049,7 @@ async fn drain_body(
     buf: &mut Vec<u8>,
     head: &RequestHead,
     max_bytes: u64,
+    idle: Option<std::time::Duration>,
 ) -> Option<(crate::body_bytes::BodyBytes, u64)> {
     // No body declared: anything buffered is the start of the **next** request —
     // a pipelined one. It must be preserved, not cleared, or a client that
@@ -4105,7 +4107,26 @@ async fn drain_body(
     // metric reporting the declaration would claim bytes that never arrived.
     let mut body = Vec::new();
     loop {
-        match reader.poll_chunk(&mut combined, 8 * 1024).await {
+        // Each poll is bounded by the idle bound, not the whole drain:
+        // a body that keeps moving — however slowly — re-arms the bound
+        // with every chunk, so only a stalled peer trips it. An absolute
+        // deadline would punish a slow-but-live upload for the attacker's
+        // trickle, and `idle_timeout` by contract never fires on an active
+        // connection. A stall refuses exactly like a malformed body: 500
+        // plus close on both transports (the established arriving-over-cap
+        // taxonomy), and the handler never runs.
+        let chunk = match idle {
+            Some(bound) => {
+                let Ok(chunk) =
+                    tokio::time::timeout(bound, reader.poll_chunk(&mut combined, 8 * 1024)).await
+                else {
+                    return None;
+                };
+                chunk
+            }
+            None => reader.poll_chunk(&mut combined, 8 * 1024).await,
+        };
+        match chunk {
             Ok(crate::body::BodyChunk::Data(chunk)) => body.extend_from_slice(&chunk),
             Ok(crate::body::BodyChunk::End) => {
                 let received = reader.bytes_read();

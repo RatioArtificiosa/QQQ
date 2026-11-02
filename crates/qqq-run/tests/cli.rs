@@ -4919,12 +4919,24 @@ fn test_snapshot_compare_leaves_recordings_untouched() {
 // ---------------------------------------------------------------------------
 
 /// A component importing `qqq:clock/wall-clock`, as WAT.
+///
+/// `now` carries the WIT `result` shape: the host serves
+/// `result<instant-ns, clock-error>` (batch-2), so a bare-`u64` import no
+/// longer instantiates (pinned negatively in `qqq-host`'s `dual_abi`).
+/// The `error` references the *exported* named type (index 1), not the
+/// variant declaration: the validator matches imports on exported named
+/// types (the same shape `wit-bindgen` emits).
 const NEEDS_WALL_CLOCK: &str = r#"(component
-  (import "qqq:clock/wall-clock@1.0.0" (instance $c
-    (export "now" (func (result u64)))
+  (type $wall-instance (instance
+    (type $e (variant (case "not-granted") (case "out-of-range") (case "shutting-down")))
+    (export "clock-error" (type (eq $e)))
+    (type $r (result u64 (error 1)))
+    (type $f (func (result $r)))
+    (export "now" (func (type $f)))
     (export "resolution" (func (result u64)))
     (export "timezone" (func (result string)))
   ))
+  (import "qqq:clock/wall-clock@1.0.0" (instance $c (type $wall-instance)))
   (core module $m)
   (core instance $i (instantiate $m))
 )"#;
@@ -4997,17 +5009,38 @@ const NEEDS_02_HTTP: &str = r#"(component
 /// A call whose result is discarded can be eliminated, and an eliminated call is not a read the host ever
 /// sees. Storing it keeps the call observable.
 const READS_WALL_CLOCK: &str = r#"(component
-  (import "qqq:clock/wall-clock@1.0.0" (instance $c
-    (export "now" (func (result u64)))
+  (type $wall-instance (instance
+    (type $e (variant (case "not-granted") (case "out-of-range") (case "shutting-down")))
+    (export "clock-error" (type (eq $e)))
+    ;; The `error` must reference the *exported* named type (index 1),
+    ;; not the variant declaration: the validator matches imports on
+    ;; exported named types (the same shape `wit-bindgen` emits).
+    (type $r (result u64 (error 1)))
+    (type $f (func (result $r)))
+    (export "now" (func (type $f)))
     (export "resolution" (func (result u64)))
     (export "timezone" (func (result string)))
   ))
+  (import "qqq:clock/wall-clock@1.0.0" (instance $c (type $wall-instance)))
   (alias export $c "now" (func $c_now))
-  (core func $now (canon lower (func $c_now)))
+  ;; The result type forces indirect return through guest memory (the
+  ;; validator requires the `memory` option), so a scratch core module
+  ;; provides it: the discriminant lands at 0, the `u64` payload at 8.
+  (core module $memmod (memory (export "memory") 1))
+  (core instance $meminst (instantiate $memmod))
+  (alias core export $meminst "memory" (core memory $mem))
+  (core func $now (canon lower (func $c_now) (memory $mem)))
   (core module $m
-    (import "" "now" (func $now (result i64)))
+    (import "" "now" (func $now (param i32)))
+    (memory 1)
     (global $seen (mut i64) (i64.const 0))
-    (func $init (global.set $seen (call $now)))
+    ;; A nonzero discriminant is a host refusal: trap rather than
+    ;; recording garbage, so the replay log never captures a lie.
+    (func $init
+      (call $now (i32.const 0))
+      (i32.load (i32.const 0))
+      (if (then (unreachable)))
+      (global.set $seen (i64.load (i32.const 8))))
     (start $init)
   )
   (core instance $i (instantiate $m

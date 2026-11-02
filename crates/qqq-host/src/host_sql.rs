@@ -916,8 +916,31 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         // validation, cap, open, mint on every minting path.
         check_sql_size(&sql)?;
         check_handles(self)?;
+        // The `PRAGMA` gate runs before any connection opens: it needs no
+        // connection, only the statement text and the grants, and a refused
+        // caller must not cause opens as a side effect of being refused.
+        // `sqlite3_stmt_readonly` reports most `PRAGMA` as reads, but several
+        // (`journal_mode`, `synchronous`, `writable_schema`, ...) mutate the
+        // file or its durability, so `PRAGMA` requires the execute grant on
+        // a writable database. Schema introspection stays available to
+        // everyone through `sqlite_master` reads.
+        if leading_keyword(&sql).eq_ignore_ascii_case("pragma")
+            && (!self.grants.grants(SqlExecute) || db.read_only())
+        {
+            return Err(WitSqlError::ReadOnlyConnection);
+        }
+        // Probe on the read-only connection when the caller cannot write,
+        // mirroring `query_once`: a refused write must not create
+        // directories or files. A missing file fails the open (fail
+        // closed) instead of being materialized by a caller that could
+        // never use it.
+        let can_write = self.grants.grants(SqlExecute) && !db.read_only();
         let read_only = {
-            let connection = connection_for(self, &db)?;
+            let connection = if can_write {
+                connection_for(self, &db)?
+            } else {
+                connection_for_readonly(self, &db)?
+            };
             prepare_on(connection, &sql)?
         };
         // Direction follows the statement, not the call: a read prepares
@@ -927,18 +950,6 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
                 return Err(WitSqlError::NotGranted);
             }
         } else if !self.grants.grants(SqlExecute) {
-            return Err(WitSqlError::ReadOnlyConnection);
-        }
-        // `sqlite3_stmt_readonly` reports most `PRAGMA` as reads, but several
-        // (`journal_mode`, `synchronous`, `writable_schema`, ...) mutate the
-        // file or its durability — on the writable connection these paths
-        // use, that verdict alone would let a read-only caller persist
-        // changes. So `PRAGMA` requires the execute grant on a writable
-        // database. Schema introspection stays available to everyone through
-        // `sqlite_master` reads, and to execute-granted callers directly.
-        if leading_keyword(&sql).eq_ignore_ascii_case("pragma")
-            && (!self.grants.grants(SqlExecute) || db.read_only())
-        {
             return Err(WitSqlError::ReadOnlyConnection);
         }
         let id = mint_id(self)?;
@@ -980,6 +991,17 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         // `can_write`, for the same borrow reason.
         let can_read = self.grants.grants(SqlQuery);
         charge_one_subrequest(self)?;
+        // The `prepare` path gates leading-`PRAGMA` on the execute grant
+        // because `sqlite3_stmt_readonly` reports most `PRAGMA` forms as
+        // reads while several mutate the file or its durability. The
+        // one-shot path applies the same gate: without it, a query-only
+        // caller runs through `prepare`'s refusal. A direction refusal
+        // spends the unit (attempts, not successes).
+        if leading_keyword(&sql).eq_ignore_ascii_case("pragma")
+            && (!self.grants.grants(SqlExecute) || db.read_only())
+        {
+            return Err(WitSqlError::ReadOnlyConnection);
+        }
         let connection = if can_write {
             connection_for(self, &db)?
         } else {
@@ -1729,9 +1751,10 @@ mod tests {
     fn query_only_grant_cannot_write() {
         use super::bindings::qqq::sql::database::{Host as _, HostStatement as _};
         let path = test_path("query-only");
-        let mut data = store_for(&path, true, false);
+        let _ = std::fs::remove_file(&path);
         // A missing file fails before direction is known: the read-only
         // open cannot prepare, so existence precedes direction here.
+        let mut data = store_for(&path, true, false);
         let err = query_once(
             &mut data,
             "orders".to_owned(),
@@ -1740,13 +1763,28 @@ mod tests {
         )
         .expect_err("query-only cannot create");
         assert!(matches!(err, WitSqlError::ExecutionFailed(_)));
+        // Seed the file through a writable store: a query-only prepare
+        // probes read-only, so the file must already exist — and a refused
+        // write must never be what creates it (see
+        // `refused_prepare_creates_no_file`).
+        let mut seed = store_for(&path, true, true);
+        query_once(
+            &mut seed,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("seed write succeeds");
         let write = data
             .prepare(
                 "orders".to_owned(),
-                "CREATE TABLE t (id INTEGER)".to_owned(),
+                "CREATE TABLE t2 (id INTEGER)".to_owned(),
             )
             .expect_err("prepare itself enforces direction");
-        assert!(matches!(write, WitSqlError::ReadOnlyConnection));
+        assert!(
+            matches!(write, WitSqlError::ReadOnlyConnection),
+            "direction first, existence of the name second: {write:?}"
+        );
         let read = data
             .prepare("orders".to_owned(), "SELECT 1".to_owned())
             .expect("reads still prepare");
@@ -2434,6 +2472,64 @@ mod tests {
                 "{tag}: the refusal must name the budget, not the database: {err:?}"
             );
         }
+    }
+
+    /// A one-shot `PRAGMA` without the execute grant is refused, not run:
+    /// `prepare` gates leading-`PRAGMA` on `SqlExecute`, and the one-shot
+    /// path must not bypass it — `sqlite3_stmt_readonly` reports most
+    /// `PRAGMA` forms as reads while several mutate the file or its
+    /// durability. `table_info` is a pure read — the point is parity, not
+    /// mutation: `prepare` refuses every leading-`PRAGMA` without execute
+    /// (schema introspection stays available through `sqlite_master`
+    /// reads), so the one-shot path running one is a bypass whatever the
+    /// statement does. The database must exist first: a missing file fails
+    /// before any statement runs, which would prove nothing about the
+    /// gate.
+    #[test]
+    fn query_once_refuses_pragma_without_execute() {
+        use super::bindings::qqq::sql::database::Host as _;
+        let path = test_path("query-once-pragma");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut writer = store_for(&path, true, true);
+            writer
+                .query_once("orders".to_owned(), "CREATE TABLE t(x)".to_owned(), vec![])
+                .expect("setup write succeeds");
+        }
+        let mut data = store_for(&path, true, false);
+        let err = data
+            .query_once(
+                "orders".to_owned(),
+                "PRAGMA table_info(t)".to_owned(),
+                vec![],
+            )
+            .expect_err("query-only PRAGMA is refused");
+        assert!(
+            matches!(err, WitSqlError::ReadOnlyConnection),
+            "a direction refusal, not a database error: {err:?}"
+        );
+    }
+
+    /// A refused write creates nothing: probing a write on a connection
+    /// the caller cannot write through must not materialize the file as
+    /// a side effect of being refused.
+    #[test]
+    fn refused_prepare_creates_no_file() {
+        use super::bindings::qqq::sql::database::Host as _;
+        let path = test_path("prepare-creates-nothing");
+        let _ = std::fs::remove_file(&path);
+        let mut data = store_for(&path, true, false);
+        let err = data
+            .prepare("orders".to_owned(), "CREATE TABLE t(x)".to_owned())
+            .expect_err("query-only CREATE is refused");
+        assert!(
+            matches!(
+                err,
+                WitSqlError::ReadOnlyConnection | WitSqlError::ExecutionFailed(_)
+            ),
+            "refused, never executed: {err:?}"
+        );
+        assert!(!path.exists(), "a refused write creates no file");
     }
 
     /// A cap-hit creates nothing: the cap is checked before any open, so a

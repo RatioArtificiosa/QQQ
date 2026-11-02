@@ -144,6 +144,15 @@ impl Failure {
 /// This is the difference between resolving the export once per *component* and once
 /// per *request*: the lookup is two hash-map probes, and doing it per request would
 /// put them on the hot path for no gain.
+///
+/// # The pairing contract
+///
+/// The indices are meaningful only against the component they were resolved
+/// from. Every caller must pass the handle together with an instance built
+/// from that same component — `GuestApp` holds both for exactly this reason —
+/// and [`func`](Self::func) refuses otherwise. Mixing a handle from component
+/// A with an instance of component B is a programming error, never a guest
+/// condition.
 #[derive(Debug, Clone)]
 pub struct HandlerHandle {
     /// The interface export index.
@@ -182,6 +191,16 @@ impl HandlerHandle {
         let (_, interface_index) = instance
             .get_export(&mut store, None, HANDLER_INTERFACE)
             .ok_or_else(|| Failure::NotAnApplication.to_error(component))?;
+
+        // A component that exports the interface *name* as a bare function —
+        // or any other non-instance — must stop here. The method lookup below
+        // uses this index as a *parent*, and a non-instance parent would
+        // either fail opaquely or resolve an unrelated nested export. Only
+        // a lifted function answers `Some` to `get_func`, so `Some` here
+        // proves the name denotes a function, not the interface.
+        if instance.get_func(&mut store, interface_index).is_some() {
+            return Err(Failure::NotAnApplication.to_error(component));
+        }
 
         // Step 2: the method, looked up *within* the interface.
         //

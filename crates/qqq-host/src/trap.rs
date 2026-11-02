@@ -109,6 +109,19 @@ pub fn classify_trap(detail: &str) -> ErrorCode {
         return ErrorCode::InvalidResourceHandle;
     }
 
+    // -- Contained host panic (checked BEFORE the guest-panic heuristic) --
+    // [`crate::guard::guard`] turns a panicking host function into a trap
+    // whose message names the function and its containment. It contains the
+    // word "panic", so without this arm it would classify as `GuestPanic` —
+    // sending an operator to inspect the guest for a host defect, and
+    // counting a host bug on the guest-panic metric. The marker is the whole
+    // sentence the guard writes, not one word, so a guest that happens to
+    // trap with "host function" in its own message still falls through to
+    // the guest classes below.
+    if d.contains("host function") && d.contains("the host contained it") {
+        return ErrorCode::HostPanicContained;
+    }
+
     // -- Guest panic ------------------------------------------------------
     // A Rust panic in a Wasm guest compiles to `unreachable`.
     if d.contains("unreachable") || d.contains("panic") {
@@ -498,6 +511,23 @@ mod tests {
             classify_trap("wasm trap: wasm `unreachable` instruction executed"),
             ErrorCode::GuestPanic
         );
+        assert_eq!(
+            classify_trap("panicked at src/lib.rs:42: assertion failed"),
+            ErrorCode::GuestPanic
+        );
+    }
+
+    #[test]
+    fn a_contained_host_panic_is_a_host_fault_not_a_guest_panic() {
+        // The exact sentence `guard` writes: the function name varies, the
+        // frame does not. Without the dedicated arm this contains "panic"
+        // and would classify as `GuestPanic` — blaming the guest for a host
+        // defect on both the report and the metric.
+        assert_eq!(
+            classify_trap("host function `qqq:crypto/digest` panicked; the host contained it"),
+            ErrorCode::HostPanicContained
+        );
+        // And the guest class still fires for real guest panics.
         assert_eq!(
             classify_trap("panicked at src/lib.rs:42: assertion failed"),
             ErrorCode::GuestPanic

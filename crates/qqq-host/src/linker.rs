@@ -1272,7 +1272,14 @@ impl wasmtime::ResourceLimiter for TrappingLimiter {
 /// that happens once per component rather than once per request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundInterfaces {
-    /// The `qqq:` interfaces that were bound.
+    /// The `qqq:` interfaces the grant set requires, in stable sorted order.
+    ///
+    /// This names what was *required*, not what was successfully registered:
+    /// an interface with no host implementation yet (such as `qqq:fs`) still
+    /// appears here, and the gap is reported separately in `unimplemented`.
+    /// Splitting "required" from "implemented" is what keeps a
+    /// partially-implemented milestone honest instead of silently narrowing
+    /// the grant.
     pub interfaces: Vec<String>,
     /// The capabilities that were granted but have no host implementation yet.
     ///
@@ -1284,7 +1291,7 @@ pub struct BoundInterfaces {
 }
 
 impl BoundInterfaces {
-    /// Whether a specific interface was bound.
+    /// Whether a specific interface was required by the grant set.
     #[must_use]
     pub fn has(&self, interface: &str) -> bool {
         self.interfaces.iter().any(|i| i == interface)
@@ -2385,7 +2392,7 @@ mod tests {
     ///
     /// # Why it counts rather than listing names
     ///
-    /// Counting `func_wrap(` against `guard::guard(` means a *newly added* host
+    /// Counting `.func_wrap(` against both guard forms means a *newly added* host
     /// function is caught, not just a known set. A list of names would go stale
     /// the moment somebody registered the next interface — which is exactly when
     /// this matters most, because new host code is where new panics live.
@@ -2403,13 +2410,31 @@ mod tests {
     /// *production* code still fails it, and the first version of this test —
     /// which counted the whole file — reported a mismatch that was really the
     /// probe.
+    ///
+    /// # Why the match is `.func_wrap(` with its dot
+    ///
+    /// The bare needle `func_wrap(` also matches prose: `host_wasi03.rs`
+    /// documents that its async registrations anchor on the literal after
+    /// `` `func_wrap(` ``, and counting that sentence as a registration fails
+    /// the check on a comment. Every real registration is a method call on an
+    /// instance or linker, so the dot keeps prose out without a comment
+    /// stripper that would itself need auditing.
     #[test]
     fn every_host_function_is_panic_guarded() {
-        // Each file that registers host functions. `include_str!` reads the
-        // repository's own source, so the check runs against what is committed.
-        let sources: [(&str, &str); 2] = [
+        // Every file that registers host functions through `func_wrap`.
+        // `include_str!` reads the repository's own source, so the check runs
+        // against what is committed. Bindgen-based modules (http, sql, kv,
+        // queue, dns, log, trace, wasi) do not appear here: their host calls
+        // are trait-method implementations on generated bindings, not
+        // `func_wrap` closures, and their panic audit belongs to the host-b
+        // review of each module rather than to this counter.
+        let sources: [(&str, &str); 6] = [
             ("host_clock.rs", include_str!("host_clock.rs")),
             ("host_crypto.rs", include_str!("host_crypto.rs")),
+            ("host_env.rs", include_str!("host_env.rs")),
+            ("host_secrets.rs", include_str!("host_secrets.rs")),
+            ("host_test.rs", include_str!("host_test.rs")),
+            ("host_wasi03.rs", include_str!("host_wasi03.rs")),
         ];
 
         for (file, source) in sources {
@@ -2425,8 +2450,14 @@ mod tests {
             // `rustfmt` breaks a line is testing formatting, not behaviour.
             let squeezed: String = production.chars().filter(|c| !c.is_whitespace()).collect();
 
-            let registrations = squeezed.matches("func_wrap(").count();
-            let guards = squeezed.matches("guard::guard(").count();
+            let registrations = squeezed.matches(".func_wrap(").count();
+            // Both guard forms count: `guard` logs the SEV1 line itself, and
+            // `guard_reporting` hands the report to a caller that logs with
+            // more context. Counting only the first would force every future
+            // reporting-form call site to fail this audit for doing the
+            // louder thing.
+            let guards = squeezed.matches("guard::guard(").count()
+                + squeezed.matches("guard_reporting(").count();
 
             assert!(
                 registrations > 0,

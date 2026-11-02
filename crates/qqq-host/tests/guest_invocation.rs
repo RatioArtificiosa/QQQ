@@ -205,6 +205,42 @@ fn a_wrong_method_name_is_not_reported_as_not_an_application() {
     );
 }
 
+/// A component that exports the interface **name** as a bare function.
+///
+/// The export name is right but the *kind* is wrong: the handler must be an
+/// instance with a `handle` method, not a function. Without the kind check
+/// this either resolves an unrelated nested export through a function index
+/// used as a parent, or fails with a version-mismatch message that sends the
+/// operator to rebuild against a different `qqq:http`. It is a non-application
+/// either way: nothing here implements the interface.
+const NAME_AS_BARE_FUNCTION: &str = r#"
+(component
+  (core module $m
+    (func (export "f") (param i32) (result i32) i32.const 0))
+  (core instance $i (instantiate $m))
+  (func $handle (param "req" u32) (result u32)
+    (canon lift (core func $i "f")))
+  (export "qqq:http/incoming-handler@1.0.0" (func $handle))
+)
+"#;
+
+/// A name that denotes a function is not the interface, however it is spelled.
+///
+/// Without the kind check this fixture either resolves an unrelated nested
+/// export (a function index used as a lookup parent) or fails with the
+/// version-mismatch message. Either outcome sends the operator the wrong way.
+#[test]
+fn a_bare_function_with_the_interface_name_is_not_an_application() {
+    let err = resolve(NAME_AS_BARE_FUNCTION, "wrong-kind.wasm")
+        .expect_err("a same-named function must not resolve as the interface");
+
+    assert!(
+        err.message.contains("is not a QQQ application"),
+        "the message must refuse the kind, not the version: {}",
+        err.message
+    );
+}
+
 /// A control: the positive fixture resolves, and only under the measured name.
 ///
 /// Without this, `a_real_application_resolves_its_handler` would also pass if the

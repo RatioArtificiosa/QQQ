@@ -288,6 +288,22 @@ impl Refusal {
 ///
 /// Carries the computed reservation so the caller does not recompute it — and so
 /// a reviewer can see the number that was admitted.
+///
+/// # What this binds, and what it does not
+///
+/// This is a receipt for the reservation, not a capability: it records the
+/// numbers the check ran on, but it does not force later stages to use them.
+/// The shape and the limits cannot disagree in production because a single
+/// join builds both from the same manifest
+/// ([`crate::config::build_engine`] computes the [`PoolShape`](crate::config::PoolShape)
+/// and admits it in one call), and every per-request instance is created from
+/// that same manifest's limits. A caller that admitted one shape and
+/// instantiated another would hold a receipt for a stay it is not on — the
+/// type does not prevent that, so the pairing is documented here rather than
+/// left for a reader to assume. Fuel and epoch deadlines ride the same
+/// manifest limits into each instance; they are not copied into this receipt
+/// because copying them would make two sources of truth for numbers that must
+/// stay equal to the manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Admitted {
     /// The per-instance memory the reservation was computed from: the

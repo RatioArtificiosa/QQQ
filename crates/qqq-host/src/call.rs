@@ -147,6 +147,16 @@ impl DecodeFailure {
     /// The error a caller reports.
     #[must_use]
     pub fn to_error(&self, component: &str) -> Error {
+        // A refusal is the guest's own answer, so it reports as a guest-class
+        // code (`QQQ-3009`): routing it through `InternalInvariantViolated`
+        // would flood the host-fault dashboards with guest decisions and bury
+        // real host bugs. `OkWithoutResponse` and `Malformed` stay host-class:
+        // the guest type-checked yet produced something the type forbids, so
+        // the fault is in the host's reading, not the guest's answering.
+        let code = match self {
+            Self::GuestRefused(_) => ErrorCode::GuestResponseRefused,
+            Self::OkWithoutResponse | Self::Malformed(_) => ErrorCode::InternalInvariantViolated,
+        };
         let (message, fix) = match self {
             Self::GuestRefused(e) => (
                 format!("`{component}` refused the request: {}", e.human_message()),
@@ -163,7 +173,7 @@ impl DecodeFailure {
                 "the component and this host disagree about `qqq:http/response`",
             ),
         };
-        Error::new(ErrorCode::InternalInvariantViolated, message)
+        Error::new(code, message)
             .with_context("component", component.to_owned())
             .with_remediation(fix)
     }
@@ -219,6 +229,13 @@ pub fn decode_http_error(value: &Val) -> Option<HttpError> {
 }
 
 /// Read a `qqq:http/response` record.
+///
+/// Diagnostic path only ([`call_handler_raw`]): the production typed lift
+/// guarantees every field is present by construction, so a default here can
+/// only be reached by hand-built `Val`s under inspection. `status` stays
+/// required (a default status would invent a result); `headers` and `body`
+/// default to empty so a partially-specified probe still renders. Production
+/// strictness comes from the type system, not from this function.
 fn decode_record(value: &Val) -> Option<abi::Response> {
     let Val::Record(fields) = value else {
         return None;
@@ -340,11 +357,13 @@ fn kind_of(value: &Val) -> &'static str {
 /// the typed API and Wasmtime lowers and lifts the byte lists with bulk
 /// copies (~1x host memory) instead of one 48-byte `Val` per payload byte.
 /// The dynamic `Val` form survives only for the diagnostic path
-/// ([`call_handler_raw`]) and its shape tests. Errors map through the
-/// identical constructor as before, so trap and mismatch codes are unchanged
-/// by construction: `typed()` failures and call failures both report through
-/// [`signature_mismatch`], and a guest refusal reports through
-/// [`DecodeFailure::GuestRefused`] exactly as [`decode_response`] does.
+/// ([`call_handler_raw`]) and its shape tests. Binding and execution fail
+/// differently by construction: a `typed()` failure means the host's encoding
+/// does not match the component's declared type and reports through
+/// [`signature_mismatch`], while a failure from the call itself means the
+/// guest trapped and reports through the [`crate::trap`] taxonomy; a guest
+/// refusal reports through [`DecodeFailure::GuestRefused`] exactly as
+/// [`decode_response`] does.
 ///
 /// # Errors
 ///
@@ -353,6 +372,14 @@ fn kind_of(value: &Val) -> &'static str {
 /// * `QQQ-6004` when the guest's signature does not match what was sent — which is
 ///   what turns a field-name typo into a *reported* error
 ///   rather than a silent misread.
+///
+/// # What this does *not* validate
+///
+/// Status range, header shape, and body size are enforced downstream in
+/// `qqq_run::guest_handler::to_served` (`QQQ-3009`), which owns the guest
+/// boundary: validating here too would make two authorities that can disagree
+/// about the same response. This function lifts what the guest returned; the
+/// boundary decides what the server may write.
 pub fn call_handler(
     store: &mut Store<StoreData>,
     wasm: &wasmtime::component::Instance,
@@ -368,7 +395,12 @@ pub fn call_handler(
         .map_err(|e| signature_mismatch(handle, &e))?;
     let (result,) = typed
         .call(&mut *store, (request,))
-        .map_err(|e| signature_mismatch(handle, &e))?;
+        // Execution, not binding: the guest ran and trapped (fuel, memory,
+        // epoch, or its own `unreachable`), so the trap taxonomy answers —
+        // not `signature_mismatch`, which would report a guest fault as a
+        // host bug and hide the backtrace. Fuel/memory peaks ride along
+        // where the caller tracks them (`Instance::run` attaches them).
+        .map_err(|e| crate::trap::Trap::from_wasmtime_error(&e).to_error())?;
     result.map_err(|e| DecodeFailure::GuestRefused(e).to_error(handle.component()))
 }
 
@@ -392,7 +424,9 @@ pub fn call_handler_raw(
     let params = [encode_request(request)?];
     let mut results = [Val::Bool(false)];
     func.call(&mut *store, &params, &mut results)
-        .map_err(|e| signature_mismatch(handle, &e))?;
+        // Same split as [`call_handler`]: a trap is the guest's execution
+        // failing, so the taxonomy answers rather than the binding error.
+        .map_err(|e| crate::trap::Trap::from_wasmtime_error(&e).to_error())?;
     Ok(results[0].clone())
 }
 
@@ -560,6 +594,11 @@ mod tests {
         )))));
         let err = decode_response(&value, "app.wasm").expect_err("a refusal is an error");
 
+        assert_eq!(
+            err.code,
+            ErrorCode::GuestResponseRefused,
+            "a refusal is the guest's own answer (3xxx), never a host fault (6xxx): {err:?}"
+        );
         assert!(
             err.message.contains("refused the request"),
             "the message must attribute the refusal to the guest: {}",
@@ -571,6 +610,33 @@ mod tests {
                 .is_some_and(|r| r.contains("not a host failure")),
             "the remediation must say it is the guest's own answer: {err:?}"
         );
+    }
+
+    #[test]
+    fn execution_failures_report_through_the_trap_taxonomy_not_the_binding_error() {
+        // `signature_mismatch` is the binding error: it says the host's
+        // encoding disagrees with the component's type. An execution failure
+        // (fuel, memory, epoch, guest panic) must never take that path, or
+        // every trapped guest would page the host-fault dashboards. The
+        // production call sites map execution errors through
+        // `Trap::from_wasmtime_error`; this pins the mapping for each class.
+        for (detail, code) in [
+            ("wasm trap: out of fuel", ErrorCode::FuelExhausted),
+            ("wasm trap: interrupt", ErrorCode::EpochDeadlineExceeded),
+            ("memory limit exceeded", ErrorCode::MemoryLimitExceeded),
+            ("wasm trap: unreachable", ErrorCode::GuestPanic),
+        ] {
+            let trap = crate::trap::Trap::from_engine_error(detail);
+            assert_eq!(
+                trap.code, code,
+                "execution detail {detail:?} must classify as {code:?}"
+            );
+            let err = trap.to_error();
+            assert!(
+                !err.message.contains("refused before the guest ran"),
+                "trap errors must not wear the binding message: {err:?}"
+            );
+        }
     }
 
     #[test]

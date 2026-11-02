@@ -92,11 +92,10 @@ pub const WARN_THRESHOLD_PERCENT: u64 = 80;
 
 /// A single-use budget for guest-driven host effects.
 ///
-/// Used for subrequests (`SEC-009`). The handle quota uses
-/// [`HandleTable`](crate::handles::HandleTable)'s own limit instead, because
-/// that table already answers "is there room" as a side effect of allocating —
-/// see [`HandleQuota`] for why a second counter there would be a second source
-/// of truth.
+/// Used for subrequests (`SEC-009`). Handles are budgeted separately by
+/// [`HandleQuota`], whose `try_open` is the single call a mint site must go
+/// through — one decision point, so the limit cannot drift between a counter
+/// and the table it claims to describe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubrequestBudget {
     /// The manifest's `limits.max_subrequests`.
@@ -268,24 +267,34 @@ impl SubrequestBudget {
 
 /// The per-instance handle quota — `SEC-008`.
 ///
-/// # Why this is a view over the table rather than a counter beside it
+/// # One decision point, not a mirror beside the table
 ///
-/// [`HandleTable`](crate::handles::HandleTable) already enforces
-/// `limits.max_open_handles` at insertion, and already counts `refused`. A
-/// separate counter that decremented on insert and incremented on remove would
-/// be a **second source of truth for the same number**, and the two would drift
-/// the first time a remove path forgot to credit the counter — leaving the quota
-/// silently wrong in whichever direction the drift went. A wrong-in-the-permissive
-/// -direction quota is a resource-exhaustion vulnerability; a wrong-in-the-strict
-/// -direction one is a production outage. Neither is acceptable, so the quota
-/// reads the table.
+/// An earlier version of this type was a passive mirror: it stored the limit
+/// and counted only when a caller remembered to call `note_exhaustion` — and
+/// no production caller did, so `max_open_handles` was a manifest field with
+/// no enforcement behind it. This type now owns the decision: a mint site
+/// calls [`try_open`](Self::try_open) with its table length, and the refusal
+/// and the count happen in the same call. There is no second path that can
+/// refuse without counting or count without refusing.
 ///
-/// What this type adds is the part the table does not have: **a refusal counter
-/// that survives the attempt, and a classification of the attempt.**
+/// # The two tables, honestly stated
+///
+/// Two table types exist and only one of them is on the enforcement path
+/// today: [`HandleTable`](crate::handles::HandleTable) enforces its limit at
+/// insertion and counts `refused`, but no production capability allocates
+/// through it — host functions mint Wasmtime resources directly. Wiring every
+/// mint site through `try_open` is host-b work (each capability module owns
+/// its mint sites); until that lands, this type is the tested primitive the
+/// wiring will call, not a claim that the wiring exists.
+///
+/// What this type adds over a bare limit check is the part a bare check does
+/// not have: **a refusal counter that survives the attempt, and a
+/// classification of the attempt.**
 ///
 /// # The exhaustion shape this defends against
 ///
-/// Three distinct attacks, all of which the table's own limit is what stops:
+/// Three distinct attacks, all of which the limit is what stops once the mint
+/// sites call `try_open`:
 ///
 /// | Attack | What it does | What stops it |
 /// |---|---|---|
@@ -313,14 +322,43 @@ impl HandleQuota {
         }
     }
 
-    /// Record an observed exhaustion attempt and produce the error.
+    /// Decide whether a table of `table_len` may open one more handle.
     ///
-    /// # Why this takes the attempt rather than checking the table
+    /// The refusal and the count are one call so they cannot disagree: a
+    /// mint site that checks first and counts later can be interleaved
+    /// between the two (or forget the second half — which is exactly how the
+    /// previous passive mirror ended up with zero production callers).
     ///
-    /// The decision "is there room" belongs to the table, because only the table
-    /// knows. This function's job starts *after* the table has refused: it makes
-    /// the refusal **countable** and the error **attributable to a specific
-    /// attack shape**.
+    /// # Errors
+    ///
+    /// `QQQ-3004` when the table already holds `limit` handles, carrying the
+    /// limit and a remediation that names it.
+    pub fn try_open(&mut self, table_len: u32) -> Result<()> {
+        if table_len >= self.limit {
+            self.exhaustion_attempts += 1;
+            return Err(Error::new(
+                ErrorCode::LimitOutOfRange,
+                format!(
+                    "the guest holds {table_len} handles against a limit of {}",
+                    self.limit
+                ),
+            )
+            .with_remediation(
+                "close handles that are no longer needed, or raise \
+                 `limits.max_open_handles` in `qqq.toml`",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Record an observed exhaustion attempt.
+    ///
+    /// Kept for the diagnostic path — a table that refuses on its own (such
+    /// as [`HandleTable`](crate::handles::HandleTable), which enforces at
+    /// insertion) reports the refusal here so the count stays in one place.
+    /// Mint sites that can call [`try_open`](Self::try_open) must prefer it:
+    /// this function counts without deciding, so it is only correct after a
+    /// refusal that already happened elsewhere.
     pub const fn note_exhaustion(&mut self) {
         self.exhaustion_attempts += 1;
     }
@@ -559,6 +597,32 @@ mod tests {
         q.note_exhaustion();
         assert_eq!(q.exhaustion_attempts(), 2);
         assert_eq!(q.limit(), 64);
+    }
+
+    #[test]
+    fn try_open_refuses_and_counts_in_one_call() {
+        // The decision and the count cannot disagree: at the limit the call
+        // refuses with QQQ-2005 and the attempt is counted exactly once.
+        let mut q = HandleQuota::new(2);
+        assert!(q.try_open(0).is_ok());
+        assert!(q.try_open(1).is_ok());
+        assert_eq!(q.exhaustion_attempts(), 0);
+        let err = q.try_open(2).expect_err("at the limit must refuse");
+        assert_eq!(err.code, ErrorCode::LimitOutOfRange);
+        assert_eq!(q.exhaustion_attempts(), 1);
+        // A repeated attempt counts again: the accumulation signal must grow
+        // with the attack, not saturate at one.
+        let _ = q.try_open(3).expect_err("past the limit must refuse");
+        assert_eq!(q.exhaustion_attempts(), 2);
+    }
+
+    #[test]
+    fn a_zero_handle_limit_refuses_everything() {
+        // A degenerate limit of zero is not "unlimited": it refuses the first
+        // open rather than admitting an unbounded table.
+        let mut q = HandleQuota::new(0);
+        assert!(q.try_open(0).is_err());
+        assert_eq!(q.exhaustion_attempts(), 1);
     }
 
     #[test]

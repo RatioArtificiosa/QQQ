@@ -451,6 +451,15 @@ impl Pool {
         // concurrency gate; the caller still creates an instance when the slot
         // is fresh because V1 has no reset-safe instance store.
         let mut state = self.state.lock_recover();
+        if self.is_draining() {
+            // Re-checked under the lock: the pre-lock check above races
+            // with `begin_drain`, and without this a shutdown that lands
+            // in between admits work the drain then has to kill
+            // mid-request. An atomic load, not a second mutex round-trip.
+            drop(state);
+            self.metrics.note_saturation();
+            return Err(exhausted_error(Exhausted::Draining, self.capacity, 0));
+        }
         if state.in_use >= self.capacity {
             drop(state);
             self.metrics.note_saturation();

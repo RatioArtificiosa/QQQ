@@ -42,10 +42,10 @@
 //! * **A per-call wrapper** catches exactly at the boundary between host code
 //!   and guest code, which is the only place the requirement applies. Chosen.
 //!
-//! [`guard`] is that wrapper. It is *not* applied by convention: [`guarded`]
-//! registers a host function through it, and the registration sites are audited
-//! by [`all_host_functions_are_guarded`]'s supporting check in the registration
-//! modules.
+//! [`guard`] is that wrapper. It is *not* applied by convention: every
+//! `func_wrap` registration site calls it directly, and the
+//! `every_host_function_is_panic_guarded` test in [`crate::linker`] fails the
+//! build when a registration site forgets it.
 //!
 //! # What happens to the guest
 //!
@@ -67,8 +67,10 @@
 //! *always* a QQQ bug — no host function should panic on any input, because the
 //! inputs are guest-controlled and therefore attacker-controlled — so it is
 //! reported through [`PanicReport::is_severity_one`], which is unconditionally
-//! `true`. The metric half is `TrapLabel::Other`-adjacent: see
-//! [`crate::metrics::Metrics::note_host_panic`].
+//! `true`. The metric half flows through the trap taxonomy: the trap message
+//! names the host function and its containment, which classifies as
+//! [`ErrorCode::HostPanicContained`] and maps to
+//! [`crate::metrics::TrapLabel::HostPanic`] — never to a guest-trap label.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -151,11 +153,12 @@ fn payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 ///
 /// It can contain host paths, internals and sometimes guest-supplied data. The
 /// guest gets the function name and nothing else; the full message goes to
-/// [`PanicReport`], which the caller logs.
+/// stderr through [`PanicReport::log_line`], written infallibly inside
+/// [`guard`] itself so a closed stderr cannot turn containment into a fresh
+/// panic.
 ///
-/// For the logging form — which is what every registration site should use, since
-/// a contained panic that is trapped but never logged leaves no trace — see
-/// [`guard_reporting`].
+/// For callers that need the report itself — to attach more context before
+/// logging — see [`guard_reporting`].
 ///
 /// # Errors
 ///
@@ -169,18 +172,31 @@ where
         // Flattened deliberately: a caller that does not care about the report
         // still gets the closure's own error, unwrapped.
         Ok(result) => result,
-        Err(report) => Err(wasmtime::Error::msg(format!(
-            "host function `{}` panicked; the host contained it",
-            report.function
-        ))),
+        Err(report) => {
+            // SEV1, always: a contained panic is a host defect probed through
+            // guest-controlled input, and a trap without a host-side trace is
+            // a bug nobody will find. Infallible by construction: `eprintln!`
+            // panics when stderr is closed, which would trade the contained
+            // panic for a fresh one escaping into the engine — the exact
+            // failure this function exists to prevent.
+            {
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr(), "{}", report.log_line());
+            }
+            Err(wasmtime::Error::msg(format!(
+                "host function `{}` panicked; the host contained it",
+                report.function
+            )))
+        }
     }
 }
 
 /// As [`guard`], but hands the caller the [`PanicReport`] for logging.
 ///
-/// This is the form the registration sites use, because a contained panic that
-/// is trapped but never *logged* is a bug nobody will find: the guest sees a
-/// trap, the request fails, and the host defect leaves no trace.
+/// Use this when the call site has more context to attach than the function
+/// name. Plain [`guard`] already writes the SEV1 line itself, so this form is
+/// never required for alerting — only for callers that log through their own
+/// sink and need the report to do it.
 ///
 /// # Errors
 ///

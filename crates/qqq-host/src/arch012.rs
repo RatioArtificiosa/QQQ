@@ -711,8 +711,10 @@ pub fn scan(file: &str, text: &str) -> Vec<Registered> {
         //
         // A `match_indices` boundary is always a char boundary, so this cannot panic.
         let line = production[..*start].matches('\n').count() + 1;
-        let checks =
-            body.contains("grants.grants(") || CHECKING_HELPERS.iter().any(|h| body.contains(h));
+        let checks = {
+            let code = code_without_strings_or_trailing_comments(body);
+            code.contains("grants.grants(") || CHECKING_HELPERS.iter().any(|h| code.contains(h))
+        };
         out.push(Registered {
             file: file.to_owned(),
             interface: instance_name(text, &production[..*start]),
@@ -852,6 +854,81 @@ fn function_name(body: &str) -> Option<String> {
     let after = rest.get(quote + 1..)?;
     let close = after.find('"')?;
     Some(after.get(..close)?.to_owned())
+}
+
+/// The body with string literals and trailing comments blanked, for the
+/// grant-check match.
+///
+/// A prose mention (`"see grants.grants(..) below"`, a commented-out
+/// check) must not satisfy the claim: the audit would bless a body whose
+/// only check is a sentence about checks. Whole-line comments and the test
+/// module are already gone (`production_lines`); what remains is inline
+/// strings (which may themselves contain `//`) and trailing comments —
+/// handled here in that order, so a URL inside a string never starts a
+/// comment. Lifetimes (`&'a`) are not char literals: only `'x'`, escapes,
+/// and `\u{...}` open one, or the newline swallowed by a misread quote
+/// shifts every line number after it.
+fn code_without_strings_or_trailing_comments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            out.push(' ');
+            let mut escaped = false;
+            for d in chars.by_ref() {
+                out.push(' ');
+                if escaped {
+                    escaped = false;
+                } else if d == '\\' {
+                    escaped = true;
+                } else if d == '"' {
+                    break;
+                } else if d == '\n' {
+                    out.push('\n');
+                }
+            }
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            for d in chars.by_ref() {
+                if d == '\n' {
+                    out.push('\n');
+                    break;
+                }
+            }
+        } else if c == '\'' {
+            // A lifetime (`&'a`, `MutexGuard<'_, T>`) is not a literal:
+            // only `'x'`, `'\\.'`, and `'\\u{...}'` open char literals, so
+            // peek (without consuming) before deciding. Consuming the
+            // quote of a lifetime would swallow the newline before the
+            // real closing quote and shift every line number after it.
+            let probe: String = chars.clone().take(10).collect();
+            let len = if probe.len() >= 2 && probe.as_bytes().get(1) == Some(&b'\'') {
+                2 // `'x'`: the peeked char plus the closing quote.
+            } else if probe.starts_with('\\')
+                && probe.len() >= 3
+                && probe.as_bytes().get(2) == Some(&b'\'')
+            {
+                3 // `'\\.'`: backslash, escaped char, closing quote.
+            } else if probe.starts_with("\\u{") {
+                match probe.find('}') {
+                    Some(end) if end <= 8 => end + 1,
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+            if len == 0 {
+                out.push(c);
+            } else {
+                out.push_str(&" ".repeat(len + 1));
+                for _ in 0..len {
+                    chars.next();
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,10 +1168,18 @@ mod tests {
         );
     }
 
-    /// `InterfaceGated` is allowed to perform no check, because the interface is
-    /// not bound without the capability. It must NOT be reported as unbacked.
+    /// An unlisted function is not an unbacked claim: the two findings
+    /// answer different questions (is it in the table at all vs does the
+    /// table's re-check claim hold), and conflating them would hide one
+    /// behind the other.
+    ///
+    /// Named honestly: this fixture has no `linker.instance(..)`, so the
+    /// scan cannot attach an interface and the audit reports it (if at
+    /// all) as unlisted, never as an unbacked claim. It pins the
+    /// separation of the two findings, not any row's classification —
+    /// the table currently holds no `InterfaceGated` rows at all.
     #[test]
-    fn an_interface_gated_row_needs_no_check_in_its_body() {
+    fn an_unlisted_function_is_not_an_unbacked_claim() {
         let source = r#"
             inst.func_wrap("timezone", |_store, (): ()| Ok(("UTC".to_owned(),)))?;
         "#;
@@ -1104,6 +1189,59 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, AuditFinding::UnbackedClaim { .. })),
             "`timezone` is interface-gated and reads nothing: {findings:?}"
+        );
+    }
+
+    /// A prose mention of a check is not a check: a body whose only
+    /// `grants.grants(` sits inside a string literal or a trailing comment
+    /// must still be reported as unbacked. This is the audit's own
+    /// soundness property — a checker that counts mentions instead of
+    /// calls would bless a body whose check is a sentence about checks.
+    #[test]
+    fn a_check_in_prose_does_not_back_the_claim() {
+        let source = r#"
+            pub const WALL_CLOCK: &str = "qqq:clock/wall-clock@1.0.0";
+            let mut inst = linker.instance(WALL_CLOCK)?;
+            inst.func_wrap("now", |store: StoreContextMut<'_, StoreData>, (): ()| {
+                // grants.grants(Capability::ClockWall) — checked above, trust me.
+                let label = "grants.grants(Capability::ClockWall)";
+                let _ = label.len();
+                Ok((0,))
+            })?;
+        "#;
+        let findings = audit(&[("host_clock.rs".to_owned(), source.to_owned())]);
+        assert!(
+            findings.iter().any(|f| matches!(
+                f,
+                AuditFinding::UnbackedClaim { function, .. } if *function == "now"
+            )),
+            "a comment plus a string literal must not count as a check: {findings:?}"
+        );
+    }
+
+    /// The positive control for the claim check: a PerFunction row whose
+    /// body really does consult the grant produces no finding. Without
+    /// it, a `scan` change that stopped seeing bodies would make the
+    /// negative tests pass by proving nothing.
+    #[test]
+    fn a_real_check_in_the_body_backs_the_claim() {
+        let source = r#"
+            pub const WALL_CLOCK: &str = "qqq:clock/wall-clock@1.0.0";
+            let mut inst = linker.instance(WALL_CLOCK)?;
+            inst.func_wrap("now", |store: StoreContextMut<'_, StoreData>, (): ()| {
+                if !store.data().grants.grants(Capability::ClockWall) {
+                    return Err(wasmtime::Error::msg("denied"));
+                }
+                Ok((0,))
+            })?;
+        "#;
+        let findings = audit(&[("host_clock.rs".to_owned(), source.to_owned())]);
+        assert!(
+            !findings.iter().any(|f| matches!(
+                f,
+                AuditFinding::UnbackedClaim { function, .. } if *function == "now"
+            )),
+            "a body that really checks must not be reported: {findings:?}"
         );
     }
 

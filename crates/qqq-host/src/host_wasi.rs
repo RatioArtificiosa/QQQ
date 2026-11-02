@@ -75,8 +75,8 @@ use std::time::Duration;
 use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;
 use qqq_core::{Error, ErrorCode, Result};
-use wasmtime::StoreContextMut;
 use wasmtime::component::Linker;
+use wasmtime::StoreContextMut;
 use wasmtime_wasi::p2::pipe::ClosedInputStream;
 use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxBuilder};
 
@@ -514,6 +514,25 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     Ok(())
 }
 
+/// Every `instance/function` name this module shadows. The declared contract
+/// the anti-drift test below pins: a shim added to `register_random` without
+/// updating this list is caught, and a list entry with no implementation
+/// behind it is caught too. It is a declaration for the test, not an input
+/// the linker reads — the registrations above are explicit literals so the
+/// ARCH-003/ARCH-012 scanners see them.
+///
+/// `allow(dead_code)`: the only consumer is the anti-drift test, which
+/// compiles under `cfg(test)` and therefore does not count as a use when the
+/// library builds for real guests.
+#[allow(dead_code)]
+pub const SERVED_RANDOM: &[&str] = &[
+    "wasi:random/random@0.2.12/get-random-bytes",
+    "wasi:random/random@0.2.12/get-random-u64",
+    "wasi:random/insecure@0.2.12/get-insecure-random-bytes",
+    "wasi:random/insecure@0.2.12/get-insecure-random-u64",
+    "wasi:random/insecure-seed@0.2.12/insecure-seed",
+];
+
 /// Describe why a named environment variable the manifest requires is missing.
 ///
 /// Mirrors [`crate::linker::describe_gap`]'s shape so the two diagnostics read the
@@ -537,6 +556,37 @@ pub fn describe_missing_env(name: &str) -> Error {
 mod tests {
     use super::*;
     use qqq_cap::manifest::Manifest;
+
+    /// **The anti-drift test.** These bindings are hand-written against the
+    /// real v0.2.12 `random.wit` (vendored with provenance in
+    /// `tests/fixtures`), so they can drift from the interface they claim.
+    /// The test reads the fixture and asserts two things: the fixture really
+    /// is the 0.2.12 file (package line present, not a paraphrase), and every
+    /// served name exists there as a `func` declaration. A wasmtime upgrade
+    /// that moves or renames the interface fails here instead of silently
+    /// un-shadowing the stock registration.
+    #[test]
+    fn served_random_names_exist_in_the_vendored_wit() {
+        let wit = include_str!("../tests/fixtures/wasi-0.2.12-random.wit");
+        assert!(
+            wit.contains("package wasi:random@0.2.12;"),
+            "the fixture must be the real 0.2.12 file, not a paraphrase"
+        );
+        for name in SERVED_RANDOM {
+            let func = name
+                .rsplit('/')
+                .next()
+                .expect("served names name a function");
+            assert!(
+                wit.lines().any(|line| {
+                    let trimmed = line.trim_start();
+                    trimmed.starts_with(func)
+                        && trimmed[func.len()..].trim_start().starts_with(": func(")
+                }),
+                "the fixture must declare {func}"
+            );
+        }
+    }
 
     /// A grant set from a manifest.
     ///

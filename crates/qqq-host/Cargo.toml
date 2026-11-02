@@ -152,6 +152,14 @@ aes-gcm = "0.11.1"
 # implemented, so the second construction needs a real backend too.
 # RustCrypto, MIT/Apache-2.0, inside deny.toml, verified by `cargo deny check`.
 chacha20poly1305 = "0.11"
+# Volatile-write zeroization for secret material (`SEC-008`): freed heap must
+# not retain key bytes, and plain `for b in ... { *b = 0 }` is a dead store the
+# optimizer may remove. RustCrypto, MIT/Apache-2.0, inside deny.toml.
+zeroize = "1"
+# Constant-time byte equality for the secret-membership test (`SEC-008`): a
+# short-circuiting `==` leaks the secret byte-by-byte through timing.
+# CC0-1.0, inside deny.toml, verified by `cargo deny check`.
+constant_time_eq = "0.4"
 
 [dev-dependencies]
 serde_json = { workspace = true }

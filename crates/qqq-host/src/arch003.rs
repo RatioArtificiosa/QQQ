@@ -132,7 +132,7 @@ pub const HOST_MODULES: [&str; 14] = [
 /// The number is not a transcription: [`registered_from_sources`] derives it from
 /// the source with the standard library available, and `arch012`'s
 /// both-directions scan independently confirms `AUDITED` matches the tree.
-pub const EXPECTED_REGISTRATIONS: usize = 24;
+pub const EXPECTED_REGISTRATIONS: usize = 29;
 
 /// Why a WIT-definition check could not be completed.
 ///
@@ -324,6 +324,7 @@ pub fn wit_defines(name: &str) -> bool {
         .iter()
         .any(|(_pkg, src)| wit_declares_function(src, name))
         || wit_declares_function(WASI03_CLOCK_WIT, name)
+        || wit_declares_function(WASI_RANDOM_WIT, name)
 }
 
 /// The real v0.3.2 `monotonic-clock` WIT, vendored with provenance at
@@ -337,6 +338,18 @@ pub fn wit_defines(name: &str) -> bool {
 /// correspondence line by line against this same file; this constant only lets
 /// the rule consult the authority that test already establishes.
 const WASI03_CLOCK_WIT: &str = include_str!("../tests/fixtures/wasi-0.3.2-monotonic-clock.wit");
+
+/// The real v0.2.12 `random` WIT, vendored with provenance at
+/// `crates/qqq-host/tests/fixtures/wasi-0.2.12-random.wit`.
+///
+/// `host_wasi` shadows all five functions with grant-gated shims (the stock
+/// wasmtime registration answers regardless of grants). No `qqq:` WIT
+/// defines these spellings, so without this third source the WIT rule would
+/// report the shims as dissenting from an interface they correctly
+/// implement. The anti-drift test in `host_wasi.rs` pins the
+/// correspondence line by line against this same file; this constant only
+/// lets the rule consult the authority that test already establishes.
+const WASI_RANDOM_WIT: &str = include_str!("../tests/fixtures/wasi-0.2.12-random.wit");
 
 /// Whether one WIT source declares `name: func` — synchronously or `async`.
 ///

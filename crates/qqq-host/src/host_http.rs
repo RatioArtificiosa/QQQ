@@ -332,15 +332,15 @@ impl StoreData {
         transport: &impl crate::egress::Transport,
         resolver: &impl crate::egress::Resolver,
     ) -> std::result::Result<Response, HttpError> {
-        let egress_req = map_request(req)?;
-        let mut rows = Vec::new();
-        // The operational switch follows the tenant grant: a grant the
-        // connector never sees would be a control believed live that
-        // is not. The protocol ceiling still applies inside.
         let limits = crate::egress::Limits {
             max_redirects: self.egress.max_redirect_hops(),
             ..crate::egress::Limits::default()
         };
+        let egress_req = map_request(req, &limits)?;
+        let mut rows = Vec::new();
+        // The operational switch follows the tenant grant: a grant the
+        // connector never sees would be a control believed live that
+        // is not. The protocol ceiling still applies inside.
         let result = crate::egress::request(
             &self.egress,
             &egress_req,
@@ -378,7 +378,10 @@ fn parse_attempted_authority(url: &str) -> (String, u16) {
 /// body. Anything the connector cannot express is refused here,
 /// before any socket opens — and before any audit row, because
 /// nothing reached the connector to audit.
-fn map_request(req: Request) -> std::result::Result<crate::egress::Request, HttpError> {
+fn map_request(
+    req: Request,
+    limits: &crate::egress::Limits,
+) -> std::result::Result<crate::egress::Request, HttpError> {
     use crate::egress::Method as EgressMethod;
     use bindings::qqq::http::http::Method as GuestMethod;
     let method = match req.method {
@@ -392,6 +395,20 @@ fn map_request(req: Request) -> std::result::Result<crate::egress::Request, Http
         // documented beats guessing an equivalent.
         _ => return Err(HttpError::InvalidUrl),
     };
+    // Bound the allocation before making it: the header count is
+    // guest-controlled, and `with_capacity(req.headers.len())` would
+    // otherwise commit host heap on an unbounded number. The same ceiling
+    // the connector enforces at write time, checked here so the refusal
+    // precedes the allocation rather than following it.
+    if req.headers.len() > limits.max_request_headers {
+        return Err(HttpError::RequestTooLarge);
+    }
+    // Same for the body: it arrives owned (moved, not copied, so no
+    // amplification), but refusing an over-cap body here keeps one
+    // authority for the bound instead of two that can disagree.
+    if req.body.as_ref().map_or(0, Vec::len) as u64 > limits.max_request_bytes {
+        return Err(HttpError::RequestTooLarge);
+    }
     let mut headers = Vec::with_capacity(req.headers.len());
     for header in req.headers {
         let value = String::from_utf8(header.value).map_err(|_| HttpError::RequestTooLarge)?;

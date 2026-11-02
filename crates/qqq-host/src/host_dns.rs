@@ -441,6 +441,14 @@ impl bindings::qqq::dns::resolver::Host for crate::linker::StoreData {
         // *it*, not the raw guest string, or a differently-cased query
         // would pass the gate and then miss the table.
         let name = check(self, &name)?;
+        // The subrequest budget binds the lookup, not just the gate: each
+        // resolution is a resolver round-trip, and an unbound loop of them
+        // is amplification the fuel budget cannot see. The WIT type has no
+        // budget case; `resolver-failed` carries the message because the
+        // refusal is the host's, not any single entry's.
+        self.charge_subrequest().map_err(|error| {
+            WitDnsError::ResolverFailed(format!("subrequest budget exhausted: {}", error.message))
+        })?;
         match self.dns.resolver.lookup(&name) {
             Ok(addrs) if !addrs.is_empty() => Ok(addrs
                 .into_iter()
@@ -536,7 +544,11 @@ mod tests {
                 .collect(),
             )),
         );
-        StoreData::new(grants).with_dns(view)
+        let mut data = StoreData::new(grants).with_dns(view);
+        // Test room, not policy: resolving spends budget, so tests that
+        // resolve declare headroom up front.
+        data.subrequests = crate::quota::SubrequestBudget::new(1024);
+        data
     }
 
     fn ungranted_store() -> StoreData {
@@ -571,6 +583,24 @@ mod tests {
             bindings::qqq::dns::resolver::Host::resolve(&mut data, "api.example.com".to_owned())
                 .expect_err("no grant");
         assert!(matches!(err, WitDnsError::NotGranted));
+    }
+
+    /// The subrequest budget binds lookups: with a budget of 1 the first
+    /// resolve succeeds and the second is refused, so an exfiltration loop
+    /// cannot resolve without bound on one instance.
+    #[test]
+    fn exhausted_budget_refuses_the_lookup() {
+        let mut data = granted_store();
+        data.subrequests = crate::quota::SubrequestBudget::new(1);
+        bindings::qqq::dns::resolver::Host::resolve(&mut data, "api.example.com".to_owned())
+            .expect("one lookup fits");
+        let err =
+            bindings::qqq::dns::resolver::Host::resolve(&mut data, "api.example.com".to_owned())
+                .expect_err("budget exhausted");
+        assert!(
+            matches!(err, WitDnsError::ResolverFailed(_)),
+            "the refusal names the host side, not the entry: {err:?}"
+        );
     }
 
     /// Unlisted names are unresolvable by policy, even when the resolver

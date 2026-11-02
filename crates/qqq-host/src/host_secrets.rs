@@ -195,6 +195,18 @@ pub struct SecretMaterial {
     permitted: Vec<PermittedOp>,
 }
 
+/// Freed heap must not retain key bytes: a plain assignment is a dead store
+/// the optimizer may remove, so this goes through volatile writes. `Clone`
+/// necessarily duplicates the bytes while both copies live — that is the
+/// documented cost of passing material by value — but nothing lingers after
+/// either copy drops.
+impl Drop for SecretMaterial {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        self.value.zeroize();
+    }
+}
+
 impl std::fmt::Debug for SecretMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Deliberately no `value` field. The length is not printed either: length
@@ -375,9 +387,21 @@ impl SecretStore {
     /// A boolean, not the bytes: the log redactor asks "is this secret?"
     /// and gets an answer, never material. Crate-visible because only the
     /// host's own log path has a legitimate use for the question.
+    ///
+    /// Constant-time in the comparison: `==` short-circuits on the first
+    /// differing byte (and on length), so a guest timing the redactor could
+    /// extract a secret one byte at a time. Lengths still differ observably
+    /// — padding every secret to one length would trade a real covert
+    /// channel for storage the manifest never approved — but within equal
+    /// lengths no byte position leaks.
     #[must_use]
     pub(crate) fn is_secret_value(&self, value: &[u8]) -> bool {
-        !value.is_empty() && self.material.values().any(|m| m.value.as_slice() == value)
+        use constant_time_eq::constant_time_eq;
+        !value.is_empty()
+            && self
+                .material
+                .values()
+                .any(|m| constant_time_eq(&m.value, value))
     }
 
     /// `exists(name)`: whether a granted secret is resolved and usable.
@@ -668,7 +692,7 @@ impl SecretCrypto for HostSecretCrypto {
     }
 
     fn encrypt(&self, key: &[u8], plaintext: &[u8]) -> std::result::Result<Vec<u8>, String> {
-        use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+        use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
         let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "AEAD key is not 32 bytes")?;
         let mut nonce_bytes = [0u8; 12];
         getrandom::fill(&mut nonce_bytes).map_err(|_| "the entropy source failed")?;
@@ -683,7 +707,7 @@ impl SecretCrypto for HostSecretCrypto {
     }
 
     fn decrypt(&self, key: &[u8], ciphertext: &[u8]) -> std::result::Result<Vec<u8>, String> {
-        use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+        use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit};
         let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "AEAD key is not 32 bytes")?;
         let (nonce_bytes, body) = ciphertext
             .split_at_checked(12)
@@ -856,6 +880,28 @@ fn register_permitted_operations(
     Ok(())
 }
 
+/// Map a `SecretStore` refusal back onto the WIT `secret-error`.
+///
+/// `SecretStore::apply`/`verify` already decide *which* condition fired and
+/// record the variant name in the error's context; collapsing all of those
+/// to `unavailable` would send an operator chasing a broken deployment for
+/// a guest that asked for something it was never granted (and would break
+/// the `unknown=err:not-granted` probe contract). Unknown shapes stay
+/// `unavailable` — a deployment fault is the safe default, never a grant.
+fn map_secret_error(error: &qqq_core::Error) -> WitSecretError {
+    let variant = error
+        .context
+        .iter()
+        .find(|(k, _)| *k == "variant")
+        .map(|(_, v)| v.as_str());
+    match variant {
+        Some("not-granted") => WitSecretError::NotGranted,
+        Some("operation-not-permitted") => WitSecretError::OperationNotPermitted,
+        Some("input-too-long") => WitSecretError::InputTooLong,
+        _ => WitSecretError::Unavailable,
+    }
+}
+
 /// `apply(name, op, input) -> result<list<u8>, secret-error>`.
 fn register_apply(
     inst: &mut wasmtime::component::LinkerInstance<'_, crate::linker::StoreData>,
@@ -923,7 +969,7 @@ fn register_apply(
                             &HostSecretCrypto,
                         ) {
                             Ok(bytes) => Ok((Ok(bytes),)),
-                            Err(_) => Ok((Err(WitSecretError::Unavailable),)),
+                            Err(e) => Ok((Err(map_secret_error(&e)),)),
                         };
                     }
                 };
@@ -945,7 +991,7 @@ fn register_apply(
                 }
                 match store_ref.apply(&name, permitting, &effective, &HostSecretCrypto) {
                     Ok(bytes) => Ok((Ok(bytes),)),
-                    Err(_) => Ok((Err(WitSecretError::Unavailable),)),
+                    Err(e) => Ok((Err(map_secret_error(&e)),)),
                 }
             })
         },
@@ -991,7 +1037,7 @@ fn verify_call(
         // `[1]` valid, `[0]` invalid. An empty success would be
         // indistinguishable from "no answer", and `verify` must answer.
         Ok(valid) => (Ok(vec![u8::from(valid)]),),
-        Err(_) => (Err(WitSecretError::Unavailable),),
+        Err(e) => (Err(map_secret_error(&e)),),
     }
 }
 
@@ -1181,11 +1227,10 @@ mod tests {
             .apply("other-key", PermittedOp::Sign, b"x", &crypto)
             .expect_err("not granted");
         assert_eq!(err.code, ErrorCode::SecretUseFailed);
-        assert!(
-            err.context
-                .iter()
-                .any(|(k, v)| k == "variant" && v == "not-granted")
-        );
+        assert!(err
+            .context
+            .iter()
+            .any(|(k, v)| k == "variant" && v == "not-granted"));
         assert!(
             crypto.calls.borrow().is_empty(),
             "the primitive must not run for an ungranted secret"
@@ -1203,11 +1248,10 @@ mod tests {
         let err = store()
             .apply("signing-key", PermittedOp::Hmac, b"x", &crypto)
             .expect_err("hmac was not permitted");
-        assert!(
-            err.context
-                .iter()
-                .any(|(k, v)| k == "variant" && v == "operation-not-permitted")
-        );
+        assert!(err
+            .context
+            .iter()
+            .any(|(k, v)| k == "variant" && v == "operation-not-permitted"));
         assert!(
             crypto.calls.borrow().is_empty(),
             "the primitive must not run for a non-permitted operation"
@@ -1291,11 +1335,10 @@ mod tests {
         let err = store()
             .apply("signing-key", PermittedOp::Sign, &big, &crypto)
             .expect_err("too long");
-        assert!(
-            err.context
-                .iter()
-                .any(|(k, v)| k == "variant" && v == "input-too-long")
-        );
+        assert!(err
+            .context
+            .iter()
+            .any(|(k, v)| k == "variant" && v == "input-too-long"));
         assert!(
             crypto.calls.borrow().is_empty(),
             "the primitive must not be handed an oversized input"
@@ -1316,14 +1359,43 @@ mod tests {
         let err = store()
             .apply("signing-key", PermittedOp::Sign, b"x", &crypto)
             .expect_err("the primitive failed");
-        assert!(
-            err.context
-                .iter()
-                .any(|(k, v)| k == "variant" && v == "unavailable")
-        );
+        assert!(err
+            .context
+            .iter()
+            .any(|(k, v)| k == "variant" && v == "unavailable"));
         assert!(
             !err.cause.is_empty(),
             "the primitive's reason must be kept for the host log"
+        );
+    }
+
+    /// The register layer must not collapse every store refusal into
+    /// `unavailable`: a guest that was never granted, one whose operation
+    /// the material forbids, and one whose input was too long get different
+    /// answers — and an operator triaging them needs the distinction. Unknown
+    /// shapes stay `unavailable` (fail closed toward deployment fault).
+    #[test]
+    fn store_refusals_map_back_to_their_wit_cases() {
+        for (variant, expected) in [
+            ("not-granted", WitSecretError::NotGranted),
+            (
+                "operation-not-permitted",
+                WitSecretError::OperationNotPermitted,
+            ),
+            ("input-too-long", WitSecretError::InputTooLong),
+            ("unavailable", WitSecretError::Unavailable),
+        ] {
+            let mapped = map_secret_error(&SecretStore::secret_failure("s", variant));
+            assert!(
+                std::mem::discriminant(&mapped) == std::mem::discriminant(&expected),
+                "{variant} must map to its own case, not to a collapsed one"
+            );
+        }
+        // An unknown variant name is a deployment fault, never a grant.
+        let mapped = map_secret_error(&SecretStore::secret_failure("s", "bogus"));
+        assert!(
+            matches!(mapped, WitSecretError::Unavailable),
+            "unknown shapes stay unavailable"
         );
     }
 
@@ -1334,14 +1406,12 @@ mod tests {
         let sig = s
             .apply("signing-key", PermittedOp::Sign, b"msg", &crypto)
             .expect("sign");
-        assert!(
-            s.verify("signing-key", b"msg", &sig, &crypto)
-                .expect("verify")
-        );
-        assert!(
-            !s.verify("signing-key", b"msg", b"wrong", &crypto)
-                .expect("verify")
-        );
+        assert!(s
+            .verify("signing-key", b"msg", &sig, &crypto)
+            .expect("verify"));
+        assert!(!s
+            .verify("signing-key", b"msg", b"wrong", &crypto)
+            .expect("verify"));
     }
 
     /// `verify` goes through the same grant and permission checks as `apply`.
@@ -1362,11 +1432,10 @@ mod tests {
         let err = hmac_only
             .verify("mac", b"m", b"s", &crypto)
             .expect_err("mac does not permit verify");
-        assert!(
-            err.context
-                .iter()
-                .any(|(k, v)| k == "variant" && v == "operation-not-permitted")
-        );
+        assert!(err
+            .context
+            .iter()
+            .any(|(k, v)| k == "variant" && v == "operation-not-permitted"));
     }
 
     /// An out-of-range discriminant from the guest is rejected.
@@ -1489,10 +1558,9 @@ mod tests {
         let crypto = FakeCrypto::new();
         assert!(!s.exists("anything"));
         assert!(s.permitted_operations("anything").is_empty());
-        assert!(
-            s.apply("anything", PermittedOp::Sign, b"x", &crypto)
-                .is_err()
-        );
+        assert!(s
+            .apply("anything", PermittedOp::Sign, b"x", &crypto)
+            .is_err());
     }
 
     /// Every `secret-error` variant must carry a remediation.
@@ -1510,11 +1578,10 @@ mod tests {
                 e.remediation.is_some(),
                 "`{variant}` must have a remediation"
             );
-            assert!(
-                e.context
-                    .iter()
-                    .any(|(k, v)| k == "variant" && v == variant)
-            );
+            assert!(e
+                .context
+                .iter()
+                .any(|(k, v)| k == "variant" && v == variant));
         }
     }
 

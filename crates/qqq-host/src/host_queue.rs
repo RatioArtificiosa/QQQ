@@ -40,6 +40,21 @@
 //! The lease length is a fixed host default (`QUEUE_LEASE_SECS`); the
 //! manifest configures names and directions, not durations.
 //!
+//! # Why bodies are never redacted here
+//!
+//! `host_log` and the trace mirror replace an exact secret match with
+//! `[redacted:secret]` because logs are **operator-visible**: the reader is
+//! a human with broad access, so a guest value that equals a secret must not
+//! reach them verbatim. Queue bodies are **guest-visible**: the reader is
+//! another component that subscribed to the queue, and replacing bytes in
+//! transit would corrupt the transport — a subscriber waiting for a key,
+//! token, or ciphertext would receive a redaction notice instead of data
+//! that parses. A guest that publishes a raw secret to a shared queue has
+//! misconfigured its own grants (publish and subscribe are separately
+//! grantable per queue for exactly this reason), and no host transform can
+//! fix the caller's addressing. Exact-match redaction stays where the
+//! reader is the operator; the wire stays byte-identical.
+//!
 //! ```
 //! use qqq_cap::manifest::QueueDirection;
 //! let config = qqq_host::host_queue::QueueConfig::new(vec![
@@ -695,6 +710,9 @@ impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
         // mutation extends. (The backend is shared across instances, so the
         // open count is deployment-wide: a per-instance number against a
         // shared table is global backpressure, fail-closed by construction.)
+        // The subrequest budget binds the write itself: a queue publish is
+        // an outbound effect, and an uncharged loop of them is amplification
+        // the fuel budget cannot see.
         let now = now_or_fail(self)?;
         let mut backend = lock_backend(&self.queue.backend);
         let open = backend.pending_count(&queue) + backend.in_flight_count(&queue);
@@ -702,6 +720,13 @@ impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
         self.handles
             .try_open(open)
             .map_err(|_| WitQueueError::QuotaExceeded)?;
+        // Direct field access rather than the `charge_subrequest` helper:
+        // the backend guard borrows `self.queue`, so only a disjoint
+        // `self.subrequests` borrow compiles here — and the pairing is the
+        // point, keeping quota and budget on the same critical section.
+        if self.subrequests.charge().is_refused() {
+            return Err(WitQueueError::QuotaExceeded);
+        }
         backend.publish(&queue, body, now)?;
         Ok(())
     }
@@ -738,6 +763,16 @@ impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
         self.handles
             .try_open_batch(open, more)
             .map_err(|_| WitQueueError::QuotaExceeded)?;
+        // The budget binds every message in the batch, up front: a batch is
+        // one call carrying N outbound effects, and charging the call once
+        // would price N effects as one. Charged before any insert, so a
+        // refused batch stores nothing. (Direct field access, as above: the
+        // guard borrows `self.queue`, the budget borrows `self.subrequests`.)
+        for _ in &bodies {
+            if self.subrequests.charge().is_refused() {
+                return Err(WitQueueError::QuotaExceeded);
+            }
+        }
         // The publish path bounds the same total, so the batch cannot
         // overflow a queue that single publishes could not.
         if backend.pending_count(&queue) + backend.in_flight_count(&queue) + bodies.len()
@@ -993,6 +1028,7 @@ mod tests {
     fn quota_exhaustion_refuses_publish_before_depth() {
         let mut data = granted_store(true, true);
         data.handles = crate::quota::HandleQuota::new(1);
+        data.subrequests = crate::quota::SubrequestBudget::new(8);
         bindings::qqq::queue::messaging::Host::publish(&mut data, "q".to_owned(), b"one".to_vec())
             .expect("one fits");
         let err = bindings::qqq::queue::messaging::Host::publish(
@@ -1012,6 +1048,7 @@ mod tests {
     fn an_over_quota_batch_stores_nothing() {
         let mut data = granted_store(true, true);
         data.handles = crate::quota::HandleQuota::new(1);
+        data.subrequests = crate::quota::SubrequestBudget::new(8);
         let err = bindings::qqq::queue::messaging::Host::publish_many(
             &mut data,
             "q".to_owned(),

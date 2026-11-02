@@ -667,6 +667,33 @@ fn check_handles(data: &mut crate::linker::StoreData) -> std::result::Result<(),
     Ok(())
 }
 
+/// Charge one subrequest against the instance budget, before the effect.
+///
+/// SEC-009's choke point for SQL: every query/execute is an outbound
+/// round-trip (file I/O, lock hold), so each execution spends one budget
+/// unit after validation and before the connection opens. Charging after a
+/// failed effect would bill work that never happened; charging before any
+/// validation would spend budget learning the call was malformed.
+///
+/// The WIT `sql-error` type has no budget case, so exhaustion reports as
+/// `execution-failed` with the budget named in the message: a refused
+/// fan-out is an execution that did not happen, and the text keeps the
+/// operator from tuning the database for a manifest limit.
+fn charge_one_subrequest(
+    data: &mut crate::linker::StoreData,
+) -> std::result::Result<(), WitSqlError> {
+    // Direct field access: call sites hold no borrows when this runs, and
+    // the budget decision must sit exactly between validation and the
+    // connection open.
+    if data.subrequests.charge().is_refused() {
+        return Err(WitSqlError::ExecutionFailed(
+            "subrequest budget exhausted: raise `limits.max_subrequests` if the fan-out is intended"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Look a statement handle up, or fail the call that needs it.
 ///
 /// Returns the cloned entry so the caller holds no borrow on the table
@@ -901,6 +928,7 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         // cannot write opens read-only, so a refused write never creates
         // directories or files.
         let can_write = self.grants.grants(SqlExecute) && !db.read_only();
+        charge_one_subrequest(self)?;
         let connection = if can_write {
             connection_for(self, &db)?
         } else {
@@ -963,6 +991,7 @@ impl bindings::qqq::sql::database::HostStatement for crate::linker::StoreData {
         };
         check_no_open_transaction(self, &db)?;
         let bound = bind_args(args)?;
+        charge_one_subrequest(self)?;
         let connection = connection_for(self, &db)?;
         let mut statement = connection
             .prepare(&sql)
@@ -998,6 +1027,7 @@ impl bindings::qqq::sql::database::HostStatement for crate::linker::StoreData {
         };
         check_no_open_transaction(self, &db)?;
         let bound = bind_args(args)?;
+        charge_one_subrequest(self)?;
         let connection = connection_for(self, &db)?;
         let count = {
             let mut statement = connection
@@ -1269,6 +1299,7 @@ impl bindings::qqq::sql::transaction::HostTxnStatement for crate::linker::StoreD
             return Err(WitSqlError::DatabaseNotConfigured);
         };
         let bound = bind_args(args)?;
+        charge_one_subrequest(self)?;
         let connection = connection_for(self, &db)?;
         let mut statement = connection
             .prepare(&sql)
@@ -1303,6 +1334,7 @@ impl bindings::qqq::sql::transaction::HostTxnStatement for crate::linker::StoreD
             return Err(WitSqlError::DatabaseNotConfigured);
         };
         let bound = bind_args(args)?;
+        charge_one_subrequest(self)?;
         let connection = connection_for(self, &db)?;
         let count = {
             let mut statement = connection
@@ -1383,11 +1415,12 @@ mod tests {
         let manifest = manifest_for(path, execute);
         let mut data =
             StoreData::new(GrantSet::from_manifest(&manifest)).with_sql(view_for(path, read_write));
-        // Test room, not policy: every mint path checks the quota first, so
-        // tests that open handles declare headroom up front. The
-        // zero-quota default (deny when unconfigured) is covered by the
-        // quota-exhaustion test below.
+        // Test room, not policy: every mint path checks the quota and every
+        // execution charges the budget, so tests declare headroom for both
+        // up front. The deny-by-default zeros are covered by the
+        // quota-exhaustion and budget-exhaustion tests below.
         data.handles = crate::quota::HandleQuota::new(1024);
+        data.subrequests = crate::quota::SubrequestBudget::new(10_000);
         data
     }
 
@@ -2098,6 +2131,26 @@ mod tests {
         assert_eq!(data.sql_state.statements.len(), 1);
     }
 
+    /// The subrequest budget binds executions: with a budget of 1 the first
+    /// one-shot query succeeds and the second is refused as a failed
+    /// execution naming the budget -- not as a database error.
+    #[test]
+    fn exhausted_budget_refuses_the_execution() {
+        use super::bindings::qqq::sql::database::Host as _;
+        let path = test_path("budget");
+        let mut data = store_for(&path, true, true);
+        data.subrequests = crate::quota::SubrequestBudget::new(1);
+        data.query_once("orders".to_owned(), "SELECT 1".to_owned(), vec![])
+            .expect("one execution fits");
+        let err = data
+            .query_once("orders".to_owned(), "SELECT 1".to_owned(), vec![])
+            .expect_err("budget exhausted");
+        assert!(
+            matches!(err, WitSqlError::ExecutionFailed(ref message) if message.contains("subrequest budget")),
+            "the refusal must name the budget, not the database: {err:?}"
+        );
+    }
+
     /// A cap-hit creates nothing: the cap is checked before any open, so a
     /// refused call leaves no file behind.
     #[test]
@@ -2195,6 +2248,7 @@ mod tests {
         assert!(!grants.grants(qqq_cap::capability::Capability::SqlQuery));
         let mut data = StoreData::new(grants).with_sql(view_for(&path, true));
         data.handles = crate::quota::HandleQuota::new(1024);
+        data.subrequests = crate::quota::SubrequestBudget::new(10_000);
         data.prepare(
             "orders".to_owned(),
             "CREATE TABLE t (id INTEGER)".to_owned(),

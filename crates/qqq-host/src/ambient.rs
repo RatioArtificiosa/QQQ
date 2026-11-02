@@ -676,7 +676,17 @@ impl AmbientState {
     /// the next [`Self::now_nanos`] records the advanced reading. What has to be
     /// deterministic is *when* the host ticks, and in deterministic mode that is
     /// a property of the caller rather than of this method.
-    pub fn tick(&self) {
+    ///
+    /// Crate-visible rather than public, like [`Self::set_ticks`]: advancing
+    /// the virtual clock is runner wiring, not a contract a guest or an
+    /// embedding application calls.
+    ///
+    /// Test-only: no production path advances the clock tick-by-tick (the
+    /// deterministic runner sets the admission count via [`Self::set_ticks`]);
+    /// only tests drive this, so it compiles only for them rather than
+    /// lingering as dead code in the shipped binary.
+    #[cfg(test)]
+    pub(crate) fn tick(&self) {
         if self.deterministic {
             self.ticks.fetch_add(1, Ordering::Relaxed);
         }
@@ -928,7 +938,7 @@ impl HostCallError {
             .with_context("algorithm", a.clone())
             .with_remediation("add it to the relevant `[capabilities.crypto]` list"),
             Self::TooLong => qqq_core::Error::new(
-                qqq_core::ErrorCode::CapabilityOutOfScope,
+                qqq_core::ErrorCode::LimitOutOfRange,
                 "the request exceeds the host's per-call maximum",
             )
             .with_remediation("split the request into smaller calls"),
@@ -1476,6 +1486,34 @@ mod tests {
             assert!(err.remediation.is_some(), "{e:?} must carry a remediation");
             assert!(err.render().contains("QQQ-"));
         }
+    }
+
+    /// Each failure maps to the code that names its kind: a grant problem
+    /// is a denial, an unlisted algorithm is out of scope, an oversize
+    /// request is a limit (not a scope question), and a dead entropy
+    /// source is a host fault.
+    #[test]
+    fn error_mapping_codes_name_the_fault() {
+        use qqq_core::ErrorCode::{
+            CapabilityDenied, CapabilityOutOfScope, HostResourceExhausted, LimitOutOfRange,
+        };
+        assert_eq!(
+            HostCallError::NotGranted(Capability::CryptoHash)
+                .to_error()
+                .code,
+            CapabilityDenied
+        );
+        assert_eq!(
+            HostCallError::AlgorithmNotAllowed("x".to_owned())
+                .to_error()
+                .code,
+            CapabilityOutOfScope
+        );
+        assert_eq!(HostCallError::TooLong.to_error().code, LimitOutOfRange);
+        assert_eq!(
+            HostCallError::SourceFailed.to_error().code,
+            HostResourceExhausted
+        );
     }
 
     /// **The injection this step exists for.** A sink wired to the wrong read, or

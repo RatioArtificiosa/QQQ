@@ -3530,11 +3530,12 @@ qqqai build --nonsense-flag    # -> QQQ-7001
 
 ### The `test` reproducers
 
-Eleven codes are reproduced by the permanent suite rather than by a command. The checker asserts the
+Twelve codes are reproduced by the permanent suite rather than by a command. The checker asserts the
 **file** exists and names the code; run it with the code as a filter to watch it happen.
 
 | Code | Test file |
 |---|---|
+| `QQQ-1002` `InvalidComponentArtifact` | `crates/qqq-run/tests/live_components.rs` |
 | `QQQ-2005` `LimitOutOfRange` | `crates/qqq-host/tests/f10_pool_admission.rs` |
 | `QQQ-3001` `MemoryLimitExceeded` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs` |
 | `QQQ-3002` `FuelExhausted` | `crates/qqq-host/tests/compatibility.rs`, `crates/qqq-host/tests/hostile_guests.rs`, `crates/qqq-host/tests/subrequest_limits.rs` |
@@ -3551,7 +3552,7 @@ Eleven codes are reproduced by the permanent suite rather than by a command. The
 
 ### The `src`-only codes
 
-**Thirty codes are raised by the code and reproduced by no integration test.** They are not unreachable — a
+**Twenty-nine codes are raised by the code and reproduced by no integration test.** They are not unreachable — a
 guest that trips them gets one — but nothing under `crates/*/tests/` proves the path works, so a regression in
 any of them is invisible to the integration suite. (`QQQ-3009` is the partial exception: its refusal paths are
 covered by the `f02_*` unit tests inside `crates/qqq-run/src/guest_handler.rs`, which is why it still counts as
@@ -3560,7 +3561,6 @@ covered by the `f02_*` unit tests inside `crates/qqq-run/src/guest_handler.rs`, 
 
 | Code | Name |
 |---|---|
-| `QQQ-1002` | `InvalidComponentArtifact` |
 | `QQQ-1003` | `MissingTarget` |
 | `QQQ-1004` | `WitInterfaceMismatch` |
 | `QQQ-1005` | `NonReproducibleBuild` |

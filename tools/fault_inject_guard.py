@@ -21,15 +21,14 @@ Two properties this script exists to guarantee, both learned the hard way:
    working tree is left modified -- a fault-injection harness that corrupts the
    tree on failure is worse than no harness.
 """
-import io
-import shutil
 
-from _fault_inject_io import restore
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+from _fault_inject_io import restore
 
 # This tool's own stdout must be able to encode what it prints. On a Windows console the stream
 # inherits `cp1252`, so a character read from a subprocess -- which this file now reads as UTF-8 --
@@ -41,56 +40,64 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
-SRC = Path('crates/qqq-host/src/host_clock.rs')
+SRC = Path("crates/qqq-host/src/host_clock.rs")
 
 # The `timezone` body: swap the guarded form for a bare expression with the same
 # return type. Valid Rust, same behaviour, no guard.
-BEFORE = '''            crate::guard::guard("qqq:clock@1.0.0/wall-clock.timezone", || {
+BEFORE = """            crate::guard::guard("qqq:clock@1.0.0/wall-clock.timezone", || {
                 // Always UTC. A host that applied its local timezone would make
                 // guest output depend on deployment configuration, which the WIT
                 // documentation explicitly forbids.
                 Ok(("UTC".to_owned(),))
-            })'''
-AFTER = '''            // INJECTED: unguarded, for the HOST-011 check's benefit.
-            Ok(("UTC".to_owned(),))'''
+            })"""
+AFTER = """            // INJECTED: unguarded, for the HOST-011 check's benefit.
+            Ok(("UTC".to_owned(),))"""
 
-original = io.open(SRC, encoding='utf-8').read()
+original = open(SRC, encoding="utf-8").read()
 if BEFORE not in original:
-    print('the injection point moved; update tools/fault_inject_guard.py')
+    print("the injection point moved; update tools/fault_inject_guard.py")
     sys.exit(2)
 
 injected = original.replace(BEFORE, AFTER, 1)
-assert injected != original, 'the injection must change the file'
+assert injected != original, "the injection must change the file"
 
 # A temp directory that always exists, unlike `.scratch/`.
 with tempfile.TemporaryDirectory() as tmp:
-    backup = Path(tmp) / 'host_clock.rs'
+    backup = Path(tmp) / "host_clock.rs"
     shutil.copy(SRC, backup)
     try:
-        io.open(SRC, 'w', encoding='utf-8', newline='').write(injected)
+        open(SRC, "w", encoding="utf-8", newline="").write(injected)
 
         out = subprocess.run(
-            ['cargo', 'test', '-p', 'qqq-host', '--lib', 'every_host_function'],
-            capture_output=True, text=True, encoding="utf-8", errors="replace")
+            ["cargo", "test", "-p", "qqq-host", "--lib", "every_host_function"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
         combined = out.stdout + out.stderr
 
-        if 'registers 5 host functions but only 4' in combined:
-            print('INJECTION DETECTED -- the check fails for the right reason')
+        if "whose body reaches neither" in combined and "HOST-011" in combined:
+            print("INJECTION DETECTED -- the check fails for the right reason")
             print(
-                '  '
-                + next(l for l in combined.splitlines() if 'registers 5' in l).strip()[:160]
+                "  "
+                + next(
+                    l
+                    for l in combined.splitlines()
+                    if "whose body reaches neither" in l
+                ).strip()[:160]
             )
             code = 0
-        elif 'error[E' in combined or '\nerror: ' in combined:
+        elif "error[E" in combined or "\nerror: " in combined:
             # The check could not run at all. Reporting success here would be the
             # §O-048c mistake: a broken instrument read as a working one.
-            print('the injected source did not compile, so the check could not run:')
+            print("the injected source did not compile, so the check could not run:")
             for line in combined.splitlines():
-                if line.startswith('error'):
-                    print('  ' + line)
+                if line.startswith("error"):
+                    print("  " + line)
             code = 2
         else:
-            print('INJECTION NOT DETECTED -- the check passed on unguarded code')
+            print("INJECTION NOT DETECTED -- the check passed on unguarded code")
             print(combined[-1200:])
             code = 1
     finally:
@@ -98,9 +105,11 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # Verify the restore, because a harness that leaves the tree modified on failure
 # is worse than no harness.
-restored = io.open(SRC, encoding='utf-8').read()
+restored = open(SRC, encoding="utf-8").read()
 if restored != original:
-    print('RESTORE FAILED -- the working tree is left modified; fix it before committing')
+    print(
+        "RESTORE FAILED -- the working tree is left modified; fix it before committing"
+    )
     sys.exit(3)
 
 sys.exit(code)

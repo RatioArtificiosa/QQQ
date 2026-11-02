@@ -390,12 +390,20 @@ impl KvBackend {
         // The scan itself still runs to completion — correctness first: a
         // listing that stopped early could miss live keys past the window —
         // while eviction stays opportunistic (the next call reaps more).
+        //
+        // Bounded by range, not by filter: entries key on `(store, key)`,
+        // so one store's keys are contiguous. Seeking to `(store, prefix)`
+        // and stopping at the first non-match means a listing touches only
+        // its own store's keys — a guest with one key cannot make the host
+        // walk another tenant's million. A full-map filter would do exactly
+        // that on every call, fuel-blind (host iteration is not fuel-metered).
         let mut reaped = 0usize;
         let mut out: Vec<String> = Vec::new();
         let mut expired: Vec<String> = Vec::new();
-        for ((entry_store, key), entry) in &self.entries {
+        let start = (store.to_owned(), prefix.to_owned());
+        for ((entry_store, key), entry) in self.entries.range(start..) {
             if entry_store != store || !key.starts_with(prefix) {
-                continue;
+                break;
             }
             if entry.expires_at.is_some_and(|at| now >= at) {
                 if reaped < MAX_KV_KEYS_LIMIT as usize {
@@ -835,6 +843,29 @@ mod tests {
             vec!["a".to_owned(), "b".to_owned()],
             "sort order with the guest limit honored"
         );
+    }
+
+    /// Listings never leave their store: keys in other stores — including
+    /// keys that sort inside this store's prefix range — are invisible, and
+    /// a store holding many keys does not slow another store's listing
+    /// (the scan seeks to `(store, prefix)` and stops at the first
+    /// non-match instead of filtering the whole map).
+    #[test]
+    fn keys_never_leave_their_store() {
+        let mut backend = KvBackend::new();
+        for i in 0..2000u32 {
+            backend
+                .set("victim", &format!("k{i:05}"), b"v".to_vec(), None, 0)
+                .expect("fits");
+        }
+        backend.set("s", "a", b"v".to_vec(), None, 0).expect("fits");
+        backend.set("s", "b", b"v".to_vec(), None, 0).expect("fits");
+        assert_eq!(
+            backend.keys("s", "", 100, 0),
+            vec!["a".to_owned(), "b".to_owned()],
+            "only this store's keys list, however many others exist"
+        );
+        assert!(backend.keys("empty", "", 100, 0).is_empty());
     }
 
     /// Ungranted reads fail before the store name is judged: spraying store

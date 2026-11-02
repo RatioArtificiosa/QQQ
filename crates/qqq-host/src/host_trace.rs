@@ -335,15 +335,27 @@ impl HostSpan for crate::linker::StoreData {
         handle: Resource<Span>,
         message: String,
     ) -> std::result::Result<(), WitTraceError> {
+        // Grant first, like `event`: an ungranted oversize message is
+        // denied for the missing grant, not for its size — and the seam
+        // records the attempt for `assert-caps-only`.
+        crate::ambient::require(
+            self,
+            qqq_cap::capability::Capability::TraceWrite,
+            "trace_set_error",
+        )
+        .map_err(|_| WitTraceError::NotGranted)?;
+        // Length before the flag: `with_span` below marks the span failed,
+        // and an oversize message must not leave that mark behind while
+        // reporting the size.
+        if message.len() > crate::host_log::MAX_LOG_FIELD_BYTES - "error ".len() {
+            return Err(WitTraceError::SpanTooLarge);
+        }
+        // Prefix-aware like `event`: the mirror renders `"error {message}"`,
+        // so the boundary bound leaves room for the prefix.
         let id = with_span(self, &handle, |span| {
             span.failed = true;
             (span.trace_id, span.span_id)
         })?;
-        // Prefix-aware like `event`: the mirror renders `"error {message}"`,
-        // so the boundary bound leaves room for the prefix.
-        if message.len() > crate::host_log::MAX_LOG_FIELD_BYTES - "error ".len() {
-            return Err(WitTraceError::SpanTooLarge);
-        }
         mirror_to_log(self, id, "error", &message, Vec::new(), true);
         Ok(())
     }
@@ -858,6 +870,24 @@ mod tests {
             .expect_err("name too long");
         assert!(matches!(err, WitTraceError::SpanTooLarge));
         assert_eq!(data.logs.len(), before, "no silent mirror drop");
+    }
+
+    /// An oversize `set_error` message fails without marking the span: the
+    /// length check runs before `with_span` sets `failed`, so a refused
+    /// message leaves no flag behind.
+    #[test]
+    fn oversize_set_error_leaves_no_failed_flag() {
+        let mut data = granted_store();
+        let root = start_span_impl(&mut data, "root", None).expect("root starts");
+        let root_id = rep_index(&root);
+        let big = "e".repeat(crate::host_log::MAX_LOG_FIELD_BYTES);
+        let err = <StoreData as HostSpan>::set_error(&mut data, rep_from_index(root_id), big)
+            .expect_err("message too long");
+        assert!(matches!(err, WitTraceError::SpanTooLarge));
+        assert!(
+            !data.trace.spans[&root_id].failed,
+            "a refused message must not mark the span failed"
+        );
     }
 
     /// The event-name bound leaves room for the mirror's `"event "` prefix:

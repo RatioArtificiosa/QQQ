@@ -235,12 +235,62 @@ pub struct HyperLimits {
     pub http1_max_header_size: usize,
     /// Largest decoded HTTP/2 header list.
     ///
+    /// Matches the in-house HPACK decoder's [`crate::h2::hpack::MAX_HEADER_LIST_SIZE`]:
+    /// one request has one size limit regardless of which protocol carried
+    /// it — two different limits for the same request is how a proxy and an
+    /// origin disagree. The count cap beside it lives in
+    /// [`crate::http1::MAX_HEADERS`] and is enforced per map, since hyper
+    /// offers no count knob.
+    ///
     /// ```
     /// use qqq_serve::transport::HyperLimits;
     ///
-    /// assert_eq!(HyperLimits::default().h2_max_header_list_bytes, 1 << 20);
+    /// assert_eq!(HyperLimits::default().h2_max_header_list_bytes, 64 << 10);
     /// ```
     pub h2_max_header_list_bytes: u32,
+    /// Initial per-stream flow-control window for HTTP/2.
+    ///
+    /// The RFC 9113 default (65,535), stated explicitly because a
+    /// default is not a contract: an upgrade that widened it would
+    /// silently widen per-stream bytes-in-flight past what the in-house
+    /// 64 KiB buffer quantum ever holds. Matches the `http1` buffer
+    /// scale so neither transport buffers an order more per request.
+    ///
+    /// ```
+    /// use qqq_serve::transport::HyperLimits;
+    ///
+    /// assert_eq!(HyperLimits::default().h2_initial_stream_window_size, 64 << 10);
+    /// ```
+    pub h2_initial_stream_window_size: u32,
+    /// Initial connection-level flow-control window for HTTP/2.
+    ///
+    /// Caps aggregate bytes-in-flight across all streams of one
+    /// connection: with 100 concurrent streams the stream windows alone
+    /// could hold ~6 MiB, and the connection window is what bounds the
+    /// total. One capped response body (`max_response_body_bytes`) in
+    /// flight — windows throttle, they never cap a total, so legitimate
+    /// bodies stream through `WINDOW_UPDATE` replenishment.
+    ///
+    /// ```
+    /// use qqq_serve::transport::HyperLimits;
+    ///
+    /// assert_eq!(HyperLimits::default().h2_initial_connection_window_size, 1 << 20);
+    /// ```
+    pub h2_initial_connection_window_size: u32,
+    /// Outbound buffer ceiling for HTTP/2.
+    ///
+    /// One capped response body, like the window above: hyper buffers
+    /// serialized frames here before the socket takes them, and an
+    /// unpinned default that grew would grow per-connection memory past
+    /// what the in-house writer ever holds. Upper-bounded by construction,
+    /// like every other number in this struct.
+    ///
+    /// ```
+    /// use qqq_serve::transport::HyperLimits;
+    ///
+    /// assert_eq!(HyperLimits::default().h2_max_send_buf_size, 1 << 20);
+    /// ```
+    pub h2_max_send_buf_size: usize,
     /// Concurrent streams per HTTP/2 connection.
     ///
     /// ```
@@ -403,10 +453,19 @@ impl Default for HyperLimits {
             // not a contract, and its per-line size is unset by default.
             http1_max_headers: crate::http1::MAX_HEADERS,
             http1_max_header_size: crate::http1::MAX_HEADER_BYTES,
-            // The 1 MiB h2 header-list ceiling — formerly mirrored
-            // from the in-house `MAX_HEADER_BLOCK_BYTES` (deleted in
-            // §O-732); the value stands on its own now.
-            h2_max_header_list_bytes: 1 << 20,
+            // The h2 header-list ceiling mirrors the in-house HPACK decoder's
+            // `MAX_HEADER_LIST_SIZE`: one request, one size limit, whichever
+            // protocol carried it.
+            h2_max_header_list_bytes: 64 << 10,
+            // The RFC default, stated not inherited: per-stream
+            // bytes-in-flight at the `http1` buffer scale.
+            h2_initial_stream_window_size: 64 << 10,
+            // Aggregate bytes-in-flight for the whole connection: one
+            // capped response body, throttling rather than capping.
+            h2_initial_connection_window_size: 1 << 20,
+            // Outbound frames buffered per connection: one capped
+            // response, matching the window above.
+            h2_max_send_buf_size: 1 << 20,
             // RFC 9113 §6.5.2 recommends no smaller than 100.
             max_concurrent_streams: 100,
             // The audit's 200/s control-frame budget, as a stream count:
@@ -522,14 +581,21 @@ pub fn apply_http1(builder: &mut hyper::server::conn::http1::Builder, limits: &H
 /// `max_frame_size` is pinned to the RFC 9113 default (16 KiB): it bounds
 /// the largest single DATA frame hyper buffers before the body reader
 /// sees it, and an unpinned default that grew would grow per-frame memory
-/// past what the in-house path ever holds. Window sizes stay hyper's
-/// (flow-control tuning, not a memory bound), and the `Date` header
-/// follows [`apply_http1`]: on, and a known emission difference from the
-/// in-house writer.
+/// past what the in-house path ever holds. Window sizes are pinned
+/// explicitly (not hyper's) for the same reason: windows bound
+/// bytes-in-flight per stream, times 100 concurrent streams, which is a
+/// memory bound an upgrade could silently widen. `adaptive_window` stays
+/// off — it overrides the pinned windows — and the `Date` header is
+/// pinned on, matching [`apply_http1`]: a known emission difference from
+/// the in-house writer, recorded here rather than discovered in a capture.
 pub fn apply_http2<E>(builder: &mut hyper::server::conn::http2::Builder<E>, limits: &HyperLimits) {
     builder.timer(hyper_util::rt::TokioTimer::new());
     builder.max_concurrent_streams(limits.max_concurrent_streams);
     builder.max_header_list_size(limits.h2_max_header_list_bytes);
+    builder.initial_stream_window_size(Some(limits.h2_initial_stream_window_size));
+    builder.initial_connection_window_size(Some(limits.h2_initial_connection_window_size));
+    builder.max_send_buf_size(limits.h2_max_send_buf_size);
+    builder.auto_date_header(true);
     builder.max_frame_size(Some(16 * 1024u32));
     builder.max_pending_accept_reset_streams(limits.max_pending_reset_streams);
     builder.max_local_error_reset_streams(limits.max_local_error_reset_streams);
@@ -587,8 +653,13 @@ mod tests {
         assert_eq!(limits.http1_max_buf_bytes, 64 << 10);
         assert_eq!(limits.http1_max_headers, crate::http1::MAX_HEADERS);
         assert_eq!(limits.http1_max_header_size, crate::http1::MAX_HEADER_BYTES);
-        assert_eq!(limits.h2_max_header_list_bytes, 1 << 20);
+        assert_eq!(limits.h2_max_header_list_bytes, 64 << 10);
         assert_eq!(limits.max_concurrent_streams, 100);
+        // Windows and send buffer are explicit constants, not hyper's
+        // inheritance: a default the dependency may change is not a bound.
+        assert_eq!(limits.h2_initial_stream_window_size, 64 << 10);
+        assert_eq!(limits.h2_initial_connection_window_size, 1 << 20);
+        assert_eq!(limits.h2_max_send_buf_size, 1 << 20);
     }
 
     /// The reset budgets are finite and non-zero: an unset (`None`) budget

@@ -637,6 +637,44 @@ fn default_limits() -> HyperLimits {
 // Differential: flat routes
 // ---------------------------------------------------------------------------
 
+/// A parked flat handler is cut off by the drain bound on both paths:
+/// the server answers 504 (a timeout, never a crash) and closes, so the
+/// detached handler cannot serve a second request on the same connection.
+/// Keep-alive requests (no `Connection: close`) prove the close is the
+/// server's doing, not the client's.
+#[tokio::test]
+async fn hyper_parked_flat_handler_times_out_on_both_paths() {
+    fn parked() -> Handler {
+        Arc::new(|_head, _m: &RouteMatch| {
+            std::thread::sleep(Duration::from_secs(5));
+            Response::text(200, "too late")
+        })
+    }
+    let routes = [(Method::Get, "/slow", "s")];
+    let inhouse = Inhouse::start_with(table_with(&routes), parked(), |config| {
+        config.connection.drain_timeout = Duration::from_millis(100);
+    })
+    .await;
+    let mut hyper_limits = default_limits();
+    hyper_limits.drain_timeout = Duration::from_millis(100);
+    let hyper = Hyper::start(
+        table_with(&routes),
+        Dispatch::flat(parked()),
+        hyper_limits,
+        Pieces::bare(),
+    )
+    .await;
+    // No `Connection: close`: a close here is the timeout's, not the client's.
+    let request = b"GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    let a = exchange(inhouse.addr, request, true).await;
+    let b = exchange(hyper.addr, request, true).await;
+    assert_eq!(code_of(&a.status), "HTTP/1.1 504", "in-house times out");
+    assert_eq!(code_of(&b.status), "HTTP/1.1 504", "hyper times out");
+    assert_eq!(b.body, a.body, "both paths answer the same timeout page");
+    assert!(a.closed, "in-house closes after the timeout");
+    assert!(b.closed, "hyper closes after the timeout");
+}
+
 /// The same `GET` answers the same on both paths.
 #[tokio::test]
 async fn hyper_flat_200_matches_in_house() {
@@ -1264,6 +1302,48 @@ async fn hyper_invalid_handler_response_is_500() {
     let request = b"GET /bad HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     let b = exchange(hyper.addr, request, true).await;
     assert_eq!(b.status, "HTTP/1.1 500 Internal Server Error");
+}
+
+/// A `204` with a handler body is framed identically: `Content-Length: 0`,
+/// no bytes — on both paths.
+///
+/// A body on a bodyless status is a handler bug, and the two transports
+/// must agree about what the client sees. The hyper path once emitted the
+/// handler's real length with no bytes, which tells an HTTP/1.1 client
+/// that bytes are coming that never arrive (a hang) and lies on h2 framing.
+/// Both paths now drop the body and declare zero.
+#[tokio::test]
+async fn hyper_204_with_a_body_is_framed_like_in_house() {
+    let routes = [(Method::Get, "/empty", "e")];
+    let buggy: Handler =
+        Arc::new(|_head, _m: &RouteMatch| Response::text(204, "x".repeat(100_000)));
+    let inhouse = Inhouse::start_with(table_with(&routes), Arc::clone(&buggy), |_| {}).await;
+    let hyper = Hyper::start(
+        table_with(&routes),
+        Dispatch::flat(buggy),
+        default_limits(),
+        Pieces::bare(),
+    )
+    .await;
+    let request = b"GET /empty HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    let a = exchange(inhouse.addr, request, true).await;
+    let b = exchange(hyper.addr, request, true).await;
+    assert_eq!(a.status, "HTTP/1.1 204 No Content");
+    assert_eq!(b.status, "HTTP/1.1 204 No Content");
+    assert!(a.body.is_empty(), "in-house must not emit the body");
+    assert!(b.body.is_empty(), "hyper must not emit the body");
+    assert_eq!(header(&a, "content-length"), Some("0"));
+    // Hyper strips `Content-Length` on a bodyless status rather than
+    // emitting the `0` the in-house writer emits. Both framings are
+    // correct — a 204 has no body by definition, so no length can lie —
+    // and what matters is that neither claims the handler's real length:
+    // a nonzero length with no bytes is the hang this test exists to
+    // prevent.
+    assert!(
+        header(&b, "content-length").is_none_or(|v| v == "0"),
+        "hyper must not declare a body on a 204: {:?}",
+        header(&b, "content-length")
+    );
 }
 
 // ---------------------------------------------------------------------------

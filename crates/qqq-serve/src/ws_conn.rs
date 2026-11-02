@@ -54,6 +54,7 @@ use qqq_io::listener::Shutdown;
 use crate::ws::{self, Handshake, HandshakeError};
 use crate::ws_frame::{self, Frame, Opcode};
 use crate::ws_message::{Assembler, Message, Progress};
+use qqq_host::tenant::TenantKey;
 
 /// The largest number of bytes the read buffer will hold before compaction.
 ///
@@ -162,25 +163,99 @@ impl WebSocketHandler for Echo {
 /// than documented.
 pub struct WsSender<'a> {
     stream: &'a mut (dyn tokio::io::AsyncWrite + Unpin + Send + 'a),
+    /// Set when any bytes are written through this sender.
+    ///
+    /// A borrow of the caller's flag rather than a field: the flag must be
+    /// readable after a handler timeout drops the future that borrowed the
+    /// sender, and a field read would borrow the sender while that borrow
+    /// is still live. A handler timeout after a partial write must not emit
+    /// a close frame — it would land mid-payload and desynchronise the
+    /// peer — so the loop reads this to tell "nothing sent yet, refuse
+    /// cleanly" from "bytes on the wire, tear down silently".
+    wrote: &'a mut bool,
+    /// The largest data payload one `send` may emit, in bytes.
+    ///
+    /// The loop's share of the connection's `max_message_bytes`: a guest
+    /// answering a 1 KiB request with a 1 GiB message would otherwise emit a
+    /// single unbounded frame while the inbound path caps at 1 MiB. Control
+    /// sends bypass it (a ping, pong or close is small by construction, and
+    /// `refuse_with`/`close_with` pass `usize::MAX`).
+    message_cap: usize,
+    /// The connection's tenant key, for per-message gates.
+    ///
+    /// Resolved once at accept time and carried here so handlers gate
+    /// without re-deriving it: re-parsing the tenant *label* per message
+    /// fails open on non-IP labels (a mapped hostname has no `IpAddr`
+    /// form), silently unlimited the tenants the flat path limits.
+    tenant_key: TenantKey,
 }
 
 impl WsSender<'_> {
+    /// The connection's tenant key, for per-message gates.
+    ///
+    /// Resolved once at accept time and carried here so handlers gate
+    /// without re-deriving it: re-parsing the tenant *label* per message
+    /// fails open on non-IP labels (a mapped hostname has no `IpAddr`
+    /// form), silently unlimited the tenants the flat path limits.
+    #[must_use]
+    pub fn tenant_key(&self) -> TenantKey {
+        self.tenant_key
+    }
+
     /// Send one message.
     ///
     /// # Errors
     ///
     /// When the write fails — the peer is gone or the socket is closed — or
-    /// when `kind` is a control opcode whose frame would be malformed (over
-    /// 125 bytes, or, were this API to allow it, unfragmented-split): a
-    /// malformed control frame would make the *peer* close the connection
-    /// with `1002`, blaming our framing. `send_frame` stays infallible
-    /// deliberately — tests use it to send malformed frames on purpose —
-    /// so the message-level path is where malformed output is refused.
+    /// when the message itself is malformed: a `Continuation` where a message
+    /// must start (§5.4), a `Text` payload that is not UTF-8 (§8.1), a `Close`
+    /// payload the decoder would refuse (bad code or non-UTF-8 reason,
+    /// §5.5.1), a control payload over 125 bytes (§5.5), or a data payload
+    /// past this sender's cap. A malformed message would make the *peer*
+    /// close the connection with `1002`, blaming our framing — refused here,
+    /// the failure names the handler bug instead. `send_frame` stays
+    /// infallible deliberately — tests use it to send malformed frames on
+    /// purpose — so the message-level path is where malformed output is
+    /// refused.
     pub async fn send(&mut self, kind: Opcode, payload: &[u8]) -> std::io::Result<()> {
+        match kind {
+            Opcode::Continuation => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "a message must start with Text or Binary, not Continuation (§5.4)",
+                ));
+            }
+            Opcode::Text => {
+                std::str::from_utf8(payload).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("a text payload must be UTF-8 (§8.1): {e}"),
+                    )
+                })?;
+            }
+            Opcode::Close => {
+                // The decoder's own rule, so the two can never disagree
+                // about what a close carries.
+                ws_frame::validate_close_payload(payload).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+                })?;
+            }
+            Opcode::Ping | Opcode::Pong | Opcode::Binary => {}
+        }
         if kind.is_control() && payload.len() > 125 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "a control frame payload may not exceed 125 bytes (§5.5)",
+            ));
+        }
+        if !kind.is_control() && payload.len() > self.message_cap {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "a message payload of {} bytes exceeds this connection's {}-byte cap",
+                    payload.len(),
+                    self.message_cap
+                ),
             ));
         }
         let frame = Frame {
@@ -189,7 +264,9 @@ impl WsSender<'_> {
             payload: payload.to_vec(),
         };
         self.stream.write_all(&ws_frame::encode(&frame)).await?;
-        self.stream.flush().await
+        self.stream.flush().await?;
+        *self.wrote = true;
+        Ok(())
     }
 
     /// Send a text message.
@@ -217,6 +294,7 @@ impl WsSender<'_> {
     pub async fn send_frame(&mut self, frame: &Frame) {
         let _ = self.stream.write_all(&ws_frame::encode(frame)).await;
         let _ = self.stream.flush().await;
+        *self.wrote = true;
     }
 }
 
@@ -236,6 +314,16 @@ pub struct WsContext {
     pub peer: SocketAddr,
     /// The tenant the peer belongs to.
     pub tenant: String,
+    /// The tenant's key for per-tenant gates.
+    ///
+    /// Resolved once at accept time (see `serve`), not re-derived per
+    /// message: re-parsing the label per message fails open on non-IP
+    /// labels (a mapped hostname has no `IpAddr` form), so a tenant whose
+    /// HTTP requests are rate- and body-limited would have unlimited
+    /// WebSocket messages. The loop hands this to every sender it builds,
+    /// and handlers gate through [`WsSender::tenant_key`] instead of
+    /// re-parsing the label.
+    pub tenant_key: TenantKey,
     /// Where records go.
     pub logger: Logger,
     /// The process-wide trace id.
@@ -349,6 +437,57 @@ where
     outcome
 }
 
+/// How many pings one connection may send per window before the server
+/// stops answering and closes instead.
+const MAX_PINGS_PER_WINDOW: u32 = 20;
+
+/// The window the ping budget refills over.
+const PING_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One connection's ping budget.
+///
+/// Every ping is answered with a same-payload pong — a `write_all` plus a
+/// flush per ping — and pongs bypass the process budget, so an unbounded
+/// ping rate is unbounded write syscalls with no shed path. Legitimate
+/// keepalives tick every tens of seconds; twenty per ten seconds is two
+/// orders of magnitude of headroom, and past it the connection closes with
+/// `1011` rather than answering forever. The budget also stops a ping
+/// trickle from holding the connection past the idle bound for free: each
+/// answered ping is activity, but only budgeted ones are answered.
+struct PingGate {
+    /// When the current window started.
+    window_start: tokio::time::Instant,
+    /// Pings answered in the current window.
+    count: u32,
+}
+
+impl PingGate {
+    /// A fresh budget, opening its first window now.
+    fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            window_start: now,
+            count: 0,
+        }
+    }
+
+    /// Whether this ping may be answered.
+    ///
+    /// The window slides: a ping past the window starts a new one rather
+    /// than being counted against the old, so a steady legitimate cadence
+    /// never trips no matter how long the connection lives.
+    fn admit(&mut self, now: tokio::time::Instant) -> bool {
+        if now.duration_since(self.window_start) >= PING_WINDOW {
+            self.window_start = now;
+            self.count = 0;
+        }
+        if self.count >= MAX_PINGS_PER_WINDOW {
+            return false;
+        }
+        self.count += 1;
+        true
+    }
+}
+
 /// One connection's share of the process-wide buffer budget.
 ///
 /// Permits are exact bytes, acquired per data frame and released when the
@@ -446,6 +585,9 @@ where
     // remainder returned when the connection ends — permits are exact, so
     // every path must settle its account exactly once.
     let mut budget = BufferBudget::new(std::sync::Arc::clone(&ctx.buffer));
+    // Pings bypass the budget (control frames are never charged), so they
+    // get their own bound — see `PingGate`.
+    let mut pings = PingGate::new(tokio::time::Instant::now());
 
     loop {
         // Decode as many whole frames as the buffer holds. A single read can carry
@@ -455,6 +597,14 @@ where
             match ws_frame::decode_server_frame_with_limit(&buf, ctx.limits.max_frame_bytes) {
                 Ok(Some((frame, used))) => {
                     buf.drain(..used);
+                    if frame.opcode == Opcode::Ping && !pings.admit(tokio::time::Instant::now()) {
+                        // Answered pings are activity, so an unbounded rate
+                        // holds the slot and the syscalls with it. Past the
+                        // budget the connection closes with 1011 rather than
+                        // answering forever.
+                        refuse_with(stream, 1011, "ping rate exceeded", ctx.tenant_key).await;
+                        return WsOutcome::ProtocolError;
+                    }
                     if !frame.opcode.is_control() && !budget.acquire(frame.payload.len()) {
                         // The process is full: shed this connection's bytes with
                         // 1009 rather than waiting, because waiting on a shared
@@ -464,20 +614,14 @@ where
                             stream,
                             1009,
                             "the server's WebSocket buffer budget is exhausted",
+                            ctx.tenant_key,
                         )
                         .await;
                         return WsOutcome::ProtocolError;
                     }
-                    if let Some(outcome) = dispatch_frame(
-                        stream,
-                        handler,
-                        &mut assembler,
-                        frame,
-                        &mut budget,
-                        ctx.limits.handler_timeout,
-                        &ctx.tenant,
-                    )
-                    .await
+                    if let Some(outcome) =
+                        dispatch_frame(stream, handler, &mut assembler, frame, &mut budget, ctx)
+                            .await
                     {
                         return outcome;
                     }
@@ -487,7 +631,7 @@ where
                     // §7.4.1: the server must say *why* it is closing. A silent close is
                     // indistinguishable from a network fault, and a client that cannot
                     // tell the difference retries.
-                    refuse_with(stream, e.close_code(), &e.to_string()).await;
+                    refuse_with(stream, e.close_code(), &e.to_string(), ctx.tenant_key).await;
                     return WsOutcome::ProtocolError;
                 }
             }
@@ -521,14 +665,14 @@ where
             tokio::select! {
                 r = &mut read => r.unwrap_or(0),
                 () = ctx.shutdown.wait() => {
-                    close_with(stream, 1001, "server shutting down").await;
+                    close_with(stream, 1001, "server shutting down", ctx.tenant_key).await;
                     return WsOutcome::Closed;
                 }
                 () = tokio::time::sleep(idle) => {
                     // 1001 as well: the *server* is ending the connection, and a code that
                     // blamed the client would make it retry with the same idle behaviour
                     // and be closed again.
-                    close_with(stream, 1001, "idle timeout").await;
+                    close_with(stream, 1001, "idle timeout", ctx.tenant_key).await;
                     return WsOutcome::Closed;
                 }
             }
@@ -536,7 +680,7 @@ where
             tokio::select! {
                 r = &mut read => r.unwrap_or(0),
                 () = ctx.shutdown.wait() => {
-                    close_with(stream, 1001, "server shutting down").await;
+                    close_with(stream, 1001, "server shutting down", ctx.tenant_key).await;
                     return WsOutcome::Closed;
                 }
             }
@@ -586,11 +730,19 @@ const REFUSAL_DRAIN_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Draining first — half-close, read-and-discard until the peer's FIN, close,
 /// the byte cap, or this timeout — means the final close finds an empty
 /// buffer and goes out as FIN, which no stack reorders ahead of the data.
-async fn refuse_with<S>(stream: &mut S, code: u16, reason: &str)
+async fn refuse_with<S>(stream: &mut S, code: u16, reason: &str, tenant_key: TenantKey)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
-    let mut sender = WsSender { stream };
+    let mut wrote = false;
+    let mut sender = WsSender {
+        stream,
+        wrote: &mut wrote,
+        // Control only: the close frame is small by construction, and no
+        // data cap applies to a refusal.
+        message_cap: usize::MAX,
+        tenant_key,
+    };
     sender.send_frame(&Frame::close(code, reason)).await;
     // Half-close: the write side is done, but the read side must stay open to
     // consume what the peer already sent — that is what keeps the teardown
@@ -629,11 +781,19 @@ where
 /// accept loop already bounds the whole teardown by the drain deadline. A
 /// drain that waited on an idle peer would park every closing task for its
 /// full timeout doing nothing.
-async fn close_with<S>(stream: &mut S, code: u16, reason: &str)
+async fn close_with<S>(stream: &mut S, code: u16, reason: &str, tenant_key: TenantKey)
 where
     S: tokio::io::AsyncWrite + Unpin + Send,
 {
-    let mut sender = WsSender { stream };
+    let mut wrote = false;
+    let mut sender = WsSender {
+        stream,
+        wrote: &mut wrote,
+        // Control only: the close frame is small by construction, and no
+        // data cap applies to a server-initiated close.
+        message_cap: usize::MAX,
+        tenant_key,
+    };
     sender.send_frame(&Frame::close(code, reason)).await;
     let _ = stream.shutdown().await;
 }
@@ -650,8 +810,7 @@ async fn dispatch_frame<S>(
     assembler: &mut Assembler,
     frame: Frame,
     budget: &mut BufferBudget,
-    handler_timeout: std::time::Duration,
-    tenant: &str,
+    ctx: &WsContext,
 ) -> Option<WsOutcome>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
@@ -665,7 +824,13 @@ where
         // refused instead of emitted — and a failed write ends the connection
         // as `ClientGone` rather than a protocol error: nothing the peer did
         // was wrong, it just left.
-        let mut sender = WsSender { stream };
+        let mut wrote = false;
+        let mut sender = WsSender {
+            stream,
+            wrote: &mut wrote,
+            message_cap: ctx.limits.max_message_bytes,
+            tenant_key: ctx.tenant_key,
+        };
         if sender.send(Opcode::Pong, &frame.payload).await.is_err() {
             return Some(WsOutcome::ClientGone);
         }
@@ -689,7 +854,7 @@ where
             .close_code()
             .filter(|c| ws_frame::is_valid_close_code(*c))
             .unwrap_or(1000);
-        refuse_with(stream, code, "").await;
+        refuse_with(stream, code, "", ctx.tenant_key).await;
         return Some(WsOutcome::Closed);
     }
 
@@ -714,19 +879,38 @@ where
             // connection the peer resets. The timeout converts that into an
             // explicit `1011` with a record, and the cancelled future drops
             // the guest call it was running.
-            let timed_out = {
+            //
+            // If the handler already wrote bytes — possibly a partial frame,
+            // since `write_all` is not cancellation-safe — no close frame may
+            // follow: it would land mid-payload and desynchronise the peer.
+            // The connection then ends without one, which reads as a cut
+            // connection rather than as valid framing.
+            let mut wrote = false;
+            let (timed_out, wrote_anything) = {
                 let mut sender = WsSender {
                     stream: &mut *stream,
+                    wrote: &mut wrote,
+                    message_cap: ctx.limits.max_message_bytes,
+                    tenant_key: ctx.tenant_key,
                 };
-                tokio::time::timeout(
-                    handler_timeout,
-                    handler.on_message(&message, &mut sender, tenant),
+                let timed_out = tokio::time::timeout(
+                    ctx.limits.handler_timeout,
+                    handler.on_message(&message, &mut sender, &ctx.tenant),
                 )
                 .await
-                .is_err()
+                .is_err();
+                (timed_out, wrote)
             };
             if timed_out {
-                refuse_with(stream, 1011, "the message handler exceeded its time bound").await;
+                if !wrote_anything {
+                    refuse_with(
+                        stream,
+                        1011,
+                        "the message handler exceeded its time bound",
+                        ctx.tenant_key,
+                    )
+                    .await;
+                }
                 return Some(WsOutcome::ProtocolError);
             }
             None
@@ -743,7 +927,7 @@ where
                 (None, Some(n)) => budget.release(n),
                 (None, None) => {}
             }
-            refuse_with(stream, e.close_code(), &e.to_string()).await;
+            refuse_with(stream, e.close_code(), &e.to_string(), ctx.tenant_key).await;
             Some(WsOutcome::ProtocolError)
         }
     }
@@ -822,6 +1006,7 @@ pub const fn supported_version() -> Version {
 )]
 mod tests {
     use super::*;
+    use crate::ws::WsLimits;
 
     /// The normal endings are `Info`; only a protocol violation is `Error`.
     #[test]
@@ -859,6 +1044,38 @@ mod tests {
 
     // -- the sender ----------------------------------------------------------
 
+    /// A `WsContext` with loopback identity and a 50 ms handler bound.
+    ///
+    /// Unit tests drive `dispatch_frame` directly, without an accept loop
+    /// to resolve tenants or load limits — so the context is built by hand
+    /// here rather than threaded from a listener that does not exist.
+    fn test_ctx() -> WsContext {
+        test_ctx_for("test")
+    }
+
+    /// [`test_ctx`] with an explicit tenant label.
+    ///
+    /// The label is deliberately a parameter: a mapped hostname is a valid
+    /// tenant label, and the loop must serve it exactly like an IP one —
+    /// the key, not the label, drives every gate.
+    fn test_ctx_for(label: &str) -> WsContext {
+        WsContext {
+            peer: "127.0.0.1:1".parse().expect("loopback"),
+            tenant: label.to_owned(),
+            tenant_key: qqq_host::tenant::tenant_key("127.0.0.1".parse().expect("loopback")),
+            logger: Logger::new(crate::access_log::Format::Json, Level::Error),
+            trace: 1,
+            span: 1,
+            shutdown: Shutdown::new(),
+            idle_timeout: None,
+            limits: WsLimits {
+                handler_timeout: std::time::Duration::from_millis(50),
+                ..WsLimits::default()
+            },
+            buffer: std::sync::Arc::new(tokio::sync::Semaphore::new(1024 * 1024)),
+        }
+    }
+
     /// `send` refuses a control payload the peer would refuse.
     ///
     /// A 200-byte ping would make the *peer* close the connection with
@@ -867,8 +1084,12 @@ mod tests {
     #[tokio::test]
     async fn send_refuses_an_oversized_control_payload() {
         let (_client, mut server) = tokio::io::duplex(64 * 1024);
+        let mut wrote = false;
         let mut sender = WsSender {
             stream: &mut server,
+            wrote: &mut wrote,
+            message_cap: 1024,
+            tenant_key: qqq_host::tenant::tenant_key("127.0.0.1".parse().expect("loopback")),
         };
         let e = sender
             .send(Opcode::Ping, &[0u8; 126])
@@ -880,6 +1101,65 @@ mod tests {
             .send(Opcode::Binary, &[0u8; 126])
             .await
             .expect("a data frame of the same size must send");
+    }
+
+    /// `send` enforces the message-level rules the decoder enforces.
+    ///
+    /// A `Continuation` where a message starts, non-UTF-8 `Text`, a close
+    /// code the wire forbids, and a data payload past the cap are all
+    /// refused here — so a guest cannot make the server emit the protocol
+    /// error the decoder would refuse from a peer.
+    #[tokio::test]
+    async fn send_refuses_malformed_messages() {
+        let (_client, mut server) = tokio::io::duplex(64 * 1024);
+        let mut wrote = false;
+        let mut sender = WsSender {
+            stream: &mut server,
+            wrote: &mut wrote,
+            message_cap: 1024,
+            tenant_key: qqq_host::tenant::tenant_key("127.0.0.1".parse().expect("loopback")),
+        };
+        // Continuation never starts a message.
+        let e = sender
+            .send(Opcode::Continuation, b"hi")
+            .await
+            .expect_err("Continuation cannot start a message");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        // Text must be UTF-8.
+        let e = sender
+            .send(Opcode::Text, &[0xff, 0xfe])
+            .await
+            .expect_err("non-UTF-8 text must be refused");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        // 1005 never appears on the wire.
+        let e = sender
+            .send(Opcode::Close, &[0x03, 0xed])
+            .await
+            .expect_err("a reserved close code must be refused");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        // One byte is not a close payload.
+        let e = sender
+            .send(Opcode::Close, &[0x03])
+            .await
+            .expect_err("a one-byte close must be refused");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        // Data past the cap is refused, not truncated.
+        let e = sender
+            .send(Opcode::Binary, &vec![0u8; 1025])
+            .await
+            .expect_err("an over-cap message must be refused");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        // And the valid shapes still send.
+        sender
+            .send(Opcode::Text, b"hi")
+            .await
+            .expect("valid text sends");
+        let mut close = 1000u16.to_be_bytes().to_vec();
+        close.extend_from_slice(b"bye");
+        sender
+            .send(Opcode::Close, &close)
+            .await
+            .expect("a valid close sends");
     }
 
     /// A handler that never answers still ends the connection — with `1011`,
@@ -924,8 +1204,7 @@ mod tests {
                 &mut assembler,
                 frame,
                 &mut budget,
-                std::time::Duration::from_millis(50),
-                "test",
+                &test_ctx(),
             )
             .await
         });
@@ -955,6 +1234,193 @@ mod tests {
         assert_eq!(
             finished.await.expect("the server task ends"),
             Some(WsOutcome::ProtocolError)
+        );
+    }
+
+    /// A timeout after a partial write tears down without a close frame.
+    ///
+    /// `write_all` is not cancellation-safe: cancelling it can leave a
+    /// partial frame on the wire, and a close frame after it would land
+    /// mid-payload and desynchronise the peer. The peer instead reads the
+    /// bytes that made it followed by EOF — a cut connection, never valid
+    /// framing with a wrong code.
+    #[tokio::test]
+    async fn a_timeout_after_a_partial_write_sends_no_close() {
+        struct SendThenPark;
+        impl WebSocketHandler for SendThenPark {
+            fn on_message<'a>(
+                &'a self,
+                _message: &'a Message,
+                send: &'a mut WsSender<'a>,
+                _tenant: &str,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+                Box::pin(async move {
+                    send.send(Opcode::Binary, b"hi")
+                        .await
+                        .expect("the first send completes");
+                    std::future::pending::<()>().await;
+                })
+            }
+        }
+
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let finished = tokio::spawn(async move {
+            let mut server = server;
+            let mut assembler = Assembler::with_limit(1024);
+            let mut budget = BufferBudget::new(std::sync::Arc::new(tokio::sync::Semaphore::new(
+                1024 * 1024,
+            )));
+            let frame = Frame {
+                opcode: Opcode::Text,
+                fin: true,
+                payload: b"hi".to_vec(),
+            };
+            dispatch_frame(
+                &mut server,
+                &SendThenPark,
+                &mut assembler,
+                frame,
+                &mut budget,
+                &test_ctx(),
+            )
+            .await
+        });
+
+        // The handler's frame arrives whole: [0x82, 0x02, 'h', 'i'].
+        let mut echo = [0u8; 4];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut echo),
+        )
+        .await
+        .expect("the sent frame must arrive promptly")
+        .expect("the sent frame is complete");
+        assert_eq!(echo, [0x82, 0x02, b'h', b'i']);
+        // Then EOF — never a close frame, which would have landed mid-stream.
+        // The task ends on the timeout; its end drops the server half.
+        assert_eq!(
+            finished.await.expect("the server task ends"),
+            Some(WsOutcome::ProtocolError)
+        );
+        let mut one = [0u8; 1];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut one),
+        )
+        .await
+        .expect("EOF must arrive promptly")
+        .expect_err("no close frame may follow a partial write");
+    }
+
+    /// A non-IP tenant label is served exactly like an IP one.
+    ///
+    /// Mapped hostnames and mTLS identities are valid tenant labels with no
+    /// `IpAddr` form. The loop must not re-derive the key from the label —
+    /// the old shape failed open for exactly these tenants, skipping the
+    /// per-message gates the flat path enforces. Serving under a hostname
+    /// label with the peer's key must behave identically to serving under
+    /// the IP label.
+    #[tokio::test]
+    async fn a_hostname_tenant_label_is_served_like_an_ip_one() {
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let finished = tokio::spawn(async move {
+            let mut server = server;
+            let mut assembler = Assembler::with_limit(1024);
+            let mut budget = BufferBudget::new(std::sync::Arc::new(tokio::sync::Semaphore::new(
+                1024 * 1024,
+            )));
+            let frame = Frame {
+                opcode: Opcode::Text,
+                fin: true,
+                payload: b"hi".to_vec(),
+            };
+            dispatch_frame(
+                &mut server,
+                &Echo,
+                &mut assembler,
+                frame,
+                &mut budget,
+                &test_ctx_for("shop.example.com"),
+            )
+            .await
+        });
+
+        // The echo arrives addressed by label, gated by key: no close, no
+        // refusal — a hostname tenant is a tenant like any other.
+        let mut echo = [0u8; 4];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut echo),
+        )
+        .await
+        .expect("the echo must arrive promptly")
+        .expect("the echo is complete");
+        assert_eq!(echo, [0x81, 0x02, b'h', b'i']);
+        drop(client);
+        assert_eq!(
+            finished.await.expect("the server task ends"),
+            None,
+            "an in-cap message under a hostname label is served, not refused"
+        );
+    }
+
+    /// A ping flood is answered up to the budget, then closed with `1011`.
+    ///
+    /// Every ping costs the server a `write_all` plus a flush, and pongs
+    /// bypass the process budget — so an unbounded rate is unbounded write
+    /// syscalls with no shed path. Twenty pings per ten seconds is two
+    /// orders of magnitude past any keepalive cadence; past it the
+    /// connection closes rather than answering forever, which also stops
+    /// answered pings from holding the slot past the idle bound for free.
+    #[tokio::test]
+    async fn a_ping_flood_closes_with_1011() {
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let finished = tokio::spawn(async move {
+            let mut server = server;
+            run_frames(&mut server, &Echo, Vec::new(), &test_ctx()).await
+        });
+
+        // Twenty-five masked empty pings in one write: [0x89, 0x80, mask×4].
+        let mut flood = Vec::with_capacity(25 * 6);
+        for i in 0..25u8 {
+            flood.extend_from_slice(&[0x89, 0x80, i, i, i, i]);
+        }
+        tokio::io::AsyncWriteExt::write_all(&mut client, &flood)
+            .await
+            .expect("the flood must send");
+
+        // The first twenty earn pongs; the twenty-first closes with 1011
+        // instead of answering forever.
+        let mut pongs = 0u32;
+        let code = loop {
+            let mut head = [0u8; 2];
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::io::AsyncReadExt::read_exact(&mut client, &mut head),
+            )
+            .await
+            .expect("the server must answer or close promptly")
+            .expect("frames, not EOF");
+            if head[0] == 0x8a {
+                pongs += 1;
+                continue;
+            }
+            assert_eq!(head[0], 0x88, "the refusal must be a close frame: {head:?}");
+            // An empty close would be code-only, but the refusal carries a
+            // reason — read it and check the code leads.
+            let len = usize::from(head[1] & 0x7f);
+            let mut rest = vec![0u8; len];
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut rest)
+                .await
+                .expect("the close payload must arrive");
+            break u16::from_be_bytes([rest[0], rest[1]]);
+        };
+        assert!(pongs <= 20, "at most the budget is answered: {pongs}");
+        assert_eq!(code, 1011, "a ping flood is a policy close");
+        drop(client);
+        assert_eq!(
+            finished.await.expect("the server task ends"),
+            WsOutcome::ProtocolError
         );
     }
 }

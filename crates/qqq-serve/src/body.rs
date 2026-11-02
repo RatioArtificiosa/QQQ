@@ -399,9 +399,18 @@ impl BodyReader {
         let line = self.read_line(io, MAX_CHUNK_SIZE_LINE).await?;
         // A chunk size may carry extensions after `;`. They are parsed away and
         // discarded: V1 defines none, and a decoder that ignored them without
-        // skipping them would misread the size.
-        let digits = line.split(';').next().unwrap_or("").trim();
-        if digits.is_empty() {
+        // skipping them would misread the size. OWS is SP/HTAB only
+        // (RFC 9110 §5.5): Unicode `trim` would strip U+2001/A0 and admit
+        // what a strict proxy refuses. Hex digits only: `from_str_radix`
+        // accepts a leading `+`, and `+5` decoding as 5 here while a proxy
+        // rejects the size line is the same smuggling-adjacent disagreement
+        // as the `+CL` row, one framing later.
+        let digits = line
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c| c == ' ' || c == '\t');
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(BodyError::BadChunkSize { line });
         }
         u64::from_str_radix(digits, 16).map_err(|_| BodyError::BadChunkSize { line })
@@ -640,6 +649,40 @@ mod tests {
             matches!(e, BodyError::BadFraming { .. }),
             "bare LF names the line, not the terminator: {e:?}"
         );
+    }
+
+    /// A `+`-prefixed chunk size is refused: `u64::from_str_radix`
+    /// accepts a leading `+`, so without a digits-only guard `+5`
+    /// decodes as 5 here while a strict proxy rejects the size line —
+    /// the same smuggling-adjacent disagreement as the `+CL` row, one
+    /// framing later. Unicode padding is refused the same way: OWS is
+    /// SP/HTAB only, so U+2001 around a size must not trim away.
+    /// SP/HTAB padding stays accepted, exactly like `Content-Length` —
+    /// the two framings agree about what whitespace is.
+    #[tokio::test]
+    async fn a_plus_prefixed_chunk_size_is_refused() {
+        for size in [b"+5".as_slice(), "\u{2001}5".as_bytes()] {
+            let mut wire = Vec::from(size);
+            wire.extend_from_slice(b"\r\nhello\r\n0\r\n\r\n");
+            let mut reader = BodyReader::from_head(&chunked_head(), u64::MAX).expect("framing ok");
+            let mut io: &[u8] = &wire;
+            let e = loop {
+                match reader.poll_chunk(&mut io, 8 * 1024).await {
+                    Ok(BodyChunk::Data(_)) => {}
+                    Ok(BodyChunk::End) => panic!("a signed size must not parse"),
+                    Err(e) => break e,
+                }
+            };
+            assert!(
+                matches!(e, BodyError::BadChunkSize { .. }),
+                "size {size:?} must refuse: {e:?}"
+            );
+        }
+        // SP/HTAB padding parses, like `Content-Length` after its OWS strip.
+        let mut reader = BodyReader::from_head(&chunked_head(), u64::MAX).expect("framing ok");
+        let mut io: &[u8] = b" 5\t\r\nhello\r\n0\r\n\r\n";
+        let body = collect_all(&mut reader, &mut io).await.expect("OWS parses");
+        assert_eq!(body, b"hello");
     }
 
     /// A missing chunk terminator is refused, not skipped: without the CRLF

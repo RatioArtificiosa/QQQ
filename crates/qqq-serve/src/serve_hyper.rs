@@ -57,7 +57,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use futures_core::Stream as _;
+use http_body::Body as _;
 use http_body_util::{BodyExt as _, BodyStream};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -157,15 +157,67 @@ pub async fn serve_hyper_tls(
     let (_, connection) = stream.get_ref();
     let negotiated = crate::tls::Negotiated::of(connection);
     let peer = crate::tls::PeerIdentity::from_verified(connection.peer_certificates());
+    // Only the ALPN values this crate serves reach a driver: an unknown
+    // negotiated protocol has no driver, and feeding its bytes to the
+    // HTTP/1.1 parser would parse one protocol's bytes as another's — a
+    // confused deputy, not a fallback. `None` still routes to HTTP/1.1
+    // (RFC 9113 §3.1), but a *named unknown* closes with no HTTP response
+    // at all, since no response would be in a language the peer speaks.
     let served = match negotiated.http_version() {
         "HTTP/2" => serve_hyper_h2(stream, table, dispatch, limits, ctx).await,
-        _ => serve_hyper_h1(stream, table, dispatch, limits, ctx).await,
+        "HTTP/1.1" => serve_hyper_h1(stream, table, dispatch, limits, ctx).await,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!(
+                    "negotiated an ALPN protocol this server does not serve: {:?}",
+                    negotiated.alpn
+                ),
+            ));
+        }
     };
     Ok(TlsServed {
         served,
         negotiated,
         peer,
     })
+}
+
+/// Classify a hyper connection error the way `ReadOutcome` classifies a
+/// head-read failure: a timeout is the server ending the connection on
+/// a timer, a vanished peer is a close, and a named failure is a
+/// protocol error — never a silent close that blinds the operator
+/// metric `Connection` populates via `CloseReason::ProtocolError`.
+///
+/// Transport failures (an `io::Error` anywhere in the cause chain: RST,
+/// peer gone) read exactly like the in-house `Ok(0) | Err(_)`: the
+/// bytes stopped with no protocol fact established. Everything else
+/// with a name — hyper parse failures, h2 compression/flow-control
+/// violations, GOAWAY-with-error — is the peer violating the protocol,
+/// which is what `Outcome::ProtocolError` counts.
+fn map_hyper_error(error: &hyper::Error) -> Served {
+    use std::error::Error as _;
+    if error.is_timeout() {
+        return Served::HeaderTimeout;
+    }
+    if error.is_parse() {
+        return Served::BadRequest;
+    }
+    if error.is_closed()
+        || error.is_canceled()
+        || error.is_incomplete_message()
+        || error.is_body_write_aborted()
+    {
+        return Served::ClientClosed;
+    }
+    let mut cause = error.source();
+    while let Some(err) = cause {
+        if err.downcast_ref::<std::io::Error>().is_some() {
+            return Served::ClientClosed;
+        }
+        cause = err.source();
+    }
+    Served::BadRequest
 }
 
 /// Serve one connection through hyper's HTTP/1.1 driver.
@@ -200,6 +252,7 @@ where
         watch: Arc::new(IdleWatch::new()),
         ws_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
         stream_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+        close_requested: Arc::new(tokio::sync::Notify::new()),
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     crate::transport::apply_http1(&mut builder, &state.limits);
@@ -248,8 +301,7 @@ where
                 // client going away.
                 break match result {
                     Ok(()) => Served::ClientClosed,
-                    Err(error) if error.is_timeout() => Served::HeaderTimeout,
-                    Err(_error) => Served::ClientClosed,
+                    Err(error) => map_hyper_error(&error),
                 };
             }
             () = shutdown.wait() => {
@@ -366,6 +418,7 @@ where
         watch: Arc::new(IdleWatch::new()),
         ws_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
         stream_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+        close_requested: Arc::new(tokio::sync::Notify::new()),
     });
     let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     crate::transport::apply_http2(&mut builder, &state.limits);
@@ -395,17 +448,32 @@ where
     let base = loop {
         tokio::select! {
             result = &mut connection => {
-                // h2 has no per-request read timeouts, so every connection
-                // error is the connection's outcome, not a request's.
                 break match result {
                     Ok(()) => Served::ClientClosed,
-                    Err(_error) => Served::ClientClosed,
+                    Err(error) => map_hyper_error(&error),
                 };
             }
             () = shutdown.wait() => {
                 connection.as_mut().graceful_shutdown();
                 let _ = tokio::time::timeout(drain, &mut connection).await;
                 break Served::Drained;
+            }
+            () = state.close_requested.notified() => {
+                // An over-ceiling 503 was just answered: end the
+                // connection instead of holding its slot to the idle
+                // bound. `graceful_shutdown` sends GOAWAY at once; the
+                // TCP close follows when the client goes away — a
+                // well-behaved peer closes on GOAWAY — or at the drain
+                // bound, whichever comes first. The bound is the same
+                // drain the shutdown arm uses: a post-GOAWAY client that
+                // never closes is bounded by drain (30 s default), not
+                // idle. Reported as the same `RequestLimit` the
+                // in-house path reports past its ceiling. H1 never sets
+                // the flag — `Connection: close` already ends the
+                // connection there.
+                connection.as_mut().graceful_shutdown();
+                let _ = tokio::time::timeout(drain, &mut connection).await;
+                break Served::RequestLimit;
             }
             _ = ticker.tick() => {
                 // Two-tier bound: before the first answer the connection
@@ -574,6 +642,13 @@ struct State {
     /// matches the abandon — no record fires for a stream the
     /// server cut, exactly as none fires in-house.
     stream_tasks: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Asked to end after the current answer: set by `refuse_ceiling`
+    /// on H2, where no per-response close signal exists. The driver
+    /// arm below turns it into `graceful_shutdown` + GOAWAY, so an
+    /// over-ceiling connection dies after its 503 instead of holding
+    /// its slot to the idle bound. H1 never sets it — `Connection:
+    /// close` already ends the connection there.
+    close_requested: Arc<tokio::sync::Notify>,
 }
 
 /// Service-observable activity for the idle bound, mirroring
@@ -792,6 +867,16 @@ fn refuse_ceiling(
 ) -> Option<hyper::Response<WatchBody>> {
     if ceiling_for(served, state.limits.max_requests_per_connection) != Ceiling::Refuse {
         return None;
+    }
+    if state.protocol == Protocol::H2 {
+        // No per-response close signal exists on H2 (`Connection:` is
+        // forbidden), so without this the over-ceiling 503 persists
+        // while the connection holds its slot to the idle bound. Ask
+        // the driver for GOAWAY after the 503 instead — the same close
+        // H1 gets from `close_after`, and the same `RequestLimit` end
+        // the in-house path reports. The close lands when the peer
+        // goes away or at the drain bound (see the driver arm).
+        state.close_requested.notify_one();
     }
     let response = Response::text(503, "this connection reached its request ceiling");
     let mapped = match state.protocol {
@@ -1280,6 +1365,7 @@ async fn serve_upgrade(
     let ws_ctx = crate::ws_conn::WsContext {
         peer: state.ctx.peer,
         tenant: tenant.to_owned(),
+        tenant_key: state.ctx.tenant,
         logger: state.ctx.logger.clone(),
         trace: state.ctx.trace,
         span,
@@ -1476,6 +1562,7 @@ async fn serve_h2_connect(
     let ws_ctx = crate::ws_conn::WsContext {
         peer: state.ctx.peer,
         tenant: tenant.to_owned(),
+        tenant_key: state.ctx.tenant,
         logger: state.ctx.logger.clone(),
         trace: state.ctx.trace,
         span,
@@ -2155,7 +2242,29 @@ async fn answer_flat(
 ) -> hyper::Response<WatchBody> {
     let ctx = &state.ctx;
     let route_started = Instant::now();
-    let response = dispatch_off_thread(&state.table, dispatch, &head, path, &body, tenant).await;
+    // Bounded like the in-house `serve_flat_request`: a parked handler must
+    // not hold the hyper executor thread forever. On expiry the server
+    // answers 504 (a timeout, never a crash) and closes after: the detached
+    // handler may still complete in the background, so the connection cannot
+    // safely serve another request.
+    let (response, timed_out) = match tokio::time::timeout(
+        state.limits.drain_timeout,
+        dispatch_off_thread(&state.table, dispatch, &head, path, &body, tenant),
+    )
+    .await
+    {
+        Ok(response) => (response, false),
+        Err(_) => (
+            response::from_error(&response::error_response(
+                &qqq_core::Error::new(
+                    qqq_core::ErrorCode::EpochDeadlineExceeded,
+                    "the handler exceeded its time bound",
+                ),
+                false,
+            )),
+            true,
+        ),
+    };
     emit_span_sampled(
         &ctx.logger,
         ctx.sampler,
@@ -2181,8 +2290,9 @@ async fn answer_flat(
     // headers are forbidden), so the warned response serves plainly and
     // the over-ceiling answer stays a persisting `503` — a GOAWAY-based
     // warning is drain-commit work, and the budget holds either way.
-    if ceiling_for(served, state.limits.max_requests_per_connection) == Ceiling::Warn
-        && state.protocol == Protocol::H1
+    if timed_out
+        || (ceiling_for(served, state.limits.max_requests_per_connection) == Ceiling::Warn
+            && state.protocol == Protocol::H1)
     {
         return close_after(rendered);
     }
@@ -2332,10 +2442,18 @@ fn render_inner(
     } else {
         Bytes::copy_from_slice(&response.body)
     };
-    // `Content-Length` always describes the real body, even when the
-    // bytes are omitted — mirroring the in-house writer, so a HEAD
-    // response does not claim the representation is empty.
-    builder = builder.header(hyper::header::CONTENT_LENGTH, real_len.to_string());
+    // `Content-Length` describes the real body — except when the status
+    // forbids one, where the in-house writer emits `0` for an empty body
+    // rather than the handler's would-be length: a `204` with
+    // `Content-Length: 1048576` and no bytes tells the client that bytes
+    // are coming which never arrive. A HEAD keeps the representation's
+    // length (RFC 9110 §9.3.2); a bodyless status carries no body at all.
+    let content_len = if crate::response::forbids_body(response.status) {
+        0
+    } else {
+        real_len
+    };
+    builder = builder.header(hyper::header::CONTENT_LENGTH, content_len.to_string());
     builder
         .body(WatchBody::new(body, watch))
         .unwrap_or_else(|_| {
@@ -2375,7 +2493,13 @@ fn framing_of(headers: &hyper::HeaderMap) -> Result<Framing, ParseError> {
     // case-insensitively, so the difference is representation.
     for (name, value) in headers {
         let name = name.as_str();
-        let value = value.to_str().map_err(|_| ParseError::InvalidUtf8)?.trim();
+        // OWS is SP/HTAB only (RFC 9110 §5.5), like `http1::parse_head`:
+        // Unicode `trim` would strip U+2001/A0 and admit what a strict
+        // proxy refuses.
+        let value = value
+            .to_str()
+            .map_err(|_| ParseError::InvalidUtf8)?
+            .trim_matches(|c| c == ' ' || c == '\t');
         if name.eq_ignore_ascii_case("content-length") {
             if content_length.is_some() {
                 return Err(ParseError::DuplicateContentLength);
@@ -2520,6 +2644,32 @@ fn map_head_h2<B>(request: &hyper::Request<B>) -> Result<RequestHead, ParseError
             value: "h2 must not carry Transfer-Encoding".to_owned(),
         });
     }
+    // RFC 9113 §8.2.2 forbids connection-specific headers, not just
+    // `Transfer-Encoding`: `connection`, `keep-alive`,
+    // `proxy-connection` and `upgrade` pass through as ordinary headers
+    // on a lenient map while a strict peer 400s them — and a smuggled
+    // `Connection: close` confuses downstream H1 re-encoding. Reuses
+    // `UnsupportedTransferEncoding`, like the TE check above: the value
+    // names the header, and no new public variant is minted for it.
+    if let Some((k, _)) = framing.headers.iter().find(|(k, _)| {
+        k.eq_ignore_ascii_case("connection")
+            || k.eq_ignore_ascii_case("keep-alive")
+            || k.eq_ignore_ascii_case("proxy-connection")
+            || k.eq_ignore_ascii_case("upgrade")
+    }) {
+        return Err(ParseError::UnsupportedTransferEncoding {
+            value: format!("h2 must not carry {k}"),
+        });
+    }
+    // The count cap has no hyper knob, so it is enforced here, like the
+    // size cap above is enforced by `max_header_list_size`: without this a
+    // 500-header block passes hyper and fails the in-house decoder — a
+    // fingerprinting and memory differential on the same request.
+    if framing.headers.len() > crate::http1::MAX_HEADERS {
+        return Err(ParseError::TooManyHeaders {
+            limit: crate::http1::MAX_HEADERS,
+        });
+    }
     let mut headers = framing.headers;
     // `:authority` is the h2 host: it sorts first, like a request line
     // the client actually addressed to us. A `host` header beside it
@@ -2538,6 +2688,17 @@ fn map_head_h2<B>(request: &hyper::Request<B>) -> Result<RequestHead, ParseError
         }
         headers.retain(|(k, _)| !k.eq_ignore_ascii_case("host"));
         headers.insert(0, ("host".to_owned(), authority.to_owned()));
+    }
+    // RFC 9113 §8.3.1 requires `:authority` (or `host`): the h2 stack
+    // tolerates its absence, so this is the enforcement point. Hostless
+    // H2 would otherwise proceed with an empty host where the H1 path
+    // answers 400 — and the tenant/loopback gates below would read a
+    // value no client sent. A `host` header alone suffices when
+    // `:authority` is absent.
+    if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("host")) {
+        return Err(ParseError::TargetNotAbsolute {
+            target: "(missing :authority/host)".to_owned(),
+        });
     }
     Ok(RequestHead {
         method,
@@ -2616,7 +2777,7 @@ async fn collect_body(
     if head.chunked {
         return collect_streamed(incoming, max_bytes).await;
     }
-    collect_framed(incoming, head, max_bytes).await
+    collect_framed(incoming, head, max_bytes, false).await
 }
 
 /// Collect an HTTP/2 body: declared lengths go through the shared
@@ -2635,7 +2796,7 @@ async fn collect_h2_body(
 ) -> Option<(BodyBytes, u64)> {
     match head.content_length {
         Some(0) => Some((BodyBytes::Buffered(Vec::new()), 0)),
-        Some(_) => collect_framed(incoming, head, max_bytes).await,
+        Some(_) => collect_framed(incoming, head, max_bytes, true).await,
         None => {
             let (body, received) = collect_streamed(incoming, max_bytes).await?;
             if received == 0 {
@@ -2648,10 +2809,27 @@ async fn collect_h2_body(
 
 /// Collect through the shared [`BodyReader`]: caps, chunked decoding,
 /// and refusal shapes identical to the in-house path.
+///
+/// `strict_end` is the H2-only overrun check: after a declared length
+/// completes, the transport must be cleanly done (no buffered
+/// remainder, end-of-stream seen) or the request refuses. Extra DATA
+/// past `Content-Length` on the same H2 stream would otherwise be
+/// silently dropped while the handler receives first-N bytes as a
+/// complete body — RFC 9110 calls that mismatch malformed. H1 passes
+/// `false`: excess bytes there are the next pipelined request, which
+/// is correct framing, not an overrun.
+///
+/// A stream the client never ends (exact bytes, no `END_STREAM`, idle
+/// after) also refuses: it is indistinguishable from an overrun in
+/// progress, and failing closed is the safe direction. H2 trailers
+/// arriving after the declared length likewise refuse — the flat path
+/// has no trailer contract, and silently skipping them already
+/// discards them today, so refusing is explicit rather than new.
 async fn collect_framed(
     incoming: Incoming,
     head: &RequestHead,
     max_bytes: u64,
+    strict_end: bool,
 ) -> Option<(BodyBytes, u64)> {
     let Ok(mut reader) = BodyReader::from_head(head, max_bytes) else {
         return None;
@@ -2662,6 +2840,9 @@ async fn collect_framed(
         match reader.poll_chunk(&mut transport, 8 * 1024).await {
             Ok(BodyChunk::Data(chunk)) => body.extend_from_slice(&chunk),
             Ok(BodyChunk::End) => {
+                if strict_end && !transport.is_end_stream() {
+                    return None;
+                }
                 let received = reader.bytes_read();
                 return Some((BodyBytes::Buffered(body), received));
             }
@@ -2699,19 +2880,24 @@ async fn collect_streamed(incoming: Incoming, max_bytes: u64) -> Option<(BodyByt
     }
 }
 
-/// Adapt hyper's body stream to the [`AsyncRead`] the shared
-/// [`BodyReader`] polls.
+/// Adapt hyper's body to the [`AsyncRead`] the shared [`BodyReader`]
+/// polls.
 ///
 /// Data frames become read bytes; trailer and informational frames are
 /// skipped (the flat path has no trailer contract, matching the
 /// in-house reader, which never sees them); transport end becomes EOF,
 /// which the reader interprets — truncated bodies fail there, not here.
 ///
+/// The adapter polls [`Incoming`] directly rather than through
+/// [`BodyStream`]: the stream adapter's `is_end_stream` is always
+/// false, which would blind the overrun check below. Polling the body
+/// itself keeps the end state visible.
+///
 /// Soundness of the manual `Unpin`: the struct owns its pinned body
 /// through a `Box`, so moving the adapter moves the pointer, never the
 /// body. The leftover bytes move freely.
 struct IncomingReader {
-    body: Pin<Box<BodyStream<Incoming>>>,
+    body: Pin<Box<Incoming>>,
     leftover: Option<Bytes>,
 }
 
@@ -2720,9 +2906,18 @@ impl Unpin for IncomingReader {}
 impl IncomingReader {
     fn new(incoming: Incoming) -> Self {
         Self {
-            body: Box::pin(BodyStream::new(incoming)),
+            body: Box::pin(incoming),
             leftover: None,
         }
+    }
+
+    /// Whether the transport is cleanly done with no unread bytes: the
+    /// inner body ended AND no frame remainder sits in `leftover`. A
+    /// `false` here after a declared length completed means the peer
+    /// sent more than it declared (or never ended the stream, which is
+    /// indistinguishable from an overrun in progress).
+    fn is_end_stream(&self) -> bool {
+        self.leftover.is_none() && self.body.is_end_stream()
     }
 }
 
@@ -2742,7 +2937,7 @@ impl AsyncRead for IncomingReader {
             }
             return Poll::Ready(Ok(()));
         }
-        match this.body.as_mut().poll_next(cx) {
+        match this.body.as_mut().poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Ok(data) = frame.into_data() {
                     this.leftover = Some(data);
@@ -3010,6 +3205,44 @@ mod tests {
         );
     }
 
+    /// H2 without `:authority` and without `host` is refused: RFC 9113
+    /// §8.3.1 requires one of them, and proceeding hostless bypasses
+    /// the Host-based tenant and loopback gates the H1 path enforces
+    /// with 400. A `host` header alone suffices when `:authority` is
+    /// absent (origin-form from a client that speaks it).
+    #[test]
+    fn h2_without_any_host_is_refused() {
+        let bare = hyper::Request::builder()
+            .method("GET")
+            .uri("/hello")
+            .body(())
+            .unwrap_or_else(|_| hyper::Request::new(()));
+        assert!(map_head_h2(&bare).is_err(), "hostless h2 must not proceed");
+        let hosted = hyper::Request::builder()
+            .method("GET")
+            .uri("/hello")
+            .header("host", "localhost")
+            .body(())
+            .unwrap_or_else(|_| hyper::Request::new(()));
+        let head = map_head_h2(&hosted).expect("a host header suffices");
+        assert_eq!(head.header("host"), Some("localhost"));
+    }
+
+    /// H2 forbids connection-specific headers (RFC 9113 §8.2.2), not
+    /// just `Transfer-Encoding`: `connection`, `keep-alive`,
+    /// `proxy-connection` and `upgrade` pass through as ordinary
+    /// headers on a lenient map while a strict peer 400s them — and a
+    /// smuggled `Connection: close` confuses downstream H1 re-encoding.
+    #[test]
+    fn h2_refuses_connection_specific_headers() {
+        for header in ["connection", "keep-alive", "proxy-connection", "upgrade"] {
+            assert!(
+                map_head_h2(&h2_get("http://localhost/a", &[(header, "close")])).is_err(),
+                "{header} on h2"
+            );
+        }
+    }
+
     /// The shared target rules hold on h2: over-long refuses, and a
     /// target that does not start at `/` is not routable.
     #[test]
@@ -3037,5 +3270,30 @@ mod tests {
                 "TE: {te} on h2"
             );
         }
+    }
+
+    /// The header count cap holds on h2, like the size cap does.
+    ///
+    /// Hyper offers no count knob, so a 500-header block would pass hyper
+    /// and fail the in-house decoder — a fingerprinting and memory
+    /// differential on the same request. Counted here, refused with the
+    /// in-house taxonomy.
+    #[test]
+    fn header_count_refuses_on_h2() {
+        let many: Vec<(String, String)> = (0..=crate::http1::MAX_HEADERS)
+            .map(|i| (format!("x-pad-{i}"), "v".to_owned()))
+            .collect();
+        let refs: Vec<(&str, &str)> = many.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let mut builder = hyper::Request::builder()
+            .method("GET")
+            .uri("http://localhost/a");
+        for (name, value) in &refs {
+            builder = builder.header(*name, *value);
+        }
+        let request = builder.body(()).unwrap_or_else(|_| hyper::Request::new(()));
+        assert!(matches!(
+            map_head_h2(&request),
+            Err(ParseError::TooManyHeaders { .. })
+        ));
     }
 }

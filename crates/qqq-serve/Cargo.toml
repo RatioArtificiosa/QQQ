@@ -110,13 +110,14 @@ bytes = "1"
 # names it. Version 0.26.5, MIT/Apache-2.0 — inside deny.toml,
 # verified by `cargo deny check`.
 tokio-rustls = "0.26.5"
-# Polling hyper's body stream inside the `AsyncRead` adapter (`F-16`):
-# `BodyStream` speaks `futures_core::Stream`, and the adapter is the only
-# place that polls it.
-futures-core = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 rcgen = { version = "0.14.10", features = ["pem"] }
+# Test-only clock for expired/not-yet-valid fixtures: `rcgen`'s
+# `not_before`/`not_after` are `time::OffsetDateTime`, and only tests
+# construct them. Unifies with the `time 0.3.55` already locked via
+# rcgen, so no new resolution.
+time = "0.3"
 # **Dev only, deliberately.** `access_log` hand-writes its JSON encoder so the
 # crate has no serialization dependency on a path that runs per request, and so the
 # control-character escaping is explicit rather than inherited. The tests parse the

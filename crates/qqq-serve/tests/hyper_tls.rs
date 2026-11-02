@@ -448,6 +448,50 @@ async fn tls_alpn_h2_routes_to_the_h2_driver() {
     );
 }
 
+/// A negotiated ALPN the server has no driver for closes without HTTP.
+///
+/// Feeding a custom protocol's bytes to the HTTP/1.1 parser would parse
+/// one protocol's bytes as another's — a confused deputy, not a fallback.
+/// `None` still routes to HTTP/1.1 (RFC 9113 §3.1), but a *named unknown*
+/// has no response that would be in a language the peer speaks, so the
+/// server ends the connection instead of answering.
+#[tokio::test]
+async fn tls_unknown_alpn_closes_without_http() {
+    let server_cert = ServerCert::generate();
+    let tls = TlsConfig::new(server_cert.source())
+        .with_alpn(&[b"custom-proto"])
+        .build()
+        .expect("a custom ALPN offer builds");
+    let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer");
+    let hyper = TlsServer::start(
+        tls,
+        table_with(&[(Method::Get, "/hello", "h")]),
+        Dispatch::flat(hello_handler()),
+        default_limits(),
+        Pieces::bare(),
+        peer,
+    )
+    .await;
+    let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut client = connect(hyper.addr, &server_cert.der, &[b"custom-proto"], None).await;
+        // The handshake agrees on the custom protocol; then the server must
+        // close rather than speak HTTP at it. No status line may arrive.
+        let mut byte = [0u8; 1];
+        assert!(
+            client.read_exact(&mut byte).await.is_err(),
+            "no HTTP may be spoken for an unknown ALPN"
+        );
+        drop(client);
+        hyper.driver.await.expect("server task joins")
+    })
+    .await
+    .expect("the server must close promptly");
+    assert!(
+        outcome.is_err(),
+        "an unknown ALPN has no driver and no response: {outcome:?}"
+    );
+}
+
 /// An ALPN-`http/1.1` client gets the h1 driver over TLS: raw GET,
 /// 200 + body, negotiated protocol reported as `http/1.1`.
 #[tokio::test]

@@ -407,9 +407,16 @@ impl RequestHead {
     }
 
     /// The query string, without the leading `?`.
+    ///
+    /// `None` when no `?` precedes any `#`: a `?` inside the fragment
+    /// (`/a#frag?x=1`) is fragment text, not a query separator, so it
+    /// must not read as one.
     #[must_use]
     pub fn query(&self) -> Option<&str> {
         let q = self.target.find('?')?;
+        if self.target[..q].contains('#') {
+            return None;
+        }
         let rest = &self.target[q.saturating_add(1)..];
         let end = rest.find('#').unwrap_or(rest.len());
         Some(&rest[..end])
@@ -447,7 +454,9 @@ impl RequestHead {
                 continue;
             }
             for token in value.split(',') {
-                let token = token.trim();
+                // OWS around a token is SP/HTAB only, like every other
+                // framing value in this module.
+                let token = token.trim_matches(|c| c == ' ' || c == '\t');
                 if token.eq_ignore_ascii_case("close") {
                     seen_close = true;
                 } else if token.eq_ignore_ascii_case("keep-alive") {
@@ -718,9 +727,11 @@ fn parse_header_block<'a>(
             });
         }
         // Leading and trailing whitespace around a field value is optional and
-        // must be stripped (RFC 9110 §5.5). Inner whitespace is significant and
+        // must be stripped (RFC 9110 §5.5). OWS is SP/HTAB only: Unicode
+        // `trim` would strip U+2001/A0 around a framing value and admit
+        // what a strict proxy refuses. Inner whitespace is significant and
         // is preserved.
-        let value = raw_value.trim();
+        let value = raw_value.trim_matches(|c| c == ' ' || c == '\t');
 
         // -- framing headers, validated rather than trusted ---------------
         if name.eq_ignore_ascii_case("content-length") {
@@ -963,6 +974,34 @@ mod tests {
 
     fn ok(s: &str) -> RequestHead {
         parse(s).unwrap_or_else(|e| panic!("`{s}` should parse: {e}"))
+    }
+
+    /// OWS is SP/HTAB only (RFC 9110 §5.5): a `Content-Length`
+    /// padded with U+2001 must not trim down to digits and parse.
+    /// `str::trim` strips Unicode whitespace, which a strict proxy
+    /// parsing OWS as SP/HTAB would not — a length disagreement.
+    #[test]
+    fn unicode_padding_around_content_length_is_refused() {
+        let e = parse("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: \u{2001}5\r\n\r\n")
+            .expect_err("unicode-padded length must be refused");
+        assert!(
+            matches!(e, ParseError::InvalidContentLength { .. }),
+            "{e:?}"
+        );
+    }
+
+    /// A `?` inside the fragment is not a query: `/a#frag?x=1` has no
+    /// query string, so `query()` returns `None` and `path()` stops at
+    /// the `#`. Without this, routing and query-reading disagree about
+    /// what the target names.
+    #[test]
+    fn query_is_absent_when_the_question_mark_is_in_the_fragment() {
+        let head = ok("GET /a#frag?x=1 HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert_eq!(head.path(), "/a");
+        assert_eq!(head.query(), None);
+        let head = ok("GET /a?x=1#frag HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert_eq!(head.path(), "/a");
+        assert_eq!(head.query(), Some("x=1"));
     }
 
     /// **Malformed heads are refused, each for its own named reason.**

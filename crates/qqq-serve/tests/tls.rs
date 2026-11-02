@@ -140,6 +140,41 @@ impl CertFiles {
         CertificateSource::files(self.cert.clone(), self.key.clone())
     }
 
+    /// Generate a self-signed certificate with an explicit validity window.
+    ///
+    /// Expired (or not-yet-valid) fixtures must be generated, never
+    /// committed: a checked-in expired certificate is indistinguishable
+    /// from a live misconfiguration, and the module doc already forbids
+    /// committed fixtures for exactly this reason.
+    fn generate_with_window(
+        cn: &str,
+        not_before: time::OffsetDateTime,
+        not_after: time::OffsetDateTime,
+    ) -> Self {
+        let mut params =
+            rcgen::CertificateParams::new(vec![cn.to_owned()]).expect("rcgen must accept the SAN");
+        params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, cn);
+            dn
+        };
+        params.not_before = not_before;
+        params.not_after = not_after;
+        let key = rcgen::KeyPair::generate().expect("rcgen must generate a key");
+        let cert = params
+            .self_signed(&key)
+            .expect("rcgen must self-sign with the generated key");
+
+        let dir = tempdir::TempDir::new();
+        let cert_path = dir.write("cert.pem", cert.pem().as_bytes());
+        let key_path = dir.write("key.pem", key.serialize_pem().as_bytes());
+        Self {
+            dir,
+            cert: cert_path,
+            key: key_path,
+        }
+    }
+
     /// A CA certificate plus a leaf it issued, for chain-building tests.
     ///
     /// Self-signed client certificates (every other test here) verify as
@@ -525,6 +560,65 @@ async fn a_valid_certificate_builds_and_a_real_client_negotiates() {
     assert_eq!(handshake.negotiated.http_version(), "HTTP/1.1");
 }
 
+/// **An expired leaf refuses at startup, naming the file — not at the
+/// first handshake.** A server that starts with a dead certificate logs
+/// nothing and fails every client closed while showing healthy, and
+/// there is no reload path. `QQQ-2002`, like every other load-time
+/// refusal, because the fix is in the deployment, not in any request.
+#[test]
+fn an_expired_certificate_is_refused_at_startup() {
+    let now = time::OffsetDateTime::now_utc();
+    let cert = CertFiles::generate_with_window(
+        SERVER_CN,
+        now - time::Duration::days(2),
+        now - time::Duration::days(1),
+    );
+    let error = TlsConfig::new(cert.source())
+        .build()
+        .expect_err("an expired leaf must not build");
+    assert_eq!(
+        error.code,
+        ErrorCode::ManifestSchemaViolation,
+        "load-time refusal, QQQ-2002: {error:?}"
+    );
+    assert!(
+        error.message.contains("expired"),
+        "the refusal must say expired: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("cert.pem"),
+        "the refusal must name the file: {}",
+        error.message
+    );
+}
+
+/// **A not-yet-valid leaf refuses the same way.** Clock skew and a
+/// premature deploy are the same shape as expiry: a lifetime the
+/// server cannot serve yet.
+#[test]
+fn a_not_yet_valid_certificate_is_refused_at_startup() {
+    let now = time::OffsetDateTime::now_utc();
+    let cert = CertFiles::generate_with_window(
+        SERVER_CN,
+        now + time::Duration::days(1),
+        now + time::Duration::days(2),
+    );
+    let error = TlsConfig::new(cert.source())
+        .build()
+        .expect_err("a future leaf must not build");
+    assert_eq!(
+        error.code,
+        ErrorCode::ManifestSchemaViolation,
+        "load-time refusal, QQQ-2002: {error:?}"
+    );
+    assert!(
+        error.message.contains("not yet valid"),
+        "the refusal must say not yet valid: {}",
+        error.message
+    );
+}
+
 /// **Resumption is pinned off, explicitly — not left to rustls' defaults.**
 ///
 /// `SEC-017` forbids unspecified policy, and resumption was unspecified: the
@@ -545,6 +639,14 @@ fn resumption_is_pinned_off() {
     assert_eq!(
         config.send_tls13_tickets, 0,
         "no stateless tickets without a ticket-key rotation story"
+    );
+    assert_eq!(
+        config.max_tls13_tickets, 0,
+        "no client-requested extra tickets either"
+    );
+    assert!(
+        !config.ticketer.enabled(),
+        "the ticketer must not produce tickets"
     );
     // `session_storage` is an `Arc<dyn ...>` with no equality to assert, so
     // the TLS 1.2 cache is pinned by its concrete type name. Deliberately

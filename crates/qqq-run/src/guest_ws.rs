@@ -120,27 +120,25 @@ impl WebSocketHandler for GuestWsBridge {
             // the tenant's cap closes `1009`, a spent rate window closes
             // `1013` — the same refusals the flat path renders as `413` and
             // `429`, expressed as the close codes a frame-mode client reads.
-            // The tenant label is a peer IP today, so it parses; a future
-            // non-IP label skips the check rather than forging a key.
+            // The key comes from the connection, resolved once at accept
+            // time: re-parsing the tenant *label* here would fail open on
+            // non-IP labels (a mapped hostname has no `IpAddr` form),
+            // silently unlimited the tenants the flat path limits.
+            let key = send.tenant_key();
             if let Some(limits) = limits.as_ref() {
                 let len = u64::try_from(msg_len).unwrap_or(u64::MAX);
-                if let Some(key) = tenant_key_for(&tenant) {
-                    if limits.check_body(key, len).is_err() {
-                        send.send_frame(&Frame::close(1009, "message exceeds tenant body cap"))
-                            .await;
-                        return;
-                    }
-                    if limits
-                        .check_and_record(key, std::time::Instant::now())
-                        .is_err()
-                    {
-                        send.send_frame(&Frame::close(
-                            1013,
-                            "tenant rate exceeded, try again later",
-                        ))
+                if limits.check_body(key, len).is_err() {
+                    send.send_frame(&Frame::close(1009, "message exceeds tenant body cap"))
                         .await;
-                        return;
-                    }
+                    return;
+                }
+                if limits
+                    .check_and_record(key, std::time::Instant::now())
+                    .is_err()
+                {
+                    send.send_frame(&Frame::close(1013, "tenant rate exceeded, try again later"))
+                        .await;
+                    return;
                 }
             }
             // The guest call blocks: run it off the async executor for the
@@ -153,6 +151,22 @@ impl WebSocketHandler for GuestWsBridge {
             // the connection, with 1011.
             match tokio::task::spawn_blocking(move || dispatch(&head, &body, &tenant)).await {
                 Ok(response) => {
+                    // Bound the guest's answer like the question: an
+                    // unbounded response would bypass the caps the request
+                    // obeyed. The frame loop's own send cap backstops this,
+                    // but a backstop that fires names nothing — the 1009
+                    // here names the tenant cap that was exceeded.
+                    if let Some(limits) = limits.as_ref() {
+                        let out_len = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+                        if limits.check_body(send.tenant_key(), out_len).is_err() {
+                            send.send_frame(&Frame::close(
+                                1009,
+                                "response exceeds tenant body cap",
+                            ))
+                            .await;
+                            return;
+                        }
+                    }
                     // Best-effort: a failed send means the peer is gone, and
                     // the frame loop discovers that on its next read. Nothing
                     // further to do for this message.
@@ -165,20 +179,6 @@ impl WebSocketHandler for GuestWsBridge {
             }
         })
     }
-}
-
-/// The tenant key for a serve label, when the label is a peer IP.
-///
-/// Serve labels are peer IPs today (`tenant_of` keys on the client IP),
-/// so this parses. A future authenticated subject would not parse and
-/// skips the per-message check rather than mapping to another tenant's
-/// key — fail-open on the check is wrong, but forging a key is worse,
-/// and the handshake gates already ran for the connection.
-fn tenant_key_for(tenant: &str) -> Option<qqq_host::tenant::TenantKey> {
-    tenant
-        .parse::<std::net::IpAddr>()
-        .ok()
-        .map(qqq_host::tenant::tenant_key)
 }
 
 #[cfg(test)]

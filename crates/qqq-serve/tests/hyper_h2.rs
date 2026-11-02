@@ -46,7 +46,7 @@ use qqq_serve::serve_hyper::serve_hyper_h2;
 use qqq_serve::server::{
     ConnectionContext, ConnectionId, Dispatch, Handler, RouteMatch, Served, TenantDispatch,
 };
-use qqq_serve::transport::{HyperLimits, hyper_limits_for};
+use qqq_serve::transport::{hyper_limits_for, HyperLimits};
 use qqq_serve::ws::WsConfig;
 use qqq_serve::{ConnectionConfig, Response};
 
@@ -482,6 +482,43 @@ async fn a_silent_h2_connection_is_closed_by_the_header_bound() {
         .expect_err("EOF, not bytes: nothing was ever sent");
     let outcome = hyper.finish().await;
     assert_eq!(outcome, Served::IdleTimeout);
+}
+
+/// A connection that speaks no H2 ends as a protocol error, not a
+/// silent close: a 24-byte garbage preface fails the handshake with a
+/// named h2 error, which is the peer violating the protocol — what
+/// `Outcome::ProtocolError` counts. Collapsing it to `ClientClosed`
+/// would blind the operator metric to handshake attacks.
+#[tokio::test]
+async fn h2_garbage_preface_is_a_protocol_error() {
+    let routes = [(Method::Get, "/hello", "h")];
+    let hyper = HyperH2::start(
+        table_with(&routes),
+        Dispatch::flat(hello_handler()),
+        default_limits(),
+        Pieces::bare(),
+    )
+    .await;
+    let mut stream = TcpStream::connect(hyper.addr).await.expect("connect");
+    // A full preface length of wrong bytes: the handshake fails on
+    // content, not on waiting, so the verdict is prompt.
+    stream
+        .write_all(b"ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ")
+        .await
+        .expect("garbage preface sends");
+    stream.flush().await.expect("flush");
+    // Wait for the server to end it: finishing first would race the
+    // shutdown signal against the handshake failure and report
+    // `Drained` for a connection the server had already condemned.
+    let mut one = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut one))
+        .await
+        .expect("the server must end a garbage handshake promptly")
+        .expect_err("EOF, not bytes: the handshake failed");
+    match hyper.finish().await {
+        Served::BadRequest => {}
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
 }
 
 /// Interleaved answers sort by stream: `/slow` (200ms) opens first
@@ -1296,14 +1333,22 @@ async fn h2_pings_do_not_extend_the_idle_bound() {
     }
 }
 
-/// Past the ceiling, h2 answers `503` and stays up: no per-response
-/// close signal exists on h2, so the client reconnects for service
-/// while the connection persists to idle.
+/// Past the ceiling, h2 answers `503` then closes with GOAWAY: no
+/// per-response close signal exists on h2, so the driver ends the
+/// connection after the refusal instead of holding its slot to the
+/// idle bound — the same `RequestLimit` end the in-house path reports
+/// past its ceiling, and the same close H1 gets from `Connection:
+/// close`. A persisting 503 would let parked over-ceiling connections
+/// burn a ledger slot each for the whole idle bound.
 #[tokio::test]
-async fn h2_ceiling_persists_503() {
+async fn h2_ceiling_closes_after_503() {
     let routes = [(Method::Get, "/hello", "h")];
     let mut limits = default_limits();
     limits.max_requests_per_connection = 1;
+    // A short drain bound: the slot is freed when the peer goes away
+    // or at this bound, and `finish` below awaits the driver — the
+    // default 30 s would make the test wait out the bound.
+    limits.drain_timeout = Duration::from_millis(500);
     let hyper = HyperH2::start(
         table_with(&routes),
         Dispatch::flat(hello_handler()),
@@ -1317,8 +1362,33 @@ async fn h2_ceiling_persists_503() {
     assert_eq!(one, 200);
     let second = h2.get("/hello").await;
     let (two, _, _) = h2.response(second).await;
-    assert_eq!(two, 503, "past-ceiling h2 answers 503, connection alive");
-    let _ = hyper.finish().await;
+    assert_eq!(two, 503, "past-ceiling h2 answers 503");
+    // Then EOF, promptly: the slot dies with the refusal, not at the
+    // idle bound (75 s by default — an order past this wait). The
+    // driver sends GOAWAY first (graceful_shutdown); whether the
+    // response reader above already sorted it past as connection-level
+    // housekeeping is a race, so drain everything — GOAWAY, stragglers —
+    // until the FIN/RST. Only the close is asserted here; `finish`
+    // below pins the reason.
+    let mut buf = [0u8; 1024];
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match h2.stream.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        closed,
+        "the server must close after the ceiling refusal promptly"
+    );
+    match hyper.finish().await {
+        Served::RequestLimit => {}
+        other => panic!("expected RequestLimit, got {other:?}"),
+    }
 }
 
 /// A past-ceiling 503 is recorded and metered like every other
@@ -1335,6 +1405,9 @@ async fn h2_ceiling_refusal_is_recorded_and_metered() {
     let routes = [(Method::Get, "/hello", "h")];
     let mut limits = default_limits();
     limits.max_requests_per_connection = 1;
+    // Short drain so `finish` below returns promptly: tripping the
+    // ceiling arms the graceful close, which ends at this bound.
+    limits.drain_timeout = Duration::from_millis(500);
     let metrics = Arc::new(HttpMetrics::new());
     let mut pieces = Pieces::bare();
     pieces.metrics = Some(Arc::clone(&metrics));
@@ -1403,24 +1476,25 @@ async fn h2_over_cap_handler_body_wires_500_and_meters_500() {
 }
 
 /// Reset streams count toward the ceiling: five `HEADERS`+`RST_STREAM`
-/// pairs against a ceiling of 3 leave the next `GET` past it.
+/// pairs against a ceiling of 3 trip it, ending the connection.
 ///
 /// The count is attempted answers, not wire-written responses: a reset
-/// stream's 500 is computed, logged, and dropped into a dead socket —
-/// exactly the in-house `reject_body` shape — and the work already
-/// happened, so the ceiling must see it. Not counting would let a
-/// reset flood do unbounded work on one connection. The in-house path
-/// bounds the same flood by closing the socket on the failed write; h2
-/// cannot (a dead stream must not kill its siblings), so the ceiling
-/// carries the bound instead. Found red: 10k resets against the
-/// default ceiling ended in 503, not absorption — the ceiling test
-/// above pins the count for live streams, this one pins it for dead
-/// ones.
+/// stream's answer is computed, recorded, and dropped into a dead
+/// socket — exactly the in-house `reject_body` shape — and the work
+/// already happened, so the ceiling must see it. Not counting would
+/// let a reset flood do unbounded work on one connection. Tripping
+/// the ceiling ends the connection with GOAWAY, like every other
+/// over-ceiling refusal: the in-house path bounds the same flood by
+/// closing the socket on the failed write. The GOAWAY above is the
+/// proof, live streams or dead ones.
 #[tokio::test]
 async fn h2_reset_streams_count_toward_the_ceiling() {
     let routes = [(Method::Get, "/hello", "h")];
     let mut limits = default_limits();
     limits.max_requests_per_connection = 3;
+    // Short drain so `finish` below returns promptly: tripping the
+    // ceiling arms the graceful close, which ends at this bound.
+    limits.drain_timeout = Duration::from_millis(500);
     let hyper = HyperH2::start(
         table_with(&routes),
         Dispatch::flat(hello_handler()),
@@ -1453,26 +1527,29 @@ async fn h2_reset_streams_count_toward_the_ceiling() {
         h2.stream.write_all(&rst(id, CANCEL)).await.expect("reset");
     }
     h2.stream.flush().await.expect("flush");
-    // Drain to quiet, decoding every HEADERS so the table stays in
-    // sync for the GET below; the reset answers are expected here.
+    // Drain to EOF: the 4th and 5th resets trip the ceiling of 3, and
+    // the trip ends the connection with GOAWAY — the same close the
+    // in-house path reports past its ceiling. Resets alone never close
+    // a connection (see the absorption tests above), so a death here
+    // proves the ceiling fired, promptly rather than at the idle
+    // bound. The dead-stream 503s are computed, recorded, and dropped
+    // into dead sockets; the GOAWAY is the refusal the client sees.
+    let mut saw_goaway = false;
     loop {
-        match read_frame_timeout(&mut h2.stream, Duration::from_millis(50)).await {
-            Some(frame) if frame.ftype == HEADERS => {
-                h2.decoder.decode(&frame.payload).expect("decode");
-            }
+        match read_frame_timeout(&mut h2.stream, Duration::from_secs(10)).await {
+            Some(frame) if frame.ftype == GOAWAY => saw_goaway = true,
             Some(_) => {}
             None => break,
         }
     }
-    let fresh = h2.get("/hello").await;
-    let (status, _, body) = h2.response(fresh).await;
-    assert_eq!(status, 503, "dead streams consumed the ceiling of 3");
     assert!(
-        body.windows(15).any(|w| w == b"request ceiling"),
-        "the refusal names the ceiling: {}",
-        String::from_utf8_lossy(&body)
+        saw_goaway,
+        "dead streams consumed the ceiling of 3, ending the connection"
     );
-    let _ = hyper.finish().await;
+    match hyper.finish().await {
+        Served::RequestLimit => {}
+        other => panic!("expected RequestLimit, got {other:?}"),
+    }
 }
 
 /// Shutdown drains: the in-flight h2 request completes, then the
@@ -1572,6 +1649,103 @@ async fn h2_over_cap_body_refused() {
         .write_all(&frame(DATA, END_STREAM, small, b"hello"))
         .await
         .expect("data");
+    let (ok, _, body) = h2.response(small).await;
+    assert_eq!(ok, 200);
+    assert_eq!(body, b"len=5");
+    let _ = hyper.finish().await;
+}
+
+/// More DATA than `Content-Length` declares is refused, not truncated:
+/// extra bytes past the declared length on the same h2 stream are a
+/// malformed message (RFC 9110 §8.6), and serving first-N bytes as a
+/// complete body would hand the handler a lie. H1 has no such hole —
+/// excess bytes there are the next pipelined request — so this is the
+/// H2-only overrun check in `collect_framed`.
+///
+/// The refusal is a stream reset, not a status: the 7 overrun bytes
+/// sit unread in the server, and answering on a stream with an
+/// undrained body would desynchronise flow control — so hyper resets
+/// the stream (the H2-native shed) while the connection survives.
+/// The operator still sees it: the limit-hit is recorded and metered
+/// before the reset, exactly like every other body refusal.
+#[tokio::test]
+async fn h2_content_length_overrun_is_refused() {
+    use qqq_serve::metrics::HttpMetrics;
+
+    let routes = [(Method::Post, "/echo", "echo")];
+    let echo: Handler = Arc::new(|head, _m: &RouteMatch| {
+        let len = head.content_length.unwrap_or(0);
+        Response::text(200, format!("len={len}"))
+    });
+    let metrics = Arc::new(HttpMetrics::new());
+    let mut pieces = Pieces::bare();
+    pieces.metrics = Some(Arc::clone(&metrics));
+    let hyper = HyperH2::start(
+        table_with(&routes),
+        Dispatch::flat(echo),
+        default_limits(),
+        pieces,
+    )
+    .await;
+    let mut h2 = H2::connect(hyper.addr).await;
+    let id = h2.next_stream;
+    h2.next_stream += 2;
+    let block = h2.encoder.encode(&[
+        HeaderField::new(":method", "POST"),
+        HeaderField::new(":path", "/echo"),
+        HeaderField::new(":scheme", "http"),
+        HeaderField::new(":authority", "localhost"),
+        HeaderField::new("content-length", "5"),
+    ]);
+    h2.stream
+        .write_all(&frame(HEADERS, END_HEADERS, id, &block))
+        .await
+        .expect("headers");
+    // Twelve bytes for a declared five, stream ended: the handler must
+    // never see `len=5` with a truncated body.
+    h2.stream
+        .write_all(&frame(DATA, END_STREAM, id, b"hello world!"))
+        .await
+        .expect("overrun data");
+    // The stream dies by reset — never a 200 with first-N bytes.
+    loop {
+        match read_frame_timeout(&mut h2.stream, Duration::from_secs(10))
+            .await
+            .expect("the server must end the overrun stream promptly")
+        {
+            frame if frame.ftype == RST_STREAM && frame.stream == id => break,
+            // Connection-level housekeeping sorts itself.
+            frame if frame.stream == 0 => {}
+            frame => panic!(
+                "overrun must reset the stream, not answer it: type={} stream={}",
+                frame.ftype, frame.stream
+            ),
+        }
+    }
+    assert_eq!(
+        metrics.body_limit_hits_for("127.0.0.1"),
+        1,
+        "the overrun meters a body-limit hit"
+    );
+    // And the connection survives its reset stream: an exact body on a
+    // fresh stream serves whole.
+    let small = h2.next_stream;
+    h2.next_stream += 2;
+    let block = h2.encoder.encode(&[
+        HeaderField::new(":method", "POST"),
+        HeaderField::new(":path", "/echo"),
+        HeaderField::new(":scheme", "http"),
+        HeaderField::new(":authority", "localhost"),
+        HeaderField::new("content-length", "5"),
+    ]);
+    h2.stream
+        .write_all(&frame(HEADERS, END_HEADERS, small, &block))
+        .await
+        .expect("headers");
+    h2.stream
+        .write_all(&frame(DATA, END_STREAM, small, b"hello"))
+        .await
+        .expect("exact data");
     let (ok, _, body) = h2.response(small).await;
     assert_eq!(ok, 200);
     assert_eq!(body, b"len=5");

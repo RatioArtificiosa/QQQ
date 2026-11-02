@@ -293,9 +293,16 @@ impl TenantLabels {
     /// The first [`Self::MAX_TENANTS`] distinct names are kept; anything after them is
     /// `Other`. A name already seen keeps its own label even past the ceiling, so a
     /// deployment's history does not change retroactively as it grows.
+    ///
+    /// `"other"` is reserved and never allocated: it is the rendered label of
+    /// the overflow bucket (`Tenant::Other.as_str()`), so tracking it as a
+    /// named tenant would attribute flood bytes to a real tenant's series.
     pub fn label<'a>(&self, name: &'a str) -> Tenant<'a> {
         if name.is_empty() || name == "default" {
             return Tenant::Default;
+        }
+        if name == "other" {
+            return Tenant::Other;
         }
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         if seen.iter().any(|s| s == name) {
@@ -354,8 +361,12 @@ impl TenantLabels {
     pub fn index(&self, name: &str) -> u16 {
         // 0 is the shared default, 1..=MAX_TENANTS are named, MAX_TENANTS + 1 is everything past
         // the ceiling. Reserved rather than allocated, so the space is bounded by construction.
+        // `"other"` names the overflow bucket itself and is never a tenant.
         if name.is_empty() || name == "default" {
             return 0;
+        }
+        if name == "other" {
+            return u16::try_from(Self::MAX_TENANTS).unwrap_or(u16::MAX) + 1;
         }
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(i) = seen.iter().position(|s| s == name) {
@@ -388,6 +399,11 @@ impl TenantLabels {
     pub fn lookup_index(&self, name: &str) -> Option<u16> {
         if name.is_empty() || name == "default" {
             return Some(0);
+        }
+        // Reserved: never tracked, so never found — reads must not conjure
+        // the overflow bucket into a named series.
+        if name == "other" {
+            return None;
         }
         let seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         let i = seen.iter().position(|s| s == name)?;
@@ -1613,6 +1629,25 @@ mod tests {
         assert_eq!(labels.lookup_index("nobody"), None);
         assert_eq!(labels.lookup_index("default"), Some(0));
         assert_eq!(labels.lookup_index(""), Some(0));
+    }
+
+    /// The literal tenant `"other"` is reserved, like `"default"`: an
+    /// operator who maps a host to a tenant named `other` must not
+    /// capture the overflow bucket. Past-the-ceiling tenants collapse
+    /// to `Other` without allocating, so attacker floods attribute to
+    /// the shared overflow rather than to a real tenant's series.
+    #[test]
+    fn the_other_tenant_name_is_reserved() {
+        let labels = TenantLabels::new();
+        assert_eq!(labels.label("other"), Tenant::Other);
+        assert_eq!(labels.label("default"), Tenant::Default);
+        let ceiling = u16::try_from(TenantLabels::MAX_TENANTS).unwrap_or(u16::MAX);
+        assert_eq!(labels.index("other"), ceiling + 1);
+        assert_eq!(labels.lookup_index("other"), None);
+        assert!(
+            labels.is_empty(),
+            "reserving a name must not allocate a slot"
+        );
     }
 
     /// **A refused body is counted separately from a completed request.**

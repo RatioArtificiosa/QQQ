@@ -97,6 +97,19 @@ pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// ```
 pub const MESSAGE_BYTES_CEILING: usize = 64 * 1024 * 1024;
 
+/// The most fragments one message may arrive in.
+///
+/// The byte cap bounds a message's *size* but not its *shape*: empty
+/// continuations add zero bytes, so a peer sending them forever never trips
+/// [`FrameError::TooLarge`], never invokes the handler, and resets the
+/// connection's idle timer on every batch — holding the task, its budget
+/// share, and its slot indefinitely for ~6 bytes a round. This bounds the
+/// count instead: 65,536 fragments is two orders of magnitude past what any
+/// legitimate sender emits (at the default 1 MiB cap it means sub-16-byte
+/// average fragments), while an unbounded count is a held connection, not
+/// a message.
+pub const MAX_FRAGMENTS_PER_MESSAGE: u32 = 65_536;
+
 /// Assembles frames into messages.
 ///
 /// One per connection. Holding the state is the point: whether a `Continuation` is legal
@@ -117,6 +130,8 @@ struct InProgress {
     /// which is precisely why the state has to remember one.
     kind: Opcode,
     payload: Vec<u8>,
+    /// How many frames the message has arrived in so far.
+    fragments: u32,
 }
 
 impl Default for Assembler {
@@ -192,6 +207,11 @@ impl Assembler {
     /// connection's cap (close code 1009). Checked **before** extending, so a
     /// peer cannot make the assembler allocate its way out of memory by
     /// sending many fragments.
+    ///
+    /// [`FrameError::TooManyFragments`] when the fragment count would exceed
+    /// [`MAX_FRAGMENTS_PER_MESSAGE`] (close code 1009): empty continuations
+    /// add zero bytes and never trip the total, so without a count bound a
+    /// peer holds the connection forever without invoking the handler.
     pub fn push(&mut self, frame: Frame) -> Result<Progress, FrameError> {
         // Control frames pass through and leave any message in progress **untouched**.
         // §5.4 allows them to interleave, so a ping is not a restart.
@@ -241,6 +261,7 @@ impl Assembler {
                 self.in_progress = Some(InProgress {
                     kind: frame.opcode,
                     payload: frame.payload,
+                    fragments: 1,
                 });
                 Ok(Progress::Accumulating)
             }
@@ -268,6 +289,17 @@ impl Assembler {
                         got: total as u64,
                     });
                 }
+
+                // Fragments are bounded by count as well as bytes: empty
+                // continuations add nothing to `total`, so without this a
+                // peer holds the connection forever sending zero-byte
+                // frames. Abandoned like an over-cap message, for the same
+                // reason — a half-built message must not survive a refusal.
+                let fragments = in_progress.fragments.saturating_add(1);
+                if fragments > MAX_FRAGMENTS_PER_MESSAGE {
+                    return Err(FrameError::TooManyFragments { got: fragments });
+                }
+                in_progress.fragments = fragments;
 
                 in_progress.payload.extend_from_slice(&frame.payload);
                 if !frame.fin {
@@ -707,5 +739,36 @@ mod tests {
             Progress::Complete(m) => assert_eq!(m.as_text().expect("utf8"), "body"),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// An endless stream of empty fragments is refused by count, not bytes.
+    ///
+    /// Empty continuations add zero bytes, so the byte cap never trips, the
+    /// handler never runs, and each frame resets the connection's idle
+    /// timer — a held task, budget share, and slot for ~6 bytes a frame.
+    /// The fragment bound closes it with 1009 instead.
+    #[test]
+    fn empty_fragments_are_bounded_by_count() {
+        let mut a = Assembler::new();
+        a.push(text(false, b""))
+            .expect("the first fragment is valid");
+        let mut err = None;
+        for _ in 0..=MAX_FRAGMENTS_PER_MESSAGE {
+            match a.push(cont(false, b"")) {
+                Ok(Progress::Accumulating) => {}
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+                other => panic!("empty fragments must accumulate or refuse: {other:?}"),
+            }
+        }
+        let err = err.expect("the fragment bound must fire");
+        assert!(
+            matches!(err, FrameError::TooManyFragments { .. }),
+            "count, not bytes: {err:?}"
+        );
+        assert_eq!(err.close_code(), 1009, "message too big: {err:?}");
+        assert!(!a.is_accumulating(), "a refused message is abandoned");
     }
 }

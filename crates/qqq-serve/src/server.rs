@@ -676,6 +676,15 @@ pub enum Served {
     ///
     /// The body was not read, so the connection cannot be reused.
     Unauthorized,
+    /// The handler did not answer within its bound, so the server answered
+    /// `504` and closed.
+    ///
+    /// Distinct from [`Self::IdleTimeout`]: nothing was idle — a handler was
+    /// running and the bound cut it off. The response status already
+    /// distinguishes the two in the access record; the metric shares the
+    /// `Timeout` series because both are the server ending the connection
+    /// on a timer rather than the peer misbehaving.
+    HandlerTimeout,
     /// The server is draining and closed it.
     Drained,
     /// The handler asked to close.
@@ -1122,6 +1131,25 @@ async fn serve_negotiated_stream(
                 ctx,
             )
             .await
+        }
+        // A negotiated protocol this server has no driver for: serving it as
+        // HTTP/1.1 would parse one protocol's bytes as another's — a confused
+        // deputy, not a fallback. Close with no HTTP response, since no
+        // response would be in a language the peer speaks. `None` (no ALPN)
+        // still falls through to HTTP/1.1 per RFC 9113 §3.1, and so does
+        // the `http/1.1` both sides just agreed — refusing it would break
+        // every H1-over-TLS client that offers ALPN.
+        ConnStream::Tls(tls)
+            if tls
+                .get_ref()
+                .1
+                .alpn_protocol()
+                .is_some_and(|alpn| alpn != b"http/1.1".as_slice()) =>
+        {
+            use tokio::io::AsyncWriteExt as _;
+            let mut stream = ConnStream::Tls(tls);
+            let _ = stream.shutdown().await;
+            Served::Refused
         }
         stream => serve_connection(stream, &table, &dispatch, &connection_config, ctx).await,
     }
@@ -1602,10 +1630,17 @@ pub fn resolve_request_tenant<'f>(sources: TenantSources<'_, 'f>) -> TenantResol
 /// keep-alive comment below makes about a `keep_alive` flag.
 ///
 /// Scans for the first `QQQ-` followed by four digits. Deliberately simple: the
-/// only producer is `Error::render`, whose format is fixed by the error model, and
-/// a parser that tried to understand more would need updating whenever that format
-/// changed.
+/// only trusted producer is `Error::render`, whose format is fixed by the error
+/// model — a guest body can also contain the pattern, which is why extraction
+/// is gated on failure status above — and a parser that tried to understand
+/// more would need updating whenever that format changed.
 fn error_code_of(response: &response::Response) -> Option<String> {
+    // Gated on failure: a guest-controlled 2xx/3xx body must not forge
+    // an error code into the access log. The only producer of `QQQ-XXXX`
+    // bodies is `Error::render`, which always carries status >= 400.
+    if response.status < 400 {
+        return None;
+    }
     let body = std::str::from_utf8(&response.body).ok()?;
     let start = body.find("QQQ-")?;
     let digits: String = body[start + 4..]
@@ -2027,6 +2062,7 @@ async fn serve_ws_route(
     let ws_ctx = crate::ws_conn::WsContext {
         peer: ctx.id.peer,
         tenant: tenant.to_owned(),
+        tenant_key: ctx.id.tenant,
         logger: ctx.logger.clone(),
         trace: ctx.id.trace,
         span,
@@ -2755,6 +2791,7 @@ async fn serve_flat_request(
     tenant: &str,
     span_seq: &mut u64,
     request_started: std::time::Instant,
+    handler_timeout: std::time::Duration,
 ) -> Option<Served> {
     let Some((body, body_bytes)) = drain_body(
         stream,
@@ -2772,7 +2809,32 @@ async fn serve_flat_request(
     };
 
     let route_started = std::time::Instant::now();
-    let response = dispatch_off_thread(table, dispatch, head, path, &body, tenant).await;
+    // Bounded: a parked flat handler would hold this connection's slot, task
+    // and (on hyper) executor thread forever — the drain deadline rescues a
+    // shutdown, but nothing rescues a connection whose handler never returns.
+    // The bound is the drain timeout: a request slower than the deploy's
+    // grace period is cut off the same way. On expiry the server answers 504
+    // (a timeout, never a crash) and closes: the detached handler may still
+    // complete in the background, so this connection cannot safely serve
+    // another request.
+    let (response, timed_out) = match tokio::time::timeout(
+        handler_timeout,
+        dispatch_off_thread(table, dispatch, head, path, &body, tenant),
+    )
+    .await
+    {
+        Ok(response) => (response, false),
+        Err(_) => (
+            response::from_error(&response::error_response(
+                &Error::new(
+                    ErrorCode::EpochDeadlineExceeded,
+                    "the handler exceeded its time bound",
+                ),
+                false,
+            )),
+            true,
+        ),
+    };
     // **`false`: the guest's answer must not vote in host sampling.**
     // `emit_span`'s contract says a guest cannot influence sampling, and
     // `response.status >= 500` would let a failing guest force its span to
@@ -2807,7 +2869,16 @@ async fn serve_flat_request(
         );
     }
 
-    write_flat_response(stream, conn, head, &response).await
+    let wrote = write_flat_response(stream, conn, head, &response).await;
+    if timed_out && !matches!(wrote, Some(Served::ClientClosed)) {
+        // The detached handler may still complete in the background and its
+        // result is dropped, so this connection cannot safely serve another
+        // request. Close after answering.
+        use tokio::io::AsyncWriteExt as _;
+        let _ = stream.shutdown().await;
+        return Some(Served::HandlerTimeout);
+    }
+    wrote
 }
 
 /// Serve one connection until it closes, for any reason.
@@ -3018,6 +3089,7 @@ async fn serve_connection(
             tenant,
             &mut span_seq,
             request_started,
+            config.drain_timeout,
         )
         .await
         {
@@ -3608,9 +3680,10 @@ fn metric_outcome_of(served: Served) -> crate::metrics::Outcome {
     match served {
         Served::HandlerClosed => Outcome::Ok,
         Served::ClientClosed => Outcome::ClientClosed,
-        // Both deadlines: the *server* ended the connection on a timer, which is a
-        // different operational fact from the peer violating the protocol.
-        Served::IdleTimeout | Served::HeaderTimeout => Outcome::Timeout,
+        // Both deadlines and the handler bound: the *server* ended the
+        // connection on a timer, which is a different operational fact from
+        // the peer violating the protocol.
+        Served::IdleTimeout | Served::HeaderTimeout | Served::HandlerTimeout => Outcome::Timeout,
         // The server refused to continue -- a request ceiling, a graceful drain, a
         // per-tenant limit, or the route's authentication policy. None is the client's
         // protocol mistake and none is a success, so all four land in one series.
@@ -3985,31 +4058,22 @@ pub fn effective_body_cap(limits: Option<&crate::limits::TenantLimits>, tenant: 
 /// here rather than in the router keeps the router's contract — "match a path" —
 /// honest, since a route pattern never contains a query.
 pub(crate) fn split_target(target: &str) -> (&str, Option<&str>) {
-    match target.split_once('?') {
+    // A fragment is never sent to the server (RFC 9110 §4.1) and never
+    // routes: strip it before splitting, so `/a#frag?x=1` carries no
+    // query and `/orders#section` routes as `/orders`.
+    let base = target.split('#').next().unwrap_or(target);
+    match base.split_once('?') {
         Some((path, query)) => (path, Some(query)),
-        None => (target, None),
+        None => (base, None),
     }
 }
 
 /// Whether the client asked to keep the connection open.
 ///
-/// HTTP/1.1 defaults to keep-alive; HTTP/1.0 does not. Getting this backwards
-/// either closes every connection after one request — making HTTP/1.1 slower
-/// than 1.0 — or keeps a 1.0 connection alive that the client will not reuse,
-/// holding a slot until the idle timeout.
+/// Delegates to [`RequestHead::wants_keep_alive`]: every `Connection`
+/// line counts and `close` wins wherever it appears.
 fn wants_keep_alive(head: &RequestHead) -> bool {
-    let connection_header = head
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("connection"))
-        .map(|(_, value)| value.to_ascii_lowercase());
-
-    match connection_header.as_deref() {
-        Some(v) if v.contains("close") => false,
-        Some(v) if v.contains("keep-alive") => true,
-        // No header: the version decides.
-        _ => head.version == Version::Http11,
-    }
+    head.wants_keep_alive()
 }
 
 /// Close a connection immediately with a status and no body.
@@ -4147,6 +4211,55 @@ mod tests {
             Version::Http10,
             &[("Connection", "keep-alive")]
         )));
+    }
+
+    /// Every `Connection` line counts and tokens match whole: a second
+    /// line naming `close` closes even when the first says keep-alive,
+    /// and a token merely *containing* "close" (`myclose`) is not one.
+    /// A first-match-only substring check holds the slot until
+    /// `idle_timeout` on a connection the client asked to close, and
+    /// falsely closes on invented tokens.
+    #[test]
+    fn every_connection_line_and_whole_tokens_decide_keep_alive() {
+        assert!(
+            !wants_keep_alive(&head(
+                Version::Http11,
+                &[("Connection", "keep-alive"), ("Connection", "close")]
+            )),
+            "close wins wherever it appears"
+        );
+        assert!(
+            wants_keep_alive(&head(Version::Http11, &[("Connection", "myclose")])),
+            "a superstring is not the close token"
+        );
+        assert!(
+            wants_keep_alive(&head(Version::Http11, &[("Connection", "x-close-token")])),
+            "an unknown token falls back to the version default"
+        );
+    }
+
+    /// A fragment is not part of the route: `split_target` strips `#`
+    /// before splitting `?`, so `/orders#section` routes as `/orders`
+    /// and `/a#frag?x=1` carries no query. Without this the route table
+    /// and `RequestHead::path` disagree about what the target names.
+    #[test]
+    fn a_fragment_never_reaches_the_route_or_the_query() {
+        assert_eq!(split_target("/orders#section"), ("/orders", None));
+        assert_eq!(split_target("/a?x=1#frag"), ("/a", Some("x=1")));
+        assert_eq!(split_target("/a#frag?x=1"), ("/a", None));
+    }
+
+    /// A guest-controlled body must not forge an error code: `code` is
+    /// attached only to failures, so a `200` carrying `QQQ-9999` in its
+    /// body records no code. A real 500 error keeps its code.
+    #[test]
+    fn success_bodies_do_not_forge_error_codes() {
+        let ok = crate::response::Response::text(200, "hello QQQ-9999 world");
+        assert_eq!(error_code_of(&ok), None);
+        let failed = crate::response::Response::text(500, "boom QQQ-2002 x");
+        assert_eq!(error_code_of(&failed).as_deref(), Some("QQQ-2002"));
+        let failed_no_code = crate::response::Response::text(500, "boom");
+        assert_eq!(error_code_of(&failed_no_code), None);
     }
 
     /// A mapped host resolves to its tenant; nothing configured means

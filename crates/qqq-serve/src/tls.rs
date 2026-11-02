@@ -675,6 +675,203 @@ fn looks_like_a_der_certificate(der: &[u8]) -> bool {
     matches!(split_element(content), Some((SEQUENCE, _, _)))
 }
 
+/// The validity window of a DER leaf certificate, if it parses.
+///
+/// Walks `Certificate -> tbsCertificate -> validity` (a `SEQUENCE` of two
+/// `Time` values, each `UTCTime` `0x17` or `GeneralizedTime` `0x18`) and
+/// parses both ends. `None` when the shape is anything else — including a
+/// `tbsCertificate` the walker cannot find — and the caller treats an
+/// unparseable window as a refusal: serving a certificate whose lifetime
+/// cannot be confirmed is the failure this check exists to prevent.
+///
+/// The search is structural, not positional: the `validity` value is the
+/// `SEQUENCE` child of `tbsCertificate` whose own children are exactly two
+/// `Time` values. Issuers and subjects are `SEQUENCE OF SET` (children tag
+/// `0x31`, never a time tag) and the signature algorithm identifier holds
+/// an OID, so neither can match by construction — the same
+/// identify-by-tag discipline `common_name_of` uses.
+fn validity_window(leaf_der: &[u8]) -> Option<(std::time::SystemTime, std::time::SystemTime)> {
+    const SEQUENCE: u8 = 0x30;
+    const UTC_TIME: u8 = 0x17;
+    const GENERALIZED_TIME: u8 = 0x18;
+
+    let (_, _, certificate_body) = split_element(leaf_der)?;
+    let (tbs_tag, _, tbs) = children(certificate_body).next()?;
+    if tbs_tag != SEQUENCE {
+        return None;
+    }
+    for (tag, _, content) in children(tbs) {
+        if tag != SEQUENCE {
+            continue;
+        }
+        // `let-else continue`, not `?`: a non-validity `SEQUENCE`
+        // (signature algorithm, issuer, subject) must be skipped, not
+        // abort the whole walk — `?` here returned `None` for every
+        // real certificate, since the signature comes first.
+        let mut times = children(content);
+        let (Some((first_tag, _, first)), Some((second_tag, _, second))) =
+            (times.next(), times.next())
+        else {
+            continue;
+        };
+        if times.next().is_some() {
+            continue;
+        }
+        let is_time = |t: u8| t == UTC_TIME || t == GENERALIZED_TIME;
+        if !is_time(first_tag) || !is_time(second_tag) {
+            continue;
+        }
+        return Some((
+            parse_x509_time(first_tag, first)?,
+            parse_x509_time(second_tag, second)?,
+        ));
+    }
+    None
+}
+
+/// Parse one X.509 `Time` value to a `SystemTime`.
+///
+/// `UTCTime` is `YYMMDDHHMMSS` with an RFC 5280 century split (00–49 map to
+/// 20xx, 50–99 to 19xx); `GeneralizedTime` is `YYYYMMDDHHMMSS`. Seconds may
+/// be omitted (some issuers do); the zone is `Z` or `±HHMM`. Anything else —
+/// fractional seconds, a missing zone, out-of-range fields — is `None`,
+/// because a validity instant read loosely is a validity window guessed at.
+fn parse_x509_time(tag: u8, value: &[u8]) -> Option<std::time::SystemTime> {
+    const UTC_TIME: u8 = 0x17;
+    const GENERALIZED_TIME: u8 = 0x18;
+
+    let s = std::str::from_utf8(value).ok()?;
+    let (year, rest) = match tag {
+        UTC_TIME => {
+            let yy: i32 = s.get(..2)?.parse().ok()?;
+            (if yy >= 50 { 1900 + yy } else { 2000 + yy }, s.get(2..)?)
+        }
+        GENERALIZED_TIME => (s.get(..4)?.parse().ok()?, s.get(4..)?),
+        _ => return None,
+    };
+    let month: u32 = rest.get(..2)?.parse().ok()?;
+    let day: u32 = rest.get(2..4)?.parse().ok()?;
+    let hour: u32 = rest.get(4..6)?.parse().ok()?;
+    let minute: u32 = rest.get(6..8)?.parse().ok()?;
+    // Seconds are optional; what follows them must be the zone.
+    let (second, zone) = match rest.get(8..10) {
+        Some(ss) if ss.bytes().all(|b| b.is_ascii_digit()) => (ss.parse().ok()?, rest.get(10..)?),
+        _ => (0, rest.get(8..)?),
+    };
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let offset_seconds: i64 = if zone == "Z" {
+        0
+    } else {
+        let sign = match zone.as_bytes().first()? {
+            b'+' => 1i64,
+            b'-' => -1i64,
+            _ => return None,
+        };
+        let offset_hour: i64 = zone.get(1..3)?.parse().ok()?;
+        let offset_minute: i64 = zone.get(3..5)?.parse().ok()?;
+        if zone.len() != 5 || offset_hour > 23 || offset_minute > 59 {
+            return None;
+        }
+        sign * (offset_hour * 3600 + offset_minute * 60)
+    };
+    let days = days_from_civil(year, month, day)?;
+    let timestamp = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))?
+        .checked_sub(offset_seconds)?;
+    if timestamp >= 0 {
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(
+            u64::try_from(timestamp).ok()?,
+        ))
+    } else {
+        std::time::UNIX_EPOCH.checked_sub(std::time::Duration::from_secs(timestamp.unsigned_abs()))
+    }
+}
+
+/// Days from the civil date to the Unix epoch (Howard Hinnant's algorithm).
+///
+/// Returns `None` for an impossible date — month outside 1–12, day zero or
+/// past the month's end — so a malformed validity window fails closed in
+/// the caller rather than wrapping into a wrong instant.
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || day == 0 {
+        return None;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day: u32 = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    if day > max_day {
+        return None;
+    }
+    let adjusted_year = i64::from(year) - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let month_prime = (i64::from(month) + 9) % 12;
+    let day_of_year = (153 * month_prime + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
+}
+
+/// Refuse a configuration whose leaf certificate is outside its lifetime.
+///
+/// A server that starts with an expired (or not-yet-valid) certificate logs
+/// nothing and fails every client closed while showing healthy — and there
+/// is no reload path, so a certificate that expires in process is served
+/// until restart. rustls-webpki stays the handshake authority; this is a
+/// fail-fast startup check naming the file, not a second verifier. Only the
+/// leaf (`chain[0]`) is checked: intermediates are the client's
+/// chain-building concern, and trust bundles routinely carry expired CAs
+/// whose clients simply fail verification.
+fn refuse_expired_leaf(resolved: &ResolvedCertificate, source: &CertificateSource) -> Result<()> {
+    let Some(leaf) = resolved.chain.first() else {
+        return Ok(());
+    };
+    match validity_window(leaf.as_ref()) {
+        Some((not_before, not_after)) => {
+            let now = std::time::SystemTime::now();
+            if now < not_before || now > not_after {
+                let state = if now < not_before {
+                    "not yet valid"
+                } else {
+                    "expired"
+                };
+                return Err(tls_error(format!(
+                    "the server certificate from {source} is {state}",
+                    source = source.describe(),
+                ))
+                .with_remediation(
+                    "renew the certificate and restart: an out-of-window leaf fails \
+                     every handshake, and nothing reloads it in process.",
+                )
+                .with_context("source", source.describe()));
+            }
+            Ok(())
+        }
+        None => Err(tls_error(format!(
+            "the server certificate from {source} has a validity window that does not parse",
+            source = source.describe(),
+        ))
+        .with_remediation(
+            "re-issue the certificate with standard UTCTime/GeneralizedTime validity \
+             values: a lifetime that cannot be confirmed is served by nothing here.",
+        )
+        .with_context("source", source.describe())),
+    }
+}
+
 /// Read a PEM private key from a file.
 ///
 /// # Which key formats are accepted, and why exactly these
@@ -1436,6 +1633,8 @@ impl TlsConfig {
     /// - No TLS 1.3 tickets are sent. Stateless tickets would need a
     ///   ticket-encryption key with a rotation story; without one, every
     ///   connection does a full handshake — forward-secret, always.
+    /// - The resumption-adjacent knobs stay at their no-resumption values:
+    ///   no half-RTT data, no extra tickets beyond the (zero) send count.
     /// - No TLS 1.2 session cache. Same reason: resumption state the
     ///   operator never configured is state the operator cannot rotate.
     ///
@@ -1444,7 +1643,9 @@ impl TlsConfig {
     /// `cargo update`.
     fn pin_no_resumption(config: &mut ServerConfig) {
         config.max_early_data_size = 0;
+        config.send_half_rtt_data = false;
         config.send_tls13_tickets = 0;
+        config.max_tls13_tickets = 0;
         config.session_storage = std::sync::Arc::new(rustls::server::NoServerSessionStorage {});
     }
 
@@ -1548,6 +1749,12 @@ impl TlsConfig {
                     .with_context("source", self.certificate.describe()),
             );
         }
+
+        // The leaf's lifetime is checked at startup, not at the first
+        // handshake — extracted as `refuse_expired_leaf` because this
+        // method is at its line budget, and the check reads as one named
+        // rule rather than an inline block.
+        refuse_expired_leaf(&resolved, &self.certificate)?;
 
         // --- The provider carries the cipher policy -------------------------
         //
@@ -2313,6 +2520,91 @@ mod tests {
         let mut trailing = good.clone();
         trailing.push(0xFF);
         assert!(!looks_like_a_der_certificate(&trailing));
+    }
+
+    /// X.509 times parse to the right instants, and malformed ones refuse.
+    ///
+    /// Every row is a fixed instant, asserted as epoch seconds a reader
+    /// can verify with `date -u -d @N`: the century split (49 → 2049,
+    /// 50 → 1950), the pre-epoch negative path (1969), numeric offsets in
+    /// both directions, omitted seconds, and the rejections (missing
+    /// zone, impossible fields, wrong tag) that would otherwise become
+    /// a guessed validity window.
+    #[test]
+    fn x509_times_parse_to_fixed_instants() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let instant = |tag: u8, s: &str| parse_x509_time(tag, s.as_bytes());
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+        let before = |secs: u64| {
+            UNIX_EPOCH
+                .checked_sub(Duration::from_secs(secs))
+                .expect("test instant is representable")
+        };
+        // UTCTime, Zulu.
+        assert_eq!(instant(0x17, "700101000000Z"), Some(at(0)));
+        // The century split: 49 is 2049, 50 is 1950.
+        assert_eq!(instant(0x17, "490101000000Z"), Some(at(2_493_072_000)));
+        assert_eq!(instant(0x17, "500101000000Z"), Some(before(631_152_000)));
+        // Negative timestamps work: 1969 is representable, not an error.
+        assert_eq!(instant(0x17, "690101000000Z"), Some(before(31_536_000)));
+        // GeneralizedTime.
+        assert_eq!(instant(0x18, "20500101000000Z"), Some(at(2_524_608_000)));
+        // Numeric offsets shift to UTC…
+        assert_eq!(instant(0x17, "700101020000+0200"), Some(at(0)));
+        // …in both directions (00:30 at −00:30 is 01:00 UTC).
+        assert_eq!(instant(0x17, "700101003000-0030"), Some(at(3_600)));
+        // Seconds may be omitted.
+        assert_eq!(instant(0x17, "7001010000Z"), Some(at(0)));
+        // Rejections: missing zone, impossible fields, wrong tag.
+        assert_eq!(instant(0x17, "700101000000"), None);
+        assert_eq!(instant(0x17, "701301000000Z"), None);
+        assert_eq!(instant(0x17, "700101250000Z"), None);
+        assert_eq!(instant(0x17, "700101000060Z"), None);
+        assert_eq!(instant(0x13, "700101000000Z"), None);
+        assert_eq!(instant(0x17, "not-a-time!!!!!"), None);
+    }
+
+    /// Civil dates convert to epoch days, and impossible ones refuse.
+    ///
+    /// Spot values a reader can check against `date -u`: the epoch
+    /// itself, the day before it (the negative path `parse_x509_time`
+    /// needs for pre-1970 certificates), and leap rules including the
+    /// century exception (2000 leaps, 2001 and 1900 do not).
+    #[test]
+    fn civil_dates_convert_and_impossible_ones_refuse() {
+        assert_eq!(days_from_civil(1970, 1, 1), Some(0));
+        assert_eq!(days_from_civil(1969, 12, 31), Some(-1));
+        assert_eq!(days_from_civil(2000, 2, 29), Some(11_016));
+        assert_eq!(days_from_civil(2024, 2, 29), Some(19_782));
+        assert_eq!(days_from_civil(2001, 2, 29), None);
+        assert_eq!(days_from_civil(1900, 2, 29), None);
+        assert_eq!(days_from_civil(2024, 0, 1), None);
+        assert_eq!(days_from_civil(2024, 13, 1), None);
+        assert_eq!(days_from_civil(2024, 1, 0), None);
+        assert_eq!(days_from_civil(2024, 4, 31), None);
+    }
+
+    /// A real certificate's validity window parses and contains now.
+    ///
+    /// `rcgen` mints fresh certificates, so `now` is inside by
+    /// construction — what this pins is that the walker finds the
+    /// `validity` SEQUENCE of a genuine encoding rather than
+    /// pattern-matching a fixture the test also built.
+    #[test]
+    fn a_real_certificate_has_a_parseable_window_containing_now() {
+        use std::time::SystemTime;
+        let mut params =
+            rcgen::CertificateParams::new(vec!["window-test".to_owned()]).expect("rcgen SANs");
+        params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, "window-test");
+            dn
+        };
+        let key = rcgen::KeyPair::generate().expect("rcgen key");
+        let cert = params.self_signed(&key).expect("rcgen self-sign");
+        let (not_before, not_after) = validity_window(cert.der()).expect("a real window parses");
+        let now = SystemTime::now();
+        assert!(not_before <= now && now <= not_after, "now is inside");
     }
 
     /// A certificate file with no `CERTIFICATE` block is the classic

@@ -158,14 +158,24 @@ pub enum FrameError {
         /// The size the peer attempted, in bytes.
         got: u64,
     },
+    /// A message fragmented past any legitimate sender's needs. §7.4.1 code 1009.
+    ///
+    /// Separate from [`FrameError::TooLarge`]: the bytes fit the cap, but the
+    /// *count* does not — empty continuations add zero bytes, so without this
+    /// a peer holds the connection forever one six-byte frame at a time.
+    TooManyFragments {
+        /// Fragments observed for the message.
+        got: u32,
+    },
 }
 
 impl FrameError {
     /// The close code §7.4.1 requires for this failure.
     ///
     /// `1002` (protocol error) for a malformed frame, `1007` (invalid payload data) for a
-    /// text or close reason that is not UTF-8, `1009` (message too big) for a frame or
-    /// message past the configured cap. The distinction matters to a client: 1002
+    /// text or close reason that is not UTF-8, `1009` (message too big) for a frame,
+    /// message, or fragment count past the configured cap. The distinction matters to a
+    /// client: 1002
     /// means "your framing is wrong", 1007 means "your content is wrong", 1009 means
     /// "your message is too large" — and a client that retries after 1002 with a
     /// corrected payload succeeds where it would loop forever on a cap refusal
@@ -174,7 +184,7 @@ impl FrameError {
     pub const fn close_code(&self) -> u16 {
         match self {
             Self::InvalidClosePayload { .. } => 1007,
-            Self::TooLarge { .. } => 1009,
+            Self::TooLarge { .. } | Self::TooManyFragments { .. } => 1009,
             _ => 1002,
         }
     }
@@ -182,9 +192,14 @@ impl FrameError {
     /// The bytes a cap refusal charged but never buffered, if any.
     ///
     /// Cap refusals ([`FrameError::TooLarge`]) arrive pre-charged against the
-    /// process-wide budget; framing errors never held permits. The caller
-    /// settles the account from this answer rather than re-matching the
-    /// variant, so a future variant cannot silently leak permits.
+    /// process-wide budget; framing errors never held permits. A fragment-count
+    /// refusal ([`FrameError::TooManyFragments`]) reports `None`: its bytes
+    /// were charged per frame as they arrived and settle through the caller's
+    /// `data_len` path, with the connection's budget backstop returning any
+    /// remainder when it ends — and a refused message always ends its
+    /// connection. The caller settles the
+    /// account from this answer rather than re-matching the variant, so a
+    /// future variant cannot silently leak permits.
     ///
     /// ```
     /// use qqq_serve::ws_frame::FrameError;
@@ -237,6 +252,10 @@ impl std::fmt::Display for FrameError {
             Self::TooLarge { limit, got } => write!(
                 f,
                 "the frame is {got} bytes, over this connection's {limit}-byte cap"
+            ),
+            Self::TooManyFragments { got } => write!(
+                f,
+                "the message arrived in {got} fragments, over the per-message fragment bound"
             ),
         }
     }
@@ -581,7 +600,11 @@ pub const fn is_valid_close_code(code: u16) -> bool {
 }
 
 /// §5.5.1: a close payload, if present, is a 2-byte code followed by UTF-8.
-fn validate_close_payload(payload: &[u8]) -> Result<(), FrameError> {
+///
+/// `pub(crate)` so the send path enforces exactly the decoder's rule: two
+/// places with two opinions about what a close carries is how an invalid
+/// code gets emitted by one and refused by the other.
+pub(crate) fn validate_close_payload(payload: &[u8]) -> Result<(), FrameError> {
     if payload.is_empty() {
         // A close with no payload is valid: it means "no status", which §7.1.5 permits.
         return Ok(());

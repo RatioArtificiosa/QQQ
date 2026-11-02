@@ -1906,7 +1906,6 @@ version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "futures-core",
  "http-body",
  "http-body-util",
  "hyper",
@@ -1920,6 +1919,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "time",
  "tokio",
  "tokio-rustls",
 ]

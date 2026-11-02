@@ -230,6 +230,13 @@ impl LogHost for crate::linker::StoreData {
             validated.push(validate_record(self, message, attributes)?);
         }
         let additional: usize = validated.iter().map(|v| v.size).sum();
+        // The batch is atomic and the quota binds on the would-be total, so a
+        // batch that overflows is refused whole rather than half-applied.
+        let open = u32::try_from(self.logs.len()).unwrap_or(u32::MAX);
+        let more = u32::try_from(validated.len()).unwrap_or(u32::MAX);
+        self.handles
+            .try_open_batch(open, more)
+            .map_err(|_| WitLogError::RecordTooLarge)?;
         if self.logs.len() + validated.len() > MAX_LOG_RECORDS
             || buffered_bytes(&self.logs) + additional > MAX_LOG_TOTAL_BYTES
         {
@@ -525,6 +532,13 @@ fn emit_record(
     attributes: &[Attribute],
 ) -> std::result::Result<(), WitLogError> {
     let validated = validate_record(data, message, attributes)?;
+    // The manifest quota binds before the absolute caps: one record against
+    // the current buffer length. Both report `RecordTooLarge` — the WIT type
+    // has no quota case — while the quota's counter records the exhaustion.
+    let open = u32::try_from(data.logs.len()).unwrap_or(u32::MAX);
+    data.handles
+        .try_open(open)
+        .map_err(|_| WitLogError::RecordTooLarge)?;
     if data.logs.len() >= MAX_LOG_RECORDS
         || buffered_bytes(&data.logs) + validated.size > MAX_LOG_TOTAL_BYTES
     {
@@ -568,7 +582,11 @@ mod tests {
         } else {
             GrantSet::empty()
         };
-        crate::linker::StoreData::new(grants)
+        let mut data = crate::linker::StoreData::new(grants);
+        // Test room, not policy: every stored record goes through the quota,
+        // so tests that fill the buffer declare headroom up front.
+        data.handles = crate::quota::HandleQuota::new(10_000);
+        data
     }
 
     fn attr(name: &str, value: AttributeValue) -> Attribute {
@@ -668,6 +686,41 @@ mod tests {
         let err = emit_record(&mut data, 2, "one more", &[]).expect_err("full");
         assert!(matches!(err, WitLogError::RecordTooLarge));
         assert_eq!(data.logs.len(), MAX_LOG_RECORDS);
+    }
+
+    /// The manifest quota binds before the absolute buffer caps: with room
+    /// for 4096 records but a quota of 1, the second record is refused and
+    /// counted — not stored past the policy.
+    #[test]
+    fn quota_exhaustion_refuses_before_the_buffer_caps() {
+        let mut data = data_with_log(true);
+        data.handles = crate::quota::HandleQuota::new(1);
+        emit_record(&mut data, 2, "first", &[]).expect("one record fits");
+        let err = emit_record(&mut data, 2, "second", &[]).expect_err("quota exhausted");
+        assert!(matches!(err, WitLogError::RecordTooLarge));
+        assert_eq!(data.logs.len(), 1, "the refused record is not stored");
+        assert_eq!(data.handles.exhaustion_attempts(), 1);
+    }
+
+    /// A batch that would overflow the quota is refused whole: no prefix
+    /// persists, matching the byte-cap atomicity below.
+    #[test]
+    fn an_over_quota_batch_stores_nothing() {
+        let mut data = data_with_log(true);
+        data.handles = crate::quota::HandleQuota::new(1);
+        let err = LogHost::emit_many(
+            &mut data,
+            vec![
+                (Level::Info, "one".to_owned(), vec![]),
+                (Level::Info, "two".to_owned(), vec![]),
+            ],
+        )
+        .expect_err("two records against a quota of one must refuse");
+        assert!(matches!(err, WitLogError::RecordTooLarge));
+        assert!(
+            data.logs.is_empty(),
+            "no prefix of a failed batch may persist"
+        );
     }
 
     /// Attribute names are bounded: an unbounded name is guest-controlled

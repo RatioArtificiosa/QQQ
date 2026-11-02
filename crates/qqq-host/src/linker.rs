@@ -2466,12 +2466,13 @@ mod tests {
         // are trait-method implementations on generated bindings, not
         // `func_wrap` closures, and their panic audit belongs to the host-b
         // review of each module rather than to this counter.
-        let sources: [(&str, &str); 6] = [
+        let sources: [(&str, &str); 7] = [
             ("host_clock.rs", include_str!("host_clock.rs")),
             ("host_crypto.rs", include_str!("host_crypto.rs")),
             ("host_env.rs", include_str!("host_env.rs")),
             ("host_secrets.rs", include_str!("host_secrets.rs")),
             ("host_test.rs", include_str!("host_test.rs")),
+            ("host_wasi.rs", include_str!("host_wasi.rs")),
             ("host_wasi03.rs", include_str!("host_wasi03.rs")),
         ];
 

@@ -72,11 +72,42 @@
 
 use std::time::Duration;
 
+use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;
 use qqq_core::{Error, ErrorCode, Result};
+use wasmtime::StoreContextMut;
 use wasmtime::component::Linker;
 use wasmtime_wasi::p2::pipe::ClosedInputStream;
 use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxBuilder};
+
+use crate::linker::StoreData;
+
+/// The `wasi:random` interfaces this module shadows, at the version wasmtime's
+/// own `p2` bindings declare (`wasi:random@0.2.12`).
+///
+/// The repo's older `0.2.9` strings name the `io`/`clocks` vintage, not
+/// random's: `random.wit` in the linked wasmtime says `0.2.12`, and a shim
+/// registered under any other version would sit beside wasmtime's own
+/// registration instead of replacing it — leaving the bypass open while
+/// looking closed. The anti-drift test below instantiates a fixture importing
+/// exactly these names, so a wasmtime upgrade that moves the version fails
+/// loudly instead of silently un-shadowing.
+const RANDOM_INTERFACE: &str = "wasi:random/random@0.2.12";
+const INSECURE_INTERFACE: &str = "wasi:random/insecure@0.2.12";
+const INSECURE_SEED_INTERFACE: &str = "wasi:random/insecure-seed@0.2.12";
+
+/// Trap an ungranted randomness call.
+///
+/// Randomness has no fallible WIT error to return (unlike clock reads, which
+/// have fixed denials): the only fail-closed answer is a trap, and the SEV1
+/// line the guard writes names the interface so the operator sees a grant
+/// problem, not guest code, in the log.
+fn denied_random(function: &str) -> wasmtime::Error {
+    wasmtime::Error::msg(format!(
+        "wasi:random `{function}` is not granted; set `[capabilities.crypto] random = true` \
+         in qqq.toml"
+    ))
+}
 
 /// A clock that refuses to tell the time.
 ///
@@ -342,11 +373,145 @@ pub struct Registered {
 /// Wasmtime's own error when a definition is rejected, which indicates a QQQ bug.
 pub fn register(linker: &mut Linker<crate::linker::StoreData>) -> wasmtime::Result<Registered> {
     wasmtime_wasi::p2::add_to_linker_sync(linker)?;
+
+    // Shadow wasmtime's `wasi:random` with grant-gated shims (C5). The stock
+    // registration answers every guest regardless of grants, bypassing the
+    // `crypto.random` allowlist, its audit, and its deterministic-mode
+    // seeding. Shadowing is scoped as tightly as the API allows: on for the
+    // five random methods below, off again before returning, so no other
+    // definition can silently win later. The shims live behind the same
+    // `guard::guard` + SEV1 containment as every `func_wrap` site, and the
+    // grant re-check runs on every call, not just at registration.
+    linker.allow_shadowing(true);
+    let shadowed = register_random(linker);
+    linker.allow_shadowing(false);
+    shadowed?;
+
     Ok(Registered {
         wasi: true,
         filesystem: false,
         sockets: false,
     })
+}
+
+/// Register the grant-gated `wasi:random` shims, shadowing wasmtime's own.
+///
+/// Granted guests get host randomness through the ambient source (seeded in
+/// deterministic mode, OS entropy otherwise, both bounded by the ambient
+/// ceiling — the same source and bound `qqq:crypto/random` uses, so the two
+/// spellings of "give me randomness" cannot disagree). Ungranted guests trap:
+/// randomness has no fixed denial value, and a constant would be predictable.
+fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
+    /// Read `len` random bytes or trap, enforcing the ambient ceiling.
+    ///
+    /// Grant-gating lives in each caller below, not here: the arch012 audit
+    /// matches `grants.grants(` textually inside each registration body, and
+    /// a check factored one frame out would pass the compiler while going
+    /// invisible to the audit. The ceiling stays here — it is a property of
+    /// the source (ambient), not of the caller.
+    fn random_bytes(
+        store: &mut StoreContextMut<'_, StoreData>,
+        function: &str,
+        len: u64,
+    ) -> wasmtime::Result<Vec<u8>> {
+        let len = u32::try_from(len).map_err(|_| {
+            wasmtime::Error::msg(format!(
+                "`{function}` asked for {len} bytes, past the ambient ceiling"
+            ))
+        })?;
+        if len > store.data().ambient.max_random_bytes() {
+            return Err(wasmtime::Error::msg(format!(
+                "`{function}` asked for {len} bytes, past the ambient ceiling"
+            )));
+        }
+        store
+            .data()
+            .ambient
+            .read_random(len)
+            .map_err(|e| wasmtime::Error::msg(format!("host randomness failed: {e:?}")))
+    }
+
+    let mut random = linker.instance(RANDOM_INTERFACE)?;
+    random.func_wrap(
+        "get-random-bytes",
+        |mut store: StoreContextMut<'_, StoreData>,
+         (len,): (u64,)|
+         -> wasmtime::Result<(Vec<u8>,)> {
+            crate::guard::guard("wasi:random/random.get-random-bytes", || {
+                if !store.data().grants.grants(Capability::CryptoRandom) {
+                    return Err(denied_random("get-random-bytes"));
+                }
+                random_bytes(&mut store, "get-random-bytes", len).map(|b| (b,))
+            })
+        },
+    )?;
+    random.func_wrap(
+        "get-random-u64",
+        |mut store: StoreContextMut<'_, StoreData>, ()| -> wasmtime::Result<(u64,)> {
+            crate::guard::guard("wasi:random/random.get-random-u64", || {
+                if !store.data().grants.grants(Capability::CryptoRandom) {
+                    return Err(denied_random("get-random-u64"));
+                }
+                let bytes = random_bytes(&mut store, "get-random-u64", 8)?;
+                let arr: [u8; 8] = bytes
+                    .try_into()
+                    .map_err(|_| wasmtime::Error::msg("host randomness returned a short read"))?;
+                Ok((u64::from_le_bytes(arr),))
+            })
+        },
+    )?;
+
+    let mut insecure = linker.instance(INSECURE_INTERFACE)?;
+    insecure.func_wrap(
+        "get-insecure-random-bytes",
+        |mut store: StoreContextMut<'_, StoreData>,
+         (len,): (u64,)|
+         -> wasmtime::Result<(Vec<u8>,)> {
+            crate::guard::guard("wasi:random/insecure.get-insecure-random-bytes", || {
+                if !store.data().grants.grants(Capability::CryptoRandom) {
+                    return Err(denied_random("get-insecure-random-bytes"));
+                }
+                random_bytes(&mut store, "get-insecure-random-bytes", len).map(|b| (b,))
+            })
+        },
+    )?;
+    insecure.func_wrap(
+        "get-insecure-random-u64",
+        |mut store: StoreContextMut<'_, StoreData>, ()| -> wasmtime::Result<(u64,)> {
+            crate::guard::guard("wasi:random/insecure.get-insecure-random-u64", || {
+                if !store.data().grants.grants(Capability::CryptoRandom) {
+                    return Err(denied_random("get-insecure-random-u64"));
+                }
+                let bytes = random_bytes(&mut store, "get-insecure-random-u64", 8)?;
+                let arr: [u8; 8] = bytes
+                    .try_into()
+                    .map_err(|_| wasmtime::Error::msg("host randomness returned a short read"))?;
+                Ok((u64::from_le_bytes(arr),))
+            })
+        },
+    )?;
+
+    let mut seed = linker.instance(INSECURE_SEED_INTERFACE)?;
+    seed.func_wrap(
+        "insecure-seed",
+        |mut store: StoreContextMut<'_, StoreData>, ()| -> wasmtime::Result<((u64, u64),)> {
+            crate::guard::guard("wasi:random/insecure-seed.insecure-seed", || {
+                if !store.data().grants.grants(Capability::CryptoRandom) {
+                    return Err(denied_random("insecure-seed"));
+                }
+                let bytes = random_bytes(&mut store, "insecure-seed", 16)?;
+                let (lo, hi) = bytes.split_at(8);
+                let lo: [u8; 8] = lo
+                    .try_into()
+                    .map_err(|_| wasmtime::Error::msg("host randomness returned a short read"))?;
+                let hi: [u8; 8] = hi
+                    .try_into()
+                    .map_err(|_| wasmtime::Error::msg("host randomness returned a short read"))?;
+                Ok(((u64::from_le_bytes(lo), u64::from_le_bytes(hi)),))
+            })
+        },
+    )?;
+    Ok(())
 }
 
 /// Describe why a named environment variable the manifest requires is missing.

@@ -168,7 +168,7 @@ impl Enforcement {
 /// disagree in either direction, so a `func_wrap` added without a row here is a
 /// test failure rather than an unexamined call path. That is the property that
 /// makes the table a check rather than documentation.
-pub const AUDITED: [AuditedCall; 24] = [
+pub const AUDITED: [AuditedCall; 29] = [
     AuditedCall {
         file: "host_clock.rs",
         function: "now",
@@ -379,6 +379,47 @@ pub const AUDITED: [AuditedCall; 24] = [
         capability: Some(Capability::EnvRead),
         // Names only (the manifest already publishes them); re-checked.
         enforced_by: Enforcement::InterfaceGated,
+    },
+    AuditedCall {
+        file: "host_wasi.rs",
+        function: "get-random-bytes",
+        interface: "wasi:random/random@0.2.12",
+        capability: Some(Capability::CryptoRandom),
+        // Per-function re-check: the shim shadows wasmtime's own
+        // registration (which answers regardless of grants), so only the
+        // body check stands between an ungranted guest and host entropy.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_wasi.rs",
+        function: "get-random-u64",
+        interface: "wasi:random/random@0.2.12",
+        capability: Some(Capability::CryptoRandom),
+        // Same shape as `get-random-bytes`: eight bytes from the same source.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_wasi.rs",
+        function: "get-insecure-random-bytes",
+        interface: "wasi:random/insecure@0.2.12",
+        capability: Some(Capability::CryptoRandom),
+        // Insecure is still entropy: same grant, same check, same source.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_wasi.rs",
+        function: "get-insecure-random-u64",
+        interface: "wasi:random/insecure@0.2.12",
+        capability: Some(Capability::CryptoRandom),
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_wasi.rs",
+        function: "insecure-seed",
+        interface: "wasi:random/insecure-seed@0.2.12",
+        capability: Some(Capability::CryptoRandom),
+        // A seed is key material by another name: same grant, same check.
+        enforced_by: Enforcement::PerFunction,
     },
 ];
 

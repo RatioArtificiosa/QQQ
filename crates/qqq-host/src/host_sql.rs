@@ -647,10 +647,20 @@ fn mint_id(data: &mut crate::linker::StoreData) -> std::result::Result<u32, WitS
 /// Checked after validation and before any open, so the entry order is
 /// grant, membership, isolation, validation, cap, open, mint on every
 /// path that mints: a refused call fails before any file effect.
-fn check_handles(data: &crate::linker::StoreData) -> std::result::Result<(), WitSqlError> {
+///
+/// The manifest quota binds before the absolute table cap: `max_open_handles`
+/// is the per-instance policy, `MAX_SQL_HANDLES` the host backstop. Both
+/// report `PoolExhausted` — the WIT type has no quota case, and a full table
+/// is what the guest observes either way — while the quota's counter records
+/// the exhaustion where the operator looks for it.
+fn check_handles(data: &mut crate::linker::StoreData) -> std::result::Result<(), WitSqlError> {
     let open = data.sql_state.statements.len()
         + data.sql_state.transactions.len()
         + data.sql_state.txn_statements.len();
+    let open_u32 = u32::try_from(open).unwrap_or(u32::MAX);
+    data.handles
+        .try_open(open_u32)
+        .map_err(|_| WitSqlError::PoolExhausted)?;
     if open >= MAX_SQL_HANDLES {
         return Err(WitSqlError::PoolExhausted);
     }
@@ -1371,7 +1381,14 @@ mod tests {
 
     fn store_for(path: &std::path::Path, read_write: bool, execute: bool) -> StoreData {
         let manifest = manifest_for(path, execute);
-        StoreData::new(GrantSet::from_manifest(&manifest)).with_sql(view_for(path, read_write))
+        let mut data =
+            StoreData::new(GrantSet::from_manifest(&manifest)).with_sql(view_for(path, read_write));
+        // Test room, not policy: every mint path checks the quota first, so
+        // tests that open handles declare headroom up front. The
+        // zero-quota default (deny when unconfigured) is covered by the
+        // quota-exhaustion test below.
+        data.handles = crate::quota::HandleQuota::new(1024);
+        data
     }
 
     fn ungranted_store() -> StoreData {
@@ -2061,6 +2078,26 @@ mod tests {
         assert!(matches!(err, WitSqlError::PoolExhausted));
     }
 
+    /// The manifest quota binds before the absolute table cap: with room
+    /// for 256 handles but a quota of 1, the second prepare is refused and
+    /// counted — the per-instance policy, not the host backstop, decides
+    /// first.
+    #[test]
+    fn quota_exhaustion_refuses_before_the_table_cap() {
+        use super::bindings::qqq::sql::database::Host as _;
+        let path = test_path("quota");
+        let mut data = store_for(&path, true, true);
+        data.handles = crate::quota::HandleQuota::new(1);
+        data.prepare("orders".to_owned(), "SELECT 1".to_owned())
+            .expect("one handle fits");
+        let err = data
+            .prepare("orders".to_owned(), "SELECT 1".to_owned())
+            .expect_err("quota exhausted");
+        assert!(matches!(err, WitSqlError::PoolExhausted));
+        assert_eq!(data.handles.exhaustion_attempts(), 1);
+        assert_eq!(data.sql_state.statements.len(), 1);
+    }
+
     /// A cap-hit creates nothing: the cap is checked before any open, so a
     /// refused call leaves no file behind.
     #[test]
@@ -2157,6 +2194,7 @@ mod tests {
         ));
         assert!(!grants.grants(qqq_cap::capability::Capability::SqlQuery));
         let mut data = StoreData::new(grants).with_sql(view_for(&path, true));
+        data.handles = crate::quota::HandleQuota::new(1024);
         data.prepare(
             "orders".to_owned(),
             "CREATE TABLE t (id INTEGER)".to_owned(),

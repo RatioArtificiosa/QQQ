@@ -244,6 +244,11 @@ pub enum Refusal {
     IpLiteral,
     /// A name (or literal) outside the tenant's allowlist.
     NotAllowed,
+    /// The per-request subrequest budget is exhausted: another hop was due
+    /// but unpaid. Returned before any socket opens for the unpaid hop, so
+    /// a redirect chain cannot amplify one guest call into N dials on one
+    /// budget unit.
+    Budget,
     /// The single resolution failed.
     Dns,
     /// At least one resolved address is forbidden — the whole request is
@@ -1299,6 +1304,51 @@ fn refuse_chain(vetted: &Vetted, reason: CallError, audit: &mut impl FnMut(Audit
     Failure::Failed(reason)
 }
 
+/// Charge one hop of the chain against the subrequest budget.
+///
+/// The hop is paid for before it is vetted: vetting resolves DNS, and an
+/// unpaid hop must not even reach the resolver, let alone a socket. `Charge`
+/// poisons on first refusal, so a guest that ignores the error cannot turn
+/// the refusal path into its own amplification vector — every later hop
+/// refuses the same way, for free.
+fn charge_hop(
+    budget: &mut crate::quota::SubrequestBudget,
+    url: &str,
+    audit: &mut impl FnMut(AuditRow),
+) -> Result<(), Failure> {
+    if budget.charge().is_refused() {
+        return Err(audit_unvetted_refusal(url, Refusal::Budget, audit));
+    }
+    Ok(())
+}
+
+/// Audit a refusal for a hop that was never vetted.
+///
+/// The target never reached [`vet`], so there is no vetted host to name:
+/// the row carries the URL's parsed host (or empty when unparseable) with
+/// zero byte counts. Parsed, never trusted — the row is operator telemetry
+/// about an attempted chain end, not a vetted destination.
+fn audit_unvetted_refusal(url: &str, reason: Refusal, audit: &mut impl FnMut(AuditRow)) -> Failure {
+    let (host, port) = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .host_str()
+                .map(|h| (h.to_owned(), parsed.port_or_known_default().unwrap_or(0)))
+        })
+        .unwrap_or_default();
+    audit(AuditRow {
+        host,
+        port,
+        outcome: Outcome::Refused {
+            reason: reason.clone(),
+        },
+        request_bytes: 0,
+        response_bytes: 0,
+    });
+    Failure::Refused(reason)
+}
+
 /// Open one hop's stream and exchange the current request over it.
 ///
 /// Thin glue keeping [`request`]'s loop readable: open, then
@@ -1641,12 +1691,19 @@ fn charge(counts: &std::sync::Mutex<IoCount>, written: usize, read: usize) {
 /// [`Failure::Refused`] before any socket opens, [`Failure::Failed`]
 /// after. A [`CallError::Timeout`] covers the whole call via the total
 /// timeout, so a hanging peer fails the call instead of the test suite.
+///
+/// The subrequest budget is charged once per hop, before vetting that hop:
+/// one guest call that 302-chains across three hops spends three budget
+/// units, not one. A hop refused for lack of budget never opens a socket,
+/// and the refusal is audited against the hop's parsed (not vetted) target
+/// so the chain's end stays visible.
 pub async fn request<T: Transport>(
     policy: &TenantEgress,
     request: &Request,
     resolver: &impl Resolver,
     limits: &Limits,
     transport: &T,
+    budget: &mut crate::quota::SubrequestBudget,
     audit: &mut impl FnMut(AuditRow),
 ) -> Result<Response, Failure> {
     let deadline = tokio::time::Instant::now() + limits.total_timeout;
@@ -1663,13 +1720,14 @@ pub async fn request<T: Transport>(
     // per-hop switch says "surface", the budget below says "follow".
     let mut hop_limits = *limits;
     hop_limits.max_redirects = 1;
-    let budget = policy
+    let hop_budget = policy
         .max_redirect_hops()
         .min(limits.max_redirects)
         .min(REDIRECT_HOP_LIMIT);
     let mut current = request.clone();
     let mut hops_followed: u8 = 0;
     loop {
+        charge_hop(budget, &current.url, audit)?;
         let before = snapshot();
         let vetted = vet_hop(policy, &current.url, resolver, deadline, audit).await?;
         let outcome = exchange_hop(transport, &vetted, &current, &hop_limits, &counts);
@@ -1698,7 +1756,7 @@ pub async fn request<T: Transport>(
                 let Some(location) = redirect_location(response.status, &response.headers) else {
                     return Ok(response);
                 };
-                if hops_followed >= budget {
+                if hops_followed >= hop_budget {
                     return Err(refuse_chain(&vetted, CallError::Redirect, audit));
                 }
                 let Some(next_url) = join_location(&current.url, location) else {
@@ -2641,6 +2699,7 @@ mod io_tests {
             &FakeResolver,
             &limits,
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -2668,6 +2727,7 @@ mod io_tests {
             &FakeResolver,
             &limits,
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -2714,6 +2774,7 @@ mod io_tests {
             &FakeResolver,
             &limits,
             &HangTransport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -2754,6 +2815,7 @@ mod io_tests {
             &HangResolver,
             &limits,
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -2789,6 +2851,7 @@ mod io_tests {
             &FakeResolver,
             &limits,
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3362,6 +3425,7 @@ mod redirect_tests {
             &resolver,
             &Limits::default(),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3402,6 +3466,7 @@ mod redirect_tests {
             &CountingResolver::new(),
             &Limits::default(),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3437,6 +3502,7 @@ mod redirect_tests {
             &CountingResolver::new(),
             &Limits::default(),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3466,6 +3532,7 @@ mod redirect_tests {
             &resolver,
             &Limits::default(),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3503,6 +3570,7 @@ mod redirect_tests {
             &resolver,
             &redirect_limits(3),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3534,6 +3602,7 @@ mod redirect_tests {
             &resolver,
             &redirect_limits(3),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3566,6 +3635,7 @@ mod redirect_tests {
             &resolver,
             &redirect_limits(3),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3607,6 +3677,7 @@ mod redirect_tests {
             &resolver,
             &redirect_limits(5),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3646,6 +3717,7 @@ mod redirect_tests {
             &CountingResolver::new(),
             &redirect_limits(3),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3691,6 +3763,7 @@ mod redirect_tests {
             &CountingResolver::new(),
             &redirect_limits(1),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3732,6 +3805,7 @@ mod redirect_tests {
             &CountingResolver::new(),
             &redirect_limits(1),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3775,6 +3849,7 @@ mod redirect_tests {
             &CountingResolver::new(),
             &redirect_limits(1),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await
@@ -3813,6 +3888,7 @@ mod redirect_tests {
             &CountingResolver::new(),
             &redirect_limits(1),
             &transport,
+            &mut crate::quota::SubrequestBudget::new(u32::MAX),
             &mut |row| rows.push(row),
         )
         .await

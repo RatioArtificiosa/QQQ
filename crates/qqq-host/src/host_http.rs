@@ -174,10 +174,15 @@ impl bindings::qqq::http::http::Host for StoreData {
     ///
     /// # The order of the two refusals, and why it matters
     ///
-    /// The **budget is charged before the destination is considered**, so a guest cannot
-    /// learn whether a host is allowlisted by exhausting its budget and observing which
-    /// error it gets. Charging first also means a refusal still spends budget, which is
-    /// the correct reading of `SEC-009`: the budget bounds *attempts*, not successes.
+    /// The grant is checked before anything else, so an ungranted call fails
+    /// without spending budget or touching the network — and the refusal is
+    /// audited, so probing stays visible. The **budget is charged per hop
+    /// inside the connector, before that hop is vetted**, so a guest cannot
+    /// learn whether a host is allowlisted by exhausting its budget and
+    /// observing which error it gets, and a 302-chain cannot amplify one
+    /// call into N dials on one unit. Charging per hop also means a refusal
+    /// still spends budget, which is the correct reading of `SEC-009`: the
+    /// budget bounds *attempts*, not successes.
     ///
     /// # Why the URL is not echoed into the error
     ///
@@ -190,15 +195,21 @@ impl bindings::qqq::http::http::Host for StoreData {
     fn send(&mut self, req: Request) -> std::result::Result<Response, HttpError> {
         // The call-time re-check, before anything reads `req`.
         if !self.grants.grants(Capability::HttpClient) {
+            // Loud, not silent: an ungranted `send` is a probing signal (or a
+            // mis-built linker), and an operator who cannot see it cannot
+            // distinguish probing from quiet. The row names the attempted
+            // target parsed — never vetted — with zero bytes moved.
+            let (host, port) = parse_attempted_authority(&req.url);
+            self.egress_audit.push(crate::egress::AuditRow {
+                host,
+                port,
+                outcome: crate::egress::Outcome::Refused {
+                    reason: crate::egress::Refusal::NotAllowed,
+                },
+                request_bytes: 0,
+                response_bytes: 0,
+            });
             return Err(HttpError::HostNotAllowed);
-        }
-
-        // `SEC-009`'s budget. A store assembled by `Default` or `new` has a budget of
-        // **zero**, and zero means "no outbound effects declared" rather than
-        // "unlimited" — the reading `StoreData`'s own documentation insists on, and the
-        // one that makes an undeclared app unable to phone home.
-        if self.subrequests.charge().is_refused() {
-            return Err(HttpError::SubrequestLimitExceeded);
         }
 
         // The bridge to the async connector. `send` is sync (the `bindgen!`
@@ -299,17 +310,23 @@ impl bindings::qqq::http::http::Host for StoreData {
 }
 
 impl StoreData {
-    /// `send` through vetting: grant and budget are the caller's job
-    /// (checked in `send` before this runs); everything from the URL
-    /// down is the connector's. Async so tests drive it directly
-    /// against fake transports and resolvers over duplex — the sync
-    /// `send` adds only the bridge.
+    /// `send` through vetting: the grant is the caller's job (checked in
+    /// `send` before this runs); the budget is charged per hop inside the
+    /// connector, so a redirect chain cannot amplify one call into N dials
+    /// on one budget unit. Async so tests drive it directly against fake
+    /// transports and resolvers over duplex — the sync `send` adds only
+    /// the bridge.
     ///
     /// One audit row per visited hop lands in `egress_audit` (plus one
     /// for a terminal chain refusal): the connector audits every path
     /// (refusal, timeout, success, failure), and rows are moved here
     /// rather than borrowed so no borrow of `self` outlives the call.
-    pub(crate) async fn send_via(
+    ///
+    /// Private (not `pub(crate)`): the only in-tree callers are `send`
+    /// above and the tests in this file. A future call site that routed
+    /// around `send` would skip the grant re-check, so the compiler must
+    /// reject it — visibility, not documentation, is the enforcement.
+    async fn send_via(
         &mut self,
         req: Request,
         transport: &impl crate::egress::Transport,
@@ -330,6 +347,7 @@ impl StoreData {
             resolver,
             &limits,
             transport,
+            &mut self.subrequests,
             &mut |row| rows.push(row),
         )
         .await;
@@ -338,6 +356,22 @@ impl StoreData {
             .map(map_response)
             .map_err(|failure| map_failure(&failure))
     }
+}
+
+/// Best-effort host/port of an attempted URL, for pre-vet audit rows.
+///
+/// Parsed, never trusted: the row is operator telemetry about what a guest
+/// attempted, not a vetted destination. Unparseable targets record empty
+/// rather than failing the refusal they annotate.
+fn parse_attempted_authority(url: &str) -> (String, u16) {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .host_str()
+                .map(|h| (h.to_owned(), parsed.port_or_known_default().unwrap_or(0)))
+        })
+        .unwrap_or_default()
 }
 
 /// Map the guest's request onto the connector's: method, headers,
@@ -397,6 +431,12 @@ fn map_response(response: crate::egress::Response) -> Response {
 fn map_failure(failure: &crate::egress::Failure) -> HttpError {
     use crate::egress::{CallError, Failure};
     match failure {
+        // The budget ran out mid-chain: the guest amplified one call into
+        // more hops than its manifest allows. Distinct from `host-not-allowed`
+        // on purpose — conflating them would send an operator to the
+        // allowlist for a fan-out problem. (Matched before the wildcard
+        // below: this is the one refusal that is not a policy denial.)
+        Failure::Refused(crate::egress::Refusal::Budget) => HttpError::SubrequestLimitExceeded,
         // A downgrade is a policy refusal wearing I/O's clothes: the
         // grant never authorises `https` to `http`, so the guest sees
         // the same `host-not-allowed` as every other denied chain.
@@ -1163,6 +1203,49 @@ mod tests {
             rows.get(1).expect("refusal row").outcome,
             Outcome::Failed { .. }
         ));
+    }
+
+    /// One budget unit buys one hop, not one call: with a budget of 1 the
+    /// granted redirect's second hop refuses `subrequest-limit-exceeded`
+    /// before any second dial, and the chain ends in an audited refusal
+    /// row rather than a silent stop. This is the test that would catch a
+    /// charge moved back to one-per-call: the second hop would succeed.
+    #[test]
+    fn send_charges_the_budget_per_hop_not_per_call() {
+        let mut data = client_store(1);
+        data.egress = qqq_cap::egress::TenantEgress::allowing_hosts(&["api.example.com"])
+            .expect("fixture policy parses")
+            .allowing_redirects(1);
+        let resolver = CannedResolver::answering("api.example.com", "93.184.216.34");
+        let result = block_on(data.send_via(
+            get("https://api.example.com/start"),
+            &RedirectOnce,
+            &resolver,
+        ));
+        assert_eq!(outcome(&result), "subrequest-limit-exceeded");
+        let rows = data.take_egress_audit();
+        assert_eq!(rows.len(), 2, "visited hop plus budget refusal");
+        assert!(matches!(
+            rows.get(1).expect("refusal row").outcome,
+            Outcome::Refused { .. }
+        ));
+    }
+
+    /// An ungranted `send` is audited, not silent: the operator sees the
+    /// attempted target and the refusal, so probing cannot hide in a
+    /// response-only world. The row names the parsed target — never vetted —
+    /// with zero bytes moved.
+    #[test]
+    fn send_audits_an_ungranted_call_without_dialling() {
+        let mut data = StoreData::new(grants_from(SERVER));
+        let result = data.send(get("https://api.example.com/thing"));
+        assert_eq!(outcome(&result), "host-not-allowed");
+        let rows = data.take_egress_audit();
+        assert_eq!(rows.len(), 1, "the refusal is recorded, not silent");
+        let row = rows.first().expect("one row recorded");
+        assert_eq!(row.host, "api.example.com");
+        assert_eq!(row.port, 443);
+        assert!(matches!(row.outcome, Outcome::Refused { .. }));
     }
 
     #[test]

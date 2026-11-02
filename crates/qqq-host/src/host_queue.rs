@@ -645,8 +645,15 @@ fn valid_queue_name(queue: &str) -> bool {
 /// forbids panicking paths, so the map itself is intact. Refusing every
 /// later request for a panic that cannot name would turn one failed call
 /// into a dead queue; recovering keeps the failure where it happened.
-fn lock_backend(data: &crate::linker::StoreData) -> std::sync::MutexGuard<'_, QueueBackend> {
-    data.queue.backend.lock().unwrap_or_else(|poisoned| {
+///
+/// Takes the backend handle rather than the whole store so a caller can hold
+/// the lock and its own quota side by side: the borrow checker sees disjoint
+/// fields, and the quota decision and the mutation share one critical
+/// section instead of a check-then-act race across two lockings.
+fn lock_backend(
+    backend: &std::sync::Arc<std::sync::Mutex<QueueBackend>>,
+) -> std::sync::MutexGuard<'_, QueueBackend> {
+    backend.lock().unwrap_or_else(|poisoned| {
         let _ = &poisoned;
         poisoned.into_inner()
     })
@@ -678,7 +685,24 @@ fn now_or_fail(data: &crate::linker::StoreData) -> std::result::Result<u64, WitQ
 impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
     fn publish(&mut self, queue: String, body: Vec<u8>) -> std::result::Result<(), WitQueueError> {
         check_publish(self, &queue)?;
-        lock_backend(self).publish(&queue, body, now_or_fail(self)?)?;
+        // The manifest quota first, the absolute depth second: `max_open_handles`
+        // is the per-instance policy, `MAX_QUEUE_DEPTH` the shared backstop.
+        // Both report `QuotaExceeded` — the WIT type's name for "no room" —
+        // while the quota's counter records the exhaustion. One critical
+        // section: the lock borrows `self.queue` while the quota borrows
+        // `self.handles`, disjoint fields the borrow checker tracks
+        // separately, so the count the quota judged is the count the
+        // mutation extends. (The backend is shared across instances, so the
+        // open count is deployment-wide: a per-instance number against a
+        // shared table is global backpressure, fail-closed by construction.)
+        let now = now_or_fail(self)?;
+        let mut backend = lock_backend(&self.queue.backend);
+        let open = backend.pending_count(&queue) + backend.in_flight_count(&queue);
+        let open = u32::try_from(open).unwrap_or(u32::MAX);
+        self.handles
+            .try_open(open)
+            .map_err(|_| WitQueueError::QuotaExceeded)?;
+        backend.publish(&queue, body, now)?;
         Ok(())
     }
 
@@ -704,7 +728,16 @@ impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
             return Err(WitQueueError::MessageTooLarge);
         }
         let now = now_or_fail(self)?;
-        let mut backend = lock_backend(self);
+        let mut backend = lock_backend(&self.queue.backend);
+        // The batch is atomic and the quota binds on the would-be total, so a
+        // batch that overflows is refused whole. Same shared-table note as
+        // `publish`: the open count is deployment-wide backpressure.
+        let open = backend.pending_count(&queue) + backend.in_flight_count(&queue);
+        let open = u32::try_from(open).unwrap_or(u32::MAX);
+        let more = u32::try_from(bodies.len()).unwrap_or(u32::MAX);
+        self.handles
+            .try_open_batch(open, more)
+            .map_err(|_| WitQueueError::QuotaExceeded)?;
         // The publish path bounds the same total, so the batch cannot
         // overflow a queue that single publishes could not.
         if backend.pending_count(&queue) + backend.in_flight_count(&queue) + bodies.len()
@@ -730,19 +763,19 @@ impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
         // reactor and poison deterministic replay.
         check_subscribe(self, &queue)?;
         let now = now_or_fail(self)?;
-        Ok(lock_backend(self).receive(&queue, now))
+        Ok(lock_backend(&self.queue.backend).receive(&queue, now))
     }
 
     fn acknowledge(&mut self, queue: String, id: String) -> std::result::Result<(), WitQueueError> {
         check_subscribe(self, &queue)?;
         let now = now_or_fail(self)?;
-        lock_backend(self).acknowledge(&queue, &id, now)
+        lock_backend(&self.queue.backend).acknowledge(&queue, &id, now)
     }
 
     fn reject(&mut self, queue: String, id: String) -> std::result::Result<(), WitQueueError> {
         check_subscribe(self, &queue)?;
         let now = now_or_fail(self)?;
-        lock_backend(self).reject(&queue, &id, now)
+        lock_backend(&self.queue.backend).reject(&queue, &id, now)
     }
 
     fn queues(&mut self) -> Vec<(String, String)> {
@@ -952,6 +985,47 @@ mod tests {
         assert!(matches!(err, WitQueueError::QueueNotConfigured));
     }
 
+    /// The manifest quota binds publish before the shared depth cap: with
+    /// room for 1024 messages but a quota of 1, the second publish is
+    /// refused and counted — the per-instance policy, not the deployment
+    /// backstop, decides first.
+    #[test]
+    fn quota_exhaustion_refuses_publish_before_depth() {
+        let mut data = granted_store(true, true);
+        data.handles = crate::quota::HandleQuota::new(1);
+        bindings::qqq::queue::messaging::Host::publish(&mut data, "q".to_owned(), b"one".to_vec())
+            .expect("one fits");
+        let err = bindings::qqq::queue::messaging::Host::publish(
+            &mut data,
+            "q".to_owned(),
+            b"two".to_vec(),
+        )
+        .expect_err("quota exhausted");
+        assert!(matches!(err, WitQueueError::QuotaExceeded));
+        assert_eq!(data.handles.exhaustion_attempts(), 1);
+        assert_eq!(lock_backend(&data.queue.backend).pending_count("q"), 1);
+    }
+
+    /// A batch that would overflow the quota stores nothing: atomicity
+    /// covers the quota exactly as it covers the depth cap.
+    #[test]
+    fn an_over_quota_batch_stores_nothing() {
+        let mut data = granted_store(true, true);
+        data.handles = crate::quota::HandleQuota::new(1);
+        let err = bindings::qqq::queue::messaging::Host::publish_many(
+            &mut data,
+            "q".to_owned(),
+            vec![b"one".to_vec(), b"two".to_vec()],
+        )
+        .expect_err("two messages against a quota of one must refuse");
+        assert!(matches!(err, WitQueueError::QuotaExceeded));
+        assert_eq!(
+            lock_backend(&data.queue.backend).pending_count("q"),
+            0,
+            "no prefix of a failed batch may persist"
+        );
+    }
+
     /// `queues()` without a grant answers empty: the manifest set is public
     /// to granted guests, but an ungranted caller learns nothing.
     #[test]
@@ -994,7 +1068,7 @@ mod tests {
                 .expect_err("too many bodies");
         assert!(matches!(err, WitQueueError::QuotaExceeded));
         assert_eq!(
-            lock_backend(&data).pending_count("q"),
+            lock_backend(&data.queue.backend).pending_count("q"),
             0,
             "no prefix of a refused batch may persist"
         );

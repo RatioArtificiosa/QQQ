@@ -375,6 +375,15 @@ fn start_span_impl(
     if name.len() > crate::host_log::MAX_LOG_FIELD_BYTES {
         return Err(WitTraceError::SpanTooLarge);
     }
+    // The manifest quota first, the absolute ceiling second: `max_open_handles`
+    // is the per-instance policy, `MAX_TRACE_SPANS` the host's backstop. Both
+    // report `SpanTooLarge` — the WIT type has no quota case, and a full table
+    // is what the guest observes either way — while the quota's own counter
+    // records the exhaustion where the operator looks for it.
+    let open = u32::try_from(data.trace.spans.len()).unwrap_or(u32::MAX);
+    data.handles
+        .try_open(open)
+        .map_err(|_| WitTraceError::SpanTooLarge)?;
     if data.trace.spans.len() >= MAX_TRACE_SPANS {
         return Err(WitTraceError::SpanTooLarge);
     }
@@ -651,7 +660,13 @@ mod tests {
         let m =
             Manifest::parse("[package]\nname = \"a\"\nversion = \"0.1.0\"\n[capabilities.trace]\n")
                 .expect("manifest parses");
-        StoreData::new(GrantSet::from_manifest(&m))
+        let mut data = StoreData::new(GrantSet::from_manifest(&m));
+        // Test room, not policy: the quota is enforced per call, so every
+        // test that opens spans needs headroom declared up front. The
+        // zero-quota default (deny when unconfigured) is covered by
+        // `quota_exhaustion_refuses_before_the_table_cap` below.
+        data.handles = crate::quota::HandleQuota::new(256);
+        data
     }
 
     fn ungranted_store() -> StoreData {
@@ -706,6 +721,29 @@ mod tests {
         let err = start_span_impl(&mut data, "x", None).expect_err("no grant");
         assert!(matches!(err, WitTraceError::NotGranted));
         assert!(data.trace.spans.is_empty(), "nothing is stored");
+    }
+
+    /// The manifest quota binds before the absolute table cap: with
+    /// `max_open_handles = 1`, the second span is refused even though the
+    /// 256-slot table is nearly empty — and the refusal is counted, so the
+    /// operator sees accumulation rather than headroom.
+    #[test]
+    fn quota_exhaustion_refuses_before_the_table_cap() {
+        let mut data = granted_store();
+        data.handles = crate::quota::HandleQuota::new(1);
+        start_span_impl(&mut data, "first", None).expect("one span fits");
+        let err = start_span_impl(&mut data, "second", None).expect_err("quota exhausted");
+        assert!(matches!(err, WitTraceError::SpanTooLarge));
+        assert_eq!(
+            data.trace.spans.len(),
+            1,
+            "the refused span must not be stored"
+        );
+        assert_eq!(
+            data.handles.exhaustion_attempts(),
+            1,
+            "the refusal must be counted"
+        );
     }
 
     /// The register links only when granted.

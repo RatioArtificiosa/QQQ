@@ -93,8 +93,7 @@ fn manifest() -> Manifest {
     Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
          [capabilities.secret]\nsecrets = [\"env:K\", \"env:UNRESOLVED\"]\n\
-         [capabilities.crypto]\nhmac = [\"sha256\"]\naead = [\"aes-256-gcm\"]\nsign = [\"ed25519\"]\n\
-         [capabilities.http]\nserver = true\n",
+         [capabilities.crypto]\nhmac = [\"sha256\"]\naead = [\"aes-256-gcm\"]\nsign = [\"ed25519\"]\n",
     )
     .expect("probe manifest parses")
 }
@@ -248,8 +247,7 @@ fn ungranted_guest_fails_closed_by_name() {
 fn secret_use_without_crypto_grant_is_operation_not_permitted() {
     let m = Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
-         [capabilities.secret]\nsecrets = [\"env:K\"]\n\
-         [capabilities.http]\nserver = true\n",
+         [capabilities.secret]\nsecrets = [\"env:K\"]\n",
     )
     .expect("manifest parses");
     let grants = GrantSet::from_manifest(&m);

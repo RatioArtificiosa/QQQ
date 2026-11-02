@@ -174,6 +174,21 @@ impl SubrequestBudget {
     /// its [`Error`] in [`Self::refusal`], which the caller invokes **only** on
     /// [`Charge::Refused`], never on [`Charge::RefusedRepeatedly`].
     ///
+    /// # What charges, and what does not (H8)
+    ///
+    /// The budget prices **host effects a guest loop can multiply**: HTTP
+    /// charges per hop (redirects re-vet and re-dial), DNS per lookup, SQL
+    /// per statement execution (file I/O, page cache, lock holds), queue
+    /// `publish`/`publish_many` (cross-instance delivery). KV does not
+    /// charge: stores are manifest-allowlisted, every call is capped (keys
+    /// per listing, key/value bytes), the backend does no I/O, and the loop
+    /// itself is fuel-bounded — the per-call CPU is what fuel prices. Log
+    /// and trace do not charge either: their buffers are operator-visible,
+    /// capped, and never leave the host. Adding KV/log/trace here would
+    /// double-price what fuel and the byte caps already bound, while
+    /// *removing* any of the four chargers would unbind a real external
+    /// effect — so the set is closed by this list, not by convention.
+    ///
     /// # Why the caller must not build an error for `RefusedRepeatedly`
     ///
     /// That is the entire point of the distinction. Building a rich error

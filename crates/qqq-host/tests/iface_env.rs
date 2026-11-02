@@ -85,8 +85,7 @@ fn limits() -> LimitSet {
 fn manifest() -> Manifest {
     Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
-         [capabilities.env]\nallow = [\"REGION\", \"MISSING\", \"BINARY\"]\n\
-         [capabilities.http]\nserver = true\n",
+         [capabilities.env]\nallow = [\"REGION\", \"MISSING\", \"BINARY\"]\n",
     )
     .expect("probe manifest parses")
 }

@@ -1168,6 +1168,8 @@ fn register_hashing(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                     .map_err(|e| wasmtime::Error::msg(e.render()))?;
 
                 let name = algorithm_name(algorithm)?;
+                // After the `list_size` gate above, so the capacity is bounded
+                // by the checked count — never by the raw guest length.
                 let mut out = Vec::with_capacity(inputs.len());
                 for (i, input) in inputs.iter().enumerate() {
                     // The per-element limit is still separate from the list

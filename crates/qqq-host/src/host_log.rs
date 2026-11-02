@@ -223,6 +223,15 @@ impl LogHost for crate::linker::StoreData {
         if !self.grants.grants(LogWrite) {
             return Err(WitLogError::NotGranted);
         }
+        // Cap before allocate: the host-side `validated`/`levels` vectors
+        // would otherwise pre-allocate for an arbitrarily large batch before
+        // the first record is even judged. A batch that cannot fit the table
+        // (`MAX_LOG_RECORDS` total) can never succeed, so refusing it here
+        // changes nothing observable — it only fails before the allocation
+        // instead of after it.
+        if records.len() > MAX_LOG_RECORDS {
+            return Err(WitLogError::RecordTooLarge);
+        }
         let mut validated = Vec::with_capacity(records.len());
         let mut levels = Vec::with_capacity(records.len());
         for (level, message, attributes) in &records {
@@ -436,6 +445,14 @@ pub(crate) fn record_bytes(message: &str, attributes: &[(String, AttributeValue)
 }
 
 /// Currently buffered stored bytes across the instance's records.
+///
+/// A full scan on every call, deliberately: the scan is bounded by
+/// `MAX_LOG_RECORDS` (4096) — a few thousand integer adds, negligible next
+/// to the per-record validation the caller already does — while a running
+/// counter would have to stay in sync across every mutation path (`emit`,
+/// `emit_many`, the trace mirror) with no enforcement that it does. A stale
+/// counter fails open or closed depending on the direction of the drift; a
+/// scan cannot drift.
 pub(crate) fn buffered_bytes(logs: &[LogRecord]) -> usize {
     logs.iter()
         .map(|record| record_bytes(&record.message, &record.attributes))
@@ -721,6 +738,22 @@ mod tests {
             data.logs.is_empty(),
             "no prefix of a failed batch may persist"
         );
+    }
+
+    /// A batch larger than the table can ever hold is refused before the
+    /// host-side vectors allocate: the refusal must precede the
+    /// `with_capacity`, or a giant batch of invalid records still triggers
+    /// a giant allocation.
+    #[test]
+    fn an_oversize_batch_is_refused_before_allocating() {
+        let mut data = data_with_log(true);
+        let batch: Vec<(Level, String, Vec<Attribute>)> = (0..=MAX_LOG_RECORDS)
+            .map(|i| (Level::Info, format!("r{i}"), vec![]))
+            .collect();
+        let err =
+            LogHost::emit_many(&mut data, batch).expect_err("a batch that cannot fit must refuse");
+        assert!(matches!(err, WitLogError::RecordTooLarge));
+        assert!(data.logs.is_empty(), "a refused batch stores nothing");
     }
 
     /// Attribute names are bounded: an unbounded name is guest-controlled

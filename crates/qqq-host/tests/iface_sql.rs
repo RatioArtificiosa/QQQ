@@ -100,8 +100,7 @@ fn manifest(dir: &std::path::Path) -> Manifest {
          [[capabilities.sql]]\nname = \"orders\"\ndriver = \"sqlite\"\n\
          host = \"{}\"\nexecute = true\n\
          [[capabilities.sql]]\nname = \"ledger\"\ndriver = \"sqlite\"\n\
-         host = \"{}\"\n\
-         [capabilities.http]\nserver = true\n",
+         host = \"{}\"\n",
         dir.join("orders.db")
             .display()
             .to_string()

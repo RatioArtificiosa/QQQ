@@ -76,7 +76,12 @@ fn limits() -> LimitSet {
         memory_bytes: 16 * 1024 * 1024,
         fuel: 1_000_000_000,
         epoch_deadline_ms: 10_000,
-        max_open_handles: 64,
+        // Room for the scenario's own 72 records (2 singles + a 70-batch):
+        // log records consume handle quota one-for-one, so a quota below
+        // the batch would refuse the happy path for policy rather than for
+        // capacity. The quota still binds (unit tests pin quota=1 refusing
+        // the second record); this number only fits the scenario to it.
+        max_open_handles: 128,
         max_subrequests: 16,
     }
 }
@@ -86,8 +91,7 @@ fn manifest() -> Manifest {
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
          [capabilities.log]\n\
          [capabilities.secret]\nsecrets = [\"env:LEAK\"]\n\
-         [capabilities.crypto]\nsign = [\"ed25519\"]\n\
-         [capabilities.http]\nserver = true\n",
+         [capabilities.crypto]\nsign = [\"ed25519\"]\n",
     )
     .expect("probe manifest parses")
 }

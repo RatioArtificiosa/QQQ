@@ -363,21 +363,6 @@ pub fn register(
     Ok(())
 }
 
-/// Check a read: the direction grant, then the database membership.
-///
-/// Grant first (an ungranted call fails before its name is judged), then
-/// membership. `sql.query` alone gates reads.
-fn check_read(data: &crate::linker::StoreData, name: &str) -> std::result::Result<(), WitSqlError> {
-    use qqq_cap::capability::Capability::SqlQuery;
-    if !data.grants.grants(SqlQuery) {
-        return Err(WitSqlError::NotGranted);
-    }
-    if !valid_name(name) || !data.sql.config.allows(name) {
-        return Err(WitSqlError::DatabaseNotConfigured);
-    }
-    Ok(())
-}
-
 /// Check a write: either grant missing, the database membership, then the direction.
 ///
 /// `not-granted` means *neither* direction was granted. A read-only
@@ -464,6 +449,12 @@ fn to_sql(value: WitValue) -> std::result::Result<rusqlite::types::Value, WitSql
 /// Convert one SQLite row to guest values, bounding text and blobs.
 fn from_row(row: &rusqlite::Row<'_>) -> std::result::Result<WitRow, WitSqlError> {
     use rusqlite::types::Value as SqlValue;
+    // Bounded by the statement, not the guest: `column_count` comes from the
+    // prepared statement against the deploy's own SQLite file (SQLite caps it
+    // at `SQLITE_LIMIT_COLUMN`, 2000 by default), and `collect_rows` caps
+    // rows and bytes downstream — so this capacity cannot be guest-driven
+    // past tens of kilobytes, and capping it lower would truncate wide rows
+    // instead of bounding an allocation.
     let mut out: WitRow = Vec::with_capacity(row.as_ref().column_count());
     for index in 0..row.as_ref().column_count() {
         let value: SqlValue = row.get(index).map_err(|error| {
@@ -915,8 +906,15 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         sql: String,
         args: Vec<WitValue>,
     ) -> std::result::Result<Vec<WitRow>, WitSqlError> {
-        use qqq_cap::capability::Capability::SqlExecute;
-        check_read(self, &database)?;
+        use qqq_cap::capability::Capability::{SqlExecute, SqlQuery};
+        // Either direction grant opens the call, mirroring
+        // `database::prepare`: an execute-only grant reaches one-shot
+        // writes, a query-only grant reaches one-shot reads, and the
+        // statement's own nature decides below. Requiring the query grant
+        // here would refuse execute-only writes `prepare` allows.
+        if !self.grants.grants(SqlQuery) && !self.grants.grants(SqlExecute) {
+            return Err(WitSqlError::NotGranted);
+        }
         let Some(db) = self.sql.config.find(&database).cloned() else {
             return Err(WitSqlError::DatabaseNotConfigured);
         };
@@ -928,6 +926,11 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         // cannot write opens read-only, so a refused write never creates
         // directories or files.
         let can_write = self.grants.grants(SqlExecute) && !db.read_only();
+        // Reads need the query grant even on the either-grant entry: an
+        // execute-only grant must not become a read grant through the
+        // one-shot path `prepare` would refuse. Read here, beside
+        // `can_write`, for the same borrow reason.
+        let can_read = self.grants.grants(SqlQuery);
         charge_one_subrequest(self)?;
         let connection = if can_write {
             connection_for(self, &db)?
@@ -939,6 +942,9 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
             .map_err(|error| WitSqlError::PrepareFailed(error.to_string()))?;
         check_arity(&statement, &bound)?;
         if statement.readonly() {
+            if !can_read {
+                return Err(WitSqlError::NotGranted);
+            }
             let rows = statement
                 .query(rusqlite::params_from_iter(bound.iter()))
                 .map_err(|error| WitSqlError::ExecutionFailed(error.to_string()))?;
@@ -1196,6 +1202,7 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         wasmtime::component::Resource<bindings::qqq::sql::transaction::TxnStatement>,
         WitSqlError,
     > {
+        use qqq_cap::capability::Capability::{SqlExecute, SqlQuery};
         use wasmtime::component::Resource;
         check_any(self)?;
         check_sql_size(&sql)?;
@@ -1208,6 +1215,18 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
             let connection = connection_for(self, &db)?;
             prepare_on(connection, &sql)?
         };
+        // Direction follows the statement, not the call — mirroring
+        // `database::prepare`: a read prepares under the query grant, a write
+        // under the execute grant. Without this, a read-only guest could
+        // prepare and hold write statements it can never execute, squatting
+        // handle-table slots its own legitimate statements need.
+        if read_only {
+            if !self.grants.grants(SqlQuery) {
+                return Err(WitSqlError::NotGranted);
+            }
+        } else if !self.grants.grants(SqlExecute) {
+            return Err(WitSqlError::ReadOnlyConnection);
+        }
         let txn = handle.rep();
         let id = mint_id(self)?;
         self.sql_state
@@ -1821,6 +1840,71 @@ mod tests {
         )
         .expect("select runs");
         assert!(rows.is_empty());
+    }
+
+    /// A read-only guest cannot mint write statements inside a transaction:    /// the direction check runs before `mint_id` (mirroring
+    /// `database::prepare`), so the refused prepare holds no handle-table
+    /// slot its own legitimate statements need.
+    #[test]
+    fn txn_prepare_of_a_write_without_the_execute_grant_mints_nothing() {
+        use super::bindings::qqq::sql::transaction::{Host as _, HostTxn as _};
+        // The table must exist for `prepare_on` to learn the statement is a
+        // write; a writer store on the same file creates it first.
+        let path = test_path("txn-read-only-prepare");
+        let mut writer = store_for(&path, true, true);
+        query_once(
+            &mut writer,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("create runs");
+        drop(writer);
+        let mut data = store_for(&path, true, false);
+        let txn = data.begin("orders".to_owned()).expect("begin runs");
+        let minted_before = data.sql_state.txn_statements.len();
+        let err = data
+            .prepare(txn, "INSERT INTO t VALUES (1)".to_owned())
+            .expect_err("a write without the execute grant must not prepare");
+        assert!(
+            matches!(err, WitSqlError::ReadOnlyConnection),
+            "the refusal names the direction, not the grant: {err:?}"
+        );
+        assert_eq!(
+            data.sql_state.txn_statements.len(),
+            minted_before,
+            "the refused prepare must hold no handle-table slot"
+        );
+    }
+
+    /// A query-only guest writing through the one-shot path is refused for
+    /// the direction, not the grant: `query_once` opens on either grant
+    /// (mirroring `database::prepare`), so the write reaches the direction
+    /// check instead of failing at entry.
+    #[test]
+    fn query_once_by_a_query_only_guest_names_the_direction_for_writes() {
+        let path = test_path("query-once-direction");
+        let mut writer = store_for(&path, true, true);
+        query_once(
+            &mut writer,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("create runs");
+        drop(writer);
+        let mut data = store_for(&path, true, false);
+        let err = query_once(
+            &mut data,
+            "orders".to_owned(),
+            "INSERT INTO t VALUES (1)".to_owned(),
+            vec![],
+        )
+        .expect_err("a query-only write must not run");
+        assert!(
+            matches!(err, WitSqlError::ReadOnlyConnection),
+            "the refusal names the direction, not the grant: {err:?}"
+        );
     }
 
     /// Dropping without committing rolls back: the safe default for a

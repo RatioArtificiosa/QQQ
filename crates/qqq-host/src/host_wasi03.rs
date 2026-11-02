@@ -144,8 +144,11 @@ pub const KNOWN_ASYNC_03: &[&str] = &[
 /// `now` additionally re-checks the grant on every call (defence in depth,
 /// same reasoning as `host_clock`'s `now`): if a future change ever registers
 /// this function unconditionally, the guest still cannot read the clock
-/// without the grant. `get-resolution` carries no recheck, mirroring the 0.2
-/// `resolution`: the tick interval is configuration, not a reading.
+/// without the grant. `get-resolution` carries the same re-check, mirroring
+/// the 0.2 `resolution` after the host-b review: the tick interval is
+/// configuration, not a reading, so the check changes nothing observable on a
+/// correct tree, and it keeps the invariant that every clock body re-checks
+/// its grant.
 ///
 /// # Errors
 ///
@@ -163,9 +166,14 @@ pub fn register(linker: &mut Linker<StoreData>, grants: &GrantSet) -> wasmtime::
         "now",
         |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
             crate::guard::guard("wasi:clocks@0.3.2/monotonic-clock.now", || {
-                if !store.data().grants.grants(Capability::ClockMonotonic) {
-                    return Err(denied(Capability::ClockMonotonic));
-                }
+                // Through `ambient::require`: the seam writes the
+                // capability-use row the audit stream reads (H10).
+                crate::ambient::require(
+                    store.data(),
+                    Capability::ClockMonotonic,
+                    "wasi03_monotonic_clock_now",
+                )
+                .map_err(|_| denied(Capability::ClockMonotonic))?;
                 Ok((store.data().ambient.read_monotonic_nanos()?,))
             })
         },
@@ -175,6 +183,12 @@ pub fn register(linker: &mut Linker<StoreData>, grants: &GrantSet) -> wasmtime::
         "get-resolution",
         |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
             crate::guard::guard("wasi:clocks@0.3.2/monotonic-clock.get-resolution", || {
+                crate::ambient::require(
+                    store.data(),
+                    Capability::ClockMonotonic,
+                    "wasi03_monotonic_clock_get_resolution",
+                )
+                .map_err(|_| denied(Capability::ClockMonotonic))?;
                 Ok((store.data().ambient.tick_interval_nanos(),))
             })
         },
@@ -284,6 +298,24 @@ mod tests {
                 "refused function must be async in the real interface: {line}"
             );
         }
+    }
+
+    /// Both served 0.3 bodies record through the audit seam (H10): the seam
+    /// writes the `Granted`/`Denied` row `assert-caps-only` reads, so an
+    /// inline grant check would answer identically while leaving a 0.3-clock
+    /// guest looking capability-clean. Counted per body, not `contains`.
+    #[test]
+    fn both_served_bodies_record_through_the_audit_seam() {
+        let production = include_str!("host_wasi03.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 2,
+            "both served bodies (`now`, `get-resolution`) must consult the audit seam; \
+             found {seams}"
+        );
     }
 
     /// **HOST-026** — the served 0.3 surface needs no 0.3.1 WIT features.

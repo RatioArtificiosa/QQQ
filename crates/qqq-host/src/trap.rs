@@ -360,6 +360,20 @@ impl Trap {
     /// from the module's name section without any DWARF at all.
     #[must_use]
     pub fn from_wasmtime_error(err: &wasmtime::Error) -> Self {
+        // `wasi:cli/exit` (H9): wasmtime-wasi surfaces `proc_exit` as
+        // `I32Exit`, an ordinary error in the chain — the process does not
+        // exit and other tenants are unaffected (one `GuestApp` holds one
+        // store, so a guest can only abandon its own request). It maps to
+        // `GuestTrap` deliberately: the guest terminated itself, which is
+        // contained, and the status stays in `detail` for triage. The match
+        // is on the type, not the message, so a future classifier arm cannot
+        // re-read "exited" as a different class, and guest-controlled frame
+        // names stay out of the decision entirely. The fallthrough below
+        // agrees today (the message matches no other arm); this arm pins the
+        // mapping against classifier drift rather than changing it.
+        let exit = err
+            .downcast_ref::<wasmtime_wasi::I32Exit>()
+            .map(|exit| exit.0);
         // Classify from the error CHAIN, not the formatted string: chain
         // sources are engine diagnostics, while the alternate-format string
         // embeds backtrace frames whose module/function names are
@@ -371,7 +385,10 @@ impl Trap {
         // stays the full formatted error — the backtrace text belongs in
         // diagnostics even though it must not drive classification.
         let mut trap = Self::from_engine_error(&format!("{err:#}"));
-        let code = classify_trap(&first_signal_in_chain(err));
+        let code = match exit {
+            Some(_) => ErrorCode::GuestTrap,
+            None => classify_trap(&first_signal_in_chain(err)),
+        };
         trap.code = code;
         human_message(code).clone_into(&mut trap.message);
 
@@ -632,6 +649,37 @@ mod tests {
         assert_eq!(
             classify_trap("panicked at src/lib.rs:42: assertion failed"),
             ErrorCode::GuestPanic
+        );
+    }
+
+    /// `wasi:cli/exit` is contained self-termination, never a crash: the
+    /// guest abandoned its own request, which classifies as `GuestTrap`.
+    /// The mapping is pinned here so a future classifier arm cannot silently
+    /// re-read "exited" as a different class (H9).
+    #[test]
+    fn a_guest_exit_classifies_as_a_contained_trap() {
+        for status in [0, 1] {
+            let err = wasmtime::Error::new(wasmtime_wasi::I32Exit(status));
+            let trap = Trap::from_wasmtime_error(&err);
+            assert_eq!(
+                trap.code,
+                ErrorCode::GuestTrap,
+                "exit({status}) must stay a contained trap"
+            );
+            assert!(
+                trap.detail.contains("Exited with i32 exit status"),
+                "the status must stay in the detail for triage: {}",
+                trap.detail
+            );
+        }
+        // Engine wrapping (context layers between the embedder and the
+        // `I32Exit`) must not lose the mapping: downcast walks the chain.
+        let wrapped = wasmtime::Error::new(wasmtime_wasi::I32Exit(0))
+            .context("error while executing at wasm backtrace");
+        assert_eq!(
+            Trap::from_wasmtime_error(&wrapped).code,
+            ErrorCode::GuestTrap,
+            "a context-wrapped exit must stay a contained trap"
         );
     }
 

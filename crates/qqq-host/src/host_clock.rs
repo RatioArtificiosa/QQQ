@@ -119,29 +119,52 @@ fn register_wall_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
         "now",
         |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
             crate::guard::guard("qqq:clock@1.0.0/wall-clock.now", || {
-                if !store.data().grants.grants(Capability::ClockWall) {
-                    return Err(denied(Capability::ClockWall));
-                }
+                // Through `ambient::require`, not an inline grant check: the
+                // seam writes the capability-use row (`Granted`/`Denied`) the
+                // audit stream — and `assert-caps-only` — read. An inline
+                // check would answer identically while leaving no record,
+                // making a clock-using guest look capability-clean (H10).
+                crate::ambient::require(store.data(), Capability::ClockWall, "wall_clock_now")
+                    .map_err(|_| denied(Capability::ClockWall))?;
                 Ok((store.data().ambient.read_wall_nanos()?,))
             })
         },
     )?;
 
     // `resolution: func() -> duration-ns`
+    //
+    // The grant is re-checked here for the same defence-in-depth reason as
+    // `now` above: on a correctly built linker this never fires (registration
+    // is already conditional), but if a future change ever registers this
+    // function unconditionally, the answer still requires the grant. The
+    // answer itself is configuration, not a reading, so the check changes
+    // nothing observable on a correct tree.
     inst.func_wrap(
         "resolution",
         |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
             crate::guard::guard("qqq:clock@1.0.0/wall-clock.resolution", || {
+                crate::ambient::require(
+                    store.data(),
+                    Capability::ClockWall,
+                    "wall_clock_resolution",
+                )
+                .map_err(|_| denied(Capability::ClockWall))?;
                 Ok((store.data().ambient.tick_interval_nanos(),))
             })
         },
     )?;
 
     // `timezone: func() -> string`
+    //
+    // Same re-check as `now` and `resolution`: the answer is the constant
+    // `"UTC"`, so the check changes nothing observable, and it keeps the
+    // invariant that every clock body re-checks its grant.
     inst.func_wrap(
         "timezone",
-        |_store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(String,)> {
+        |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(String,)> {
             crate::guard::guard("qqq:clock@1.0.0/wall-clock.timezone", || {
+                crate::ambient::require(store.data(), Capability::ClockWall, "wall_clock_timezone")
+                    .map_err(|_| denied(Capability::ClockWall))?;
                 // Always UTC. A host that applied its local timezone would make
                 // guest output depend on deployment configuration, which the WIT
                 // documentation explicitly forbids.
@@ -161,9 +184,12 @@ fn register_monotonic_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<
         "now",
         |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
             crate::guard::guard("qqq:clock@1.0.0/monotonic-clock.now", || {
-                if !store.data().grants.grants(Capability::ClockMonotonic) {
-                    return Err(denied(Capability::ClockMonotonic));
-                }
+                crate::ambient::require(
+                    store.data(),
+                    Capability::ClockMonotonic,
+                    "monotonic_clock_now",
+                )
+                .map_err(|_| denied(Capability::ClockMonotonic))?;
                 Ok((store.data().ambient.read_monotonic_nanos()?,))
             })
         },
@@ -173,6 +199,12 @@ fn register_monotonic_clock(linker: &mut Linker<StoreData>) -> wasmtime::Result<
         "resolution",
         |store: StoreContextMut<'_, StoreData>, (): ()| -> wasmtime::Result<(u64,)> {
             crate::guard::guard("qqq:clock@1.0.0/monotonic-clock.resolution", || {
+                crate::ambient::require(
+                    store.data(),
+                    Capability::ClockMonotonic,
+                    "monotonic_clock_resolution",
+                )
+                .map_err(|_| denied(Capability::ClockMonotonic))?;
                 Ok((store.data().ambient.tick_interval_nanos(),))
             })
         },
@@ -553,6 +585,38 @@ mod tests {
                 "resolution must be non-zero (deterministic={deterministic})"
             );
         }
+    }
+
+    /// Every clock body records its capability use through the audit seam.
+    ///
+    /// Five `func_wrap` bodies (`now`/`resolution`/`timezone` under
+    /// wall-clock, `now`/`resolution` under monotonic-clock), five
+    /// `ambient::require` calls: the seam is what writes the `Granted`/`Denied`
+    /// row `assert-caps-only` reads, so an inline grant check here would
+    /// answer identically while leaving a clock-using guest looking
+    /// capability-clean (H10). Counted, not `contains`: one seam call in one
+    /// body must not vouch for the other four.
+    #[test]
+    fn every_clock_body_records_through_the_audit_seam() {
+        let production = include_str!("host_clock.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        // The match string is written `func_wrap(\""` (escaped quote) so
+        // this very test does not contain the `func_wrap("` needle the
+        // boundary scanner (`boundary::registered_names`) searches for —
+        // otherwise the test would register itself as an undeclared host
+        // function. The *value* still matches every real registration once
+        // whitespace is squeezed (registrations break after the paren).
+        let squeezed: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+        let bodies = squeezed.matches("func_wrap(\"").count();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(bodies, 5, "this file should register five clock functions");
+        assert_eq!(
+            seams, bodies,
+            "every clock body must consult the audit seam; found {seams} seam call(s) \
+             for {bodies} registration(s)"
+        );
     }
 
     /// The monotonic reading must be non-decreasing — the one guarantee the

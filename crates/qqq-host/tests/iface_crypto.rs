@@ -91,8 +91,7 @@ fn manifest() -> Manifest {
          hash = [\"sha256\"]\n\
          hmac = [\"sha256\", \"sha512\"]\n\
          aead = [\"aes-256-gcm\"]\n\
-         sign = [\"ed25519\"]\n\
-         [capabilities.http]\nserver = true\n",
+         sign = [\"ed25519\"]\n",
     )
     .expect("probe manifest parses")
 }
@@ -207,8 +206,7 @@ fn hash_only_grant_cannot_reach_hmac() {
     let prepared = PreparedComponent::compile(&engine, &bytes).expect("probe component compiles");
     let manifest = Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
-         [capabilities.crypto]\nhash = [\"sha256\"]\n\
-         [capabilities.http]\nserver = true\n",
+         [capabilities.crypto]\nhash = [\"sha256\"]\n",
     )
     .expect("probe manifest parses");
     let grants = GrantSet::from_manifest(&manifest);

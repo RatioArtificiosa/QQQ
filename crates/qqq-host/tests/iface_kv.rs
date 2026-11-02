@@ -86,8 +86,7 @@ fn limits() -> LimitSet {
 fn manifest() -> Manifest {
     Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
-         [capabilities.kv]\nstores = [\"s\"]\nwrite = true\n\
-         [capabilities.http]\nserver = true\n",
+         [capabilities.kv]\nstores = [\"s\"]\nwrite = true\n",
     )
     .expect("probe manifest parses")
 }
@@ -166,8 +165,7 @@ fn granted_guest_stores_and_loads() {
 fn read_only_guest_is_refused_writes_by_name() {
     let manifest = Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
-         [capabilities.kv]\nstores = [\"s\"]\n\
-         [capabilities.http]\nserver = true\n",
+         [capabilities.kv]\nstores = [\"s\"]\n",
     )
     .expect("probe manifest parses");
     let grants = GrantSet::from_manifest(&manifest);

@@ -648,10 +648,24 @@ fn check_subscribe(
 /// Names arrive per call and become map keys, so an unbounded name is an
 /// unbounded host allocation for one lookup. Empty names are refused for
 /// the same reason blank store names are: a nameless queue would render as
-/// structure without identity.
+/// structure without identity. Control characters and whitespace are
+/// refused because a name containing a newline would forge structure in
+/// any future line-oriented rendering of it.
+///
+/// Deliberately NOT a `[a-z0-9._-]` allowlist: delivery ids carry the
+/// queue name opaquely (`{queue}:{counter:020}`) and `acknowledge` takes
+/// the queue separately with a `flight.queue == queue` cross-check, so a
+/// `:` or `/` in a name parses nothing and forges nothing; error variants
+/// carry no names at all. The allowlist membership (`allows_publish` /
+/// `allows_subscribe`) is the gate, and tightening the charset beyond
+/// line-forging would only break manifests that name queues freely.
 fn valid_queue_name(queue: &str) -> bool {
     const MAX_QUEUE_NAME_BYTES: usize = 256;
-    !queue.is_empty() && queue.len() <= MAX_QUEUE_NAME_BYTES
+    !queue.is_empty()
+        && queue.len() <= MAX_QUEUE_NAME_BYTES
+        && !queue
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
 }
 
 /// Lock the shared backend, recovering from a poisoned lock.
@@ -1018,6 +1032,29 @@ mod tests {
         )
         .expect_err("unlisted");
         assert!(matches!(err, WitQueueError::QueueNotConfigured));
+    }
+
+    /// Names carrying line structure are refused at the boundary: a queue
+    /// named with a newline or whitespace would forge structure in any
+    /// future line-oriented rendering of it. Ordinary punctuation (`:`,
+    /// `/`, `.`, `-`, `_`, uppercase) still passes the shape check — ids
+    /// carry the queue opaquely and `acknowledge` cross-checks the queue
+    /// separately, so those characters parse and forge nothing (the
+    /// allowlist membership remains the gate).
+    #[test]
+    fn line_structured_queue_names_are_refused() {
+        for hostile in ["a\nb", "a b", "a\tb", "a\rb", ""] {
+            assert!(
+                !valid_queue_name(hostile),
+                "{hostile:?} must fail the name shape"
+            );
+        }
+        for fine in ["q", "Orders", "a:b", "a/b", "a.b", "a-b", "a_b"] {
+            assert!(
+                valid_queue_name(fine),
+                "{fine:?} carries no line structure and must pass the shape"
+            );
+        }
     }
 
     /// The manifest quota binds publish before the shared depth cap: with

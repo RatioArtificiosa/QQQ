@@ -277,6 +277,13 @@ impl HostSpan for crate::linker::StoreData {
         name: String,
         attributes: Vec<WitAttribute>,
     ) -> std::result::Result<(), WitTraceError> {
+        // Grant first, like every sibling: an ungranted oversize name is
+        // denied for the missing grant, not for its size — otherwise the
+        // error tells an ungranted guest how big a name may be, probing the
+        // bound without the grant (`ARCH-012`).
+        if !self.grants.grants(TraceWrite) {
+            return Err(WitTraceError::NotGranted);
+        }
         // Bounded up front: the mirror drops oversize messages silently
         // (best-effort visibility), so an unbounded name that passed here
         // would return `Ok` for an event nobody can read. The bound
@@ -721,6 +728,22 @@ mod tests {
         let err = start_span_impl(&mut data, "x", None).expect_err("no grant");
         assert!(matches!(err, WitTraceError::NotGranted));
         assert!(data.trace.spans.is_empty(), "nothing is stored");
+    }
+
+    /// An ungranted oversize event is denied for the missing grant, not for
+    /// its size: the error must not tell an ungranted guest where the bound
+    /// is. (Grant-before-size; the sibling `set_attributes` already orders
+    /// this way.)
+    #[test]
+    fn event_without_grant_is_not_granted_even_when_oversize() {
+        let mut data = ungranted_store();
+        let big = "n".repeat(crate::host_log::MAX_LOG_FIELD_BYTES);
+        let err = <StoreData as HostSpan>::event(&mut data, rep_from_index(0), big, vec![])
+            .expect_err("no grant");
+        assert!(
+            matches!(err, WitTraceError::NotGranted),
+            "an ungranted oversize name must not leak the bound: {err:?}"
+        );
     }
 
     /// The manifest quota binds before the absolute table cap: with

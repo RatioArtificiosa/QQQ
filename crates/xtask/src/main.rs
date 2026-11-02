@@ -424,6 +424,11 @@ const PY_STEPS: &[Step] = &[
     ),
     Step::py(
         Lane::Par,
+        "check_no_panic_in_host_impls",
+        &["tools/check_no_panic_in_host_impls.py"],
+    ),
+    Step::py(
+        Lane::Par,
         "check_no_poison_expect",
         &["tools/check_no_poison_expect.py"],
     ),
@@ -721,6 +726,11 @@ const PY_STEPS: &[Step] = &[
         Lane::Seq,
         "check_milestones",
         &["tools/check_milestones.py", "--self-test"],
+    ),
+    Step::py(
+        Lane::Seq,
+        "check_no_panic_in_host_impls",
+        &["tools/check_no_panic_in_host_impls.py", "--self-test"],
     ),
     Step::py(
         Lane::Seq,

@@ -255,7 +255,11 @@ pub(crate) const MAX_DNS_BATCH_NAMES: usize = 128;
 ///
 /// Dotless single labels (`localhost`, `db`) resolve via the hosts database
 /// or search domains: valid DNS rather than a bypass, and blocking them
-/// would break the one hermetic name every test relies on.
+/// would break the one hermetic name every test relies on. The allowlist is
+/// the gate either way: `check` requires membership of the normalized name,
+/// so a guest cannot introduce a name the manifest did not list, and any
+/// search-domain suffixing happens under the deploy's own resolver
+/// configuration, not under guest control.
 fn valid_name(name: &str) -> bool {
     const MAX_DNS_SEGMENTS: usize = 127;
     if name.is_empty() || name.len() > MAX_DNS_NAME_BYTES {

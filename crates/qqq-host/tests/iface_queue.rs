@@ -87,8 +87,7 @@ fn manifest() -> Manifest {
     Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
          [[capabilities.queue]]\nname = \"q\"\ndirection = \"publish\"\n\
-         [[capabilities.queue]]\nname = \"q\"\ndirection = \"subscribe\"\n\
-         [capabilities.http]\nserver = true\n",
+         [[capabilities.queue]]\nname = \"q\"\ndirection = \"subscribe\"\n",
     )
     .expect("probe manifest parses")
 }
@@ -182,8 +181,7 @@ fn granted_guest_publishes_and_receives() {
 fn directions_do_not_widen() {
     let publish_only = Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
-         [[capabilities.queue]]\nname = \"q\"\ndirection = \"publish\"\n\
-         [capabilities.http]\nserver = true\n",
+         [[capabilities.queue]]\nname = \"q\"\ndirection = \"publish\"\n",
     )
     .expect("probe manifest parses");
     let grants = GrantSet::from_manifest(&publish_only);

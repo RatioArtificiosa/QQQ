@@ -88,8 +88,7 @@ fn limits() -> LimitSet {
 fn manifest() -> Manifest {
     Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
-         [capabilities.dns]\nresolve = [\"api.example.com\", \"missing.example.com\"]\n\
-         [capabilities.http]\nserver = true\n",
+         [capabilities.dns]\nresolve = [\"api.example.com\", \"missing.example.com\"]\n",
     )
     .expect("probe manifest parses")
 }

@@ -75,8 +75,8 @@ use std::time::Duration;
 use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;
 use qqq_core::{Error, ErrorCode, Result};
-use wasmtime::component::Linker;
 use wasmtime::StoreContextMut;
+use wasmtime::component::Linker;
 use wasmtime_wasi::p2::pipe::ClosedInputStream;
 use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxBuilder};
 
@@ -401,36 +401,59 @@ pub fn register(linker: &mut Linker<crate::linker::StoreData>) -> wasmtime::Resu
 /// ceiling — the same source and bound `qqq:crypto/random` uses, so the two
 /// spellings of "give me randomness" cannot disagree). Ungranted guests trap:
 /// randomness has no fixed denial value, and a constant would be predictable.
-fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
-    /// Read `len` random bytes or trap, enforcing the ambient ceiling.
-    ///
-    /// Grant-gating lives in each caller below, not here: the arch012 audit
-    /// matches `grants.grants(` textually inside each registration body, and
-    /// a check factored one frame out would pass the compiler while going
-    /// invisible to the audit. The ceiling stays here — it is a property of
-    /// the source (ambient), not of the caller.
-    fn random_bytes(
-        store: &mut StoreContextMut<'_, StoreData>,
-        function: &str,
-        len: u64,
-    ) -> wasmtime::Result<Vec<u8>> {
-        let len = u32::try_from(len).map_err(|_| {
-            wasmtime::Error::msg(format!(
-                "`{function}` asked for {len} bytes, past the ambient ceiling"
-            ))
-        })?;
-        if len > store.data().ambient.max_random_bytes() {
-            return Err(wasmtime::Error::msg(format!(
-                "`{function}` asked for {len} bytes, past the ambient ceiling"
-            )));
-        }
-        store
-            .data()
-            .ambient
-            .read_random(len)
-            .map_err(|e| wasmtime::Error::msg(format!("host randomness failed: {e:?}")))
-    }
+/// The grant check every random shim runs, through the audit seam.
+///
+/// `ambient::require` writes the `Granted`/`Denied` row the audit stream —
+/// and `assert-caps-only` — reads (H10); an inline check would answer
+/// identically while leaving a `wasi:random` guest looking
+/// capability-clean. The error maps to this module's trap because
+/// randomness has no fixed denial value, and a constant would be
+/// predictable.
+///
+/// A helper rather than five copies, and registered in
+/// `arch012::CHECKING_HELPERS`: the audit matches the helper's name
+/// textually inside each registration body, so factoring it out stays
+/// visible to the audit instead of going invisible with the duplication.
+fn require_random(
+    data: &StoreData,
+    audit_function: &'static str,
+    wit_function: &str,
+) -> wasmtime::Result<()> {
+    crate::ambient::require(data, Capability::CryptoRandom, audit_function)
+        .map_err(|_| denied_random(wit_function))
+}
 
+/// Read `len` random bytes or trap, enforcing the ambient ceiling.
+///
+/// Module-level (not nested in `register_random`) so the registration
+/// function stays within the line budget: the ceiling is a property of the
+/// source (ambient), not of any caller, wherever it sits. The grant check
+/// lives in `require_random`, which each shim invokes: the audit matches
+/// that name textually (`arch012::CHECKING_HELPERS`), so the factored check
+/// stays visible instead of going invisible with the duplication.
+fn random_bytes(
+    store: &mut StoreContextMut<'_, StoreData>,
+    function: &str,
+    len: u64,
+) -> wasmtime::Result<Vec<u8>> {
+    let len = u32::try_from(len).map_err(|_| {
+        wasmtime::Error::msg(format!(
+            "`{function}` asked for {len} bytes, past the ambient ceiling"
+        ))
+    })?;
+    if len > store.data().ambient.max_random_bytes() {
+        return Err(wasmtime::Error::msg(format!(
+            "`{function}` asked for {len} bytes, past the ambient ceiling"
+        )));
+    }
+    store
+        .data()
+        .ambient
+        .read_random(len)
+        .map_err(|e| wasmtime::Error::msg(format!("host randomness failed: {e:?}")))
+}
+
+fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
     let mut random = linker.instance(RANDOM_INTERFACE)?;
     random.func_wrap(
         "get-random-bytes",
@@ -438,9 +461,11 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
          (len,): (u64,)|
          -> wasmtime::Result<(Vec<u8>,)> {
             crate::guard::guard("wasi:random/random.get-random-bytes", || {
-                if !store.data().grants.grants(Capability::CryptoRandom) {
-                    return Err(denied_random("get-random-bytes"));
-                }
+                require_random(
+                    store.data(),
+                    "wasi_random_get_random_bytes",
+                    "get-random-bytes",
+                )?;
                 random_bytes(&mut store, "get-random-bytes", len).map(|b| (b,))
             })
         },
@@ -449,9 +474,7 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
         "get-random-u64",
         |mut store: StoreContextMut<'_, StoreData>, ()| -> wasmtime::Result<(u64,)> {
             crate::guard::guard("wasi:random/random.get-random-u64", || {
-                if !store.data().grants.grants(Capability::CryptoRandom) {
-                    return Err(denied_random("get-random-u64"));
-                }
+                require_random(store.data(), "wasi_random_get_random_u64", "get-random-u64")?;
                 let bytes = random_bytes(&mut store, "get-random-u64", 8)?;
                 let arr: [u8; 8] = bytes
                     .try_into()
@@ -468,9 +491,11 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
          (len,): (u64,)|
          -> wasmtime::Result<(Vec<u8>,)> {
             crate::guard::guard("wasi:random/insecure.get-insecure-random-bytes", || {
-                if !store.data().grants.grants(Capability::CryptoRandom) {
-                    return Err(denied_random("get-insecure-random-bytes"));
-                }
+                require_random(
+                    store.data(),
+                    "wasi_random_get_insecure_random_bytes",
+                    "get-insecure-random-bytes",
+                )?;
                 random_bytes(&mut store, "get-insecure-random-bytes", len).map(|b| (b,))
             })
         },
@@ -479,9 +504,11 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
         "get-insecure-random-u64",
         |mut store: StoreContextMut<'_, StoreData>, ()| -> wasmtime::Result<(u64,)> {
             crate::guard::guard("wasi:random/insecure.get-insecure-random-u64", || {
-                if !store.data().grants.grants(Capability::CryptoRandom) {
-                    return Err(denied_random("get-insecure-random-u64"));
-                }
+                require_random(
+                    store.data(),
+                    "wasi_random_get_insecure_random_u64",
+                    "get-insecure-random-u64",
+                )?;
                 let bytes = random_bytes(&mut store, "get-insecure-random-u64", 8)?;
                 let arr: [u8; 8] = bytes
                     .try_into()
@@ -496,9 +523,7 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
         "insecure-seed",
         |mut store: StoreContextMut<'_, StoreData>, ()| -> wasmtime::Result<((u64, u64),)> {
             crate::guard::guard("wasi:random/insecure-seed.insecure-seed", || {
-                if !store.data().grants.grants(Capability::CryptoRandom) {
-                    return Err(denied_random("insecure-seed"));
-                }
+                require_random(store.data(), "wasi_random_insecure_seed", "insecure-seed")?;
                 let bytes = random_bytes(&mut store, "insecure-seed", 16)?;
                 let (lo, hi) = bytes.split_at(8);
                 let lo: [u8; 8] = lo
@@ -586,6 +611,30 @@ mod tests {
                 "the fixture must declare {func}"
             );
         }
+    }
+
+    /// All five random shims record through the audit seam (H10): the seam
+    /// writes the `Granted`/`Denied` row `assert-caps-only` reads, so an
+    /// inline grant check would answer identically while leaving a
+    /// `wasi:random` guest looking capability-clean. Counted per shim: all
+    /// `require_random(` mentions minus the helper's own definition is the
+    /// number of shim call sites, however rustfmt lays each call out.
+    #[test]
+    fn every_random_shim_records_through_the_audit_seam() {
+        let production = include_str!("host_wasi.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let mentions = production.matches("require_random(").count();
+        let definitions = production.matches("fn require_random(").count();
+        let seams = mentions - definitions;
+        assert_eq!(
+            seams,
+            SERVED_RANDOM.len(),
+            "every random shim must consult the audit seam; found {seams} seam call(s) \
+             for {} shims",
+            SERVED_RANDOM.len()
+        );
     }
 
     /// A grant set from a manifest.

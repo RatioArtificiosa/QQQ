@@ -83,8 +83,7 @@ fn limits() -> LimitSet {
 fn manifest() -> Manifest {
     Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
-         [capabilities.trace]\n\
-         [capabilities.http]\nserver = true\n",
+         [capabilities.trace]\n",
     )
     .expect("probe manifest parses")
 }

@@ -115,8 +115,14 @@ pub enum Enforcement {
     ViaHelper,
     /// The `func_wrap` sits inside a gated `register_*` and performs no check of
     /// its own, because it is a pure function of data the interface's own
-    /// gating already covers — `wall-clock.timezone`, which returns the constant
-    /// `"UTC"` and reads nothing from the store.
+    /// gating already covers.
+    ///
+    /// No current row uses this: every audited call re-checks its grant per
+    /// call (the host-b review moved the last constant-answer rows to
+    /// [`Self::PerFunction`]). The variant stays because the classification
+    /// must be able to describe a pure function honestly if one is ever
+    /// registered — collapsing the taxonomy to "everything re-checks" would
+    /// make that future row claim a check its body does not have.
     ///
     /// # Why this variant is allowed to exist
     ///
@@ -181,14 +187,20 @@ pub const AUDITED: [AuditedCall; 29] = [
         function: "resolution",
         interface: "qqq:clock/wall-clock@1.0.0",
         capability: Some(Capability::ClockWall),
-        enforced_by: Enforcement::InterfaceGated,
+        // Per-function re-check like `now`: the answer is configuration, not
+        // a reading, but the body re-checks the grant anyway, so a mis-built
+        // linker still denies.
+        enforced_by: Enforcement::PerFunction,
     },
     AuditedCall {
         file: "host_clock.rs",
         function: "timezone",
         interface: "qqq:clock/wall-clock@1.0.0",
         capability: Some(Capability::ClockWall),
-        enforced_by: Enforcement::InterfaceGated,
+        // Per-function re-check like `now`: the answer is the constant
+        // `"UTC"`, but the body re-checks the grant anyway, so a mis-built
+        // linker still denies.
+        enforced_by: Enforcement::PerFunction,
     },
     AuditedCall {
         file: "host_clock.rs",
@@ -202,7 +214,10 @@ pub const AUDITED: [AuditedCall; 29] = [
         function: "resolution",
         interface: "qqq:clock/monotonic-clock@1.0.0",
         capability: Some(Capability::ClockMonotonic),
-        enforced_by: Enforcement::InterfaceGated,
+        // Per-function re-check like `now`: the answer is configuration, not
+        // a reading, but the body re-checks the grant anyway, so a mis-built
+        // linker still denies.
+        enforced_by: Enforcement::PerFunction,
     },
     AuditedCall {
         file: "host_crypto.rs",
@@ -301,10 +316,10 @@ pub const AUDITED: [AuditedCall; 29] = [
         function: "get-resolution",
         interface: "wasi:clocks/monotonic-clock@0.3.2",
         capability: Some(Capability::ClockMonotonic),
-        // Interface-gated like the 0.2 `resolution`: the tick interval is
-        // configuration, not a reading, so the registration gate (no grant,
-        // no instance) is the check and the body needs none.
-        enforced_by: Enforcement::InterfaceGated,
+        // Per-function re-check like the 0.2 `resolution` it twins: the tick
+        // interval is configuration, not a reading, but the body re-checks
+        // the grant anyway, so a mis-built linker still denies.
+        enforced_by: Enforcement::PerFunction,
     },
     AuditedCall {
         file: "host_wasi03.rs",
@@ -341,19 +356,20 @@ pub const AUDITED: [AuditedCall; 29] = [
         function: "exists",
         interface: "qqq:secrets/secret-use@1.0.0",
         capability: Some(Capability::SecretUse),
-        // Interface-gated like the 0.2 `resolution`: the answer is a
-        // disclosure-safe boolean, so the registration gate (no grant, no
-        // instance) is the check and the body needs none beyond it — but it
-        // re-checks anyway, so a mis-built linker still denies.
-        enforced_by: Enforcement::InterfaceGated,
+        // Per-function re-check: registration is conditional on the grant AND
+        // the body re-checks it (fail-closed to `false`), so a mis-built
+        // linker still denies. The answer is a disclosure-safe boolean.
+        enforced_by: Enforcement::PerFunction,
     },
     AuditedCall {
         file: "host_secrets.rs",
         function: "permitted-operations",
         interface: "qqq:secrets/secret-use@1.0.0",
         capability: Some(Capability::SecretUse),
-        // Names only, never values: the allowlist check happens per call.
-        enforced_by: Enforcement::InterfaceGated,
+        // Per-function re-check: the body re-checks the grant (fail-closed
+        // to an empty list), so a mis-built linker still denies. Names only,
+        // never values.
+        enforced_by: Enforcement::PerFunction,
     },
     AuditedCall {
         file: "host_env.rs",
@@ -377,8 +393,10 @@ pub const AUDITED: [AuditedCall; 29] = [
         function: "allowed-names",
         interface: "qqq:env/environment@1.0.0",
         capability: Some(Capability::EnvRead),
-        // Names only (the manifest already publishes them); re-checked.
-        enforced_by: Enforcement::InterfaceGated,
+        // Per-function re-check: the body re-checks the grant (fail-closed
+        // to an empty list), so a mis-built linker still denies. Names only
+        // (the manifest already publishes them), never values.
+        enforced_by: Enforcement::PerFunction,
     },
     AuditedCall {
         file: "host_wasi.rs",
@@ -542,7 +560,7 @@ pub struct Registered {
 /// hand and [`audit`] cross-checks. The list is short, explicit, and a helper
 /// that starts gating must be added to it — whereupon the `UnbackedClaim` check
 /// begins validating the rows that depend on it.
-pub const CHECKING_HELPERS: [&str; 2] = ["hash_data(", "ambient::require("];
+pub const CHECKING_HELPERS: [&str; 3] = ["hash_data(", "ambient::require(", "require_random("];
 
 /// Cross-check [`AUDITED`] against the source in `sources`.
 ///

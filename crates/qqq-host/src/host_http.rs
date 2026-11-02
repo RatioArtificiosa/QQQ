@@ -336,7 +336,37 @@ impl StoreData {
             max_redirects: self.egress.max_redirect_hops(),
             ..crate::egress::Limits::default()
         };
-        let egress_req = map_request(req, &limits)?;
+        // Cloned for the refusal row below: `map_request` takes the request
+        // by value, and a failed mapping must still name its target. One
+        // short-string clone per send, against a thread spawn plus network
+        // round-trips on every path that gets past mapping.
+        let attempted_url = req.url.clone();
+        let egress_req = match map_request(req, &limits) {
+            Ok(mapped) => mapped,
+            Err(error) => {
+                // The shape never reached the connector, so it earned no
+                // per-hop charge or row — but the attempt still counts.
+                // SEC-009 bounds attempts, not successes, so the budget
+                // records it; and the refusal is audited rather than
+                // silent, so parser probing cannot hide in a response-only
+                // world (the mapping test below pins the row). The
+                // returned error stays the mapping error: the budget state
+                // is visible in the row, and misreporting the shape as a
+                // budget problem would misdirect triage.
+                let _ = self.subrequests.charge();
+                let (host, port) = parse_attempted_authority(&attempted_url);
+                self.egress_audit.push(crate::egress::AuditRow {
+                    host,
+                    port,
+                    outcome: crate::egress::Outcome::Refused {
+                        reason: crate::egress::Refusal::Malformed,
+                    },
+                    request_bytes: 0,
+                    response_bytes: 0,
+                });
+                return Err(error);
+            }
+        };
         let mut rows = Vec::new();
         // The operational switch follows the tenant grant: a grant the
         // connector never sees would be a control believed live that
@@ -995,10 +1025,11 @@ mod tests {
     /// A method the connector does not speak is refused before any
     /// socket opens: `egress` moves GET, HEAD, and POST only, so the
     /// WIT's wider enum meets `invalid-url` with the reason stated.
-    /// No audit row: rows start when the connector runs (vet refusal
-    /// and later), exactly like grant and budget refusals emit none —
-    /// a mapping refusal is a client-shape error, and the budget
-    /// charge is its accounting.
+    /// The refusal IS audited (one `Refused` row naming the attempted
+    /// target) and charged (SEC-009 bounds attempts, not successes) even
+    /// though the connector never ran: mapping refusals predate the
+    /// connector's per-hop accounting, but silent refusals would hide
+    /// parser probing in a response-only world.
     #[test]
     fn send_refuses_methods_the_connector_does_not_speak() {
         let mut data = allowing_store();
@@ -1012,11 +1043,14 @@ mod tests {
         };
         let result = block_on(data.send_via(request, &transport, &resolver));
         assert_eq!(outcome(&result), "invalid-url");
-        assert_eq!(
-            data.take_egress_audit().len(),
-            0,
-            "mapping refusals predate the connector, like grant and budget refusals"
-        );
+        let rows = data.take_egress_audit();
+        assert_eq!(rows.len(), 1, "a mapping refusal is audited, not silent");
+        let row = rows.first().expect("one refusal row");
+        assert_eq!(row.host, "api.example.com");
+        assert!(matches!(
+            row.outcome,
+            crate::egress::Outcome::Refused { .. }
+        ));
     }
 
     /// An unwired store refuses through `send()` itself — grant checked,

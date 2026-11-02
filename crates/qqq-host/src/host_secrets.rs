@@ -658,9 +658,23 @@ pub const MAX_SECRET_NAME_LEN: usize = 256;
 /// deployment fault (`unavailable` via the store); a well-formed input that
 /// does not verify or decrypt is a *result* (`Ok(false)` / store-level
 /// failure), never a key leak — the error text stays in the host log.
-pub struct HostSecretCrypto;
+///
+/// Randomness comes from the ambient state, never from the OS directly:
+/// deterministic replay must reproduce every byte (`DET-008`), and a direct
+/// `getrandom` call would diverge the replay while bypassing the recorded
+/// `crypto.random` stream.
+pub struct HostSecretCrypto<'a> {
+    ambient: &'a crate::ambient::AmbientState,
+}
 
-impl SecretCrypto for HostSecretCrypto {
+impl HostSecretCrypto<'_> {
+    /// Bind to the ambient randomness source.
+    pub(crate) fn with_ambient(ambient: &crate::ambient::AmbientState) -> HostSecretCrypto<'_> {
+        HostSecretCrypto { ambient }
+    }
+}
+
+impl SecretCrypto for HostSecretCrypto<'_> {
     fn sign(&self, key: &[u8], input: &[u8]) -> std::result::Result<Vec<u8>, String> {
         use ed25519_dalek::{Signer as _, SigningKey};
         let seed: &[u8; 32] = key
@@ -703,8 +717,15 @@ impl SecretCrypto for HostSecretCrypto {
     fn encrypt(&self, key: &[u8], plaintext: &[u8]) -> std::result::Result<Vec<u8>, String> {
         use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
         let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "AEAD key is not 32 bytes")?;
-        let mut nonce_bytes = [0u8; 12];
-        getrandom::fill(&mut nonce_bytes).map_err(|_| "the entropy source failed")?;
+        let nonce_bytes: [u8; 12] = {
+            let bytes = self
+                .ambient
+                .read_random(12)
+                .map_err(|error| format!("host randomness failed: {error:?}"))?;
+            bytes
+                .try_into()
+                .map_err(|_| "host randomness returned a short read")?
+        };
         let nonce = Nonce::from(nonce_bytes);
         let body = cipher
             .encrypt(&nonce, plaintext)
@@ -975,7 +996,7 @@ fn register_apply(
                             &name,
                             PermittedOp::PublicKey,
                             &[],
-                            &HostSecretCrypto,
+                            &HostSecretCrypto::with_ambient(&data.ambient),
                         ) {
                             Ok(bytes) => Ok((Ok(bytes),)),
                             Err(e) => Ok((Err(map_secret_error(&e)),)),
@@ -998,7 +1019,12 @@ fn register_apply(
                 if !store_ref.material_permits(&name, permitting) {
                     return Ok((Err(WitSecretError::OperationNotPermitted),));
                 }
-                match store_ref.apply(&name, permitting, &effective, &HostSecretCrypto) {
+                match store_ref.apply(
+                    &name,
+                    permitting,
+                    &effective,
+                    &HostSecretCrypto::with_ambient(&data.ambient),
+                ) {
                     Ok(bytes) => Ok((Ok(bytes),)),
                     Err(e) => Ok((Err(map_secret_error(&e)),)),
                 }
@@ -1038,10 +1064,12 @@ fn verify_call(
     if !data.secrets.material_permits(name, PermittedOp::Verify) {
         return (Err(WitSecretError::OperationNotPermitted),);
     }
-    match data
-        .secrets
-        .verify(name, input, signature, &HostSecretCrypto)
-    {
+    match data.secrets.verify(
+        name,
+        input,
+        signature,
+        &HostSecretCrypto::with_ambient(&data.ambient),
+    ) {
         // Verification is a boolean answer, and the WIT carries it as bytes:
         // `[1]` valid, `[0]` invalid. An empty success would be
         // indistinguishable from "no answer", and `verify` must answer.
@@ -1608,7 +1636,8 @@ mod tests {
     /// Ed25519 sign/verify round-trips through the real primitive.
     #[test]
     fn host_crypto_sign_verify_round_trips() {
-        let crypto = HostSecretCrypto;
+        let ambient = crate::ambient::AmbientState::new(true);
+        let crypto = HostSecretCrypto::with_ambient(&ambient);
         let key = [7u8; 32];
         let sig = crypto.sign(&key, b"hello").expect("signs");
         assert_eq!(sig.len(), 64, "an ed25519 signature is 64 bytes");
@@ -1629,7 +1658,8 @@ mod tests {
     /// A malformed signature is a negative answer, not a backend failure.
     #[test]
     fn host_crypto_short_signature_is_false_not_error() {
-        let crypto = HostSecretCrypto;
+        let ambient = crate::ambient::AmbientState::new(true);
+        let crypto = HostSecretCrypto::with_ambient(&ambient);
         let key = [7u8; 32];
         assert!(
             !crypto
@@ -1642,7 +1672,8 @@ mod tests {
     /// A malformed key is a deployment fault, reported as an error.
     #[test]
     fn host_crypto_wrong_length_key_fails() {
-        let crypto = HostSecretCrypto;
+        let ambient = crate::ambient::AmbientState::new(true);
+        let crypto = HostSecretCrypto::with_ambient(&ambient);
         assert!(crypto.sign(b"short", b"x").is_err());
         assert!(crypto.public_key(b"short").is_err());
         assert!(crypto.encrypt(b"short", b"x").is_err());
@@ -1652,7 +1683,8 @@ mod tests {
     /// HMAC-SHA256 is deterministic and 32 bytes.
     #[test]
     fn host_crypto_hmac_is_deterministic_sha256() {
-        let crypto = HostSecretCrypto;
+        let ambient = crate::ambient::AmbientState::new(true);
+        let crypto = HostSecretCrypto::with_ambient(&ambient);
         let a = crypto.hmac(b"key", b"input").expect("hmacs");
         let b = crypto.hmac(b"key", b"input").expect("hmacs");
         assert_eq!(a, b, "HMAC is deterministic");
@@ -1667,7 +1699,8 @@ mod tests {
     /// AES-256-GCM encrypt/decrypt round-trips; tampering fails closed.
     #[test]
     fn host_crypto_encrypt_decrypt_round_trips() {
-        let crypto = HostSecretCrypto;
+        let ambient = crate::ambient::AmbientState::new(true);
+        let crypto = HostSecretCrypto::with_ambient(&ambient);
         let key = [9u8; 32];
         let ct = crypto.encrypt(&key, b"hello").expect("encrypts");
         assert!(
@@ -1689,13 +1722,46 @@ mod tests {
     #[test]
     fn host_crypto_public_key_derives() {
         use ed25519_dalek::SigningKey;
-        let crypto = HostSecretCrypto;
+        let ambient = crate::ambient::AmbientState::new(true);
+        let crypto = HostSecretCrypto::with_ambient(&ambient);
         let seed = [11u8; 32];
         let pk = crypto.public_key(&seed).expect("derives");
         assert_eq!(
             pk,
             SigningKey::from_bytes(&seed).verifying_key().to_bytes(),
             "the public half matches ed25519"
+        );
+    }
+
+    /// Nonces come from the ambient stream, not the OS: with a replay
+    /// source holding known bytes, encryption uses exactly those bytes, so
+    /// a replay reproduces the ciphertext instead of diverging (`DET-008`).
+    /// A direct `getrandom` call would ignore the source and this test
+    /// would flake instead of passing.
+    #[test]
+    fn host_crypto_nonces_come_from_the_ambient_stream() {
+        use crate::replay::{ReplayHeader, ReplayLog, ReplayValue};
+        use std::sync::{Arc, Mutex};
+        let mut written = ReplayLog::new(
+            ReplayHeader {
+                artifact_digest: "0011223344556677".to_owned(),
+                engine_version: "test".to_owned(),
+                target_triple: "test".to_owned(),
+                deterministic: true,
+            },
+            8,
+        );
+        written
+            .record("crypto.random", ReplayValue::Random(vec![0xAB; 12]))
+            .expect("room");
+        let ambient = crate::ambient::AmbientState::new(true)
+            .with_replay_source(Arc::new(Mutex::new(written)));
+        let crypto = HostSecretCrypto::with_ambient(&ambient);
+        let ct = crypto.encrypt(&[9u8; 32], b"hello").expect("encrypts");
+        assert_eq!(
+            &ct[..12],
+            &[0xABu8; 12],
+            "the nonce is the replayed stream, not fresh entropy"
         );
     }
 

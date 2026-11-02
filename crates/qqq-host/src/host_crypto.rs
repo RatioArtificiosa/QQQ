@@ -852,6 +852,12 @@ impl bindings::qqq::crypto::aead::Host for crate::linker::StoreData {
         associated_data: Vec<u8>,
         plaintext: Vec<u8>,
     ) -> std::result::Result<Vec<u8>, WitAeadError> {
+        // Nonce uniqueness is the caller's contract, stated here because
+        // the failure mode is silent: reusing a (key, nonce) pair across
+        // two encryptions destroys confidentiality for both, and no host
+        // check can tell a fresh nonce from a repeated one. A guest that
+        // cannot track nonces should draw 12 bytes from `qqq:crypto/random`
+        // per message and never send the same pair twice.
         use aes_gcm::aead::{Aead, Payload};
         crate::ambient::require(self, Capability::CryptoAead, "aead_encrypt")
             .map_err(|_| WitAeadError::ConstructionNotAllowed)?;

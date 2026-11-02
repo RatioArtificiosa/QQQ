@@ -331,6 +331,13 @@ impl HostSpan for crate::linker::StoreData {
         {
             return Err(WitTraceError::NotGranted);
         }
+        // Liveness before shapes, like `event`: a severed child must
+        // report `span-closed` even when the attributes are also bad, so
+        // the error kind never tells whether the span is alive. The write
+        // below re-enters `with_span` for the mutation; the probe pays one
+        // extra table walk on the failure path only in the sense that a
+        // live span walks twice — hash lookups, not I/O.
+        with_span(self, &handle, |_| ())?;
         let checked = check_attributes(&attributes)?;
         // Through `with_span`, like `event` and `set-error`: a child whose
         // parent was dropped is severed, and writing to it must fail
@@ -414,6 +421,15 @@ impl HostSpan for crate::linker::StoreData {
             && matches!(self.trace.active, Some((id, _)) if id == trace_id)
         {
             self.trace.active = None;
+        }
+        // The allocator restarts when the table drains: `next` only grows
+        // while spans are live, so churning spans in a long-lived instance
+        // can never exhaust the u32 index space. The restart cannot
+        // collide with a live handle — an empty table means every guest
+        // handle was finalized through this `drop`, and a use-after-drop
+        // traps in the engine before reaching the host table.
+        if self.trace.spans.is_empty() {
+            self.trace.next = 0;
         }
         Ok(())
     }
@@ -990,7 +1006,7 @@ mod tests {
     fn hostile_attribute_names_are_refused() {
         let mut data = granted_store();
         let root = start_span_impl(&mut data, "root", None).expect("root starts");
-        for hostile in ["", "a b", "a=b", "a\"b", "a\nb"] {
+        for hostile in ["", "a b", "a=b", "a\"b", "a\nb", "a\0b", "a\x7fb"] {
             let err = <StoreData as HostSpan>::event(
                 &mut data,
                 rep_from_index(rep_index(&root)),
@@ -1006,6 +1022,49 @@ mod tests {
                 "{hostile:?} must fail closed"
             );
         }
+    }
+
+    /// `set-attributes` judges liveness before attributes, like `event`
+    /// does: a severed child carrying a hostile attribute name reports
+    /// `span-closed`, not the attribute error — otherwise the error kind
+    /// tells an unobservant caller whether the span is alive.
+    #[test]
+    fn set_attributes_judges_liveness_before_attributes() {
+        let mut data = granted_store();
+        let root = start_span_impl(&mut data, "root", None).expect("root starts");
+        let kid = start_span_impl(&mut data, "kid", Some(rep_index(&root))).expect("child starts");
+        let kid_id = rep_index(&kid);
+        <StoreData as HostSpan>::drop(&mut data, root).expect("parent drops");
+        let err = <StoreData as HostSpan>::set_attributes(
+            &mut data,
+            rep_from_index(kid_id),
+            vec![WitAttribute {
+                name: "a b".to_owned(),
+                value: WitTraceAttribute::Boolean(true),
+            }],
+        )
+        .expect_err("severed child fails");
+        assert!(
+            matches!(err, WitTraceError::SpanClosed),
+            "liveness first, like `event`: {err:?}"
+        );
+    }
+
+    /// Draining the table restarts the index allocator: `next` only grows
+    /// while spans are live, so a long-lived instance that churns spans
+    /// never exhausts the u32 index space. An empty table holds no live
+    /// handle the restart could collide with — the engine finalizes a
+    /// guest handle through this `drop` before the table can drain, and a
+    /// use-after-drop traps in the engine before reaching the host table.
+    #[test]
+    fn draining_the_table_restarts_the_index_allocator() {
+        let mut data = granted_store();
+        let root = start_span_impl(&mut data, "root", None).expect("root starts");
+        assert!(data.trace.next > 0, "minting advances the allocator");
+        <StoreData as HostSpan>::drop(&mut data, root).expect("drop works");
+        assert!(data.trace.spans.is_empty());
+        assert_eq!(data.trace.next, 0, "an empty table restarts at zero");
+        let _again = start_span_impl(&mut data, "again", None).expect("minting resumes");
     }
 
     /// A secret value in an event or error is mirrored redacted: the mirror

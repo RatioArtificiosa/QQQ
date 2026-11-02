@@ -282,7 +282,15 @@ impl KvBackend {
     /// ```
     #[must_use]
     pub fn exists(&mut self, store: &str, key: &str, now: u64) -> bool {
-        self.get(store, key, now).is_some()
+        // Probe, don't fetch: `get` clones up to 64KB to hand the value
+        // over, and a presence check that copies what it discards prices
+        // every poll at the value size. Expiry first, like `get` — an
+        // expired key is absent by the time anyone asks.
+        if self.is_expired(store, key, now) {
+            return false;
+        }
+        self.entries
+            .contains_key(&(store.to_owned(), key.to_owned()))
     }
 
     /// Write a value with an absolute expiry (`None` never expires).
@@ -731,6 +739,23 @@ mod tests {
             2,
             "quota counts key plus value"
         );
+    }
+
+    /// `exists` answers liveness, not storage: an expired-but-unevicted
+    /// key reads absent through the probe path exactly as through `get` —
+    /// and the probe never copies the value to learn that.
+    #[test]
+    fn exists_reports_liveness_without_fetching() {
+        let data = granted_store(true);
+        lock_backend(&data)
+            .set("s", "k", vec![7u8; 1024], Some(100), 0)
+            .expect("fits");
+        assert!(lock_backend(&data).exists("s", "k", 50));
+        assert!(
+            !lock_backend(&data).exists("s", "k", 100),
+            "expiry is absence, probe path included"
+        );
+        assert!(!lock_backend(&data).exists("s", "missing", 0));
     }
 
     /// Expiry is lazy and absolute: past the deadline the key reads absent,

@@ -333,6 +333,19 @@ impl QueueBackend {
     /// pending line is leased out. An empty queue is the normal steady state
     /// of a polling consumer, not an error.
     ///
+    /// Uncharged by design: receiving is inbound — the message travels to
+    /// the guest, and the backend is an in-process map doing no I/O — so it
+    /// joins KV reads (not HTTP/DNS/SQL/queue-publish) in the
+    /// fuel-priced set. A spin-poll loop burns fuel per call; the budget
+    /// binds outbound fan-out, fuel binds inbound polling.
+    ///
+    /// Poison messages are the consumer's job, not the host's: every
+    /// delivery carries its `delivery-count`, so a message that keeps
+    /// coming back is recognizable, and `acknowledge` drops it. A
+    /// host-side drop-after-N would silently discard guest data the guest
+    /// never agreed to lose — and no WIT surface names a dead-letter
+    /// queue, so the host has nowhere honest to put one.
+    ///
     /// ```
     /// let mut backend = qqq_host::host_queue::QueueBackend::new();
     /// assert!(backend.receive("q", 0).is_none());
@@ -780,8 +793,10 @@ impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
         // The budget binds every message in the batch, up front: a batch is
         // one call carrying N outbound effects, and charging the call once
         // would price N effects as one. Charged before any insert, so a
-        // refused batch stores nothing. (Direct field access, as above: the
-        // guard borrows `self.queue`, the budget borrows `self.subrequests`.)
+        // refused batch stores nothing — and before the depth check below
+        // on purpose, so a depth refusal that spent nothing cannot become a
+        // free depth probe. (Direct field access, as above: the guard
+        // borrows `self.queue`, the budget borrows `self.subrequests`.)
         for _ in &bodies {
             if self.subrequests.charge().is_refused() {
                 return Err(WitQueueError::QuotaExceeded);

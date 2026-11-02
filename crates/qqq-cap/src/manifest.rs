@@ -1500,6 +1500,20 @@ impl Manifest {
                             .to_owned(),
                     });
                 }
+                // `wasmtime-wasi` builds `NAME=value` pairs from these names: `=`
+                // would forge the split, and NUL or another control would trap
+                // deep in the builder instead of failing here with a line
+                // number. The manifest is operator-authored, so this is typo
+                // protection, not a guest boundary — but a typo must still
+                // fail at parse, not as a host trap at first request.
+                if v.bytes().any(|b| b == b'=' || b.is_ascii_control()) {
+                    return Err(ManifestError::InvalidField {
+                        field: format!("capabilities.env.allow[{i}]"),
+                        reason: "must be a plain variable name: no `=` and no \
+                                 control bytes; the WASI layer cannot express them"
+                            .to_owned(),
+                    });
+                }
             }
         }
         Ok(())
@@ -4241,6 +4255,23 @@ allow_origins = ["https://app.example.com"]
             e.to_string().contains("wildcards are not permitted"),
             "got: {e}"
         );
+    }
+
+    /// Names the WASI layer cannot express must fail at parse, not as a
+    /// host trap at first request: `=` forges the `NAME=value` split, and
+    /// controls (NUL included) cannot survive the builder. Raw controls are
+    /// not valid TOML, so the test spells them as `\u` escapes — the parsed
+    /// value still carries the byte, which is what the validator refuses.
+    #[test]
+    fn hostile_env_names_are_rejected_at_parse() {
+        for (hostile, toml) in [("A=B", "A=B"), ("A B", "A\\u0000B"), ("AB", "A\\u001BB")] {
+            let src = format!("{MINIMAL}\n[capabilities.env]\nallow = [\"{toml}\"]\n");
+            let e = Manifest::parse(&src).unwrap_err();
+            assert!(
+                e.to_string().contains("plain variable name"),
+                "{hostile:?} must fail closed, got: {e}"
+            );
+        }
     }
 
     #[test]

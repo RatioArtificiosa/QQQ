@@ -430,8 +430,16 @@ fn level_index(level: Level) -> u8 {
 }
 /// Approximate stored bytes of one record: message plus names plus text
 /// values. Integers, floats and booleans render to a few bytes; counting
-/// eight each keeps the estimate above the rendering without pretending it
-/// is exact — the bound is backpressure, not accounting.
+/// eight each keeps the estimate above the stored content without
+/// pretending it is exact — the bound is backpressure, not accounting.
+///
+/// Two things are deliberately outside the estimate. The per-record
+/// framing the renderer adds (`tenant=`, `level=`, `trace=`, key quotes
+/// and escapes) is a bounded constant: tenant names and trace ids are
+/// fixed-size, and escape expansion happens at render time, which streams
+/// rather than buffers. The headroom between any plausible sum of records
+/// and `MAX_LOG_TOTAL_BYTES` absorbs the framing; the scan-vs-counter
+/// reasoning below says why no running total tracks it.
 pub(crate) fn record_bytes(message: &str, attributes: &[(String, AttributeValue)]) -> usize {
     let mut total = message.len();
     for (name, value) in attributes {
@@ -462,17 +470,19 @@ pub(crate) fn buffered_bytes(logs: &[LogRecord]) -> usize {
 /// Whether an attribute name is safe to store and render.
 ///
 /// Empty names render as `=value`, and whitespace, quotes or `=` in a name
-/// would forge structure in the rendered line. The renderer quotes and
-/// escapes as defense in depth, but the boundary refuses rather than
-/// repairs: a guest that meant a different name must learn it failed.
+/// would forge structure in the rendered line. Control bytes (including NUL
+/// and DEL, which whitespace matching misses) are refused for the same
+/// reason: the renderer escapes them as defense in depth, but the boundary
+/// refuses rather than repairs — a guest that meant a different name must
+/// learn it failed.
 ///
 /// Crate-visible: the trace mirror enforces the same rule on span
 /// attributes, so both `qqq:` surfaces refuse the same names.
 pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
-        && !name
-            .bytes()
-            .any(|b| b.is_ascii_whitespace() || b == b'"' || b == b'=' || b == b'\\')
+        && !name.bytes().any(|b| {
+            b.is_ascii_whitespace() || b.is_ascii_control() || b == b'"' || b == b'=' || b == b'\\'
+        })
 }
 
 /// A record that passed every bound, with redaction applied.
@@ -779,7 +789,7 @@ mod tests {
     #[test]
     fn hostile_attribute_names_are_refused() {
         let mut data = data_with_log(true);
-        for hostile in ["", "a b", "a=b", "a\"b", "a\\b", "a\nb"] {
+        for hostile in ["", "a b", "a=b", "a\"b", "a\\b", "a\nb", "a\0b", "a\x7fb"] {
             let err = emit_record(
                 &mut data,
                 2,

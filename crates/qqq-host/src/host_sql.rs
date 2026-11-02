@@ -1247,6 +1247,11 @@ impl bindings::qqq::sql::transaction::Host for crate::linker::StoreData {
         let Some(db) = self.sql.config.find(&database).cloned() else {
             return Err(WitSqlError::DatabaseNotConfigured);
         };
+        // Transaction control is an execution, not bookkeeping: `BEGIN`
+        // takes the lock (immediate for writers) and touches the journal,
+        // so it spends the unit like every other statement. Charging after
+        // the config lookup keeps a typo'd database name from spending.
+        charge_one_subrequest(self)?;
         // Writers take the lock up front; readers defer it, so a read-only
         // transaction never starves writers. Read before borrowing.
         let immediate = self.grants.grants(SqlExecute) && !db.read_only();
@@ -1325,6 +1330,9 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         let Some(db) = self.sql.config.find(&database).cloned() else {
             return Err(WitSqlError::DatabaseNotConfigured);
         };
+        // `COMMIT` writes the journal and releases the lock: an execution
+        // like any other, charged before the connection opens.
+        charge_one_subrequest(self)?;
         let connection = connection_for(self, &db)?;
         let outcome = connection
             .execute_batch("COMMIT")
@@ -1348,6 +1356,12 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         let Some(db) = self.sql.config.find(&database).cloned() else {
             return Err(WitSqlError::DatabaseNotConfigured);
         };
+        // `ROLLBACK` discards the journal and releases the lock: an
+        // execution like any other, charged before the connection opens.
+        // (The best-effort `rollback_open` on the drop path stays
+        // uncharged: a drop is infallible, and charging it could fail a
+        // cleanup that must not fail.)
+        charge_one_subrequest(self)?;
         let connection = connection_for(self, &db)?;
         let outcome = connection
             .execute_batch("ROLLBACK")
@@ -2392,6 +2406,34 @@ mod tests {
             matches!(err, WitSqlError::ExecutionFailed(ref message) if message.contains("subrequest budget")),
             "the refusal must name the budget, not the database: {err:?}"
         );
+    }
+
+    /// Transaction control spends the budget like every other execution:
+    /// `begin`, `commit` and `rollback` are file I/O and lock holds, not
+    /// free bookkeeping. A guest looping bare `begin`/`rollback` pairs
+    /// without this would spin the journal for fuel only.
+    #[test]
+    fn transaction_control_spends_the_subrequest_budget() {
+        use super::bindings::qqq::sql::database::Host as _;
+        use super::bindings::qqq::sql::transaction::{Host as _, HostTxn as _};
+        for (tag, close) in [("commit", true), ("rollback", false)] {
+            let path = test_path(&format!("txn-control-budget-{tag}"));
+            let mut data = store_for(&path, true, true);
+            data.subrequests = crate::quota::SubrequestBudget::new(2);
+            let txn = data.begin("orders".to_owned()).expect("begin fits");
+            if close {
+                data.commit(txn).expect("commit fits");
+            } else {
+                data.rollback(txn).expect("rollback fits");
+            }
+            let err = data
+                .query_once("orders".to_owned(), "SELECT 1".to_owned(), vec![])
+                .expect_err("begin+close spent the budget");
+            assert!(
+                matches!(err, WitSqlError::ExecutionFailed(ref message) if message.contains("subrequest budget")),
+                "{tag}: the refusal must name the budget, not the database: {err:?}"
+            );
+        }
     }
 
     /// A cap-hit creates nothing: the cap is checked before any open, so a

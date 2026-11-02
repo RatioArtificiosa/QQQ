@@ -208,6 +208,16 @@ pub fn should_deny(grants: &GrantSet, clock: qqq_cap::capability::Capability) ->
 /// and each **clock** is denied individually unless the manifest granted it (see
 /// [`should_deny`]).
 ///
+/// # Caller contract: `env` is the manifest allowlist
+///
+/// Pass only the pairs resolved from the same manifest the grants derive
+/// from (`qqq-run` resolves them from `loaded.manifest`, the grants' own
+/// source). The builder installs what it is given unconditionally, so a
+/// caller that passed ambient variables here would leak through WASI what
+/// `qqq:env` denies — the two stay in sync because they share one source,
+/// not because this function re-checks. Malformed names (`=`, controls)
+/// fail at manifest parse, before this function ever sees them.
+///
 /// # Errors
 ///
 /// A refusal when an environment entry is malformed. The function is documented as

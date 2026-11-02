@@ -388,6 +388,17 @@ impl HandleQuota {
     /// refusal and the count happen in one call. A batch of zero opens
     /// nothing and always succeeds.
     ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_host::quota::HandleQuota;
+    ///
+    /// let mut quota = HandleQuota::new(2);
+    /// assert!(quota.try_open_batch(0, 2).is_ok());
+    /// quota.try_open_batch(0, 3).expect_err("three past a limit of two must refuse");
+    /// assert_eq!(quota.exhaustion_attempts(), 1);
+    /// ```
+    ///
     /// # Errors
     ///
     /// `QQQ-2005` when the batch would take the table past `limit`.

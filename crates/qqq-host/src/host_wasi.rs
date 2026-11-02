@@ -546,6 +546,11 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
 /// the linker reads — the registrations above are explicit literals so the
 /// ARCH-003/ARCH-012 scanners see them.
 ///
+/// No doctest here: the module is private (`mod host_wasi`), so no external
+/// example can name this table, and a fence that does not compile proves
+/// nothing. The anti-drift unit test below (`served_random_names_exist_in_the_vendored_wit`)
+/// is the coverage, and it runs in CI.
+///
 /// `allow(dead_code)`: the only consumer is the anti-drift test, which
 /// compiles under `cfg(test)` and therefore does not count as a use when the
 /// library builds for real guests.

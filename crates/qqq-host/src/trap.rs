@@ -358,6 +358,20 @@ impl Trap {
     /// frame after the engine is gone — that is the whole reason `qqq-debug`
     /// exists — and `qqq-debug` cannot name a *function*, which `Wasmtime` knows
     /// from the module's name section without any DWARF at all.
+    ///
+    /// # Example
+    ///
+    /// A `wasi:cli/exit` is contained self-termination, not a crash: the
+    /// guest abandoned its own request, and the status stays in the detail
+    /// for triage.
+    ///
+    /// ```
+    /// # use qqq_host::trap::Trap;
+    /// let err = wasmtime::Error::new(wasmtime_wasi::I32Exit(0));
+    /// let trap = Trap::from_wasmtime_error(&err);
+    /// assert_eq!(trap.message, "the guest trapped");
+    /// assert!(trap.detail.contains("Exited with i32 exit status"));
+    /// ```
     #[must_use]
     pub fn from_wasmtime_error(err: &wasmtime::Error) -> Self {
         // `wasi:cli/exit` (H9): wasmtime-wasi surfaces `proc_exit` as

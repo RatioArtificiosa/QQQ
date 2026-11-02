@@ -260,6 +260,13 @@ pub(crate) const MAX_DNS_BATCH_NAMES: usize = 128;
 /// so a guest cannot introduce a name the manifest did not list, and any
 /// search-domain suffixing happens under the deploy's own resolver
 /// configuration, not under guest control.
+///
+/// Beyond the allowlist, names carrying `:/?#@` or non-ASCII bytes are
+/// refused at shape: they can never be a plain allowlisted hostname, and
+/// each confuses a different downstream parser (`:` splits host from port,
+/// `/` starts a path, `?#` start query/fragment, non-ASCII needs IDNA the
+/// resolver does not perform). Underscores stay allowed — SRV, DMARC and
+/// DKIM names are real DNS even though they are not LDH.
 fn valid_name(name: &str) -> bool {
     const MAX_DNS_SEGMENTS: usize = 127;
     if name.is_empty() || name.len() > MAX_DNS_NAME_BYTES {
@@ -267,7 +274,13 @@ fn valid_name(name: &str) -> bool {
     }
     if name
         .bytes()
-        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control() || !b.is_ascii())
+    {
+        return false;
+    }
+    if name
+        .bytes()
+        .any(|b| matches!(b, b':' | b'/' | b'?' | b'#' | b'@'))
     {
         return false;
     }
@@ -636,6 +649,32 @@ mod tests {
                 matches!(err, WitDnsError::NameNotAllowed),
                 "{hostile:?} must fail closed"
             );
+        }
+    }
+
+    /// Shapes that confuse downstream parsers fail at the boundary even
+    /// though the allowlist would refuse them anyway: `:` splits host from
+    /// port, `/` starts a path, `?#` start query/fragment, and non-ASCII
+    /// would need IDNA the resolver does not perform. Underscores and
+    /// dotless locals stay legal (SRV/DMARC names, `localhost`).
+    #[test]
+    fn parser_confusing_shapes_fail_closed() {
+        for hostile in [
+            "evil.com:80",
+            "a/b.com",
+            "a?b.com",
+            "a#b.com",
+            "a@b.com",
+            "éxample.com",
+            "münchen",
+        ] {
+            assert!(
+                !valid_name(hostile),
+                "{hostile:?} must fail the shape check"
+            );
+        }
+        for fine in ["localhost", "db", "api.example.com", "_dmarc.example.com"] {
+            assert!(valid_name(fine), "{fine:?} must pass the shape check");
         }
     }
 

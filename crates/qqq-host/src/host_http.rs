@@ -441,7 +441,12 @@ fn map_request(
     }
     let mut headers = Vec::with_capacity(req.headers.len());
     for header in req.headers {
-        let value = String::from_utf8(header.value).map_err(|_| HttpError::RequestTooLarge)?;
+        // Non-UTF-8 is a shape error, not a size error: same least-wrong
+        // `invalid-url` as the method case above, for the same reason —
+        // the taxonomy has no malformed-value case, and telling the guest
+        // its value is "too large" would send it shrinking a value whose
+        // bytes are the problem.
+        let value = String::from_utf8(header.value).map_err(|_| HttpError::InvalidUrl)?;
         headers.push((header.name, value));
     }
     Ok(crate::egress::Request {
@@ -1051,6 +1056,28 @@ mod tests {
             row.outcome,
             crate::egress::Outcome::Refused { .. }
         ));
+    }
+
+    /// A non-UTF-8 header value is a shape error, not a size error:
+    /// `invalid-url`, like an unspeakable method — never
+    /// `request-too-large`, which would send the guest shrinking a value
+    /// whose bytes are the problem.
+    #[test]
+    fn send_refuses_non_utf8_header_values_as_invalid_url() {
+        let mut data = allowing_store();
+        let transport = CannedTransport;
+        let resolver = CannedResolver::answering("api.example.com", "93.184.216.34");
+        let request = Request {
+            method: Method::Get,
+            url: "https://api.example.com/thing".to_owned(),
+            headers: vec![Header {
+                name: "x-probe".to_owned(),
+                value: vec![0xff, 0xfe],
+            }],
+            body: None,
+        };
+        let result = block_on(data.send_via(request, &transport, &resolver));
+        assert_eq!(outcome(&result), "invalid-url");
     }
 
     /// An unwired store refuses through `send()` itself — grant checked,

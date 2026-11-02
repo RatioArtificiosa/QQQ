@@ -666,6 +666,11 @@ fn check_handles(data: &mut crate::linker::StoreData) -> std::result::Result<(),
 /// failed effect would bill work that never happened; charging before any
 /// validation would spend budget learning the call was malformed.
 ///
+/// A direction refusal (read-only connection) still spends the unit: the
+/// decision required preparing the statement, and an uncharged refusal
+/// would let a guest probe the direction grant for free — the same
+/// attempts-not-successes rule the HTTP mapping refusals follow.
+///
 /// The WIT `sql-error` type has no budget case, so exhaustion reports as
 /// `execution-failed` with the budget named in the message: a refused
 /// fan-out is an execution that did not happen, and the text keeps the

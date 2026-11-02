@@ -1219,7 +1219,7 @@ mod tests {
         );
     }
 
-    /// The positive control for the claim check: a PerFunction row whose
+    /// The positive control for the claim check: a `PerFunction` row whose
     /// body really does consult the grant produces no finding. Without
     /// it, a `scan` change that stopped seeing bodies would make the
     /// negative tests pass by proving nothing.

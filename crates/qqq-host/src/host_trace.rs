@@ -246,7 +246,16 @@ impl TraceHost for crate::linker::StoreData {
     }
 
     fn current_traceparent(&mut self) -> Option<String> {
-        if !self.grants.grants(TraceWrite) {
+        // Absent grant reads as absent trace, and the attempt is recorded
+        // through the seam for `assert-caps-only` — same as every other
+        // trace entry point.
+        if crate::ambient::require(
+            self,
+            qqq_cap::capability::Capability::TraceWrite,
+            "trace_current_traceparent",
+        )
+        .is_err()
+        {
             return None;
         }
         self.trace.active.and_then(|(trace_id, root)| {
@@ -280,8 +289,15 @@ impl HostSpan for crate::linker::StoreData {
         // Grant first, like every sibling: an ungranted oversize name is
         // denied for the missing grant, not for its size — otherwise the
         // error tells an ungranted guest how big a name may be, probing the
-        // bound without the grant (`ARCH-012`).
-        if !self.grants.grants(TraceWrite) {
+        // bound without the grant (`ARCH-012`). The check runs through the
+        // audit seam so the attempt is recorded.
+        if crate::ambient::require(
+            self,
+            qqq_cap::capability::Capability::TraceWrite,
+            "trace_event",
+        )
+        .is_err()
+        {
             return Err(WitTraceError::NotGranted);
         }
         // Bounded up front: the mirror drops oversize messages silently
@@ -304,8 +320,15 @@ impl HostSpan for crate::linker::StoreData {
         attributes: Vec<WitAttribute>,
     ) -> std::result::Result<(), WitTraceError> {
         // Grant first, like every sibling: an ungranted call fails before
-        // its handle is judged (`ARCH-012`).
-        if !self.grants.grants(TraceWrite) {
+        // its handle is judged (`ARCH-012`). Through the audit seam so the
+        // attempt is recorded.
+        if crate::ambient::require(
+            self,
+            qqq_cap::capability::Capability::TraceWrite,
+            "trace_set_attributes",
+        )
+        .is_err()
+        {
             return Err(WitTraceError::NotGranted);
         }
         let checked = check_attributes(&attributes)?;
@@ -361,6 +384,20 @@ impl HostSpan for crate::linker::StoreData {
     }
 
     fn drop(&mut self, rep: Resource<Span>) -> std::result::Result<(), wasmtime::Error> {
+        // Grant-checked like every other entry point: a misbuilt linker
+        // must not drop what was never granted, and the attempt is recorded
+        // through the seam. A dropped handle is gone either way.
+        if crate::ambient::require(
+            self,
+            qqq_cap::capability::Capability::TraceWrite,
+            "trace_drop",
+        )
+        .is_err()
+        {
+            return Err(wasmtime::Error::msg(
+                "tracing is not granted; a drop outside the grant is refused",
+            ));
+        }
         // Read-then-delete in two steps: the lookup borrows, the removal
         // needs `&mut`, and holding both would not compile — which is the
         // borrow checker enforcing that a use-after-delete cannot happen here
@@ -388,7 +425,16 @@ fn start_span_impl(
     name: &str,
     parent: Option<u32>,
 ) -> std::result::Result<Resource<Span>, WitTraceError> {
-    if !data.grants.grants(TraceWrite) {
+    // Through the audit seam: the grant decision is recorded for
+    // `assert-caps-only`, and an ungranted call fails before its name is
+    // judged, so no size oracle leaks the bound.
+    if crate::ambient::require(
+        data,
+        qqq_cap::capability::Capability::TraceWrite,
+        "trace_start_span",
+    )
+    .is_err()
+    {
         return Err(WitTraceError::NotGranted);
     }
     if name.len() > crate::host_log::MAX_LOG_FIELD_BYTES {
@@ -887,6 +933,26 @@ mod tests {
         assert!(
             !data.trace.spans[&root_id].failed,
             "a refused message must not mark the span failed"
+        );
+    }
+
+    /// Every trace entry point records through the audit seam (H10): the
+    /// seam writes the `Granted`/`Denied` row `assert-caps-only` reads, so
+    /// an inline grant check would answer identically while leaving a
+    /// tracing guest looking capability-clean. Counted, not `contains`:
+    /// one seam call in one body must not vouch for the other five.
+    #[test]
+    fn every_trace_body_records_through_the_audit_seam() {
+        let production = include_str!("host_trace.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 6,
+            "every trace body (start_span, current_traceparent, event, \
+             set_attributes, set_error, drop) must consult the audit seam; \
+             found {seams} seam call(s)"
         );
     }
 

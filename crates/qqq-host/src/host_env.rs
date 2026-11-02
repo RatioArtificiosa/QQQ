@@ -77,10 +77,11 @@ pub fn register(
 
 /// `get(name) -> result<string, env-error>`.
 ///
-/// The grant re-check is inline (not delegated to `lookup`), so the audit
-/// sees the re-check in the body that enforces it (`ARCH-012`). The WIT has
-/// no `not-granted` case — an ungranted call is `not-allowed`, which is also
-/// what an unlisted name gets, so a guest cannot probe the allowlist.
+/// The grant re-check goes through the audit seam, not an inline check, so
+/// the capability use is recorded for `assert-caps-only` (H10) rather than
+/// staying invisible. The WIT has no `not-granted` case — an ungranted call
+/// is `not-allowed`, which is also what an unlisted name gets, so a guest
+/// cannot probe the allowlist.
 fn register_get(
     inst: &mut wasmtime::component::LinkerInstance<'_, crate::linker::StoreData>,
 ) -> wasmtime::Result<()> {
@@ -91,7 +92,13 @@ fn register_get(
          -> wasmtime::Result<(std::result::Result<String, WitEnvError>,)> {
             crate::guard::guard("qqq:env/environment.get", || {
                 let data = store.data();
-                if !data.grants.grants(EnvRead) {
+                if crate::ambient::require(
+                    data,
+                    qqq_cap::capability::Capability::EnvRead,
+                    "env_get",
+                )
+                .is_err()
+                {
                     return Ok((Err(WitEnvError::NotAllowed),));
                 }
                 match lookup(data, &name) {
@@ -111,7 +118,8 @@ fn register_get(
 ///
 /// The fallback applies to `unset` only: substituting a default for a denied
 /// capability would hide a misconfiguration. Grant and allowlist re-checked
-/// inline, as above; `not-allowed` covers ungranted and unlisted alike.
+/// through the audit seam, as above; `not-allowed` covers ungranted and
+/// unlisted alike.
 fn register_get_or(
     inst: &mut wasmtime::component::LinkerInstance<'_, crate::linker::StoreData>,
 ) -> wasmtime::Result<()> {
@@ -122,7 +130,13 @@ fn register_get_or(
          -> wasmtime::Result<(std::result::Result<String, WitEnvError>,)> {
             crate::guard::guard("qqq:env/environment.get-or", || {
                 let data = store.data();
-                if !data.grants.grants(EnvRead) {
+                if crate::ambient::require(
+                    data,
+                    qqq_cap::capability::Capability::EnvRead,
+                    "env_get_or",
+                )
+                .is_err()
+                {
                     return Ok((Err(WitEnvError::NotAllowed),));
                 }
                 match lookup(data, &name) {
@@ -152,7 +166,16 @@ fn register_allowed_names(
          ()|
          -> wasmtime::Result<(Vec<String>,)> {
             crate::guard::guard("qqq:env/environment.allowed-names", || {
-                if !store.data().grants.grants(EnvRead) {
+                // Fail closed by answering empty (the manifest set is
+                // public, but an ungranted caller learns nothing, including
+                // membership), and record the attempt through the seam.
+                if crate::ambient::require(
+                    store.data(),
+                    qqq_cap::capability::Capability::EnvRead,
+                    "env_allowed_names",
+                )
+                .is_err()
+                {
                     return Ok((Vec::new(),));
                 }
                 Ok((store.data().env.keys().cloned().collect(),))
@@ -211,6 +234,24 @@ mod tests {
         );
         assert_eq!(lookup(&data, "B"), Some(None), "listed but unset");
         assert_eq!(lookup(&data, "C"), None, "unlisted is absent");
+    }
+
+    /// Every env body records through the audit seam (H10): the seam writes
+    /// the `Granted`/`Denied` row `assert-caps-only` reads, so an inline
+    /// grant check would answer identically while leaving an env-using
+    /// guest looking capability-clean. Counted, not `contains`.
+    #[test]
+    fn every_env_body_records_through_the_audit_seam() {
+        let production = include_str!("host_env.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 3,
+            "every env body (get, get-or, allowed-names) must consult the audit seam; \
+             found {seams} seam call(s)"
+        );
     }
 
     /// The register links exactly when granted.

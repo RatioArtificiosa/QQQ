@@ -371,8 +371,12 @@ impl Pool {
     }
 
     /// Whether the pool is refusing new work.
-    #[must_use]
-    pub fn is_draining(&self) -> bool {
+    ///
+    /// Crate-visible (not `pub`): the only in-tree transition that reads it
+    /// is `acquire` itself, under the same lock that sets it — a `pub`
+    /// accessor nothing calls would trip the reachability gate, and a lock
+    /// read is not a substitute for the atomic decision `acquire` makes.
+    pub(crate) fn is_draining(&self) -> bool {
         self.state.lock_recover().draining
     }
 

@@ -838,10 +838,11 @@ mod tests {
         let e = t.to_error();
         assert_eq!(e.code, ErrorCode::FuelExhausted);
         assert!(e.context.iter().any(|(k, _)| k == "fuel-consumed"));
-        assert!(e
-            .context
-            .iter()
-            .any(|(k, v)| k == "memory-peak" && v.contains("MiB")));
+        assert!(
+            e.context
+                .iter()
+                .any(|(k, v)| k == "memory-peak" && v.contains("MiB"))
+        );
         assert!(
             e.cause.iter().any(|c| c.contains("handle_request")),
             "the backtrace must reach the error: {:?}",

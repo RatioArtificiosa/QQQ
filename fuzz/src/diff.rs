@@ -13,7 +13,7 @@
 //! these tests is a harness bug that would otherwise have silently
 //! mislabelled a smuggling shape.
 
-use qqq_serve::http1::{RequestHead, head_end, parse_head};
+use qqq_serve::http1::{head_end, parse_head, RequestHead};
 
 /// Reference header slots. Above QQQ's `MAX_HEADERS` (100) so a head QQQ
 /// accepts always fits; heads the reference accepts past 100 fall in arm 3
@@ -75,6 +75,22 @@ pub fn ref_framing(headers: &[httparse::Header<'_>]) -> Option<(Option<u64>, boo
     Some((length, chunked))
 }
 
+/// Strip ASCII OWS (SP/HTAB) from a raw header value, byte-wise.
+///
+/// Byte-wise so UTF-8 boundaries are never at risk: only 0x20/0x09 are
+/// removed, and those are single-byte in every encoding. Mirrors the
+/// trimming `qqq-serve` applies before storing the value.
+fn ascii_trimmed(value: &[u8]) -> &[u8] {
+    let mut span = value;
+    while let Some(&b' ' | b'\t') = span.first() {
+        span = &span[1..];
+    }
+    while let Some(&b' ' | b'\t') = span.last() {
+        span = &span[..span.len() - 1];
+    }
+    span
+}
+
 /// Compare one head's two parses, naming the first disagreement.
 pub fn compare_accepted(ours: &RequestHead, req: &httparse::Request<'_, '_>) -> Verdict {
     // Methods compare case-insensitively: `Method::parse` trims and
@@ -102,10 +118,15 @@ pub fn compare_accepted(ours: &RequestHead, req: &httparse::Request<'_, '_>) -> 
         if !o_name.eq_ignore_ascii_case(r.name) {
             return Verdict::Mismatch("header name");
         }
-        // QQQ stores values trimmed; the reference returns raw spans, so
-        // both sides trim before comparing (OWS is not significant).
-        let r_value = String::from_utf8_lossy(r.value);
-        if o_value.as_str() != r_value.trim() {
+        // QQQ stores values trimmed of ASCII OWS (SP/HTAB) only; the
+        // reference returns raw spans, so strip the same ASCII framing here.
+        // `str::trim` is wrong: it strips Unicode whitespace (U+00A0 etc.),
+        // which is significant obs-text content, not OWS — QQQ deliberately
+        // keeps it (see `http1.rs` on the crash-1521af0 precedent, and the
+        // 2026-11-02 http1_diff crash on a bare `\u{a0}` value, which this
+        // harness misread as empty).
+        let r_value = String::from_utf8_lossy(ascii_trimmed(r.value));
+        if o_value.as_str() != r_value {
             return Verdict::Mismatch("header value");
         }
     }
@@ -191,8 +212,7 @@ mod tests {
         // head both accept, then compare a tampered copy against the same
         // reference parse.
         let raw = head("GET /a HTTP/1.1\r\nHost: x\r\n\r\n");
-        let (head_parsed, _) =
-            parse_head(&raw).expect("fixture parses");
+        let (head_parsed, _) = parse_head(&raw).expect("fixture parses");
         let mut buf = [httparse::EMPTY_HEADER; MAX_REF_HEADERS];
         let mut req = httparse::Request::new(&mut buf);
         assert!(matches!(req.parse(&raw), Ok(httparse::Status::Complete(_))));
@@ -208,5 +228,25 @@ mod tests {
     fn truncated_input_is_ours_rejects() {
         let (v, _) = classify(b"GET / HTTP/1.1\r\nHost: x\r\n", MAX_HEAD_BYTES);
         assert_eq!(v, Verdict::OursRejects);
+    }
+
+    /// The 2026-11-02 http1_diff crash: a bare U+00A0 value is obs-text
+    /// content, not OWS. Both parsers accept it; the old Unicode-trimming
+    /// comparison read the reference side as empty and cried mismatch.
+    #[test]
+    fn obs_text_nbsp_value_agrees() {
+        let raw = b"POST /o HTTP/1.0\r\ng:\xc2\x90s\r\nv: \xc2\xa0\r\nt: \xc2\x90\r\n\r\n";
+        let (v, _) = classify(raw, MAX_HEAD_BYTES);
+        assert_eq!(v, Verdict::Agree);
+    }
+
+    /// ASCII OWS still trims on the reference side, matching QQQ's store.
+    #[test]
+    fn ascii_ows_value_agrees() {
+        let (v, _) = classify(
+            &head("GET / HTTP/1.1\r\nHost: x\r\nX-V: \t padded \t\r\n\r\n"),
+            MAX_HEAD_BYTES,
+        );
+        assert_eq!(v, Verdict::Agree);
     }
 }

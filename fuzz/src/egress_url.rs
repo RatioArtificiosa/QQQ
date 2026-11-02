@@ -13,7 +13,7 @@
 //! (public + private together) reachable on every input.
 
 use qqq_cap::egress::TenantEgress;
-use qqq_host::egress::{Resolver, is_forbidden_ip, vet};
+use qqq_host::egress::{is_forbidden_ip, vet, Resolver};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -75,13 +75,12 @@ pub fn check(data: &[u8]) {
     // `vet` must not panic on any input — including the non-UTF-8 the
     // lossy conversion replaced, the empty string, and multi-megabyte
     // strings (libFuzzer explores all three).
-    match rt.block_on(vet(&policy(), &url, &resolver)) {
-        Ok(vetted) => assert!(
+    if let Ok(vetted) = rt.block_on(vet(&policy(), &url, &resolver)) {
+        assert!(
             !is_forbidden_ip(vetted.addr.ip()),
             "vetted a forbidden address for {url:?}: {:?}",
             vetted.addr.ip(),
-        ),
-        Err(_) => {}
+        );
     }
 }
 
@@ -130,10 +129,7 @@ mod tests {
         let err = rt
             .block_on(vet(&policy(), "https://example.com/", &resolver))
             .expect_err("mixed answers refuse");
-        assert!(matches!(
-            err,
-            qqq_host::egress::Refusal::Forbidden { .. }
-        ));
+        assert!(matches!(err, qqq_host::egress::Refusal::Forbidden { .. }));
         assert_eq!(resolver.calls.load(Ordering::Relaxed), 1);
     }
 }

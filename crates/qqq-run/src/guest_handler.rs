@@ -378,21 +378,25 @@ impl GuestApp {
                 limits,
                 &timed_options(limits, false, tick),
             )?;
+            // The host's own result travels out in a slot: `Instance::run`
+            // treats any closure error as a trap, which would stringify the
+            // resolution failure into a trap summary and discard its code,
+            // context, and per-variant remediation (a version mismatch would
+            // then read as "rebuild against the world"). The slot keeps the
+            // original result intact — the same shape `handle_request` uses.
+            let mut slot: Option<Result<HandlerHandle>> = None;
             instance.run(|store, wasm| {
-                HandlerHandle::resolve(&mut *store, wasm, "guest")
-                    .map_err(|e| wasmtime::Error::msg(e.message.clone()))
-            })
-        }
-        .map_err(|e| {
-            // `Instance::run` classifies a closure error as a trap, so the reason is
-            // in the message. Re-wrapped here so the caller gets a QQQ error rather
-            // than a trap summary -- the same shape `invoke`'s own tests document.
-            Error::new(
-                ErrorCode::InvalidComponentArtifact,
-                format!("this component cannot serve requests: {e}"),
-            )
-            .with_remediation("build the app against `wit/app/app.wit`")
-        })?;
+                slot = Some(HandlerHandle::resolve(&mut *store, wasm, "guest"));
+                Ok(())
+            })?;
+            slot.ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InternalInvariantViolated,
+                    "the guest export resolution produced no outcome",
+                )
+                .with_remediation("this is a QQQ bug; please report it")
+            })??
+        };
 
         // Both digests are computed **before** the struct literal, because `grants` is moved into
         // it and `GrantSet::digest` borrows. Ordering matters here rather than in the literal.

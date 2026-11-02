@@ -69,7 +69,23 @@ use qqq_core::{Error, ErrorCode};
 ///   word "epoch".
 #[must_use]
 pub fn classify_trap(detail: &str) -> ErrorCode {
-    let d = detail.to_ascii_lowercase();
+    // Backtrace frame names are guest-controlled (module and function names),
+    // so a frame contributes only its engine-message suffix to matching: a
+    // guest naming a function "all fuel consumed" must not reclassify its own
+    // trap, forge a fuel metric, or trip the fuel remediation. Stripping the
+    // whole frame line is wrong in the other direction — this engine version
+    // embeds genuine signals in the frame line itself
+    // (`0: 0x2d - m!f: wasm trap: all fuel consumed`) — so the prefix (index,
+    // address, names) is cut and the trailing engine message is kept. The
+    // `Caused by:` chain is engine diagnostics, never guest names, and is
+    // kept whole, which is why the pinned fuel fixture (signal on the fourth
+    // line) still classifies.
+    let d: String = detail
+        .lines()
+        .map(frame_message)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
 
     // -- Fuel (most specific; its backtrace may mention anything) --------
     if d.contains("fuel") {
@@ -129,6 +145,43 @@ pub fn classify_trap(detail: &str) -> ErrorCode {
     }
 
     ErrorCode::GuestTrap
+}
+
+/// The engine-message suffix of a `format!("{err:#}")` line.
+///
+/// A Wasm backtrace frame looks like
+/// `0: 0x2d - m!<wasm function 0>: wasm trap: all fuel consumed`: a decimal
+/// index, a hex address, guest-controlled module/function names, then the
+/// engine's own message after the first `": "` past the address. Everything else — the
+/// engine's message lines and its `Caused by:` chain — is returned whole.
+/// An unrecognized shape is also returned whole: dropping text the matcher
+/// does not understand would turn a future Wasmtime format change into silent
+/// misclassification, while keeping it preserves the old behaviour exactly.
+///
+/// The split takes the *first* `": "` after the address, because the engine's
+/// own messages contain one (`"wasm trap: interrupt"`): splitting at the last
+/// would truncate genuine signals to their tail (`"interrupt"`), which matches
+/// nothing. A guest name containing `": "` can therefore smuggle a signal word
+/// into the suffix — that shape is exotic (no toolchain emits it), and the
+/// alternative of dropping the suffix loses genuine signals outright.
+#[must_use]
+fn frame_message(line: &str) -> &str {
+    let Some((index, rest)) = line.trim_start().split_once(':') else {
+        return line;
+    };
+    if index.trim().is_empty()
+        || !index.trim().chars().all(|c| c.is_ascii_digit())
+        || !rest.trim_start().starts_with("0x")
+    {
+        return line;
+    }
+    let Some((_, after_addr)) = rest.split_once(" - ") else {
+        return line;
+    };
+    match after_addr.split_once(": ") {
+        Some((_, message)) => message,
+        None => "",
+    }
 }
 
 /// A guest failure, with everything needed to diagnose it.
@@ -360,6 +413,7 @@ pub const fn human_message(code: ErrorCode) -> &'static str {
         ErrorCode::EpochDeadlineExceeded => "the guest exceeded its wall-clock deadline",
         ErrorCode::InvalidResourceHandle => "the guest used an invalid or closed resource handle",
         ErrorCode::GuestPanic => "the guest panicked",
+        ErrorCode::HostPanicContained => "a host function panicked and was contained",
         ErrorCode::GuestOutOfBounds => "the guest accessed memory outside its linear memory",
         _ => "the guest trapped",
     }
@@ -382,6 +436,10 @@ pub const fn remediation_for(code: ErrorCode) -> &'static str {
         }
         ErrorCode::GuestPanic => {
             "build with debug info (`qqqai build --debug`) for source-mapped frames"
+        }
+        ErrorCode::HostPanicContained => {
+            "this is a host bug, not a guest bug: fix the panicking host function. \
+             The SEV1 `host-panic-contained` log line names it"
         }
         ErrorCode::GuestOutOfBounds => {
             "this is a guest bug, not a limit to raise — fix the indexing or pointer arithmetic"
@@ -535,6 +593,55 @@ mod tests {
     }
 
     #[test]
+    fn a_forged_frame_name_does_not_reclassify_the_trap() {
+        // A guest that names a function after another class's signal must not
+        // move its own trap into that class: only the frame's engine-message
+        // suffix classifies, never the guest-controlled names.
+        for forged in [
+            "error while executing at wasm backtrace:\n\
+             0: 0x1234 - <unknown>!all fuel consumed by WebAssembly",
+            "error while executing at wasm backtrace:\n\
+             0: 0x1234 - <unknown>!memory limit exceeded",
+        ] {
+            assert_eq!(
+                classify_trap(forged),
+                ErrorCode::GuestTrap,
+                "a frame-named signal must not match: {forged:?}"
+            );
+        }
+        // And cutting the names must not eat genuine signals this engine
+        // version embeds in frame lines.
+        for (frame, code) in [
+            (
+                "error while executing at wasm backtrace:\n\
+                 0: 0x2d - m!<wasm function 0>: wasm trap: all fuel consumed by WebAssembly",
+                ErrorCode::FuelExhausted,
+            ),
+            (
+                "error while executing at wasm backtrace:\n\
+                 0: 0x2d - m!<wasm function 0>: wasm trap: interrupt",
+                ErrorCode::EpochDeadlineExceeded,
+            ),
+        ] {
+            assert_eq!(
+                classify_trap(frame),
+                code,
+                "a real signal in the frame suffix must still classify"
+            );
+        }
+        // And stripping frames must not eat the engine's own signal, which
+        // lives in the `Caused by:` chain the filter keeps.
+        assert_eq!(
+            classify_trap(
+                "error while executing at wasm backtrace:\n\
+                 0: 0x1234 - <unknown>!spin\n\
+                 Caused by:\n    all fuel consumed by WebAssembly"
+            ),
+            ErrorCode::FuelExhausted
+        );
+    }
+
+    #[test]
     fn unknown_details_fall_back_to_generic_trap() {
         assert_eq!(
             classify_trap("something entirely unexpected"),
@@ -570,6 +677,7 @@ mod tests {
             ErrorCode::EpochDeadlineExceeded,
             ErrorCode::GuestTrap,
             ErrorCode::GuestPanic,
+            ErrorCode::HostPanicContained,
             ErrorCode::GuestOutOfBounds,
             ErrorCode::InvalidResourceHandle,
         ] {
@@ -597,6 +705,7 @@ mod tests {
             ErrorCode::EpochDeadlineExceeded,
             ErrorCode::GuestTrap,
             ErrorCode::GuestPanic,
+            ErrorCode::HostPanicContained,
             ErrorCode::GuestOutOfBounds,
             ErrorCode::InvalidResourceHandle,
         ] {

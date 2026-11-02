@@ -148,11 +148,12 @@ impl Failure {
 /// # The pairing contract
 ///
 /// The indices are meaningful only against the component they were resolved
-/// from. Every caller must pass the handle together with an instance built
-/// from that same component — `GuestApp` holds both for exactly this reason —
-/// and [`func`](Self::func) refuses otherwise. Mixing a handle from component
-/// A with an instance of component B is a programming error, never a guest
-/// condition.
+/// from. The handle also carries that component's content digest, and
+/// [`func`](Self::func) compares it against the store's own digest — so a
+/// handle resolved from component A that reaches an instance built from
+/// component B is refused rather than invoking B's code under A's identity.
+/// `GuestApp` holds one handle next to the artifact it was resolved from for
+/// exactly this reason; the check is the enforcement behind the convention.
 #[derive(Debug, Clone)]
 pub struct HandlerHandle {
     /// The interface export index.
@@ -161,6 +162,8 @@ pub struct HandlerHandle {
     method: ComponentExportIndex,
     /// The component's name, for diagnostics.
     component: String,
+    /// The content digest of the component the indices were resolved from.
+    digest: String,
 }
 
 impl HandlerHandle {
@@ -223,6 +226,7 @@ impl HandlerHandle {
             interface: interface_index,
             method: index,
             component: component.to_owned(),
+            digest: store.as_context_mut().data().component_digest.clone(),
         })
     }
 
@@ -248,14 +252,32 @@ impl HandlerHandle {
     ///
     /// # Errors
     ///
-    /// [`Failure::HandlerMissing`] if the store was not built from the component this
+    /// `QQQ-6004` if the store was not built from the component this
     /// handle was resolved against — which is a **programming error**, not a guest
     /// condition, so the message says so rather than blaming the guest.
+    ///
+    /// A cross-component mix-up (handle from A, instance of B) is refused
+    /// before any lookup: the digest pins which artifact the indices belong
+    /// to, and an index resolved from one component must never invoke another
+    /// component's code, even when both export the same interface shape.
     pub fn func(
         &self,
         store: &mut Store<StoreData>,
         instance: &WasmInstance,
     ) -> Result<wasmtime::component::Func> {
+        if store.data().component_digest != self.digest {
+            return Err(Error::new(
+                ErrorCode::InternalInvariantViolated,
+                format!(
+                    "the handler for `{}` was invoked against an instance built from a \
+                     different component",
+                    self.component
+                ),
+            )
+            .with_remediation(
+                "this is a QQQ bug: the handle and the instance must come from the same component",
+            ));
+        }
         instance.get_func(store, self.method).ok_or_else(|| {
             Error::new(
                 ErrorCode::InternalInvariantViolated,

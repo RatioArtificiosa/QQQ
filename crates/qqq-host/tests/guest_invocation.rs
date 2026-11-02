@@ -224,6 +224,56 @@ const NAME_AS_BARE_FUNCTION: &str = r#"
 )
 "#;
 
+/// A handle resolved from one component must not invoke another.
+///
+/// Both fixtures instantiate (neither imports anything), and both export the
+/// same interface name — so without the digest check the indices from A
+/// would resolve a live function in B and run B's code under A's identity.
+/// The refusal names the mix-up as a host bug, never a guest condition.
+#[test]
+fn a_handle_from_one_component_does_not_invoke_another() {
+    let engine = engine();
+    let grants = no_grants();
+    let prepared_a =
+        PreparedComponent::compile(&engine, AN_APPLICATION.as_bytes()).expect("A compiles");
+    let prepared_b =
+        PreparedComponent::compile(&engine, WRONG_METHOD.as_bytes()).expect("B compiles");
+    assert_ne!(
+        prepared_a.digest(),
+        prepared_b.digest(),
+        "the fixtures must be different components for the test to mean anything"
+    );
+    let instance_a =
+        Instance::create(&engine, &prepared_a, &grants, ordinary_limits()).expect("A instantiates");
+    let instance_b =
+        Instance::create(&engine, &prepared_b, &grants, ordinary_limits()).expect("B instantiates");
+
+    // `run` consumes the instance, so the handle travels by value: resolve
+    // against A, then move it into the closure over B and invoke.
+    let mut handle_a: Option<HandlerHandle> = None;
+    instance_a
+        .run(|store, wasm| {
+            handle_a = HandlerHandle::resolve(&mut *store, wasm, "a.wasm").ok();
+            Ok(())
+        })
+        .expect("resolving must not trap");
+    let handle_a = handle_a.expect("A resolves");
+
+    let mut outcome: Option<qqq_core::Result<wasmtime::component::Func>> = None;
+    instance_b
+        .run(|store, wasm| {
+            outcome = Some(handle_a.func(&mut *store, wasm));
+            Ok(())
+        })
+        .expect("the refusal must not trap");
+    let err = outcome
+        .expect("the closure ran")
+        .expect_err("a cross-component invoke must be refused");
+    assert!(
+        err.message.contains("different component"),
+        "the refusal must name the mix-up: {err:?}"
+    );
+}
 /// A name that denotes a function is not the interface, however it is spelled.
 ///
 /// Without the kind check this fixture either resolves an unrelated nested

@@ -35,7 +35,6 @@
 //! a constant, because a constant is either too short (a retry storm) or too
 //! long (a needlessly idle client). See [`Pool::retry_after_seconds`].
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use qqq_core::sync::LockRecover;
@@ -139,8 +138,6 @@ pub struct Pool {
     /// values the panicking holder left, which the saturating counters keep
     /// inside the capacity invariant.
     state: Mutex<PoolState>,
-    /// Set when the host begins shutting down.
-    draining: AtomicU64,
     /// Shared so the tenant output budgets can meter refusals into the same
     /// recorder the pool feeds: one `Metrics` per pool, however many holders.
     metrics: Arc<Metrics>,
@@ -150,6 +147,12 @@ pub struct Pool {
 struct PoolState {
     in_use: u64,
     idle: u64,
+    /// Whether the host has begun shutting down. Lives in the same mutex as
+    /// the counters so admission and draining are one atomic decision: a
+    /// drain that lands between the check and the reservation can no longer
+    /// admit work it will then kill mid-request. An earlier version kept this
+    /// as a lock-free atomic beside the mutex, which left exactly that window.
+    draining: bool,
 }
 
 impl Pool {
@@ -164,7 +167,6 @@ impl Pool {
         Self {
             capacity,
             state: Mutex::new(PoolState::default()),
-            draining: AtomicU64::new(0),
             metrics: Arc::new(Metrics::new()),
         }
     }
@@ -371,7 +373,7 @@ impl Pool {
     /// Whether the pool is refusing new work.
     #[must_use]
     pub fn is_draining(&self) -> bool {
-        self.draining.load(Ordering::Relaxed) != 0
+        self.state.lock_recover().draining
     }
 
     /// Begin refusing acquisitions.
@@ -380,7 +382,7 @@ impl Pool {
     /// already in flight completes and its instances come home, rather than
     /// being abandoned when the process exits.
     pub fn begin_drain(&self) {
-        self.draining.store(1, Ordering::Relaxed);
+        self.state.lock_recover().draining = true;
     }
 
     /// The fraction of capacity currently checked out, in `0.0..=1.0`.
@@ -442,20 +444,15 @@ impl Pool {
     /// `state` field): the capacity check runs against the recovered values,
     /// which the saturating counters keep inside the invariant.
     pub fn acquire(&self, completed_per_second: f64) -> Result<Acquired> {
-        if self.is_draining() {
-            self.metrics.note_saturation();
-            return Err(exhausted_error(Exhausted::Draining, self.capacity, 0));
-        }
-
-        // Reservation and idle dequeue are one state transition. This is a
-        // concurrency gate; the caller still creates an instance when the slot
-        // is fresh because V1 has no reset-safe instance store.
+        // Reservation, drain check, and idle dequeue are one state transition
+        // under one lock. A concurrency gate; the caller still creates an
+        // instance when the slot is fresh because V1 has no reset-safe
+        // instance store. Checking `draining` here — rather than on a
+        // lock-free atomic before the lock — is what closes the race where a
+        // drain landing between check and reservation admitted work the drain
+        // then had to kill mid-request.
         let mut state = self.state.lock_recover();
-        if self.is_draining() {
-            // Re-checked under the lock: the pre-lock check above races
-            // with `begin_drain`, and without this a shutdown that lands
-            // in between admits work the drain then has to kill
-            // mid-request. An atomic load, not a second mutex round-trip.
+        if state.draining {
             drop(state);
             self.metrics.note_saturation();
             return Err(exhausted_error(Exhausted::Draining, self.capacity, 0));
@@ -579,6 +576,7 @@ impl Acquired {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     /// **F-21: a poisoned state lock does not wedge the pool.**
     ///

@@ -178,12 +178,12 @@ pub const MAX_MEMORIES_PER_COMPONENT: u32 = 8;
 
 /// Max tables per component instance (`F-10`).
 ///
-/// Single source of truth shared by the pooling allocator and load-time
-/// shape validation. Note the store's `.tables(16)` in `instance.rs` is a
-/// *different* (wider, older) bound the pool never agreed with; this constant
-/// is what the pool enforces and what load-time validation refuses past, so
-/// those two agree by construction. Narrowing the store-level 16 is a
-/// behaviour change no finding asks for, so it stays.
+/// Single source of truth shared by the pooling allocator, load-time shape
+/// validation, and the per-store limiter: all three agree by construction, so
+/// one cannot admit what another refuses. An earlier revision left the
+/// store-level bound at a wider literal 16; the r2 ultra-review closed it to
+/// this constant (no behaviour change: load-time validation already refuses
+/// past 8, so 9–16 were unreachable).
 pub const MAX_TABLES_PER_COMPONENT: u32 = 8;
 
 /// Async stack bytes per instance (`F-10`).

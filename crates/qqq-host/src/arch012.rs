@@ -417,9 +417,15 @@ pub enum AuditFinding {
         line: usize,
     },
     /// A table row naming a `func_wrap` the source does not contain.
+    ///
+    /// Keyed by `(file, interface, function)`, not `(file, function)`: the
+    /// wall and monotonic clocks share function names in one file, and a
+    /// two-part key let a present namesake vouch for a deleted row.
     Stale {
         /// The file.
         file: &'static str,
+        /// The interface the row claims.
+        interface: &'static str,
         /// The function name.
         function: &'static str,
     },
@@ -448,9 +454,13 @@ impl std::fmt::Display for AuditFinding {
                  is checked -- an unlisted one is a call path nobody has \
                  reasoned about."
             ),
-            Self::Stale { file, function } => write!(
+            Self::Stale {
+                file,
+                interface,
+                function,
+            } => write!(
                 f,
-                "`arch012::AUDITED` lists `{file}`:`{function}`, which the source \
+                "`arch012::AUDITED` lists `{file}`:`{interface}`/`{function}`, which the source \
                  does not register. A stale row makes the table claim coverage \
                  it does not have."
             ),
@@ -551,12 +561,13 @@ pub fn audit(sources: &[(String, String)]) -> Vec<AuditFinding> {
     }
 
     for row in &AUDITED {
-        let named = seen
-            .iter()
-            .any(|(f, _, fn_)| f == row.file && fn_ == row.function);
+        let named = seen.iter().any(|(f, i, fn_)| {
+            f == row.file && fn_ == row.function && i.ends_with(interface_suffix(row.interface))
+        });
         if !named {
             findings.push(AuditFinding::Stale {
                 file: row.file,
+                interface: row.interface,
                 function: row.function,
             });
         }
@@ -940,14 +951,57 @@ mod tests {
                 .all(|f| matches!(f, AuditFinding::Stale { .. })),
             "{findings:?}"
         );
-        // `Stale` is reported per `(file, function)` and deduplicated, and two
-        // pairs repeat in the table because the wall and monotonic clocks name
-        // the same functions in the same file. The count is therefore smaller
-        // than the row count -- which is exactly why the *key* had to change;
-        // see `the_audited_identity_is_unique`.
-        let distinct: BTreeSet<(&str, &str)> =
-            AUDITED.iter().map(|a| (a.file, a.function)).collect();
-        assert_eq!(findings.len(), distinct.len());
+        // `Stale` is reported per `(file, interface, function)`: the wall and
+        // monotonic clocks name the same functions in the same file, and a
+        // two-part key let the surviving namesake vouch for a deleted row.
+        // Every row is therefore its own finding on an empty source set.
+        assert_eq!(findings.len(), AUDITED.len());
+    }
+
+    /// **Fault injection 3b: a namesake does not vouch for a deleted row.**
+    ///
+    /// `wall-clock.now` and `monotonic-clock.now` share file and function. A
+    /// source that keeps the wall clock (with its check) but drops the
+    /// monotonic registration must still report the monotonic row as stale —
+    /// otherwise deleting `monotonic-clock.now`'s grant check passes the
+    /// audit on the wall clock's back.
+    #[test]
+    fn a_namesake_does_not_vouch_for_a_deleted_row() {
+        // A wall-clock `now` whose body reaches the grant check, mirroring
+        // the real registration's shape without copying its exact text.
+        let source = r#"
+            pub const WALL_CLOCK: &str = "qqq:clock/wall-clock@1.0.0";
+            let mut inst = linker.instance(WALL_CLOCK)?;
+            inst.func_wrap("now", |store: StoreContextMut<'_, StoreData>, (): ()| {
+                if !store.data().grants.grants(Capability::ClockWall) {
+                    return Err(wasmtime::Error::msg("denied"));
+                }
+                Ok((0u64,))
+            })?;
+        "#;
+        let findings = audit(&[("host_clock.rs".to_owned(), source.to_owned())]);
+        assert!(
+            findings.iter().any(|f| matches!(
+                f,
+                AuditFinding::Stale {
+                    interface,
+                    function,
+                    ..
+                } if interface.contains("monotonic-clock") && *function == "now"
+            )),
+            "dropping monotonic-clock.now must report its row as stale: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| matches!(
+                f,
+                AuditFinding::Stale {
+                    interface,
+                    function,
+                    ..
+                } if interface.contains("wall-clock") && *function == "now"
+            )),
+            "the surviving wall-clock.now must not be reported stale: {findings:?}"
+        );
     }
 
     /// **`(file, function)` does not uniquely identify a row, and the audit must

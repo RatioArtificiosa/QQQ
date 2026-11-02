@@ -108,6 +108,21 @@ pub struct StoreData {
     /// The QQQ-level limits, for diagnostics and fuel accounting.
     limits: Option<crate::config::StoreLimits>,
 
+    /// The content digest of the component this store was built for.
+    ///
+    /// Set once during [`crate::instance::Instance::create_with`] (and every
+    /// path that funnels through it) from the compiled artifact's digest, and
+    /// never changed afterwards: the store and the component are born paired.
+    /// [`crate::invoke::HandlerHandle::func`] compares it against the handle's
+    /// own digest, so a handle resolved from component A cannot be invoked
+    /// against an instance of component B — a cross-tenant confusion that
+    /// would otherwise run one guest's code under another's identity.
+    ///
+    /// Empty for a store assembled without a component (unit-test fixtures
+    /// via [`StoreData::new`]): no component means nothing to confuse, and an
+    /// empty handle digest from the same kind of store still matches.
+    pub component_digest: String,
+
     /// This instance's crypto view — `HOST-037`.
     ///
     /// Deploy-resolved allowlist: which hash algorithms, HMAC algorithms,
@@ -359,6 +374,7 @@ impl fmt::Debug for StoreData {
         f.debug_struct("StoreData")
             .field("grants", &self.grants)
             .field("limits", &self.limits)
+            .field("component_digest", &self.component_digest)
             .field("crypto", &self.crypto.config)
             .field("ambient", &self.ambient)
             .field("has_wasi_ctx", &true)
@@ -393,6 +409,9 @@ impl Default for StoreData {
             test: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
+            // No component bound this store: see the field's own doc for why
+            // empty matches empty.
+            component_digest: String::new(),
             // No algorithms: a store assembled without going through the
             // manifest names none, so hashing, HMAC, AEAD and signing all
             // refuse. See the field's own doc for why empty is safe.
@@ -510,6 +529,9 @@ impl StoreData {
             test: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
+            // No component bound this store: see the field's own doc for why
+            // empty matches empty.
+            component_digest: String::new(),
             // No algorithms: a store assembled without going through the
             // manifest names none, so hashing, HMAC, AEAD and signing all
             // refuse. See the field's own doc for why empty is safe.
@@ -643,6 +665,9 @@ impl StoreData {
             test: None,
             resource_limits: TrappingLimiter::new(StoreLimits::default(), usize::MAX),
             limits: None,
+            // No component bound this store: see the field's own doc for why
+            // empty matches empty.
+            component_digest: String::new(),
             crypto,
             ambient: crate::ambient::AmbientState::default(),
             // Derived from the manifest so `[limits]` is the single source of
@@ -2390,12 +2415,14 @@ mod tests {
     /// exists precisely to prevent a failure that no test can reach. A source
     /// check is the only mechanism available, and it is honest about being one.
     ///
-    /// # Why it counts rather than listing names
+    /// # Why it checks each body rather than counting the file
     ///
-    /// Counting `.func_wrap(` against both guard forms means a *newly added* host
-    /// function is caught, not just a known set. A list of names would go stale
-    /// the moment somebody registered the next interface — which is exactly when
-    /// this matters most, because new host code is where new panics live.
+    /// A file-wide count lets a stray guard-shaped string — prose, or a
+    /// second guard in an already-guarded body — vouch for an unguarded
+    /// function elsewhere in the file. Each registration's body (sliced at
+    /// the next registration) must reach a guard form itself, so a *newly
+    /// added* unguarded host function fails loudly instead of hiding behind
+    /// its neighbours' guards.
     ///
     /// # The one exclusion, and why it is safe
     ///
@@ -2445,33 +2472,41 @@ mod tests {
                 .next()
                 .expect("split always yields at least one element");
 
-            // Whitespace is stripped for the same reason as in
-            // `host_crypto::tests::registers`: a match that depends on how
-            // `rustfmt` breaks a line is testing formatting, not behaviour.
+            // Per registration body, not a file-wide count. A count lets a
+            // stray `guard::guard(` in prose (or a second guard in one body)
+            // vouch for an unguarded function elsewhere in the file — the one
+            // guest-found panic then aborts the host under `panic = "abort"`.
+            // Slicing each body at the next registration is exact for this
+            // codebase's shape (one registration per `func_wrap`, in order),
+            // the same trick `arch012::scan` uses for the same reason.
+            // Whitespace is stripped so the match does not depend on how
+            // `rustfmt` breaks a line.
             let squeezed: String = production.chars().filter(|c| !c.is_whitespace()).collect();
-
-            let registrations = squeezed.matches(".func_wrap(").count();
-            // Both guard forms count: `guard` logs the SEV1 line itself, and
-            // `guard_reporting` hands the report to a caller that logs with
-            // more context. Counting only the first would force every future
-            // reporting-form call site to fail this audit for doing the
-            // louder thing.
-            let guards = squeezed.matches("guard::guard(").count()
-                + squeezed.matches("guard_reporting(").count();
-
+            let starts: Vec<usize> = squeezed
+                .match_indices(".func_wrap(")
+                .map(|(i, _)| i)
+                .collect();
             assert!(
-                registrations > 0,
+                !starts.is_empty(),
                 "{file} registers no host functions in production code; if that is \
                  true this check should stop including it, and if it is not, the \
                  check is broken"
             );
-            assert_eq!(
-                registrations, guards,
-                "{file} registers {registrations} host functions but only {guards} \
-                 are wrapped in `guard`; an unguarded function unwinds through the \
-                 engine on panic, and the release profile sets `panic = \"abort\"`, \
-                 so one guest finding it kills the host process (HOST-011)"
-            );
+            for (idx, start) in starts.iter().enumerate() {
+                let end = starts.get(idx + 1).copied().unwrap_or(squeezed.len());
+                let body = &squeezed[*start..end];
+                // Both guard forms satisfy the audit: `guard` logs the SEV1
+                // line itself, and `guard_reporting` hands the report to a
+                // caller that logs with more context.
+                assert!(
+                    body.contains("guard::guard(") || body.contains("guard_reporting("),
+                    "{file} has a `func_wrap` registration whose body reaches \
+                     neither `guard` form; an unguarded function unwinds through \
+                     the engine on panic, and the release profile sets \
+                     `panic = \"abort\"`, so one guest finding it kills the \
+                     host process (HOST-011)"
+                );
+            }
         }
     }
 

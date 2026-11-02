@@ -198,6 +198,16 @@ where
 /// never required for alerting — only for callers that log through their own
 /// sink and need the report to do it.
 ///
+/// # The caller MUST log the report
+///
+/// Unlike [`guard`], this function does not write the SEV1 line: the report
+/// is the return value, and a caller that drops it silences the alert the
+/// taxonomy, the metric label, and the remediation all assume exists. A
+/// contained panic that is trapped but never logged is a bug nobody will
+/// find — the guest sees a trap, the request fails, and the host defect
+/// leaves no trace. The linker audit counts both guard forms, so choosing
+/// this form never weakens that check; dropping its report does.
+///
 /// # Errors
 ///
 /// Returns the [`PanicReport`] when `f` panicked, and the normal error

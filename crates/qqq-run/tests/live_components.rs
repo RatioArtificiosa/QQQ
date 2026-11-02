@@ -557,3 +557,46 @@ async fn the_same_listener_serves_the_replacement() {
         .unwrap()
         .unwrap();
 }
+
+/// A component that is not a QQQ application fails `GuestApp::new` with the
+/// resolution error intact — code, context, and per-variant remediation.
+///
+/// The resolve runs inside `Instance::run`, which classifies any closure
+/// error as a trap. Without the slot the failure is stringified into a trap
+/// summary and every variant collapses to one message; with it, a missing
+/// export names `wit/app/app.wit` while a version mismatch names the
+/// version fix instead.
+#[test]
+fn a_non_application_keeps_its_resolution_diagnostic() {
+    let engine =
+        wasmtime::Engine::new(&EngineConfig::default().to_wasmtime_config().unwrap()).unwrap();
+    let err = GuestApp::new(
+        engine,
+        b"(component)",
+        GrantSet::empty(),
+        LimitSet {
+            memory_bytes: 16 * 1024 * 1024,
+            fuel: 1_000_000,
+            epoch_deadline_ms: 5_000,
+            max_open_handles: 32,
+            max_subrequests: 16,
+        },
+        "localhost:3000",
+    )
+    .expect_err("an empty component is not a QQQ application");
+    assert_eq!(
+        err.code,
+        qqq_core::ErrorCode::InvalidComponentArtifact,
+        "resolution failures stay user-class, never traps: {err:?}"
+    );
+    assert!(
+        err.message.contains("is not a QQQ application"),
+        "the variant message must survive: {err:?}"
+    );
+    assert!(
+        err.remediation
+            .as_deref()
+            .is_some_and(|r| r.contains("wit/app/app.wit")),
+        "the per-variant remediation must survive, not a generic one: {err:?}"
+    );
+}

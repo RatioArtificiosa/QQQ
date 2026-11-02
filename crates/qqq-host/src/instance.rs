@@ -694,6 +694,12 @@ impl<'a> Instance<'a> {
             opts,
             prepared.component(),
         )?;
+        // The store is born paired with its component: the handle check in
+        // `HandlerHandle::func` compares this digest, so a handle resolved
+        // from one artifact cannot invoke an instance built from another.
+        prepared
+            .digest()
+            .clone_into(&mut ready.store.data_mut().component_digest);
         let instance = instantiator(&ready.linker, &mut ready.store, prepared)
             .map_err(|e| instantiation_error(&e, prepared, grants))?;
         Ok(Self::finish(
@@ -814,6 +820,12 @@ impl<'a> Instance<'a> {
             opts,
             prepared.component(),
         )?;
+        // Same pairing as the sync path above: the async constructor must
+        // not end up with an unpaired store, which is exactly the drift
+        // `finish` exists to prevent.
+        prepared
+            .digest()
+            .clone_into(&mut ready.store.data_mut().component_digest);
         let instance = instantiator_async(&ready.linker, &mut ready.store, prepared)
             .await
             .map_err(|e| instantiation_error(&e, prepared, grants))?;
@@ -1441,7 +1453,7 @@ impl ReadyStore {
         let wasm_limits = StoreLimitsBuilder::new()
             .memory_size(usize::try_from(limits.memory_bytes).unwrap_or(usize::MAX))
             .instances(MAX_INNER_INSTANCES)
-            .tables(16)
+            .tables(crate::config::MAX_TABLES_PER_COMPONENT as usize)
             // Same numbers as the pooling allocator (`F-08`): the per-store
             // limiter and the pool must agree, or one admits what the other
             // refuses. Shared constants in `config.rs`, not literals here.

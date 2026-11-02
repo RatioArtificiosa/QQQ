@@ -462,8 +462,17 @@ impl ErrorCode {
     }
 
     /// Whether a caller should consider retrying.
+    ///
+    /// A contained host panic is never retryable even though its class is:
+    /// the same input panics the same host function again, so a retry burns
+    /// a slot and logs another SEV1 for a defect only a code change can fix.
+    /// The class stays `Host` (it is a host fault, and the taxonomy, metrics,
+    /// and remediation all key on that); only the retry hint is narrowed.
     #[must_use]
     pub const fn is_retryable(self) -> bool {
+        if matches!(self, Self::HostPanicContained) {
+            return false;
+        }
         self.class().is_retryable()
     }
 

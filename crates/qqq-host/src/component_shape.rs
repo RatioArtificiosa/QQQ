@@ -48,6 +48,16 @@ pub(crate) fn initial_memory_bytes(bytes: &[u8]) -> Result<u64, String> {
     Ok(total)
 }
 
+/// Whether the bytes claim to be binary WebAssembly (`\0asm` magic).
+///
+/// WAT text never starts with a NUL byte, so this distinguishes a binary
+/// artifact a parser disagreement would hide from test-suite WAT that
+/// `wasmparser` cannot read by design.
+#[must_use]
+fn starts_with_wasm_magic(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x00asm")
+}
+
 /// Countable shape of a component: how many memories, tables, and core
 /// modules it declares (`F-10`).
 ///
@@ -127,19 +137,25 @@ impl ShapeCaps {
 /// refused HERE, at deploy, rather than as an instantiation error under
 /// load.
 ///
-/// Unparseable-by-`wasmparser` bytes are NOT refused: `Component::new`
-/// already validated them, so at this point they are either a parser
-/// disagreement (refusing would turn a measurement aid into a denial of
-/// service) or WAT text, which Wasmtime's `wat` feature accepts and the test
-/// suite passes throughout. Production artifacts are binary; the runtime
-/// limiters remain the enforcement for everything instantiation admits.
-/// This is the same fail-open-with-backstop as `initial_memory_bytes`'
-/// zero-on-unparseable, and for the same reason.
+/// Unparseable bytes fail closed for binaries and open for text: a binary
+/// artifact `Component::new` accepted but `wasmparser` rejects is a parser
+/// disagreement that would hide an oversized shape past every cap, so it is
+/// refused; WAT text (no `\0asm` magic) is what the test suite compiles
+/// through Wasmtime's `wat` feature while `wasmparser` reads binary only, so
+/// refusing it would refuse every WAT fixture rather than a hostile
+/// artifact. The runtime limiters remain the backstop either way.
 ///
 /// Returns the message for the refusal; the caller attaches the code
 /// (`LimitOutOfRange`) and the remediation.
 pub(crate) fn validate_shape(bytes: &[u8], caps: &ShapeCaps) -> Result<(), String> {
     let Ok(counts) = component_counts(bytes) else {
+        if starts_with_wasm_magic(bytes) {
+            return Err(
+                "the component's binary could not be parsed for shape validation: \
+                 refusing rather than admitting an unmeasured shape past the caps"
+                    .to_owned(),
+            );
+        }
         return Ok(());
     };
     if counts.memories > caps.memories {
@@ -207,5 +223,28 @@ mod tests {
     fn f08_garbage_bytes_are_an_error_not_a_panic() {
         assert!(initial_memory_bytes(&[0x00, 0x01, 0x02]).is_err());
         assert!(initial_memory_bytes(&[]).is_err());
+    }
+
+    #[test]
+    fn an_unparseable_binary_is_refused_while_wat_text_passes_through() {
+        let caps = ShapeCaps::maximum();
+        // Binary magic with truncated contents: `Component::new` may still
+        // accept the shape while `wasmparser` cannot measure it — the parser
+        // disagreement that would hide an oversized shape past every cap.
+        let truncated_binary = vec![0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00];
+        assert!(
+            validate_shape(&truncated_binary, &caps).is_err(),
+            "an unmeasurable binary must not be admitted past the caps"
+        );
+        // WAT text is what the test suite compiles; `wasmparser` cannot read
+        // it by design, and refusing it would refuse the fixtures.
+        assert!(
+            validate_shape(b"(component)", &caps).is_ok(),
+            "WAT text must keep the fail-open path"
+        );
+        assert!(
+            validate_shape(&one_memory_component(), &caps).is_ok(),
+            "a well-formed binary within caps still passes"
+        );
     }
 }

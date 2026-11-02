@@ -182,12 +182,12 @@ impl SubrequestBudget {
     /// states alike.
     pub fn charge(&mut self) -> Charge {
         if self.poisoned {
-            self.amplification_attempts += 1;
+            self.amplification_attempts = self.amplification_attempts.saturating_add(1);
             return Charge::RefusedRepeatedly;
         }
         if self.spent >= self.limit {
             self.poisoned = true;
-            self.amplification_attempts += 1;
+            self.amplification_attempts = self.amplification_attempts.saturating_add(1);
             return Charge::Refused;
         }
         self.spent += 1;
@@ -328,14 +328,28 @@ impl HandleQuota {
     /// mint site that checks first and counts later can be interleaved
     /// between the two (or forget the second half — which is exactly how the
     /// previous passive mirror ended up with zero production callers).
+    /// There is deliberately no separate count-only path: a second function
+    /// that counts without deciding would let one path refuse without
+    /// counting and another count without refusing.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use qqq_host::quota::HandleQuota;
+    ///
+    /// let mut quota = HandleQuota::new(1);
+    /// assert!(quota.try_open(0).is_ok());
+    /// quota.try_open(1).expect_err("at the limit must refuse");
+    /// assert_eq!(quota.exhaustion_attempts(), 1);
+    /// ```
     ///
     /// # Errors
     ///
-    /// `QQQ-3004` when the table already holds `limit` handles, carrying the
+    /// `QQQ-2005` when the table already holds `limit` handles, carrying the
     /// limit and a remediation that names it.
     pub fn try_open(&mut self, table_len: u32) -> Result<()> {
         if table_len >= self.limit {
-            self.exhaustion_attempts += 1;
+            self.exhaustion_attempts = self.exhaustion_attempts.saturating_add(1);
             return Err(Error::new(
                 ErrorCode::LimitOutOfRange,
                 format!(
@@ -349,18 +363,6 @@ impl HandleQuota {
             ));
         }
         Ok(())
-    }
-
-    /// Record an observed exhaustion attempt.
-    ///
-    /// Kept for the diagnostic path — a table that refuses on its own (such
-    /// as [`HandleTable`](crate::handles::HandleTable), which enforces at
-    /// insertion) reports the refusal here so the count stays in one place.
-    /// Mint sites that can call [`try_open`](Self::try_open) must prefer it:
-    /// this function counts without deciding, so it is only correct after a
-    /// refusal that already happened elsewhere.
-    pub const fn note_exhaustion(&mut self) {
-        self.exhaustion_attempts += 1;
     }
 
     /// The limit.
@@ -590,12 +592,9 @@ mod tests {
     }
 
     #[test]
-    fn the_handle_quota_counts_every_attempt() {
-        let mut q = HandleQuota::new(64);
+    fn the_handle_quota_starts_empty() {
+        let q = HandleQuota::new(64);
         assert_eq!(q.exhaustion_attempts(), 0);
-        q.note_exhaustion();
-        q.note_exhaustion();
-        assert_eq!(q.exhaustion_attempts(), 2);
         assert_eq!(q.limit(), 64);
     }
 

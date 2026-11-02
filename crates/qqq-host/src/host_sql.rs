@@ -769,7 +769,9 @@ fn collect_rows(mut rows: rusqlite::Rows<'_>) -> std::result::Result<Vec<WitRow>
 /// The guest controls the text; without a bound one call hands SQLite
 /// megabytes to parse. Every entry point that prepares — `prepare`,
 /// `query-once`, `txn prepare` — calls this first, so the cap cannot be
-/// bypassed by choosing the one-shot path.
+/// bypassed by choosing the one-shot path. The attachment and
+/// transaction-control gates ride along for the same reason: one choke
+/// point, no path that skips it.
 fn check_sql_size(sql: &str) -> std::result::Result<(), WitSqlError> {
     if sql.len() > MAX_SQL_STATEMENT_BYTES {
         return Err(WitSqlError::PrepareFailed(format!(
@@ -777,7 +779,8 @@ fn check_sql_size(sql: &str) -> std::result::Result<(), WitSqlError> {
             sql.len()
         )));
     }
-    check_forbidden_leading(sql)
+    check_forbidden_leading(sql)?;
+    check_no_txn_control(sql)
 }
 
 /// Reject statements that reach files outside the named database.
@@ -799,6 +802,34 @@ fn check_forbidden_leading(sql: &str) -> std::result::Result<(), WitSqlError> {
     {
         return Err(WitSqlError::PrepareFailed(format!(
             "{keyword} statements are not allowed: queries address only the named database"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject transaction-control statements outside the transaction interface.
+///
+/// `BEGIN`/`COMMIT`/`ROLLBACK` (and `SAVEPOINT`/`RELEASE`/`END`) through a
+/// statement handle desynchronize the host's transaction table: the guest's
+/// `execute("COMMIT")` would commit SQLite while the host still lists the
+/// transaction as open, so a second `begin` opens a new SQLite transaction
+/// under two host handles and the two "transactions" share one lock. The
+/// control words belong to `begin`/`commit`/`rollback` — never to SQL text —
+/// on every prepare path, transaction or plain. (Plain paths are additionally
+/// backstopped by `require_autocommit` after execution; the transaction paths
+/// cannot be, because a transaction is definitionally not in autocommit.)
+fn check_no_txn_control(sql: &str) -> std::result::Result<(), WitSqlError> {
+    let keyword = leading_keyword(sql);
+    if keyword.eq_ignore_ascii_case("begin")
+        || keyword.eq_ignore_ascii_case("commit")
+        || keyword.eq_ignore_ascii_case("rollback")
+        || keyword.eq_ignore_ascii_case("savepoint")
+        || keyword.eq_ignore_ascii_case("release")
+        || keyword.eq_ignore_ascii_case("end")
+    {
+        return Err(WitSqlError::PrepareFailed(format!(
+            "{keyword} statements are not allowed: transaction control belongs to the \
+             transaction interface, not to SQL text"
         )));
     }
     Ok(())
@@ -891,6 +922,18 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
                 return Err(WitSqlError::NotGranted);
             }
         } else if !self.grants.grants(SqlExecute) {
+            return Err(WitSqlError::ReadOnlyConnection);
+        }
+        // `sqlite3_stmt_readonly` reports most `PRAGMA` as reads, but several
+        // (`journal_mode`, `synchronous`, `writable_schema`, ...) mutate the
+        // file or its durability — on the writable connection these paths
+        // use, that verdict alone would let a read-only caller persist
+        // changes. So `PRAGMA` requires the execute grant on a writable
+        // database. Schema introspection stays available to everyone through
+        // `sqlite_master` reads, and to execute-granted callers directly.
+        if leading_keyword(&sql).eq_ignore_ascii_case("pragma")
+            && (!self.grants.grants(SqlExecute) || db.read_only())
+        {
             return Err(WitSqlError::ReadOnlyConnection);
         }
         let id = mint_id(self)?;
@@ -1089,6 +1132,8 @@ fn check_any(data: &crate::linker::StoreData) -> std::result::Result<(), WitSqlE
 /// that smuggles `BEGIN` would open a hidden SQLite transaction no host
 /// handle names, defeating the open-transaction refusal. Rolling back and
 /// failing keeps the host record — which never opened one — truthful.
+/// handle names, defeating the open-transaction refusal. Rolling back and
+/// failing keeps the host record — which never opened one — truthful.
 fn require_autocommit(connection: &rusqlite::Connection) -> std::result::Result<(), WitSqlError> {
     if connection.is_autocommit() {
         Ok(())
@@ -1097,6 +1142,24 @@ fn require_autocommit(connection: &rusqlite::Connection) -> std::result::Result<
         Err(WitSqlError::ExecutionFailed(
             "transaction control statements are not allowed outside transactions".to_owned(),
         ))
+    }
+}
+
+/// Require the SQLite transaction the host handle names to still be open.
+///
+/// The host table and the connection can desynchronize only one way: a
+/// control statement smuggled past the prepare gate commits or rolls back
+/// SQLite while the handle stays listed. Running another statement on that
+/// handle would then execute outside any transaction while the host claims
+/// to be inside one — so the entry path checks SQLite state, not just the
+/// host table, and fails closed when they disagree.
+fn require_txn_open(connection: &rusqlite::Connection) -> std::result::Result<(), WitSqlError> {
+    if connection.is_autocommit() {
+        Err(WitSqlError::ExecutionFailed(
+            "transaction is not active".to_owned(),
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -1227,6 +1290,18 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         } else if !self.grants.grants(SqlExecute) {
             return Err(WitSqlError::ReadOnlyConnection);
         }
+        // `sqlite3_stmt_readonly` reports most `PRAGMA` as reads, but several
+        // (`journal_mode`, `synchronous`, `writable_schema`, ...) mutate the
+        // file or its durability — on the writable connection these paths
+        // use, that verdict alone would let a read-only caller persist
+        // changes. So `PRAGMA` requires the execute grant on a writable
+        // database. Schema introspection stays available to everyone through
+        // `sqlite_master` reads, and to execute-granted callers directly.
+        if leading_keyword(&sql).eq_ignore_ascii_case("pragma")
+            && (!self.grants.grants(SqlExecute) || db.read_only())
+        {
+            return Err(WitSqlError::ReadOnlyConnection);
+        }
         let txn = handle.rep();
         let id = mint_id(self)?;
         self.sql_state
@@ -1320,6 +1395,11 @@ impl bindings::qqq::sql::transaction::HostTxnStatement for crate::linker::StoreD
         let bound = bind_args(args)?;
         charge_one_subrequest(self)?;
         let connection = connection_for(self, &db)?;
+        // The host table says this transaction is open; SQLite must agree.
+        // A smuggled control statement would have committed behind the
+        // handle's back, and running on would execute outside a transaction
+        // the host claims to hold.
+        require_txn_open(connection)?;
         let mut statement = connection
             .prepare(&sql)
             .map_err(|error| WitSqlError::PrepareFailed(error.to_string()))?;
@@ -1355,6 +1435,9 @@ impl bindings::qqq::sql::transaction::HostTxnStatement for crate::linker::StoreD
         let bound = bind_args(args)?;
         charge_one_subrequest(self)?;
         let connection = connection_for(self, &db)?;
+        // Same agreement check as `txn query`: the handle claims an open
+        // transaction, and SQLite must agree before anything runs.
+        require_txn_open(connection)?;
         let count = {
             let mut statement = connection
                 .prepare(&sql)
@@ -1907,6 +1990,77 @@ mod tests {
         );
     }
 
+    /// Transaction control belongs to the transaction interface, never to
+    /// SQL text: `COMMIT` through any prepare path — plain or transaction —
+    /// is refused at prepare time, before anything mints or executes.
+    #[test]
+    fn transaction_control_is_refused_on_every_prepare_path() {
+        use super::bindings::qqq::sql::database::Host as DbHost;
+        use super::bindings::qqq::sql::transaction::{Host as _, HostTxn as TxnHost};
+        let path = test_path("txn-control-prepare");
+        let mut data = store_for(&path, true, true);
+        for sql in [
+            "COMMIT",
+            "  -- setup\nROLLBACK",
+            "/*x*/begin",
+            "SAVEPOINT sp",
+            "RELEASE sp",
+        ] {
+            let err = DbHost::prepare(&mut data, "orders".to_owned(), sql.to_owned())
+                .expect_err("control words never prepare");
+            assert!(
+                matches!(err, WitSqlError::PrepareFailed(_)),
+                "{sql:?} must fail at prepare time: {err:?}"
+            );
+        }
+        let txn = data.begin("orders".to_owned()).expect("begin runs");
+        let err = TxnHost::prepare(&mut data, txn, "COMMIT".to_owned())
+            .expect_err("control words never prepare inside a txn either");
+        assert!(matches!(err, WitSqlError::PrepareFailed(_)));
+        assert!(
+            data.sql_state.txn_statements.is_empty(),
+            "refused control words mint nothing"
+        );
+    }
+
+    /// `PRAGMA` reports readonly but can persist: a query-only guest is
+    /// refused at prepare time, while an execute-granted guest keeps it.
+    /// Read-only introspection stays available through `sqlite_master`
+    /// reads; the tradeoff is deliberate and this test pins it.
+    #[test]
+    fn pragma_requires_the_execute_grant() {
+        use super::bindings::qqq::sql::database::Host as _;
+        let path = test_path("pragma-direction");
+        let mut writer = store_for(&path, true, true);
+        query_once(
+            &mut writer,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("create runs");
+        drop(writer);
+        let mut data = store_for(&path, true, false);
+        let err = data
+            .prepare("orders".to_owned(), "PRAGMA journal_mode=WAL".to_owned())
+            .expect_err("a query-only PRAGMA must not prepare");
+        assert!(
+            matches!(err, WitSqlError::ReadOnlyConnection),
+            "the refusal names the direction: {err:?}"
+        );
+        // And the read-PRAGMA tradeoff: `table_info` reports readonly too,
+        // so it takes the same path — introspection goes through
+        // `sqlite_master`, not `PRAGMA`.
+        let err = data
+            .prepare("orders".to_owned(), "PRAGMA table_info(t)".to_owned())
+            .expect_err("read PRAGMAs take the same path");
+        assert!(matches!(err, WitSqlError::ReadOnlyConnection));
+        let mut writer = store_for(&path, true, true);
+        writer
+            .prepare("orders".to_owned(), "PRAGMA journal_mode=WAL".to_owned())
+            .expect("execute-granted PRAGMA prepares");
+    }
+
     /// Dropping without committing rolls back: the safe default for a
     /// guest that panics mid-transaction.
     #[test]
@@ -2298,19 +2452,22 @@ mod tests {
 
     /// Transaction control stays in the transaction interface: `BEGIN`
     /// through a plain path fails instead of opening a hidden SQLite
-    /// transaction no host handle names.
+    /// transaction that no host handle names.
     #[test]
     fn plain_paths_reject_transaction_control() {
         let path = test_path("txn-control");
         let mut data = store_for(&path, true, true);
         let err = query_once(&mut data, "orders".to_owned(), "BEGIN".to_owned(), vec![])
             .expect_err("BEGIN outside a transaction fails");
+        // Refused at prepare time, before anything executes: the message
+        // still names the rule, and no ROLLBACK recovery is needed because
+        // nothing ran.
         match err {
-            WitSqlError::ExecutionFailed(message) => assert!(
+            WitSqlError::PrepareFailed(message) => assert!(
                 message.contains("transaction control"),
                 "the refusal names the rule: {message}"
             ),
-            other => panic!("expected execution-failed, got {other:?}"),
+            other => panic!("expected prepare-failed, got {other:?}"),
         }
     }
 

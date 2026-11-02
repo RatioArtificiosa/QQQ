@@ -217,14 +217,15 @@ impl SubrequestBudget {
 
     /// The error to return to the guest for a [`Charge::Refused`].
     ///
-    /// # Why the code is `QQQ-3003` and not `QQQ-3001`
+    /// # Why the code is `QQQ-3008` and not `QQQ-3001`
     ///
     /// `QQQ-3001` is the memory class and `QQQ-3002` the fuel class; this is a
     /// **distinct** limit with a distinct operator response. An operator reading
     /// `SubrequestLimitExceeded` knows the fix is either a manifest change or an
     /// investigation into why the guest fans out, whereas a memory exhaustion
     /// means something else entirely. Sharing a code would make the trap taxonomy
-    /// lie.
+    /// lie. (`QQQ-3003` is the epoch deadline — near in number, unrelated in
+    /// meaning; the two must never be confused.)
     #[must_use]
     pub fn refusal(&self) -> Error {
         Error::new(

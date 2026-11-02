@@ -2636,7 +2636,11 @@ mod tests {
             memory_bytes: 64 * 1024 * 1024,
             fuel: 1_000_000_000,
             epoch_deadline_ms: 10_000,
-            max_open_handles: 64,
+            // Room for the probe's own 72 records (2 singles + a 70-batch):
+            // log records consume handle quota one-for-one, so a quota below
+            // the batch would refuse the happy path for policy rather than
+            // for capacity.
+            max_open_handles: 128,
             max_subrequests: 16,
         };
         let mut app = GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1)

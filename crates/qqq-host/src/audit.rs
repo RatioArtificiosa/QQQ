@@ -854,7 +854,7 @@ impl AppendCounters {
 ///
 /// Adding a host function that records means adding its name here, and the test
 /// `every_recorded_function_round_trips` fails until it is.
-pub(crate) const RECORDED_FUNCTIONS: [&str; 9] = [
+pub(crate) const RECORDED_FUNCTIONS: [&str; 21] = [
     "handle_request",
     "hash_data",
     "hmac_compute",
@@ -864,6 +864,18 @@ pub(crate) const RECORDED_FUNCTIONS: [&str; 9] = [
     "signing_sign",
     "signing_verify",
     "signing_public_key",
+    "wall_clock_now",
+    "wall_clock_resolution",
+    "wall_clock_timezone",
+    "monotonic_clock_now",
+    "monotonic_clock_resolution",
+    "wasi03_monotonic_clock_now",
+    "wasi03_monotonic_clock_get_resolution",
+    "wasi_random_get_random_bytes",
+    "wasi_random_get_random_u64",
+    "wasi_random_get_insecure_random_bytes",
+    "wasi_random_get_insecure_random_u64",
+    "wasi_random_insecure_seed",
 ];
 
 /// A shared handle to the capability-use record, for the per-call seam — `OBS-001`.

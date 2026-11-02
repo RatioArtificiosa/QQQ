@@ -829,6 +829,19 @@ mod tests {
         }
     }
 
+    /// The near-miss pair must stay distinct: `QQQ-3003` is the epoch
+    /// deadline, `QQQ-3008` the subrequest budget. An operator reading one
+    /// for the other misdiagnoses a hung guest as a fanning-out one.
+    #[test]
+    fn epoch_deadline_and_subrequest_budget_are_distinct_codes() {
+        assert_eq!(ErrorCode::EpochDeadlineExceeded.number(), 3003);
+        assert_eq!(ErrorCode::SubrequestLimitExceeded.number(), 3008);
+        assert_ne!(
+            ErrorCode::EpochDeadlineExceeded.id(),
+            ErrorCode::SubrequestLimitExceeded.id()
+        );
+    }
+
     /// Declaration order is numeric order, so the derived `Ord` agrees with
     /// `number()`. A new code appended in the wrong place fails here rather
     /// than silently reordering every sorted collection of codes.

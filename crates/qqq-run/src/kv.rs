@@ -146,6 +146,17 @@ mod tests {
         assert!(config.write);
     }
 
+    /// Surrounding whitespace is significant, not trimmed: a declared
+    /// `" s "` stays `" s "`, and a guest asking for `"s"` learns
+    /// `store-not-configured`. Trimming would silently rename the store.
+    #[test]
+    fn whitespace_is_significant() {
+        let config = resolve_kv_config(&manifest_with("[capabilities.kv]\nstores = [\" s \"]\n"));
+        assert_eq!(config.stores, vec![" s ".to_owned()]);
+        assert!(config.allows(" s "));
+        assert!(!config.allows("s"));
+    }
+
     /// Stores and the write flag travel verbatim from the manifest.
     #[test]
     fn stores_and_write_flag_resolve() {

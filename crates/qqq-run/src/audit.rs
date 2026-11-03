@@ -28,12 +28,14 @@
 //! | Rule | Severity | Why it is a finding at all |
 //! |---|---|---|
 //! | `qqq/exposed-posture` | warning | The grant set can write or reach the network |
-//! | `qqq/unbounded-memory` | error | No memory limit means a guest can exhaust the host |
-//! | `qqq/unbounded-fuel` | error | No fuel limit means a guest can run forever |
-//! | `qqq/no-epoch-deadline` | warning | Without a deadline a looping guest is not preempted |
-//! | `qqq/unsigned-manifest` | warning | Authority with no provenance record |
-//! | `qqq/capability-escalation` | error | A lockfile update ADDS authority |
-//! | `qqq/unpinned-dependency` | warning | A dependency with no digest cannot be reproduced |
+//! | `qqq/unused-grant` | warning | A capability is granted that the artifact does not import |
+//! | `qqq/limits-at-default` | note | A limit is at the manifest default rather than chosen |
+//! | `qqq/unsigned-manifest` | warning | A package records no digest, so provenance cannot be checked |
+//! | `qqq/capability-escalation` | note | A dependency declares authority; check the update delta before merging |
+//!
+//! Unbounded limits have no row because the manifest parser forbids them —
+//! `a_manifest_parser_forbids_an_unbounded_limit` pins that — so there is no
+//! rule that could fire for one.
 //!
 //! The severities are not decoration: `--fail-on` branches on them, so a CI job
 //! can pass on warnings and fail on errors, and the choice of which is which is a
@@ -237,7 +239,7 @@ impl AuditReport {
 }
 
 /// Every rule the audit can emit, for the SARIF `rules` array and the docs.
-pub const RULES: [RuleInfo; 6] = [
+pub const RULES: [RuleInfo; 5] = [
     RuleInfo {
         id: "qqq/exposed-posture",
         summary: "The grant set can write or reach the network",
@@ -252,16 +254,12 @@ pub const RULES: [RuleInfo; 6] = [
     },
     RuleInfo {
         id: "qqq/unsigned-manifest",
-        summary: "The manifest carries no signature",
+        summary: "A package records no digest, so provenance cannot be checked",
     },
     RuleInfo {
         id: "qqq/capability-escalation",
         summary: "A dependency declares authority; check the update delta before \
                   merging",
-    },
-    RuleInfo {
-        id: "qqq/unpinned-dependency",
-        summary: "A dependency has no digest",
     },
 ];
 
@@ -350,6 +348,11 @@ pub fn audit(loaded: &LoadedManifest, lock: Option<&qqq_pkg::lock::Lockfile>) ->
 /// what the build produces, and this repository has already paid for that once: a checker that reads
 /// a different language than the code writes measures something else (`§O-361`, `§O-374`).
 ///
+/// A corrupt artifact reports nothing either, for the same reason: without imports the set of
+/// unused grants is unknowable, and an empty answer is honest where a guessed one would not be.
+/// The corruption itself surfaces where it must -- `run` and `serve` refuse the artifact before
+/// serving -- so silence here defers to the louder failure rather than hiding it.
+///
 /// # Why the predicate is a separate function
 ///
 /// Because it has to be **provable without a build**. This module already records the lesson -- *"a
@@ -409,11 +412,6 @@ fn unused_grants_from(
 
 /// The exposure question: can this component write or reach the network?
 ///
-/// # Errors
-///
-/// `QQQ-2004` when a granted path does not exist, because normalization must
-/// resolve real paths to be honest about reachability. Inherited from [`inspect`].
-///
 /// # Why the capability list is filtered rather than the posture re-derived
 ///
 /// [`classify_posture`] already decides *whether* the posture is exposed; this
@@ -422,7 +420,6 @@ fn unused_grants_from(
 /// and this is only an explanation of it -- re-deriving the verdict here would be
 /// a second opinion that could differ.
 ///
-/// [`inspect`]: crate::commands::inspect
 /// [`classify_posture`]: crate::commands::classify_posture
 fn caps_and_posture(loaded: &LoadedManifest) -> Vec<Finding> {
     let resolution = qqq_cap::resolve::Resolution::from_manifest(&loaded.manifest);
@@ -507,6 +504,18 @@ fn limits_at_default(loaded: &LoadedManifest) -> Vec<Finding> {
     }
     if loaded.manifest.limits.epoch_deadline_ms == defaults.epoch_deadline_ms {
         at_default.push("epoch_deadline_ms");
+    }
+    if loaded.manifest.limits.max_instances == defaults.max_instances {
+        at_default.push("max_instances");
+    }
+    if loaded.manifest.limits.max_open_handles == defaults.max_open_handles {
+        at_default.push("max_open_handles");
+    }
+    if loaded.manifest.limits.max_subrequests == defaults.max_subrequests {
+        at_default.push("max_subrequests");
+    }
+    if loaded.manifest.limits.max_poll_per_tick == defaults.max_poll_per_tick {
+        at_default.push("max_poll_per_tick");
     }
     if at_default.is_empty() {
         return Vec::new();
@@ -829,7 +838,9 @@ mod tests {
     /// rule tracks *explicit choice* rather than merely a different value.
     const CHOSEN: &str = "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\
                           [limits]\nmemory = \"64MiB\"\nfuel = 10_000_000\n\
-                          epoch_deadline_ms = 2500\n";
+                          epoch_deadline_ms = 2500\nmax_instances = 100\n\
+                          max_open_handles = 128\nmax_subrequests = 16\n\
+                          max_poll_per_tick = 5\n";
 
     // -- Severity ---------------------------------------------------------
 
@@ -988,6 +999,8 @@ mod tests {
         );
         assert!(f.message.contains("memory"), "{}", f.message);
         assert!(f.message.contains("fuel"), "{}", f.message);
+        assert!(f.message.contains("max_instances"), "{}", f.message);
+        assert!(f.message.contains("max_poll_per_tick"), "{}", f.message);
     }
 
     /// And an explicit choice removes the note, so the rule tracks *attention*
@@ -996,7 +1009,9 @@ mod tests {
     fn explicitly_chosen_limits_are_not_noted() {
         let src = "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\
                    [limits]\nmemory = \"64MiB\"\nfuel = 10_000_000\n\
-                   epoch_deadline_ms = 2500\n";
+                   epoch_deadline_ms = 2500\nmax_instances = 100\n\
+                   max_open_handles = 128\nmax_subrequests = 16\n\
+                   max_poll_per_tick = 5\n";
         let report = audit(&loaded(src), None);
         assert!(
             !report
@@ -1343,6 +1358,34 @@ mod tests {
                 f.rule
             );
         }
+    }
+
+    /// Every rule declared in `RULES` must be emittable, or it is a phantom.
+    ///
+    /// `qqq/unpinned-dependency` sat in `RULES` while `provenance` emitted
+    /// `qqq/unsigned-manifest`, and the one-direction test above could not see
+    /// it — a rule that cannot fire reads as coverage. The kitchen sink fires
+    /// the four file-driven rules; `unused-grant` needs a staged artifact, so
+    /// its pure predicate is exercised directly.
+    #[test]
+    fn every_declared_rule_can_fire() {
+        use qqq_cap::Capability;
+        let src = "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\
+                   [[capabilities.fs]]\npath = \".\"\nmode = \"read-write\"\n";
+        let l = lock_with("a", None, &["http.client"]);
+        let report = audit(&loaded(src), Some(&l));
+        let mut fired: Vec<&str> = report.findings.iter().map(|f| f.rule).collect();
+        let granted = [Capability::HttpServer];
+        let none: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        fired.extend(unused_grants_from(&granted, &none).iter().map(|f| f.rule));
+        fired.sort_unstable();
+        fired.dedup();
+        let mut declared: Vec<&str> = RULES.iter().map(|r| r.id).collect();
+        declared.sort_unstable();
+        assert_eq!(
+            fired, declared,
+            "RULES must be exactly the emittable set: fired {fired:?}, declared {declared:?}"
+        );
     }
 
     /// A clean project still produces a well-formed SARIF document with an empty

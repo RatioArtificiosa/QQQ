@@ -56,6 +56,10 @@ pub fn resolve_sql_config(manifest: &Manifest) -> SqlConfig {
         .sql
         .iter()
         .filter(|db| db.driver == "sqlite" && db.host != ":memory:")
+        // Blank names are dropped like `kv` drops blank stores: a name that
+        // is empty or whitespace would open a blank `SqlDatabase` the guest
+        // could address but the operator never meant.
+        .filter(|db| !db.name.trim().is_empty())
         .filter(|db| {
             if seen.contains(&db.name) {
                 false
@@ -188,5 +192,46 @@ mod tests {
             "/tmp/first.db"
         );
         assert_eq!(config.databases.len(), 1);
+    }
+
+    /// Blank names resolve to nothing, like `kv`'s blank stores: validation
+    /// refuses blanks at parse, but direct construction bypasses validation,
+    /// and a blank name would open a database the operator never meant.
+    #[test]
+    fn blank_names_resolve_to_nothing() {
+        use qqq_cap::manifest::SqlCapability;
+        let base = manifest_with("");
+        let mut capabilities = base.capabilities.clone();
+        capabilities.sql = vec![
+            SqlCapability {
+                name: String::new(),
+                driver: "sqlite".to_owned(),
+                host: "/tmp/blank.db".to_owned(),
+                secret: None,
+                execute: false,
+            },
+            SqlCapability {
+                name: "   ".to_owned(),
+                driver: "sqlite".to_owned(),
+                host: "/tmp/space.db".to_owned(),
+                secret: None,
+                execute: false,
+            },
+            SqlCapability {
+                name: "orders".to_owned(),
+                driver: "sqlite".to_owned(),
+                host: "/tmp/orders.db".to_owned(),
+                secret: None,
+                execute: false,
+            },
+        ];
+        let manifest = Manifest {
+            capabilities,
+            ..base
+        };
+        let config = resolve_sql_config(&manifest);
+        assert_eq!(config.databases.len(), 1);
+        assert!(config.allows("orders"));
+        assert!(!config.allows(""));
     }
 }

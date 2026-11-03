@@ -57,6 +57,12 @@ pub fn resolve_secret_store(
             )
             .with_remediation("use the `env:NAME` scheme, e.g. `secrets = [\"env:DB_URL\"]`")
         })?;
+        // One logical name resolves once: `secret` and `crypto` may reference
+        // the same `env:K`, and without the skip the variable is looked up
+        // twice and the material carried twice.
+        if granted.contains(&parsed.logical_name) {
+            continue;
+        }
         granted.push(parsed.logical_name.clone());
         match lookup(&parsed.env_var) {
             Some(value) => material.push(SecretMaterial::new(
@@ -77,7 +83,6 @@ pub fn resolve_secret_store(
         }
     }
     granted.sort();
-    granted.dedup();
     Ok(SecretStore::with_grants(granted, material))
 }
 
@@ -111,6 +116,41 @@ mod tests {
         assert!(store.is_granted("K"));
         assert!(store.exists("K"));
         assert!(!store.is_granted("OTHER"));
+    }
+
+    /// A variable referenced by both `secret` and `crypto` resolves once.
+    ///
+    /// Without the skip, the lookup runs twice and the material is carried
+    /// twice; the counting lookup pins the single call.
+    #[test]
+    fn duplicate_references_resolve_once() {
+        let m = manifest_with(
+            "[capabilities.secret]\nsecrets = [\"env:K\"]\n\
+             [capabilities.crypto]\nsecrets = [\"env:K\"]\n",
+        );
+        let calls = std::cell::Cell::new(0u32);
+        let store = resolve_secret_store(&m, &|name| {
+            calls.set(calls.get() + 1);
+            (name == "K").then(|| b"v".to_vec())
+        })
+        .expect("set variable resolves");
+        assert_eq!(calls.get(), 1, "the shared variable is looked up once");
+        assert!(store.is_granted("K"));
+        assert!(store.exists("K"));
+    }
+
+    /// Both stanzas union: distinct names from `secret` and `crypto` each
+    /// resolve and each grant.
+    #[test]
+    fn both_stanzas_union() {
+        let m = manifest_with(
+            "[capabilities.secret]\nsecrets = [\"env:A\"]\n\
+             [capabilities.crypto]\nsecrets = [\"env:B\"]\n",
+        );
+        let store = resolve_secret_store(&m, &lookup(&[("A", b"a"), ("B", b"b")]))
+            .expect("both set variables resolve");
+        assert!(store.is_granted("A") && store.exists("A"));
+        assert!(store.is_granted("B") && store.exists("B"));
     }
 
     /// A missing variable fails the deploy, naming the variable — not the guest's first call.

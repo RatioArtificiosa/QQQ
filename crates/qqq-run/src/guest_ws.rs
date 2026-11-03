@@ -64,6 +64,12 @@ impl GuestWsBridge {
     /// use and must be gated again, or one connection spends unbounded
     /// guest instantiations past the rate and body caps.
     ///
+    /// `None` means no per-tenant limiter was declared, and that is a
+    /// legitimate configuration (`no_declared_limits_means_no_limiter` pins
+    /// it): the frame layer still bounds every message (`WsLimits`, 1 MiB
+    /// default) and every send (`message_cap`), so `None` skips only the
+    /// per-tenant accounting, never the caps.
+    ///
     /// Named `for_route` rather than `new` because it returns the trait
     /// object the dispatcher stores, not the bridge itself.
     ///
@@ -108,7 +114,7 @@ impl WebSocketHandler for GuestWsBridge {
                 "content-type".to_owned(),
                 "application/octet-stream".to_owned(),
             )],
-            content_length: Some(message.payload.len() as u64),
+            content_length: Some(u64::try_from(msg_len).unwrap_or(u64::MAX)),
             chunked: false,
         };
         let body = qqq_serve::BodyBytes::Buffered(message.payload.clone());

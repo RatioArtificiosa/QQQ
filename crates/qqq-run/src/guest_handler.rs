@@ -1614,6 +1614,21 @@ pub fn to_served(
                 format!("guest must not set host-controlled header `{name}`"),
             ));
         }
+        // The `x-qqq-` namespace is the host's: markers like `X-QQQ-Error` steer
+        // host decisions (the SSE poller retries on `InstancePoolExhausted`),
+        // so a guest that sets one forges a host verdict — a 502 carrying the
+        // pool-exhaustion name would read as saturation and spin the poller
+        // through its retry budget. Refused by prefix, not by name, so future
+        // markers are reserved too.
+        if name
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("x-qqq-"))
+        {
+            return Err(Error::new(
+                ErrorCode::GuestResponseRefused,
+                format!("guest must not set host-reserved header `{name}`"),
+            ));
+        }
         // Non-UTF-8 values keep the historical drop: a lossy conversion would
         // emit U+FFFD, producing a valid response carrying a header the guest
         // never sent — a silent corruption. Pinned by
@@ -1655,10 +1670,14 @@ pub fn to_served(
 
 /// The response for a failed guest call.
 ///
-/// The message is the guest's own where there is one, because an operator
-/// debugging an app wants the app's reason rather than QQQ's.
+/// The client gets a generic body and the machine-readable code: the message
+/// carries paths, grant names, and SQL fragments that an unauthenticated
+/// caller must not read. The message stays server-side — logged here, where
+/// the operator (not the client) reads it — because an operator debugging an
+/// app still needs the app's reason rather than QQQ's.
 pub(crate) fn failure_response(e: &Error) -> Response {
-    let mut r = Response::text(502, format!("the application failed: {}", e.message));
+    eprintln!("guest call failed: {}", e.message);
+    let mut r = Response::text(502, "the application failed");
     r.set_header("X-QQQ-Error", &format!("{:?}", e.code));
     r
 }
@@ -1956,6 +1975,29 @@ mod tests {
             max_subrequests: 16,
         };
         GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", workers).ok()
+    }
+
+    /// A test app with an explicit memory ceiling, for the cap tests.
+    /// `None` when the reference component is absent, like the builder above.
+    fn test_app_with_memory(memory_bytes: u64) -> Option<GuestApp> {
+        let bytes = orders_api_component()?;
+        let manifest = qqq_cap::Manifest::parse(
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\n\
+             [capabilities.http]\nserver = true\n",
+        )
+        .expect("a minimal manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let cfg = qqq_host::config::EngineConfig::default();
+        let wasmtime_cfg = cfg.to_wasmtime_config().expect("engine config");
+        let engine = wasmtime::Engine::new(&wasmtime_cfg).expect("engine");
+        let limits = qqq_host::LimitSet {
+            memory_bytes,
+            fuel: 1_000_000_000,
+            epoch_deadline_ms: 10_000,
+            max_open_handles: 64,
+            max_subrequests: 16,
+        };
+        GuestApp::with_capacity(engine, &bytes, grants, limits, "127.0.0.1:8080", 1).ok()
     }
 
     /// **F-17: one idle engine draws at most 100 ticks per second from the
@@ -4013,6 +4055,56 @@ mod tests {
         );
     }
 
+    /// **The host namespace is refused by prefix, not by name.**
+    ///
+    /// A guest answering `502` with `X-QQQ-Error: InstancePoolExhausted` would
+    /// otherwise read as pool saturation to the SSE poller and spin it through
+    /// its retry budget. Case-insensitive: `x-qQq-eRrOr` forges the same way.
+    #[test]
+    fn host_namespace_headers_are_refused() {
+        for name in ["X-QQQ-Error", "x-qqq-auth-mode", "x-QqQ-eRrOr"] {
+            let err = to_served(
+                guest_response(502, vec![(name, b"InstancePoolExhausted")]),
+                MAX_GUEST_RESPONSE_BODY_BYTES,
+            )
+            .expect_err("host-namespace header must be refused");
+            assert!(
+                matches!(err.code, qqq_core::ErrorCode::GuestResponseRefused),
+                "wrong code for {name}: {err:?}"
+            );
+        }
+    }
+
+    /// **The failure body is generic; the message stays server-side.**
+    ///
+    /// `failure_response` renders to unauthenticated clients, and the message
+    /// carries paths, grant names, and SQL fragments. The code header is the
+    /// client's machine-readable signal; the message is the operator's, in the
+    /// process log.
+    #[test]
+    fn failure_response_hides_the_message() {
+        let err = Error::new(
+            ErrorCode::SecretUnresolvable,
+            "secret `K` needs environment variable `/etc/s3cr3t` which is not set",
+        );
+        let failure = failure_response(&err);
+        assert_eq!(failure.status, 502);
+        let body = String::from_utf8_lossy(&failure.body);
+        assert!(
+            !body.contains("s3cr3t"),
+            "secret must not reach the client: {body}"
+        );
+        assert!(
+            !body.contains("/etc/"),
+            "paths must not reach the client: {body}"
+        );
+        assert_eq!(
+            failure.header("X-QQQ-Error"),
+            Some("SecretUnresolvable"),
+            "the code header is the client signal"
+        );
+    }
+
     /// **Oversized header sets are refused before serialization.**
     ///
     /// 129 headers where 128 are allowed, and a single value over 8 KiB:
@@ -4455,6 +4547,32 @@ mod tests {
         };
         let served = to_served(exact, 100).expect("exactly the cap must serve");
         assert_eq!(served.body.len(), 100);
+    }
+
+    /// **The cap follows the smaller memory: a small instance caps below 8 MiB.**
+    ///
+    /// `response_body_cap` is the `min` of the response constant and the
+    /// instance ceiling, so a deployment with a small memory binds its guests
+    /// tighter than the default. Skips without the reference component, like
+    /// the other app-driving tests.
+    #[test]
+    fn small_memory_ceiling_caps_responses() {
+        let Some(small) = test_app_with_memory(1024 * 1024) else {
+            return;
+        };
+        assert_eq!(
+            small.response_body_cap(),
+            1024 * 1024,
+            "a 1 MiB instance caps below the constant"
+        );
+        let Some(roomy) = test_app_with_memory(64 * 1024 * 1024) else {
+            return;
+        };
+        assert_eq!(
+            roomy.response_body_cap(),
+            MAX_GUEST_RESPONSE_BODY_BYTES,
+            "a roomy instance caps at the constant"
+        );
     }
 
     /// **F-03: an exhausted buffer budget sheds with 503 + `Retry-After`.**

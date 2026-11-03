@@ -153,4 +153,18 @@ mod tests {
             vec!["q"]
         );
     }
+
+    /// The same name in both directions keeps both entries: dedup keys on
+    /// `(name, direction)`, so a queue that publishes and subscribes is not
+    /// collapsed to one half.
+    #[test]
+    fn cross_direction_entries_are_both_kept() {
+        let config = resolve_queue_config(&manifest_with(
+            "[[capabilities.queue]]\nname = \"q\"\ndirection = \"publish\"\n\
+             [[capabilities.queue]]\nname = \"q\"\ndirection = \"subscribe\"\n",
+        ));
+        assert_eq!(config.queues.len(), 2);
+        assert!(config.allows_publish("q"));
+        assert!(config.allows_subscribe("q"));
+    }
 }

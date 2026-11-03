@@ -305,22 +305,22 @@ fn classify_poll(response: &qqq_serve::Response, path: &str) -> PollOutcome {
     // Pool saturation arrives as the dispatcher's fail-closed refusal
     // (502 carrying the `InstancePoolExhausted` code name), not as a guest
     // answer: the guest never ran, so there is nothing to fail closed on,
-    // and the error taxonomy marks exactly this code retryable.
+    // and the error taxonomy marks exactly this code retryable. Only
+    // host-made refusals reach this match on that name: every poll runs
+    // through `to_served`, which refuses the `x-qqq-` namespace from guests,
+    // so a forged marker fails conversion before it can read as saturation.
     if response.status == 502 && response.header("X-QQQ-Error") == Some("InstancePoolExhausted") {
         return PollOutcome::Retry;
     }
     if response.status != 200 || !is_event_stream(response.header("Content-Type")) {
-        // The record names the cause, not just the shape: a bare status
-        // sends the operator hunting through guest logs for which failure
-        // truncated the stream.
+        // The record names the status and the host marker, never the body: a
+        // guest answering with proxied user data would put that data in the
+        // log if the snippet below quoted it. Status plus marker is what the
+        // operator needs to find the failure.
         let error = response.header("X-QQQ-Error").unwrap_or("none");
-        let snippet: String = String::from_utf8_lossy(&response.body)
-            .chars()
-            .take(120)
-            .collect();
         return PollOutcome::Failed(format!(
             "route {path} is declared `sse` but the guest stopped \
-             answering events (status {}, error {error}, body {snippet:?})",
+             answering events (status {}, error {error})",
             response.status
         ));
     }
@@ -557,13 +557,14 @@ mod tests {
             "a gated refusal must fail, not stream"
         );
         // And a bare non-event 200 (a gate that did not run) fails too,
-        // naming the status, the error marker, and the body it stopped on.
+        // naming the status and the error marker — never the body, which is
+        // untrusted guest output.
         let bare = Response::text(200, "<h1>x</h1>");
         assert_eq!(
             classify_poll(&bare, "/events"),
             PollOutcome::Failed(
                 "route /events is declared `sse` but the guest stopped \
-                 answering events (status 200, error none, body \"<h1>x</h1>\")"
+                 answering events (status 200, error none)"
                     .to_owned()
             ),
             "a non-event 200 must fail, not stream html",

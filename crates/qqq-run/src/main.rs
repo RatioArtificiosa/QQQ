@@ -3104,9 +3104,7 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
         match a {
             "--port" | "-p" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.port = v
-                    .parse()
-                    .map_err(|_| bad_value(a, v, "a port number 1-65535"))?;
+                opts.port = dev_port(a, v)?;
                 i += 1;
             }
             "--host" => {
@@ -3126,10 +3124,7 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
             }
             "--inspect" => {
                 let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.inspect = Some(
-                    v.parse()
-                        .map_err(|_| bad_value(a, v, "a port number 1-65535"))?,
-                );
+                opts.inspect = Some(dev_port(a, v)?);
                 i += 1;
             }
             "--reload-limit" => {
@@ -3146,9 +3141,15 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
             "--deterministic" => opts.set(qqq_run::DevOptions::DETERMINISTIC),
             other => {
                 if let Some(v) = other.strip_prefix("--port=") {
-                    opts.port = v
-                        .parse()
-                        .map_err(|_| bad_value("--port", v, "a port number"))?;
+                    opts.port = dev_port("--port", v)?;
+                } else if let Some(v) = other.strip_prefix("--host=") {
+                    v.clone_into(&mut opts.host);
+                } else if let Some(v) = other.strip_prefix("--watch=") {
+                    opts.watch.push(v.to_owned());
+                } else if let Some(v) = other.strip_prefix("--ignore=") {
+                    opts.ignore.push(v.to_owned());
+                } else if let Some(v) = other.strip_prefix("--inspect=") {
+                    opts.inspect = Some(dev_port("--inspect", v)?);
                 } else if let Some(v) = other.strip_prefix("--reload-limit=") {
                     opts.reload_limit = Some(
                         v.parse()
@@ -3164,14 +3165,44 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
                     )
                     .with_remediation(
                         "`dev` accepts --port, --host, --watch, --ignore, --inspect, \
-                         --open, --https and --once",
+                         --reload-limit, --deterministic, --open, --https and --once",
                     ));
                 }
             }
         }
         i += 1;
     }
+    // Refused here rather than in `start_listener`: parsing succeeds and the
+    // build runs before the listener refuses, so the user waits through a
+    // compile to learn the flag does nothing. Live reload re-runs the guest
+    // on every save, which is the opposite of one deterministic pass.
+    if opts.deterministic() {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`--deterministic` is not supported by `dev`",
+        )
+        .with_remediation(
+            "use `qqqai serve --deterministic` for a reproducible server, or drop the flag",
+        ));
+    }
     Ok(opts)
+}
+
+/// Parse a `dev` port, refusing zero: port 0 asks the OS to pick, and `dev`
+/// reports the configured port before binding, so it would print an address
+/// nothing listens on.
+fn dev_port(flag: &str, v: &str) -> Result<u16, qqq_core::Error> {
+    let port: u16 = v
+        .parse()
+        .map_err(|_| bad_value(flag, v, "a port number 1-65535"))?;
+    if port == 0 {
+        return Err(bad_value(
+            flag,
+            v,
+            "an explicit port 1-65535; 0 asks the OS to pick, which `dev` cannot report",
+        ));
+    }
+    Ok(port)
 }
 
 /// The error for a flag whose value could not be parsed.
@@ -3565,6 +3596,12 @@ fn run_options(
                     opts.artifact = Some(std::path::PathBuf::from(v));
                 } else if let Some(v) = other.strip_prefix("--cap=") {
                     opts.caps.push(v.to_owned());
+                } else if let Some(v) = other.strip_prefix("--aot-cache=") {
+                    opts.aot_cache = Some(std::path::PathBuf::from(v));
+                } else if let Some(v) = other.strip_prefix("--replay=") {
+                    opts.replay = Some(std::path::PathBuf::from(v));
+                } else if let Some(v) = other.strip_prefix("--replay-log=") {
+                    opts.replay_log = Some(std::path::PathBuf::from(v));
                 } else if TAKES_VALUE.contains(&other) {
                     // `--manifest` is consumed by `with_manifest`; skip its
                     // value here so it is not mistaken for a positional.
@@ -5285,5 +5322,76 @@ mod tests {
         let unique: std::collections::BTreeSet<u8> = codes.iter().copied().collect();
         assert_eq!(unique.len(), codes.len(), "exit codes must be distinct");
         assert_eq!(exit::OK, 0, "success must be 0");
+    }
+
+    /// **`dev --deterministic` is refused at parse, not after a build.**
+    ///
+    /// `start_listener` refused it post-build, so the user waited through a
+    /// compile to learn the flag does nothing. Live reload re-runs the guest
+    /// on every save — the opposite of one deterministic pass.
+    #[test]
+    fn dev_deterministic_is_refused_at_parse() {
+        let err = dev_options(&argv(&["--deterministic"])).expect_err("must be refused");
+        assert!(
+            err.message.contains("--deterministic"),
+            "the refusal must name the flag: {}",
+            err.message
+        );
+    }
+
+    /// **`dev` accepts `=` uniformly, and refuses port 0.**
+    ///
+    /// Only `--port=`/`--reload-limit=` worked; `--host 127.0.0.1` had no
+    /// `--host=` twin. Port 0 asks the OS to pick, which `dev` cannot report.
+    #[test]
+    fn dev_equals_forms_parse_and_zero_ports_refuse() {
+        let o = dev_options(&argv(&[
+            "--host=127.0.0.1",
+            "--port=3001",
+            "--watch=src",
+            "--ignore=target",
+            "--inspect=9229",
+        ]))
+        .expect("= forms must parse");
+        assert_eq!(o.host, "127.0.0.1");
+        assert_eq!(o.port, 3001);
+        assert_eq!(o.watch, vec!["src".to_owned()]);
+        assert_eq!(o.ignore, vec!["target".to_owned()]);
+        assert_eq!(o.inspect, Some(9229));
+        for flag in ["--port", "--port=", "--inspect", "--inspect="] {
+            let args: Vec<String> = if flag.ends_with('=') {
+                vec![format!("{flag}0")]
+            } else {
+                vec![flag.to_owned(), "0".to_owned()]
+            };
+            let err = dev_options(&args).expect_err("port 0 must be refused");
+            assert!(
+                err.message.contains('0'),
+                "{flag} 0 must name the value: {}",
+                err.message
+            );
+        }
+    }
+
+    /// **`run` accepts `=` uniformly.**
+    ///
+    /// `--artifact=`/`--cap=` worked; `--aot-cache`/`--replay`/`--replay-log`
+    /// had no twins.
+    #[test]
+    fn run_equals_forms_parse() {
+        let o = run_options(
+            &argv(&[
+                "--aot-cache=cache",
+                "--replay=run.jsonl",
+                "--replay-log=clock.jsonl",
+                "--deterministic",
+            ]),
+            GlobalFlags::default(),
+        )
+        .expect("= forms must parse");
+        assert_eq!(o.aot_cache, Some(std::path::PathBuf::from("cache")));
+        assert_eq!(o.replay, Some(std::path::PathBuf::from("run.jsonl")));
+        assert_eq!(o.replay_log, Some(std::path::PathBuf::from("clock.jsonl")));
+        assert!(o.deterministic);
     }
 }

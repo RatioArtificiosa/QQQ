@@ -6118,3 +6118,104 @@ fn verify_refuses_an_unknown_flag_rather_than_ignoring_it() {
         unknown.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// serve/dev/run flag coherence (run-a r1)
+// ---------------------------------------------------------------------------
+
+/// `--allow-deterministic-public` without `--deterministic` changes nothing,
+/// so it is refused rather than accepted as a posture.
+#[test]
+fn serve_refuses_lone_allow_deterministic_public() {
+    let s = Sandbox::new("serve-lone-det-public");
+    s.write("qqq.toml", MINIMAL);
+    let run = s.run(&["serve", "--allow-deterministic-public"]);
+    run.assert_failed()
+        .assert_contains("--allow-deterministic-public")
+        .assert_contains("--deterministic");
+    assert_eq!(run.code, 2, "a usage error exits 2: {}", run.all());
+}
+
+/// `--audit-hmac-key-file` without `--audit-log` is silently ignored upstream
+/// of the audit attach, so it is refused at parse.
+#[test]
+fn serve_refuses_hmac_key_file_without_audit_log() {
+    let s = Sandbox::new("serve-lone-hmac-key");
+    s.write("qqq.toml", MINIMAL);
+    let run = s.run(&["serve", "--audit-hmac-key-file", "key.hex"]);
+    run.assert_failed()
+        .assert_contains("--audit-hmac-key-file")
+        .assert_contains("--audit-log");
+    assert_eq!(run.code, 2, "a usage error exits 2: {}", run.all());
+}
+
+/// `--manifest` is the `--config` spelling the rest of the CLI uses.
+///
+/// Both spellings must behave identically: the same missing file must fail
+/// the same way, proving the value was consumed as a path rather than
+/// rejected as an unknown flag.
+#[test]
+fn serve_manifest_alias_matches_config() {
+    let s = Sandbox::new("serve-manifest-alias");
+    s.write("qqq.toml", MINIMAL);
+    let via_manifest = s.run(&["serve", "--manifest", "missing.toml"]);
+    let via_config = s.run(&["serve", "--config", "missing.toml"]);
+    via_manifest.assert_failed();
+    assert!(
+        !via_manifest.all().contains("unknown flag"),
+        "the global spelling must be accepted: {}",
+        via_manifest.all()
+    );
+    assert_eq!(
+        via_manifest.all(),
+        via_config.all(),
+        "alias and flag must fail identically"
+    );
+}
+
+/// `--accept-limit 0` would serve nothing, so it is refused at parse.
+#[test]
+fn serve_refuses_accept_limit_zero() {
+    let s = Sandbox::new("serve-accept-zero");
+    s.write("qqq.toml", MINIMAL);
+    let run = s.run(&["serve", "--accept-limit", "0"]);
+    run.assert_failed().assert_contains("--accept-limit 0");
+    assert_eq!(run.code, 2, "a usage error exits 2: {}", run.all());
+}
+
+/// `dev --deterministic` is refused before the build, not after it.
+#[test]
+fn dev_refuses_deterministic_at_parse() {
+    let s = Sandbox::new("dev-deterministic");
+    s.write("qqq.toml", MINIMAL);
+    let run = s.run(&["dev", "--deterministic"]);
+    run.assert_failed().assert_contains("--deterministic");
+    assert_eq!(run.code, 2, "a usage error exits 2: {}", run.all());
+}
+
+/// Port 0 asks the OS to pick, which `dev` cannot report, so it is refused.
+#[test]
+fn dev_refuses_port_zero() {
+    let s = Sandbox::new("dev-port-zero");
+    s.write("qqq.toml", MINIMAL);
+    let run = s.run(&["dev", "--port", "0"]);
+    run.assert_failed().assert_contains("--port");
+    assert_eq!(run.code, 2, "a usage error exits 2: {}", run.all());
+}
+
+/// An explicit `--artifact` pointing nowhere names the path.
+///
+/// Telling a user who already passed `--artifact` to "pass --artifact"
+/// sends them in a circle.
+#[test]
+fn run_explicit_missing_artifact_names_the_path() {
+    let s = Sandbox::new("run-bad-artifact");
+    s.write("qqq.toml", MINIMAL);
+    let run = s.run(&["run", "--artifact", "nope.wasm"]);
+    run.assert_failed().assert_contains("nope.wasm");
+    assert!(
+        !run.all().contains("pass --artifact"),
+        "must not send the user in a circle: {}",
+        run.all()
+    );
+}

@@ -260,15 +260,26 @@ pub fn locate_artifact_with_root(
         .map(|p| format!("  {}", p.display()))
         .collect::<Vec<_>>()
         .join("\n");
+    // The remediation depends on what the user did: an explicit `--artifact`
+    // pointing nowhere is a wrong path, not a missing build — telling the user
+    // to pass `--artifact` when they already did sends them in a circle.
+    let remediation = match &opts.artifact {
+        Some(explicit) => format!(
+            "`--artifact {}` does not exist; check the path, or run `{} build` first",
+            explicit.display(),
+            qqq_core::BINARY_NAME
+        ),
+        None => format!(
+            "run `{} build` first, or pass --artifact <path>",
+            qqq_core::BINARY_NAME
+        ),
+    };
     Err(Error::new(
         ErrorCode::InvalidComponentArtifact,
         "no built component found",
     )
     .with_cause(format!("looked in:\n{tried}"))
-    .with_remediation(format!(
-        "run `{} build` first, or pass --artifact <path>",
-        qqq_core::BINARY_NAME
-    )))
+    .with_remediation(remediation))
 }
 
 // ---------------------------------------------------------------------------
@@ -1376,6 +1387,33 @@ mod tests {
             "must show both cargo profiles: {cause}"
         );
         assert!(e.remediation.as_deref().unwrap_or("").contains("build"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An explicit `--artifact` pointing nowhere names the path, not the build.
+    ///
+    /// Telling a user who already passed `--artifact` to "pass --artifact"
+    /// sends them in a circle; the defect is the path, so the remediation
+    /// names it.
+    #[test]
+    fn an_explicit_missing_artifact_names_the_path() {
+        let dir = temp_dir("explicit-missing-artifact");
+        let l = loaded(DENY_ALL, &dir);
+        let opts = RunOptions {
+            artifact: Some(dir.join("nope.wasm")),
+            ..Default::default()
+        };
+        let e = locate_artifact_with_root(&l, &opts, &dir).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidComponentArtifact);
+        let remediation = e.remediation.as_deref().unwrap_or("");
+        assert!(
+            remediation.contains("nope.wasm"),
+            "must name the bad path: {remediation}"
+        );
+        assert!(
+            !remediation.contains("pass --artifact"),
+            "must not send the user in a circle: {remediation}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

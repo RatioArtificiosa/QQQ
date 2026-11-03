@@ -480,6 +480,14 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
                 opts.config = Some(value_of(args, i, "--config")?);
                 i += 2;
             }
+            "--manifest" => {
+                // The global spelling, owned by `with_manifest_at` like `--config`:
+                // `serve` documents `--config`, but every other project command
+                // takes `--manifest`, and rejecting the spelling the rest of the
+                // CLI accepts would punish consistency. Same field, so last wins.
+                opts.config = Some(value_of(args, i, "--manifest")?);
+                i += 2;
+            }
             "--trace-sample" => {
                 opts.trace_rate = Some(trace_rate_of(args, i)?);
                 i += 2;
@@ -517,18 +525,28 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
             }
             "--accept-limit" => {
                 let v = value_of(args, i, "--accept-limit")?;
-                opts.accept_limit = Some(v.parse().map_err(|_| {
+                let n: u64 = v.parse().map_err(|_| {
                     usage(format!("`--accept-limit {v}` is not a number"))
                         .with_remediation("pass a whole number of connections")
-                })?);
+                })?;
+                if n == 0 {
+                    return Err(
+                        usage("`--accept-limit 0` would serve nothing").with_remediation(
+                            "pass at least 1, or drop the flag to run until signalled",
+                        ),
+                    );
+                }
+                opts.accept_limit = Some(n);
                 i += 2;
             }
             other => {
                 return Err(usage(format!("`{other}` is not a flag `serve` accepts"))
                     .with_remediation(
-                        "serve accepts --listen, --workers, --tls, --config, \
-                         --accept-limit, --deterministic and \
-                         --allow-deterministic-public",
+                        "serve accepts --listen, --workers, --tls, --config, --manifest, \
+                         --accept-limit, --aot-cache, --audit-log, \
+                         --audit-hmac-key-file, --redact-from, --log-format, \
+                         --metrics-path, --trace-sample, --trace-keep-failures, \
+                         --deterministic and --allow-deterministic-public",
                     ));
             }
         }
@@ -553,7 +571,41 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
     // `handle_request` acquires before instantiating — so the number now sizes something
     // and the check is gone.
 
+    validate_standalone_flags(&opts)?;
+
     Ok(opts)
+}
+
+/// Refuse flags that are inert without their companion flag.
+///
+/// A *refusal at parse time*: unlike the TLS check above, these rules need no
+/// manifest — coherence between two flags is decidable from the flags alone,
+/// so waiting for `prepare` would only delay a usage error the parser can
+/// already name. The same shape as `validate_replay_flags` for `run` in
+/// `main.rs`: the same rule, enforced where each enforcement is useful.
+///
+/// # Errors
+///
+/// `QQQ-7001` when `--allow-deterministic-public` is given without
+/// `--deterministic`, or `--audit-hmac-key-file` without `--audit-log`.
+fn validate_standalone_flags(opts: &ServeOptions) -> Result<()> {
+    if opts.allow_deterministic_public && !opts.deterministic {
+        return Err(
+            usage("`--allow-deterministic-public` needs `--deterministic`").with_remediation(
+                "without deterministic mode the flag changes nothing; add `--deterministic`, \
+             or drop the flag",
+            ),
+        );
+    }
+    if opts.audit_hmac_key_file.is_some() && opts.audit_log.is_none() {
+        return Err(
+            usage("`--audit-hmac-key-file` needs `--audit-log`").with_remediation(
+                "the key file only signs audit-log rows; add `--audit-log <path>`, or drop \
+             the flag",
+            ),
+        );
+    }
+    Ok(())
 }
 
 /// Read the value that follows a flag.
@@ -816,7 +868,37 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
         tenant_live: built.tenant_live,
         loopback,
         deterministic: built.deterministic,
+        redactor: load_redactor(opts)?,
     })
+}
+
+/// Read and parse `--redact-from`, refusing a bad file at `prepare` time.
+///
+/// Extracted from `run` because `prepare` promises a server ready to bind,
+/// and a redactor that cannot load breaks that promise: the failure used to
+/// surface after `prepare` succeeded, so a caller trusting `Prepared` — `dev`'s
+/// hot-reload path, a test, any future embedder — held a server that could
+/// never start. The COUNT is reported by the caller, never the values: a
+/// start-up message naming what is redacted would be the leak the redactor
+/// exists to prevent.
+///
+/// # Errors
+///
+/// `QQQ-7001` when the file cannot be read or a line is not `NAME=value`.
+fn load_redactor(opts: &ServeOptions) -> Result<Option<qqq_serve::access_log::Redactor>> {
+    let Some(path) = &opts.redact_from else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        usage(format!("`--redact-from {path}` could not be read: {e}")).with_remediation(
+            "point it at a readable `NAME=value` file, or remove the flag to redact nothing",
+        )
+    })?;
+    let redactor = qqq_serve::access_log::Redactor::from_dotenv(&text).map_err(|e| {
+        usage(format!("`--redact-from {path}` is malformed: {e}"))
+            .with_remediation("each non-comment line must be `NAME=value`")
+    })?;
+    Ok(Some(redactor))
 }
 
 /// Build the cross-origin policy from the manifest's `[server.cors]`.
@@ -1131,6 +1213,12 @@ pub struct Prepared {
     /// Read from the installed app in `build_dispatch`, like `pool_capacity`:
     /// the report states the mode running, not the flag parsed.
     pub deterministic: bool,
+    /// The parsed `--redact-from` file, loaded in `prepare`.
+    ///
+    /// Read here rather than in `run` so a bad path refuses before bind:
+    /// `Prepared` is "a server that is ready to bind", and a server whose
+    /// redactor cannot load is not ready. `run` only reports the count.
+    pub redactor: Option<qqq_serve::access_log::Redactor>,
 }
 
 /// Build the dispatcher, loading the guest when the project has been built.
@@ -1610,24 +1698,15 @@ pub async fn run(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<ServeOu
         None => qqq_serve::access_log::Format::for_terminal(std::io::stdout().is_terminal()),
     };
 
-    let logger = match &opts.redact_from {
-        Some(path) => {
-            let text = std::fs::read_to_string(path).map_err(|e| {
-                usage(format!("`--redact-from {path}` could not be read: {e}")).with_remediation(
-                    "point it at a readable `NAME=value` file, or remove the flag to redact nothing",
-                )
-            })?;
-            let redactor = qqq_serve::access_log::Redactor::from_dotenv(&text).map_err(|e| {
-                usage(format!("`--redact-from {path}` is malformed: {e}"))
-                    .with_remediation("each non-comment line must be `NAME=value`")
-            })?;
+    let logger = match &prepared.redactor {
+        Some(redactor) => {
             // The COUNT is reported, never the values: a start-up message naming what is redacted
             // would be the leak the redactor exists to prevent.
             eprintln!(
                 "redacting {} distinct secret value(s) from every log line",
                 redactor.len()
             );
-            Logger::new(format, Level::Info).with_redactor(redactor)
+            Logger::new(format, Level::Info).with_redactor(redactor.clone())
         }
         None => Logger::new(format, Level::Info),
     };
@@ -2005,6 +2084,97 @@ mod tests {
         assert_eq!(o.workers, 1);
         assert_eq!(o.config.as_deref(), Some("prod.toml"));
         assert_eq!(o.accept_limit, Some(3));
+    }
+
+    /// **`--allow-deterministic-public` alone is refused at parse time.**
+    ///
+    /// Without `--deterministic` the flag changes nothing, so accepting it
+    /// would print a posture the server does not hold — the same shape as
+    /// `run`'s `--replay`-without-`--deterministic` refusal in `main.rs`.
+    #[test]
+    fn lone_allow_deterministic_public_is_refused() {
+        let err = options(&args(&["--allow-deterministic-public"]))
+            .expect_err("the lone flag must be refused");
+        assert!(
+            err.message.contains("--allow-deterministic-public")
+                && err.message.contains("--deterministic"),
+            "the refusal must name the flag and its companion: {}",
+            err.message
+        );
+        options(&args(&["--deterministic", "--allow-deterministic-public"]))
+            .expect("the pair must parse");
+    }
+
+    /// **`--audit-hmac-key-file` alone is refused at parse time.**
+    ///
+    /// The key file only signs audit-log rows, and `attach_audit_log` returns
+    /// early without `--audit-log` — so the flag was silently ignored, and a
+    /// typo'd path never surfaced.
+    #[test]
+    fn hmac_key_file_without_audit_log_is_refused() {
+        let err = options(&args(&["--audit-hmac-key-file", "key.hex"]))
+            .expect_err("the lone flag must be refused");
+        assert!(
+            err.message.contains("--audit-hmac-key-file") && err.message.contains("--audit-log"),
+            "the refusal must name the flag and its companion: {}",
+            err.message
+        );
+        options(&args(&[
+            "--audit-log",
+            "a.jsonl",
+            "--audit-hmac-key-file",
+            "k.hex",
+        ]))
+        .expect("the pair must parse");
+    }
+
+    /// **`--manifest` is the `--config` spelling the rest of the CLI uses.**
+    ///
+    /// `serve` documents `--config` while every other project command takes
+    /// `--manifest`; rejecting the global spelling punishes consistency. Same
+    /// field, so last wins — the norm for repeated flags in this parser.
+    #[test]
+    fn manifest_is_an_alias_for_config() {
+        let o = options(&args(&["--manifest", "prod.toml"])).expect("--manifest must parse");
+        assert_eq!(o.config.as_deref(), Some("prod.toml"));
+        let o = options(&args(&["--config", "a.toml", "--manifest", "b.toml"]))
+            .expect("both spellings must parse");
+        assert_eq!(o.config.as_deref(), Some("b.toml"));
+    }
+
+    /// **`--accept-limit 0` is refused: a server that exits after 0 connections.**
+    ///
+    /// The same zero-policy as `--workers 0`: a bound that accepts nothing is
+    /// not a bound, and the failure would surface only as an instant shutdown.
+    #[test]
+    fn accept_limit_zero_is_refused() {
+        let err = options(&args(&["--accept-limit", "0"])).expect_err("0 must be refused");
+        assert!(
+            err.message.contains("--accept-limit 0"),
+            "the refusal must name the value: {}",
+            err.message
+        );
+        options(&args(&["--accept-limit", "3"])).expect("a positive limit must parse");
+    }
+
+    /// **A bad `--redact-from` refuses at `prepare`, not in `run`.**
+    ///
+    /// `Prepared` promises a server ready to bind; a redactor that cannot load
+    /// breaks that promise, and `dev`'s hot-reload path trusts `prepare` before
+    /// any socket exists.
+    #[test]
+    fn bad_redact_from_is_refused_at_prepare_time() {
+        let loaded = loaded_manifest("");
+        let opts = options(&args(&["--redact-from", "nonexistent-secrets.env"]))
+            .expect("--redact-from must parse");
+        let Err(err) = prepare(&loaded, &opts) else {
+            panic!("a missing redact file must be refused at prepare");
+        };
+        assert!(
+            err.message.contains("--redact-from"),
+            "the refusal must name the flag: {}",
+            err.message
+        );
     }
 
     #[test]

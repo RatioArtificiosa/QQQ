@@ -372,6 +372,20 @@ fn walk(
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
         };
+        if meta.is_symlink() {
+            // A symlink to a *file* is fingerprinted through the target, so
+            // edits via symlinked sources reload: the link path is the key,
+            // the target's metadata the value. Links to directories still
+            // never descend (ancestor loop, per the comment above), and
+            // dangling links skip like unreadable entries.
+            if let Ok(target) = std::fs::metadata(&path)
+                && target.is_file()
+                && !rules.is_ignored(root, &path)
+            {
+                out.insert(path, fingerprint(&target));
+            }
+            continue;
+        }
         if meta.is_dir() {
             if rules.should_descend(root, &path) {
                 walk(root, &path, rules, out, depth + 1);
@@ -386,6 +400,12 @@ fn walk(
 }
 
 /// Convert metadata into a comparable fingerprint.
+///
+/// Nanosecond mtime plus size: a same-size rewrite inside one nanosecond tick
+/// would be missed, which filesystems make vanishingly rare and editors make
+/// rarer still (they rewrite the size or the tick). Documented residual, not
+/// a hash: hashing every file on every poll would trade a theoretical miss
+/// for a certain slowdown.
 fn fingerprint(meta: &std::fs::Metadata) -> FileFingerprint {
     let modified_nanos = meta
         .modified()
@@ -794,6 +814,32 @@ mod tests {
         std::fs::create_dir_all(dir.join("src/deep")).unwrap();
         let snap = Snapshot::take(&dir, &IgnoreRules::default());
         assert!(snap.is_empty(), "directories are not changes: {snap:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink to a file is fingerprinted, so edits through the link reload.
+    ///
+    /// Skipped links used to vanish silently. Unix-only: Windows needs a
+    /// privilege for symlinks that CI runners do not grant.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_file_is_watched_through_the_link() {
+        let dir = temp_dir("snap-symlink");
+        std::fs::write(dir.join("real.rs"), "one").unwrap();
+        std::os::unix::fs::symlink(dir.join("real.rs"), dir.join("link.rs")).unwrap();
+        let before = Snapshot::take(&dir, &IgnoreRules::default());
+        assert!(
+            before.files.contains_key(&dir.join("link.rs")),
+            "the link itself is fingerprinted: {:?}",
+            before.files.keys().collect::<Vec<_>>()
+        );
+        std::fs::write(dir.join("link.rs"), "two words").unwrap();
+        let after = Snapshot::take(&dir, &IgnoreRules::default());
+        let changes = after.changes_since(&before);
+        assert!(
+            changes.iter().any(|c| c.path() == dir.join("link.rs")),
+            "an edit through the link must reload: {changes:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

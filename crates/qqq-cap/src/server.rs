@@ -715,20 +715,20 @@ fn validate_stateful_methods(
         }
     }
 
+    if route.kind == crate::manifest::RouteKind::Sse && !methods.contains(&"GET") {
+        return Err(ManifestError::InvalidField {
+            field: format!("{where_}.methods"),
+            reason: "an `sse` route must list `GET`: without it no event \
+                     poll can ever arrive"
+                .to_owned(),
+        });
+    }
     if route.kind == crate::manifest::RouteKind::Sse && methods.iter().any(|m| *m != "GET") {
         return Err(ManifestError::InvalidField {
             field: format!("{where_}.methods"),
             reason: "an `sse` route must list only `GET`: event polls \
                      replay the head with no body, so a stream declared \
                      for another method would run blind"
-                .to_owned(),
-        });
-    }
-    if route.kind == crate::manifest::RouteKind::Sse && !methods.contains(&"GET") {
-        return Err(ManifestError::InvalidField {
-            field: format!("{where_}.methods"),
-            reason: "an `sse` route must list `GET`: without it no event \
-                     poll can ever arrive"
                 .to_owned(),
         });
     }
@@ -1089,8 +1089,22 @@ mod tests {
             let err = server(vec![r]).validate().expect_err("must refuse");
             let text = err.to_string();
             assert!(text.contains("methods"), "{text}");
-            assert!(text.contains("only `GET`"), "{text}");
         }
+        // Each arm fires on its own shape: missing-`GET` versus extra methods.
+        let mut missing = route("/events", &["POST"]);
+        missing.kind = crate::manifest::RouteKind::Sse;
+        let err = server(vec![missing]).validate().expect_err("must refuse");
+        assert!(
+            err.to_string().contains("must list `GET`"),
+            "missing GET names the missing method: {err}"
+        );
+        let mut extra = route("/events", &["GET", "POST"]);
+        extra.kind = crate::manifest::RouteKind::Sse;
+        let err = server(vec![extra]).validate().expect_err("must refuse");
+        assert!(
+            err.to_string().contains("only `GET`"),
+            "extra methods name the restriction: {err}"
+        );
         let mut ok = route("/events", &["GET"]);
         ok.kind = crate::manifest::RouteKind::Sse;
         assert!(server(vec![ok]).validate().is_ok());

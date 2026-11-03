@@ -231,16 +231,32 @@ impl AuditReport {
     }
 
     /// Render for a terminal.
+    ///
+    /// Control characters are blanked: finding text carries manifest paths,
+    /// lockfile names, and versions, and a `\n` or ANSI escape in any of them
+    /// would forge terminal lines on the operator reading the report. The
+    /// SARIF path needs no equivalent — JSON escaping already neutralises
+    /// control characters there.
     #[must_use]
     pub fn render(&self) -> String {
         use std::fmt::Write as _;
-        let mut out = format!("audit of `{}`\n", self.project);
+        let mut out = format!("audit of `{}`\n", sanitize_log_line(&self.project));
         if self.findings.is_empty() {
             return out;
         }
         for f in &self.findings {
-            let _ = writeln!(out, "  [{:<7}] {}  {}", f.severity, f.rule, f.message);
-            let _ = writeln!(out, "            fix: {}", f.remediation);
+            let _ = writeln!(
+                out,
+                "  [{:<7}] {}  {}",
+                f.severity,
+                f.rule,
+                sanitize_log_line(&f.message)
+            );
+            let _ = writeln!(
+                out,
+                "            fix: {}",
+                sanitize_log_line(&f.remediation)
+            );
         }
         out
     }
@@ -278,6 +294,18 @@ pub struct RuleInfo {
     pub id: &'static str,
     /// One-line summary.
     pub summary: &'static str,
+}
+
+/// Blank control characters for terminal and log output.
+///
+/// A `\n` or ANSI escape in rendered text forges lines on the reader's
+/// terminal; words stay separated through spaces without executing anything.
+/// `pub(crate)` so the guest failure path shares it: guest-influenced error
+/// text reaches the operator's log through the same shape.
+pub(crate) fn sanitize_log_line(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// Audit a loaded project.
@@ -955,6 +983,38 @@ mod tests {
         }
     }
 
+    /// The exposing set, by name: the pin the agreement test cannot state.
+    ///
+    /// `classify_posture` calls `exposes_posture`, so agreement passes for any
+    /// list — including a wrong one. This test names the exact set, so adding
+    /// or dropping an exposing capability fails loudly rather than silently
+    /// redefining the security boundary.
+    #[test]
+    fn the_exposing_set_is_exact() {
+        let mut exposing: Vec<&str> = qqq_cap::Capability::all()
+            .iter()
+            .filter(|c| crate::commands::exposes_posture(**c))
+            .map(|c| c.name())
+            .collect();
+        exposing.sort_unstable();
+        assert_eq!(
+            exposing,
+            vec![
+                "ai.infer",
+                "dns.resolve",
+                "fs.watch",
+                "fs.write",
+                "http.client",
+                "http.server",
+                "kv.write",
+                "queue.publish",
+                "queue.subscribe",
+                "sql.execute",
+            ],
+            "the exposing set changed: review the boundary deliberately"
+        );
+    }
+
     /// A project granting `fs.write` is exposed, and the finding names the
     /// capability rather than saying "something is wrong".
     #[test]
@@ -1496,9 +1556,24 @@ mod tests {
         assert!(summary.contains("max subrequests 16"), "{summary}");
         assert!(summary.contains("max poll per tick 5"), "{summary}");
         assert!(summary.contains("posture"), "{summary}");
+        assert!(summary.contains("unused grants"), "{summary}");
         assert!(
             summary.contains("supply chain") && summary.contains("provenance"),
             "the summary must name every surface audited: {summary}"
+        );
+    }
+
+    /// Rendered text carries no control characters: finding text holds
+    /// manifest paths and lockfile names, and a `\n` or ANSI escape in any
+    /// of them would forge terminal lines on the reader.
+    #[test]
+    fn render_blanks_control_characters() {
+        assert_eq!(sanitize_log_line("a\nb\x1b[31mc\td"), "a b [31mc d");
+        let report = audit(&loaded(CHOSEN), None);
+        let text = report.render();
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "rendered lines must not carry control characters: {text:?}"
         );
     }
 

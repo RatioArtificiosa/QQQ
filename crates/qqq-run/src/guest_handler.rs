@@ -1684,10 +1684,13 @@ pub(crate) fn failure_response(e: &Error) -> Response {
 
 /// The server-side half of a guest failure: the message the operator reads.
 ///
-/// Split out so a test pins what the log carries without capturing stderr:
-/// the client sees the generic body, the log sees this.
+/// Control characters are blanked through the shared sanitizer: the message
+/// carries guest-influenced paths and values, and a `\n` or ANSI escape in it
+/// would forge lines on the operator's terminal. Split out so a test pins
+/// what the log carries without capturing stderr: the client sees the generic
+/// body, the log sees this.
 fn failure_detail(e: &Error) -> String {
-    format!("{:?}: {}", e.code, e.message)
+    crate::audit::sanitize_log_line(&format!("{:?}: {}", e.code, e.message))
 }
 
 /// The error for a request shed by the buffer budget (`F-03`).
@@ -4115,7 +4118,8 @@ mod tests {
     }
 
     /// The logged half names the code and keeps the message: what the
-    /// operator greps for, without a stderr capture.
+    /// operator greps for, without a stderr capture. Control characters are
+    /// blanked so guest-influenced text cannot forge terminal lines.
     #[test]
     fn failure_detail_keeps_code_and_message() {
         let err = Error::new(
@@ -4125,6 +4129,13 @@ mod tests {
         let detail = failure_detail(&err);
         assert!(detail.contains("SecretUnresolvable"), "{detail}");
         assert!(detail.contains("/etc/s3cr3t"), "{detail}");
+        let evil = Error::new(ErrorCode::GuestResponseRefused, "bad\x1b[31mred");
+        let clean = failure_detail(&evil);
+        assert!(
+            !clean.chars().any(char::is_control),
+            "no control characters survive: {clean:?}"
+        );
+        assert!(clean.contains("bad [31mred"), "{clean}");
     }
 
     /// **Oversized header sets are refused before serialization.**

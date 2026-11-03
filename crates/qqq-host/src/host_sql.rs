@@ -908,6 +908,13 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         if !self.grants.grants(SqlQuery) && !self.grants.grants(SqlExecute) {
             return Err(WitSqlError::NotGranted);
         }
+        // Bound the name before the lookup: `find` compares per configured
+        // database, so a megabyte name prices host CPU at the guest's chosen
+        // size. Unconfigured is the honest answer for a name that could never
+        // be configured (mirrors `txn::begin`).
+        if !valid_name(&database) {
+            return Err(WitSqlError::DatabaseNotConfigured);
+        }
         let Some(db) = self.sql.config.find(&database).cloned() else {
             return Err(WitSqlError::DatabaseNotConfigured);
         };
@@ -973,6 +980,13 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         // here would refuse execute-only writes `prepare` allows.
         if !self.grants.grants(SqlQuery) && !self.grants.grants(SqlExecute) {
             return Err(WitSqlError::NotGranted);
+        }
+        // Bound the name before the lookup: `find` compares per configured
+        // database, so a megabyte name prices host CPU at the guest's chosen
+        // size. Unconfigured is the honest answer for a name that could never
+        // be configured (mirrors `txn::begin`).
+        if !valid_name(&database) {
+            return Err(WitSqlError::DatabaseNotConfigured);
         }
         let Some(db) = self.sql.config.find(&database).cloned() else {
             return Err(WitSqlError::DatabaseNotConfigured);
@@ -1611,6 +1625,24 @@ mod tests {
         let err = data
             .query_once("ledger".to_owned(), "SELECT 1".to_owned(), vec![])
             .expect_err("one-shot path checks too");
+        assert!(matches!(err, WitSqlError::DatabaseNotConfigured));
+    }
+
+    /// An oversize database name fails before the lookup: `find` compares
+    /// per configured database, so a megabyte name must not reach it.
+    #[test]
+    fn oversize_database_names_fail_closed() {
+        use super::bindings::qqq::sql::database::Host as _;
+        let path = test_path("oversize-name");
+        let mut data = store_for(&path, true, true);
+        let big = "d".repeat(MAX_SQL_NAME_BYTES + 1);
+        let err = data
+            .prepare(big.clone(), "SELECT 1".to_owned())
+            .expect_err("oversize name refused");
+        assert!(matches!(err, WitSqlError::DatabaseNotConfigured));
+        let err = data
+            .query_once(big, "SELECT 1".to_owned(), vec![])
+            .expect_err("one-shot path bounds too");
         assert!(matches!(err, WitSqlError::DatabaseNotConfigured));
     }
 

@@ -518,6 +518,17 @@ fn valid_store_name(store: &str) -> bool {
     !store.is_empty() && store.len() <= MAX_KV_STORE_NAME_BYTES
 }
 
+/// Keys become map keys on every lookup, so an unbounded key is an unbounded
+/// host allocation for one call. `set`, `keys` and `get-many` already refuse
+/// oversize keys; `get`/`exists`/`delete` must too, or a megabyte key probes
+/// the map for free.
+fn check_key(key: &str) -> std::result::Result<(), WitKvError> {
+    if key.len() > MAX_KV_KEY_BYTES {
+        return Err(WitKvError::EntryTooLarge);
+    }
+    Ok(())
+}
+
 /// Check a read: the direction grant, then the store membership.
 ///
 /// Grant first (an ungranted call fails before its store name is judged),
@@ -602,6 +613,7 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
         key: String,
     ) -> std::result::Result<Option<Vec<u8>>, WitKvError> {
         check_read(self, &store)?;
+        check_key(&key)?;
         let now = now_or_fail(self)?;
         Ok(lock_backend(self).get(&store, &key, now))
     }
@@ -629,12 +641,14 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
 
     fn delete(&mut self, store: String, key: String) -> std::result::Result<(), WitKvError> {
         check_write(self, &store)?;
+        check_key(&key)?;
         lock_backend(self).delete(&store, &key);
         Ok(())
     }
 
     fn exists(&mut self, store: String, key: String) -> std::result::Result<bool, WitKvError> {
         check_read(self, &store)?;
+        check_key(&key)?;
         let now = now_or_fail(self)?;
         Ok(lock_backend(self).exists(&store, &key, now))
     }
@@ -1050,6 +1064,29 @@ mod tests {
         let err = bindings::qqq::kv::store::Host::get_many(&mut data, "s".to_owned(), vec![big])
             .expect_err("oversize batch key refused");
         assert!(matches!(err, WitKvError::EntryTooLarge));
+    }
+
+    /// Point lookups refuse oversize keys before the map: a megabyte key
+    /// must not cost a `BTree` lookup + owned-key allocation.
+    #[test]
+    fn oversize_point_keys_fail_closed() {
+        let mut data = granted_store(true);
+        let big = "k".repeat(MAX_KV_KEY_BYTES + 1);
+        assert!(matches!(
+            bindings::qqq::kv::store::Host::get(&mut data, "s".to_owned(), big.clone())
+                .expect_err("oversize get refused"),
+            WitKvError::EntryTooLarge
+        ));
+        assert!(matches!(
+            bindings::qqq::kv::store::Host::exists(&mut data, "s".to_owned(), big.clone())
+                .expect_err("oversize exists refused"),
+            WitKvError::EntryTooLarge
+        ));
+        assert!(matches!(
+            bindings::qqq::kv::store::Host::delete(&mut data, "s".to_owned(), big)
+                .expect_err("oversize delete refused"),
+            WitKvError::EntryTooLarge
+        ));
     }
 
     /// `stores()` without a grant answers empty: the manifest set is public

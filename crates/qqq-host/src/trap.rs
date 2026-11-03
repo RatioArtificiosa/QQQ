@@ -245,6 +245,11 @@ pub struct Trap {
     /// A single human sentence describing what happened.
     pub message: String,
     /// The raw engine detail. **Unstable** — for debugging, never for parsing.
+    ///
+    /// Raw, not escaped: triage reads backtraces, and an escaped store would
+    /// make every real newline literal noise. The text renderers escape on
+    /// the way out instead ([`Trap::render`], [`Trap::to_error`]), because
+    /// the detail carries guest-controlled frame names.
     pub detail: String,
     /// Wasm frames, outermost first, when the engine supplied them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -258,6 +263,11 @@ pub struct Trap {
 }
 
 /// One frame of a guest backtrace.
+///
+/// Structured form keeps guest names raw by design: JSON string encoding is
+/// the escape there, and triage (including `qqq-debug` source mapping) needs
+/// the exact bytes. The text rendering ([`fmt::Display`]) escapes, because a
+/// terminal or log line has no encoding layer.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WasmFrame {
     /// The module name, when the engine resolved one.
@@ -276,15 +286,71 @@ pub struct WasmFrame {
     pub line: Option<u32>,
 }
 
+/// Escape control characters for one-line diagnostics.
+///
+/// Module and function names come from the guest name section and file paths
+/// from its DWARF info: a chosen name can carry newlines that would forge
+/// log lines wherever a frame renders (see `to_error`, `render`). Length
+/// is bounded at construction by `capped_name`; this bounds the alphabet.
+///
+/// Beyond C0/C1 controls, line/paragraph separators (`U+2028`/`U+2029`,
+/// `Zl`/`Zp`) break lines in renderers that honor them, and bidirectional
+/// controls (`U+202A`–`U+202E`, `U+2066`–`U+2069`, marks) reorder the
+/// visible text -- both are name-spoofing primitives, never legitimate in
+/// a name or path, so they escape like controls. The predicate is shared
+/// with [`crate::boundary`]'s renderer and validators, so the two surfaces
+/// cannot disagree on what "safe to print" means.
+fn escape_frame_text(s: &str) -> std::borrow::Cow<'_, str> {
+    // ASCII fast path: any C0/DEL byte means the slow path runs. Non-ASCII
+    // always takes the slow path, because `U+2028` and the bidi controls
+    // are multi-byte and no byte test can see them.
+    if s.is_ascii() && !s.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            // Layout-forging separators and bidi controls: invisible in
+            // source, load-bearing in renderers. Escaped, never passed.
+            // Predicate shared with `boundary` (see its docs for the list).
+            c if crate::boundary::is_layout_forgery(c) => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            _ => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
 impl fmt::Display for WasmFrame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The module qualifies the function when the engine resolved one:
+        // without it, a multi-module backtrace cannot say which artifact
+        // each frame belongs to. Escaped like every other guest name.
+        let qualified: std::borrow::Cow<'_, str> = match &self.module {
+            Some(module) => std::borrow::Cow::Owned(format!(
+                "{}::{}",
+                escape_frame_text(module),
+                escape_frame_text(&self.func)
+            )),
+            None => escape_frame_text(&self.func),
+        };
         // `func (file:line)` when debug info is available, `func+offset` when
         // it is not. Both are useful; inventing a fake line number is not.
         match (&self.file, self.line) {
-            (Some(file), Some(line)) => write!(f, "{} ({file}:{line})", self.func),
+            (Some(file), Some(line)) => {
+                write!(f, "{} ({}:{line})", qualified, escape_frame_text(file))
+            }
             _ => match self.offset {
-                Some(off) => write!(f, "{}+0x{off:x}", self.func),
-                None => f.write_str(&self.func),
+                Some(off) => write!(f, "{qualified}+0x{off:x}"),
+                None => f.write_str(&qualified),
             },
         }
     }
@@ -303,17 +369,22 @@ impl fmt::Display for WasmFrame {
 /// So: the name section for the name, DWARF for the location. That split means a
 /// frame is *named* even in an artifact built without `debug = true`, which is
 /// the common case, and it keeps this function free of a demangler.
-/// Cap a guest-influenced string kept in a stored record.
+/// Cap a guest-influenced string at a byte budget, cutting at a character
+/// boundary so the stored text stays valid UTF-8.
 ///
-/// Module and function names come from the guest name section and file
-/// paths from its DWARF: without a bound, one identifier prices unbounded
-/// host memory across up to 64 kept frames. Offsets and line numbers are
+/// Module and function names come from the guest name section and file paths
+/// from its DWARF info: the bound is on bytes (the priced resource), so a
+/// non-ASCII name cannot multiply the estimate. Offsets and line numbers are
 /// integers, so capping names loses nothing the debugger keys on.
-fn capped_name(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
+fn capped_name(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
         s.to_owned()
     } else {
-        s.chars().take(max_chars).collect()
+        let mut end = max_bytes;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s[..end].to_owned()
     }
 }
 
@@ -449,7 +520,16 @@ impl Trap {
         // back to the top message, exactly as before. The stored `detail`
         // stays the full formatted error — the backtrace text belongs in
         // diagnostics even though it must not drive classification.
-        let mut trap = Self::from_engine_error(&format!("{err:#}"));
+        // Bound the formatted error before anything materializes it twice:
+        // a deep backtrace with long guest-controlled names would otherwise
+        // allocate the whole text here and again inside classification. The
+        // head carries the cause (and classification only reads 64 KiB).
+        let formatted = format!("{err:#}");
+        let mut cap = formatted.len().min(64 * 1024);
+        while !formatted.is_char_boundary(cap) {
+            cap -= 1;
+        }
+        let mut trap = Self::from_engine_error(&formatted[..cap]);
         let code = match exit {
             Some(_) => ErrorCode::GuestTrap,
             None => classify_trap(&first_signal_in_chain(err)),
@@ -504,8 +584,12 @@ impl Trap {
     /// Convert to the shared error type with a remediation.
     #[must_use]
     pub fn to_error(&self) -> Error {
+        // Escaped at insertion: `Error::render` prints context values raw,
+        // and the detail carries guest-controlled frame names. Structured
+        // consumers (serde, the audit chain) read `Trap::detail` itself,
+        // which stays raw for triage -- only the text renderings escape.
         let mut e = Error::new(self.code, self.message.clone())
-            .with_context("trap-detail", self.detail.clone());
+            .with_context("trap-detail", escape_frame_text(&self.detail).into_owned());
 
         if let Some(peak) = self.memory_peak_bytes {
             e = e.with_context("memory-peak", format_bytes(peak));
@@ -526,7 +610,10 @@ impl Trap {
         use std::fmt::Write as _;
         let mut out = String::new();
         let _ = writeln!(out, "{}  {}", self.code.id(), self.message);
-        let _ = writeln!(out, "  detail: {}", self.detail);
+        // Escaped like the frames: the detail carries guest-controlled
+        // frame names, and a raw multi-line detail would forge lines in
+        // the terminal report.
+        let _ = writeln!(out, "  detail: {}", escape_frame_text(&self.detail));
         if let Some(p) = self.memory_peak_bytes {
             let _ = writeln!(out, "  memory peak: {}", format_bytes(p));
         }
@@ -701,9 +788,107 @@ mod tests {
     /// Stored frame strings are bounded: a guest-controlled name cannot
     /// grow host memory without limit across the 64 kept frames.
     #[test]
+    fn frame_display_never_forges_a_second_line() {
+        let hostile = WasmFrame {
+            module: Some("m".to_owned()),
+            func: "ok\nSEV1: forged".to_owned(),
+            offset: Some(1),
+            file: None,
+            line: None,
+        };
+        let rendered = format!("{hostile}");
+        assert!(
+            !rendered.contains('\n'),
+            "a guest name must not forge log lines: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\n"),
+            "the newline is escaped visibly: {rendered:?}"
+        );
+    }
+
+    /// Unicode layout forgery escapes like ASCII controls: `U+2028` breaks
+    /// lines in renderers that honor it, and bidi overrides reorder the
+    /// visible text -- both spoof names without a newline anywhere.
+    #[test]
+    fn frame_display_escapes_unicode_layout_forgery() {
+        let hostile = WasmFrame {
+            module: None,
+            func: "ok\u{2028}\u{202E}forged".to_owned(),
+            offset: None,
+            file: None,
+            line: None,
+        };
+        let rendered = format!("{hostile}");
+        assert!(
+            !rendered.contains('\u{2028}') && !rendered.contains('\u{202E}'),
+            "layout controls must not pass through: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\u2028") && rendered.contains("\\u202e"),
+            "each control escapes visibly: {rendered:?}"
+        );
+    }
+
+    /// Legitimate non-ASCII text passes through: the escaper targets layout
+    /// forgery, not language. CJK names render as written.
+    #[test]
+    fn frame_display_keeps_legitimate_non_ascii_text() {
+        let frame = WasmFrame {
+            module: None,
+            func: "中際".to_owned(),
+            offset: None,
+            file: None,
+            line: None,
+        };
+        assert_eq!(format!("{frame}"), "中際");
+    }
+
+    /// The stored detail carries guest-controlled frame names, so the text
+    /// renderers must escape it: a raw `detail` would let a hostile module
+    /// name forge lines in the terminal report and in the error block.
+    #[test]
+    fn trap_render_never_forges_a_second_line_from_the_detail() {
+        let mut trap = Trap::from_engine_error("all fuel consumed by WebAssembly");
+        trap.detail = "boom\nSEV1: forged".to_owned();
+        let rendered = trap.render();
+        assert!(
+            !rendered.contains("\nSEV1: forged"),
+            "the detail must not forge lines: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\nSEV1: forged"),
+            "the newline is escaped visibly: {rendered:?}"
+        );
+    }
+
+    /// Same forgery, through the shared error type: `to_error` carries the
+    /// detail as a context value, and `Error::render` prints contexts raw,
+    /// so the escape happens at insertion, not in the generic renderer.
+    #[test]
+    fn trap_error_context_never_forges_a_second_line_from_the_detail() {
+        let mut trap = Trap::from_engine_error("all fuel consumed by WebAssembly");
+        trap.detail = "boom\nSEV1: forged".to_owned();
+        let rendered = trap.to_error().render();
+        assert!(
+            !rendered.contains("\nSEV1: forged"),
+            "the context must not forge lines: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\nSEV1: forged"),
+            "the newline is escaped visibly: {rendered:?}"
+        );
+    }
+    #[test]
     fn frame_name_lengths_are_capped() {
         assert_eq!(capped_name(&"m".repeat(300), 256).chars().count(), 256);
         assert_eq!(capped_name("short", 256), "short");
+        // Non-ASCII names are bounded by bytes, not chars.
+        let wide: String = core::iter::repeat_n(char::from_u32(0x4E2D).unwrap(), 100).collect();
+        assert_eq!(wide.len(), 300);
+        let capped = capped_name(&wide, 256);
+        assert_eq!(capped.len(), 255);
+        assert_eq!(capped.chars().count(), 85);
     }
     #[test]
     fn wasmtime_fuel_message_classifies_as_fuel() {
@@ -1056,6 +1241,37 @@ mod tests {
             line: None,
         };
         assert_eq!(bare.to_string(), "f");
+    }
+
+    /// The module qualifies the function when the engine resolved one, so a
+    /// multi-module backtrace attributes each frame -- and a hostile module
+    /// name escapes like every other guest string.
+    #[test]
+    fn frame_display_names_the_module_when_present() {
+        let framed = WasmFrame {
+            module: Some("m".to_owned()),
+            func: "f".to_owned(),
+            offset: Some(0x10),
+            file: None,
+            line: None,
+        };
+        assert_eq!(framed.to_string(), "m::f+0x10");
+        let hostile = WasmFrame {
+            module: Some("ok\nSEV1: forged".to_owned()),
+            func: "f".to_owned(),
+            offset: None,
+            file: None,
+            line: None,
+        };
+        let rendered = hostile.to_string();
+        assert!(
+            !rendered.contains('\n'),
+            "a hostile module must not forge lines: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("ok\\nSEV1: forged::f"),
+            "the module escapes visibly: {rendered:?}"
+        );
     }
 
     #[test]

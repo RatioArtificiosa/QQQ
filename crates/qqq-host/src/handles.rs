@@ -281,8 +281,9 @@ impl<T> HandleTable<T> {
                 // retired rather than reused. Refusing is the safe direction: a
                 // wrapped generation would make an old handle valid again, which
                 // is exactly the recycling attack the generation exists to stop.
+                // No counting here: the retirement was counted once in `remove`,
+                // and every refused insert re-scans the same retired slots.
                 if next_generation == u32::MAX {
-                    self.stats.generations_exhausted += 1;
                     continue;
                 }
                 let generation = next_generation;
@@ -308,8 +309,24 @@ impl<T> HandleTable<T> {
             }
         }
 
-        // No free slot: append. The `limit` check above guarantees this cannot
-        // exceed the limit, because `live == slots.len()` when nothing is free.
+        // No free slot was reusable: either every slot is live, or the only
+        // free slots were retired at `u32::MAX` and must never hand out a
+        // wrapped generation. Appending is still fine while the table has
+        // room under the limit; at capacity it would grow past the limit
+        // the check below enforces, so refuse the same way instead.
+        if self.slots.len() >= self.limit as usize {
+            self.stats.refused += 1;
+            return Err(Error::new(
+                ErrorCode::InvalidResourceHandle,
+                "no reusable handle slot remains",
+            )
+            .with_context("limit", self.limit.to_string())
+            .with_context("live", self.live.to_string())
+            .with_remediation(
+                "close handles that are no longer needed, or raise \
+                    `limits.max_open_handles` in `qqq.toml",
+            ));
+        }
         let index = self.slots.len();
         debug_assert!(
             index < self.limit as usize,
@@ -397,6 +414,10 @@ impl<T> HandleTable<T> {
             Some(Slot::Live { generation: g, .. }) if *g == generation
         );
         if !ok {
+            // Forged, stale, or double-closed: dropping what is not there
+            // is the same probe signal as a bad lookup, so it counts the
+            // same `invalid` counter that `get_mut`/`get_counted` feed.
+            self.stats.invalid += 1;
             return Err(Self::invalid_handle_message(handle));
         }
 
@@ -406,8 +427,18 @@ impl<T> HandleTable<T> {
         // would match. `get_mut` rather than subscripted: the match above
         // validated the index, and the `None` arm reports the same error —
         // total without restating the bound.
+        // Saturate, never wrap: a wrapped generation would revalidate handles
+        // issued four billion cycles ago, which is exactly the recycling
+        // attack the generation exists to stop. A saturated slot retires
+        // permanently (`insert` skips `u32::MAX`), as the module docs promise.
+        // The retirement is counted here, once, where it happens -- `insert`
+        // merely observes retired slots, and counting observations would
+        // inflate the counter on every refused insert.
+        if generation == u32::MAX {
+            self.stats.generations_exhausted += 1;
+        }
         let placeholder = Slot::Free {
-            next_generation: generation.wrapping_add(1),
+            next_generation: generation.saturating_add(1),
         };
         let old = match self.slots.get_mut(index) {
             Some(slot) => std::mem::replace(slot, placeholder),
@@ -441,9 +472,24 @@ impl<T> HandleTable<T> {
     }
 
     /// Whether the table is at its limit.
+    ///
+    /// `true` exactly when `insert` would refuse: a full live set, or a
+    /// table with no reusable slot and no room to grow (retired slots at
+    /// `u32::MAX` count as unusable here, the way `insert` treats them).
+    /// The scan is O(`limit`), like `insert`'s own scan, and for the same
+    /// reason: a cached answer would need its own invalidation argument.
     #[must_use]
     pub fn is_full(&self) -> bool {
-        self.live >= self.limit as usize
+        if self.live >= self.limit as usize {
+            return true;
+        }
+        self.slots.len() >= self.limit as usize
+            && !self.slots.iter().any(|slot| {
+                matches!(
+                    slot,
+                    Slot::Free { next_generation } if *next_generation != u32::MAX
+                )
+            })
     }
 
     /// Build the error for a handle that names nothing.
@@ -714,24 +760,120 @@ mod tests {
     #[test]
     fn a_wrapped_generation_refuses_the_slot_rather_than_reusing_it() {
         let mut t = HandleTable::new(2);
-        let h = t.insert("x").expect("fits");
-        t.remove(h).expect("live");
-
-        // Force the slot to the edge of its generation space.
-        if let Some(slot) = t.slots.first_mut() {
-            *slot = Slot::Free {
-                next_generation: u32::MAX,
-            };
-        }
+        // Retire through the real path: removing a max-generation slot
+        // saturates it, and the retirement is counted there -- not when a
+        // later scan merely observes the retired slot.
+        t.slots.push(Slot::Live {
+            value: "x",
+            generation: u32::MAX,
+        });
+        t.live += 1;
+        t.remove(Handle::pack(0, u32::MAX)).expect("live");
+        assert_eq!(
+            t.stats().generations_exhausted,
+            1,
+            "the retirement is counted once, at removal"
+        );
 
         // Either outcome is correct: the exhausted slot was skipped, or there
         // was no other slot free.
         if let Ok(new) = t.insert("y") {
             assert_ne!(new.slot(), 0, "the exhausted slot must not be reused");
         }
-        assert_eq!(t.stats().generations_exhausted, 1);
+        assert_eq!(
+            t.stats().generations_exhausted,
+            1,
+            "observing a retired slot must not recount it"
+        );
     }
 
+    /// Re-scanning a retired slot must not recount the retirement: the
+    /// counter names retirements, and every refused insert re-scans the
+    /// same poisoned slots.
+    #[test]
+    fn rescanning_a_retired_slot_does_not_recount_the_retirement() {
+        let mut t = HandleTable::new(1);
+        t.slots.push(Slot::Live {
+            value: 1,
+            generation: u32::MAX,
+        });
+        t.live += 1;
+        t.remove(Handle::pack(0, u32::MAX)).expect("live");
+        assert_eq!(t.stats().generations_exhausted, 1);
+        for _ in 0..3 {
+            let _ = t.insert(2).expect_err("poisoned at capacity");
+        }
+        assert_eq!(
+            t.stats().generations_exhausted,
+            1,
+            "three refused scans must not recount one retirement"
+        );
+        assert_eq!(t.stats().refused, 3);
+    }
+
+    /// Removing a max-generation slot saturates rather than wrapping: a
+    /// wrapped generation would revalidate a handle issued four billion
+    /// cycles ago. Constructed directly, as reaching it by insertion would
+    /// outlive the test runner.
+    #[test]
+    fn removing_a_max_generation_slot_saturates_it() {
+        let mut t = HandleTable::new(2);
+        t.slots.push(Slot::Live {
+            value: 7,
+            generation: u32::MAX,
+        });
+        t.live += 1;
+        let stale = Handle::pack(0, u32::MAX);
+        t.remove(stale).expect("live");
+        match t.slots.first() {
+            Some(Slot::Free { next_generation }) => assert_eq!(
+                *next_generation,
+                u32::MAX,
+                "a saturated slot retires; it must never wrap to 0"
+            ),
+            Some(Slot::Live { .. }) | None => panic!("remove must free the slot"),
+        }
+    }
+
+    /// A poisoned slot at capacity refuses instead of growing past the
+    /// limit: with no reusable slot and no room, appending would hand
+    /// out a handle the limit says must not exist.
+    #[test]
+    fn a_fully_poisoned_table_refuses_rather_than_growing() {
+        let mut t = HandleTable::new(1);
+        t.slots.push(Slot::Free {
+            next_generation: u32::MAX,
+        });
+        // No live handle, yet full: the one slot is retired and the table
+        // cannot grow, so `insert` can only refuse.
+        assert!(
+            t.is_full(),
+            "a table that can only refuse is full even with live < limit"
+        );
+        let err = t.insert(1).expect_err("no slot is reusable at capacity");
+        assert_eq!(err.code, ErrorCode::InvalidResourceHandle);
+        assert_eq!(t.stats().refused, 1);
+    }
+
+    /// `is_full` answers insertability, not liveness: an empty table with
+    /// room is not full, and a retired slot with room to grow is not full
+    /// either -- `insert` appends past it.
+    #[test]
+    fn is_full_is_false_while_the_table_can_grow() {
+        let t: HandleTable<u32> = HandleTable::new(2);
+        assert!(!t.is_full(), "an empty table with room is not full");
+        let mut retired: HandleTable<u32> = HandleTable::new(2);
+        retired.slots.push(Slot::Free {
+            next_generation: u32::MAX,
+        });
+        assert!(
+            !retired.is_full(),
+            "a retired slot with room to grow is not full"
+        );
+        retired
+            .insert(1)
+            .expect("room to append past the retired slot");
+    }
     /// The handle's text form must show the generation, so a diagnostic makes a
     /// recycled slot visible.
     #[test]

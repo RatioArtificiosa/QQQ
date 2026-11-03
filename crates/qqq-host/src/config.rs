@@ -382,6 +382,14 @@ pub fn build_pooling(shape: &PoolShape) -> Result<wasmtime::PoolingAllocationCon
     // admission read the same multiplications, so one cannot admit what the
     // other cannot host. Method names verified against the pinned Wasmtime
     // 48 source, not memory.
+    //
+    // The `.max(1)` floor is Wasmtime's, not ours: a zero total builds a pool
+    // that can never instantiate (the first acquire already meets the
+    // limit), so it serves nothing while looking configured. Zero is
+    // unreachable through the manifest anyway (`limits.max_instances`
+    // validates to >= 1, and admission refuses an engine-clamped zero
+    // before the pool is built), which makes the floor belt-and-braces for
+    // direct callers rather than a second admission decision.
     p.total_component_instances(instances.max(1));
     p.total_core_instances(shape.total_core_instances().max(1));
     p.total_memories(shape.total_memories().max(1));

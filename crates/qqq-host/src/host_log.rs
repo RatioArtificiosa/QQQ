@@ -219,7 +219,11 @@ impl LogHost for crate::linker::StoreData {
         // that fails on its last record leaves no prefix behind. A caller
         // that retries the batch would otherwise duplicate the prefix, and
         // an operator reading the buffer could not tell which records came
-        // from a batch that reported failure.
+        // from a batch that reported failure. The seam records the batch
+        // as one consultation (`log_emit_many`, not per-record rows), so a
+        // large batch is one audit row rather than thousands.
+        crate::ambient::require(self, LogWrite, "log_emit_many")
+            .map_err(|_| WitLogError::NotGranted)?;
         if !self.grants.grants(LogWrite) {
             return Err(WitLogError::NotGranted);
         }
@@ -292,8 +296,12 @@ impl LogHost for crate::linker::StoreData {
         // No level filter is configured in V1 (the marker stanza carries no
         // fields), so every level records. Returning false would silence a
         // guest that has no way to learn why, and a filter that exists
-        // nowhere is not a filter.
-        self.grants.grants(LogWrite)
+        // nowhere is not a filter. The probe is still a consultation of the
+        // grant, so it is recorded -- mirroring `kv::stores` -- while the
+        // answer stays a pure function of the grant set.
+        let granted = self.grants.grants(LogWrite);
+        let _ = crate::ambient::require(self, LogWrite, "log_enabled");
+        granted
     }
 }
 
@@ -593,7 +601,9 @@ fn emit_record(
     // missing grant before its size or quota is judged — otherwise the
     // error tells an ungranted guest how big a record may be. (`validate_record`
     // repeats the check; the second one always passes here and stays as
-    // defense in depth.)
+    // defense in depth.) The seam records the consultation, so the audit
+    // stream sees log use like every other capability family.
+    crate::ambient::require(data, LogWrite, "log_emit").map_err(|_| WitLogError::NotGranted)?;
     if !data.grants.grants(LogWrite) {
         return Err(WitLogError::NotGranted);
     }
@@ -689,6 +699,95 @@ mod tests {
         let err = emit_record(&mut data, 2, "hello", &[]).expect_err("no grant");
         assert!(matches!(err, WitLogError::NotGranted));
         assert!(data.logs.is_empty(), "a refused record is not stored");
+    }
+
+    /// Every log body records through the audit seam: a direct grant check
+    /// would answer identically while leaving the caller looking
+    /// capability-clean to `assert-caps-only`. Counted, not `contains`.
+    #[test]
+    fn every_log_body_records_through_the_audit_seam() {
+        let production = include_str!("host_log.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 3,
+            "every log body (emit, emit_many, enabled) must consult \
+             the audit seam; found {seams} seam call(s)"
+        );
+    }
+
+    /// Attach a record stream to a store, so the seam tests can assert on
+    /// the rows rather than on the return value alone.
+    fn attach_audit(
+        data: &mut crate::linker::StoreData,
+    ) -> std::sync::Arc<std::sync::Mutex<crate::audit::AuditStream>> {
+        let stream = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::audit::AuditStream::with_default_capacity(),
+        ));
+        let digest = data.grants.digest();
+        data.audit = Some(crate::audit::AuditHandle::new(
+            std::sync::Arc::clone(&stream),
+            crate::tenant::ComponentDigest::new("0011223344556677").expect("digest"),
+            crate::tenant::GrantDigest::new(&digest).expect("digest"),
+            None,
+        ));
+        stream
+    }
+
+    /// A granted emit records a `Granted` row naming the capability and the
+    /// host function -- the row an auditor aggregates, not a constant.
+    #[test]
+    fn a_granted_emit_records_a_granted_row() {
+        let mut data = data_with_log(true);
+        let stream = attach_audit(&mut data);
+        emit_record(&mut data, 2, "hello", &[]).expect("emits");
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 1, "one consultation, one row");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].capability,
+            qqq_cap::capability::Capability::LogWrite
+        );
+        assert_eq!(records[0].function, "log_emit");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Granted);
+    }
+
+    /// A refused batch records a `Denied` row even though nothing is
+    /// stored -- a refusal is the row an auditor most wants. One row for
+    /// the batch, not one per record.
+    #[test]
+    fn a_denied_emit_many_records_a_denied_row() {
+        let mut data = data_with_log(false);
+        let stream = attach_audit(&mut data);
+        let err = LogHost::emit_many(&mut data, vec![(Level::Info, "one".to_owned(), vec![])])
+            .expect_err("no grant");
+        assert!(matches!(err, WitLogError::NotGranted));
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 1, "the denial must be recorded");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].function, "log_emit_many");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Denied);
+    }
+
+    /// Even the grant probe records: `enabled` answers from the grant set,
+    /// and the consultation is visible like `kv::stores`.
+    #[test]
+    fn an_enabled_probe_records_its_consultation() {
+        let mut data = data_with_log(false);
+        let stream = attach_audit(&mut data);
+        assert!(!LogHost::enabled(&mut data, Level::Info));
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 1, "the probe must be recorded");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records[0].function, "log_enabled");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Denied);
     }
 
     /// An exact secret value is stored redacted; near-matches are verbatim.

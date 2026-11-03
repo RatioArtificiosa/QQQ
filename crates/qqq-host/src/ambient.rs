@@ -1152,6 +1152,135 @@ mod tests {
         // and the point is that `require` did not need one to work.
     }
 
+    /// **Every audit-seam call site names a `RECORDED_FUNCTIONS` entry.**
+    ///
+    /// `record`'s writer-side check is a `debug_assert`: a typo'd name in a
+    /// new seam would buffer rows in every build, and the reader -- which
+    /// refuses unknown names -- would drop them at resume. That is a
+    /// persisted record that cannot be reported on, discovered at restart.
+    /// This test parses every `require(` call in production code and asserts
+    /// the name literal is allowlisted, so a typo fails CI in any profile,
+    /// not just in debug.
+    #[test]
+    fn every_audit_seam_name_is_a_recorded_function() {
+        /// The argument list of the call whose `(` sits at `open`,
+        /// paren-depth aware so receivers like `store.data()` parse.
+        /// A nested item, before the statements: clippy's
+        /// `items_after_statements` says items exist from the scope's start,
+        /// so the helper reads first even though it is used below.
+        fn call_args(source: &str, open: usize) -> &str {
+            let bytes = source.as_bytes();
+            let mut depth = 0u32;
+            let mut in_str = false;
+            let mut escaped = false;
+            let mut i = open;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if in_str {
+                    if b == b'"' && !escaped {
+                        in_str = false;
+                    }
+                    escaped = b == b'\\' && !escaped;
+                } else if b == b'"' {
+                    in_str = true;
+                    escaped = false;
+                } else if b == b'(' {
+                    depth += 1;
+                } else if b == b')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open + 1..i];
+                    }
+                }
+                i += 1;
+            }
+            panic!("unterminated require( at byte {open}");
+        }
+
+        // Every module that consults the seam. This file calls `require`
+        // unqualified (it owns it); the rest qualify it. `arch012.rs` only
+        // counts the calls, so it is not a seam and is not listed.
+        const MODULES: &[&str] = &[
+            include_str!("ambient.rs"),
+            include_str!("host_clock.rs"),
+            include_str!("host_crypto.rs"),
+            include_str!("host_dns.rs"),
+            include_str!("host_env.rs"),
+            include_str!("host_http.rs"),
+            include_str!("host_kv.rs"),
+            include_str!("host_log.rs"),
+            include_str!("host_sql.rs"),
+            include_str!("host_trace.rs"),
+            include_str!("host_wasi.rs"),
+            include_str!("host_wasi03.rs"),
+        ];
+        for source in MODULES {
+            // Tests call the seam with fixture names; the contract covers
+            // shipping code only.
+            let production = source.split("#[cfg(test)]").next().unwrap_or_default();
+            for (at, _) in production.match_indices("require(") {
+                // The definition, not a call.
+                if production[..at].ends_with("pub fn ") {
+                    continue;
+                }
+                let args = call_args(production, at + "require(".len() - 1);
+                let mut parts = args.split(',');
+                let (Some(_receiver), Some(_capability), Some(name)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    panic!("require call shape changed; update this test: {args:?}");
+                };
+                // A trailing comma is style, not a fourth argument.
+                assert!(
+                    parts.all(|rest| rest.trim().is_empty()),
+                    "require call shape changed; update this test: {args:?}"
+                );
+                let name = name.trim();
+                if let Some(name) = name.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                    assert!(
+                        crate::audit::RECORDED_FUNCTIONS.contains(&name),
+                        "`{name}` is recorded but not allowlisted; add it to RECORDED_FUNCTIONS"
+                    );
+                } else {
+                    // No other indirection exists: `require_random` is the
+                    // one helper that forwards a caller-supplied name, and
+                    // its call sites are parsed below. Anything else is a
+                    // seam whose name cannot be checked statically.
+                    let enclosing = production[..at]
+                        .rfind("\nfn ")
+                        .map(|i| production[i + 1..].lines().next().unwrap_or_default())
+                        .unwrap_or_default();
+                    assert!(
+                        enclosing.starts_with("fn require_random("),
+                        "non-literal seam name outside the require_random helper: \
+                         {args:?} in {enclosing:?}"
+                    );
+                }
+            }
+            // `require_random` forwards its caller's name literal to the
+            // seam, so the call sites carry the checkable names. The helper
+            // definition itself is skipped, like the seam definition above.
+            for (at, _) in production.match_indices("require_random(") {
+                if production[..at].ends_with("fn ") {
+                    continue;
+                }
+                let args = call_args(production, at + "require_random(".len() - 1);
+                let mut parts = args.split(',');
+                let (Some(_data), Some(name)) = (parts.next(), parts.next()) else {
+                    panic!("require_random call shape changed; update this test: {args:?}");
+                };
+                let name = name.trim();
+                let Some(name) = name.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
+                    panic!("require_random caller must pass a literal: {args:?}");
+                };
+                assert!(
+                    crate::audit::RECORDED_FUNCTIONS.contains(&name),
+                    "`{name}` is recorded but not allowlisted; add it to RECORDED_FUNCTIONS"
+                );
+            }
+        }
+    }
+
     /// **Every name in `RECORDED_FUNCTIONS` survives a round trip through the file format.**
     ///
     /// The writer's allowlist and the reader's are the same list, and a name added to one and not

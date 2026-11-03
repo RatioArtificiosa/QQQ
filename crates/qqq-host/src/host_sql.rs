@@ -905,6 +905,14 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         // Either direction grant opens the call; the direction check happens
         // after the statement's own nature is known, so an execute-only
         // grant (reachable through a narrowing overlay) prepares writes.
+        // The audit seam records under the direction held (execute when
+        // held, else query), so a manifest with neither records `Denied`.
+        let cap = if self.grants.grants(SqlExecute) {
+            SqlExecute
+        } else {
+            SqlQuery
+        };
+        crate::ambient::require(self, cap, "sql_prepare").map_err(|_| WitSqlError::NotGranted)?;
         if !self.grants.grants(SqlQuery) && !self.grants.grants(SqlExecute) {
             return Err(WitSqlError::NotGranted);
         }
@@ -982,7 +990,15 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         // `database::prepare`: an execute-only grant reaches one-shot
         // writes, a query-only grant reaches one-shot reads, and the
         // statement's own nature decides below. Requiring the query grant
-        // here would refuse execute-only writes `prepare` allows.
+        // here would refuse execute-only writes `prepare` allows. The seam
+        // records under the direction held, like `prepare` above.
+        let cap = if self.grants.grants(SqlExecute) {
+            SqlExecute
+        } else {
+            SqlQuery
+        };
+        crate::ambient::require(self, cap, "sql_query_once")
+            .map_err(|_| WitSqlError::NotGranted)?;
         if !self.grants.grants(SqlQuery) && !self.grants.grants(SqlExecute) {
             return Err(WitSqlError::NotGranted);
         }
@@ -1056,7 +1072,17 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         // Infallible by WIT design (the manifest set is public), so the
         // grant re-check fails closed by answering empty rather than by
         // erroring: an ungranted caller learns nothing, including membership.
+        // The consultation is still recorded, under the direction the caller
+        // holds -- mirroring `kv::stores`.
         use qqq_cap::capability::Capability::{SqlExecute, SqlQuery};
+        let cap = if self.grants.grants(SqlExecute) {
+            SqlExecute
+        } else {
+            SqlQuery
+        };
+        if crate::ambient::require(self, cap, "sql_databases").is_err() {
+            return Vec::new();
+        }
         if !(self.grants.grants(SqlQuery) || self.grants.grants(SqlExecute)) {
             return Vec::new();
         }
@@ -1077,6 +1103,8 @@ impl bindings::qqq::sql::database::HostStatement for crate::linker::StoreData {
         args: Vec<WitValue>,
     ) -> std::result::Result<Vec<WitRow>, WitSqlError> {
         use qqq_cap::capability::Capability::SqlQuery;
+        crate::ambient::require(self, SqlQuery, "sql_statement_query")
+            .map_err(|_| WitSqlError::NotGranted)?;
         if !self.grants.grants(SqlQuery) {
             return Err(WitSqlError::NotGranted);
         }
@@ -1113,6 +1141,16 @@ impl bindings::qqq::sql::database::HostStatement for crate::linker::StoreData {
         args: Vec<WitValue>,
     ) -> std::result::Result<u64, WitSqlError> {
         use qqq_cap::capability::Capability::{SqlExecute, SqlQuery};
+        // Either direction grant opens the call; `check_write` below keeps
+        // the membership-then-direction precedence. The seam records under
+        // the direction held.
+        let cap = if self.grants.grants(SqlExecute) {
+            SqlExecute
+        } else {
+            SqlQuery
+        };
+        crate::ambient::require(self, cap, "sql_statement_execute")
+            .map_err(|_| WitSqlError::NotGranted)?;
         if !self.grants.grants(SqlQuery) && !self.grants.grants(SqlExecute) {
             return Err(WitSqlError::NotGranted);
         }
@@ -1151,7 +1189,10 @@ impl bindings::qqq::sql::database::HostStatement for crate::linker::StoreData {
         handle: wasmtime::component::Resource<bindings::qqq::sql::database::Statement>,
     ) {
         // Idempotent: the end state — the handle is gone — is what was
-        // asked for, so closing twice is not an error.
+        // asked for, so closing twice is not an error. No audit seam:
+        // closing consults no capability (see `ARCH-012`'s `InterfaceGated`
+        // rows for the statement/transaction cleanup paths), so there is no
+        // consultation to record.
         self.sql_state.statements.remove(&handle.rep());
     }
 
@@ -1159,6 +1200,8 @@ impl bindings::qqq::sql::database::HostStatement for crate::linker::StoreData {
         &mut self,
         rep: wasmtime::component::Resource<bindings::qqq::sql::database::Statement>,
     ) -> wasmtime::Result<()> {
+        // No audit seam, same reason as `close` above: cleanup consults
+        // no capability.
         self.sql_state.statements.remove(&rep.rep());
         Ok(())
     }
@@ -1283,8 +1326,17 @@ impl bindings::qqq::sql::transaction::Host for crate::linker::StoreData {
         wasmtime::component::Resource<bindings::qqq::sql::transaction::Txn>,
         WitSqlError,
     > {
-        use qqq_cap::capability::Capability::SqlExecute;
+        use qqq_cap::capability::Capability::{SqlExecute, SqlQuery};
         use wasmtime::component::Resource;
+        // The seam records under execute when held (the lock-taking
+        // direction), else query; either opens the transaction. `check_any`
+        // below re-derives the same verdict, keeping the refusal name.
+        let cap = if self.grants.grants(SqlExecute) {
+            SqlExecute
+        } else {
+            SqlQuery
+        };
+        crate::ambient::require(self, cap, "sql_begin").map_err(|_| WitSqlError::NotGranted)?;
         check_any(self)?;
         if !valid_name(&database) {
             return Err(WitSqlError::DatabaseNotConfigured);
@@ -1322,6 +1374,15 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
     > {
         use qqq_cap::capability::Capability::{SqlExecute, SqlQuery};
         use wasmtime::component::Resource;
+        // Either direction grant opens the call, mirroring
+        // `database::prepare`. The seam records under the direction held.
+        let cap = if self.grants.grants(SqlExecute) {
+            SqlExecute
+        } else {
+            SqlQuery
+        };
+        crate::ambient::require(self, cap, "sql_txn_prepare")
+            .map_err(|_| WitSqlError::NotGranted)?;
         check_any(self)?;
         check_sql_size(&sql)?;
         let database = lookup_transaction(self, &handle)?;
@@ -1380,6 +1441,16 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         &mut self,
         handle: wasmtime::component::Resource<bindings::qqq::sql::transaction::Txn>,
     ) -> std::result::Result<(), WitSqlError> {
+        // `COMMIT` writes the journal: record under the direction held,
+        // mirroring `begin`. `check_any` below keeps the refusal name.
+        use qqq_cap::capability::Capability::{SqlExecute, SqlQuery};
+        let cap = if self.grants.grants(SqlExecute) {
+            SqlExecute
+        } else {
+            SqlQuery
+        };
+        crate::ambient::require(self, cap, "sql_txn_commit")
+            .map_err(|_| WitSqlError::NotGranted)?;
         check_any(self)?;
         let database = lookup_transaction(self, &handle)?;
         let id = handle.rep();
@@ -1409,6 +1480,16 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         &mut self,
         handle: wasmtime::component::Resource<bindings::qqq::sql::transaction::Txn>,
     ) -> std::result::Result<(), WitSqlError> {
+        // Same seam as `commit`: discarding the journal is an execution,
+        // and either direction grant opens it.
+        use qqq_cap::capability::Capability::{SqlExecute, SqlQuery};
+        let cap = if self.grants.grants(SqlExecute) {
+            SqlExecute
+        } else {
+            SqlQuery
+        };
+        crate::ambient::require(self, cap, "sql_txn_rollback")
+            .map_err(|_| WitSqlError::NotGranted)?;
         check_any(self)?;
         let database = lookup_transaction(self, &handle)?;
         let id = handle.rep();
@@ -1444,7 +1525,8 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         // mid-transaction must not leave a partial write committed. The
         // rollback's own failure is swallowed — the WIT `drop` is
         // infallible, and the cleanup (invalidating the handle and its
-        // statements) happens regardless.
+        // statements) happens regardless. No audit seam: cleanup consults
+        // no capability (see the `close` note on statements).
         let id = rep.rep();
         rollback_open(self, id);
         close_transaction(self, id);
@@ -1460,6 +1542,8 @@ impl bindings::qqq::sql::transaction::HostTxnStatement for crate::linker::StoreD
         args: Vec<WitValue>,
     ) -> std::result::Result<Vec<WitRow>, WitSqlError> {
         use qqq_cap::capability::Capability::SqlQuery;
+        crate::ambient::require(self, SqlQuery, "sql_txn_statement_query")
+            .map_err(|_| WitSqlError::NotGranted)?;
         if !self.grants.grants(SqlQuery) {
             return Err(WitSqlError::NotGranted);
         }
@@ -1499,6 +1583,16 @@ impl bindings::qqq::sql::transaction::HostTxnStatement for crate::linker::StoreD
         args: Vec<WitValue>,
     ) -> std::result::Result<u64, WitSqlError> {
         use qqq_cap::capability::Capability::{SqlExecute, SqlQuery};
+        // Either direction grant opens the call; `check_write` below keeps
+        // the membership-then-direction precedence. The seam records under
+        // the direction held.
+        let cap = if self.grants.grants(SqlExecute) {
+            SqlExecute
+        } else {
+            SqlQuery
+        };
+        crate::ambient::require(self, cap, "sql_txn_statement_execute")
+            .map_err(|_| WitSqlError::NotGranted)?;
         if !self.grants.grants(SqlQuery) && !self.grants.grants(SqlExecute) {
             return Err(WitSqlError::NotGranted);
         }
@@ -1634,6 +1728,87 @@ mod tests {
             .expect_err("no grant means no statement");
         assert!(matches!(err, WitSqlError::NotGranted));
         assert!(data.databases().is_empty());
+    }
+
+    /// Every sql body that consults a capability records through the audit
+    /// seam: a direct grant check would answer identically while leaving
+    /// the caller looking capability-clean to `assert-caps-only`. Counted,
+    /// not `contains`. Cleanup paths (`close`/`drop`) consult no capability
+    /// and are deliberately absent -- see their inline notes.
+    #[test]
+    fn every_sql_body_records_through_the_audit_seam() {
+        let production = include_str!("host_sql.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 11,
+            "every sql body (prepare, query_once, databases, statement query/execute, \
+             begin, txn prepare/commit/rollback, txn-statement query/execute) must consult \
+             the audit seam; found {seams} seam call(s)"
+        );
+    }
+
+    /// Attach a record stream to a store, so the seam tests can assert on
+    /// the rows rather than on the return value alone.
+    fn attach_audit(
+        data: &mut StoreData,
+    ) -> std::sync::Arc<std::sync::Mutex<crate::audit::AuditStream>> {
+        let stream = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::audit::AuditStream::with_default_capacity(),
+        ));
+        let digest = data.grants.digest();
+        data.audit = Some(crate::audit::AuditHandle::new(
+            std::sync::Arc::clone(&stream),
+            crate::tenant::ComponentDigest::new("0011223344556677").expect("digest"),
+            crate::tenant::GrantDigest::new(&digest).expect("digest"),
+            None,
+        ));
+        stream
+    }
+
+    /// A granted call records a `Granted` row naming the capability and the
+    /// host function -- the row an auditor aggregates, not a constant.
+    #[test]
+    fn a_granted_databases_call_records_a_granted_row() {
+        use super::bindings::qqq::sql::database::Host as _;
+        let path = test_path("audit-granted");
+        let mut data = store_for(&path, true, true);
+        let stream = attach_audit(&mut data);
+        let names = data.databases();
+        assert_eq!(names, vec!["orders".to_owned()]);
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 1, "one consultation, one row");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].capability,
+            qqq_cap::capability::Capability::SqlExecute
+        );
+        assert_eq!(records[0].function, "sql_databases");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Granted);
+    }
+
+    /// A refused call records a `Denied` row even though it fails -- a
+    /// refusal is the row an auditor most wants.
+    #[test]
+    fn a_denied_prepare_records_a_denied_row() {
+        use super::bindings::qqq::sql::database::Host as _;
+        let mut data = ungranted_store();
+        let stream = attach_audit(&mut data);
+        let err = data
+            .prepare("orders".to_owned(), "SELECT 1".to_owned())
+            .expect_err("no grant means no statement");
+        assert!(matches!(err, WitSqlError::NotGranted));
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 1, "the denial must be recorded");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].function, "sql_prepare");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Denied);
     }
 
     /// A granted call against an unlisted name fails `database-not-configured`

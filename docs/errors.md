@@ -98,6 +98,16 @@ logs and issue trackers reference them indefinitely.
 { "code": "QQQ-1006" }
 ```
 
+### `QQQ-1007` — `ComponentDigestMismatch`
+
+**Cause.** A preloaded artifact's bytes do not match the content digest they arrived with.
+
+**Remediation.** Recompute the digest from the artifact bytes; the deploy pipeline passed a digest that names a different artifact, and caching under that digest would serve these bytes to that artifact's key. Do not relabel the bytes — find where the digest diverged.
+
+```json
+{ "code": "QQQ-1007" }
+```
+
 ## Manifest and configuration
 
 ### `QQQ-2001` — `ManifestSyntaxInvalid`

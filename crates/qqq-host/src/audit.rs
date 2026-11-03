@@ -854,7 +854,7 @@ impl AppendCounters {
 ///
 /// Adding a host function that records means adding its name here, and the test
 /// `every_recorded_function_round_trips` fails until it is.
-pub(crate) const RECORDED_FUNCTIONS: [&str; 37] = [
+pub(crate) const RECORDED_FUNCTIONS: [&str; 58] = [
     "handle_request",
     "hash_data",
     "random_get",
@@ -892,6 +892,27 @@ pub(crate) const RECORDED_FUNCTIONS: [&str; 37] = [
     "dns_resolve",
     "dns_resolve_many",
     "dns_allowed_names",
+    "kv_get",
+    "kv_set",
+    "kv_delete",
+    "kv_exists",
+    "kv_keys",
+    "kv_get_many",
+    "kv_stores",
+    "sql_prepare",
+    "sql_query_once",
+    "sql_databases",
+    "sql_statement_query",
+    "sql_statement_execute",
+    "sql_begin",
+    "sql_txn_prepare",
+    "sql_txn_commit",
+    "sql_txn_rollback",
+    "sql_txn_statement_query",
+    "sql_txn_statement_execute",
+    "log_emit",
+    "log_emit_many",
+    "log_enabled",
 ];
 
 // The pre-commit buffer bound: pending rows live in the requesting task, so an
@@ -1541,7 +1562,11 @@ impl AuditStream {
             }
         }
         let sequence = self.next;
-        self.next += 1;
+        // Saturate, never wrap: a wrap would restart numbering at zero and
+        // collide with retained rows (and panic a debug build). Unreachable
+        // in practice -- 2^64 appends -- but the resume path saturates and
+        // the two must agree on what "past the end" means.
+        self.next = self.next.saturating_add(1);
         let timestamp_unix_ms = self.clock_ms();
         let chain = AuditRecord::compute_chain_v2(
             &AuditFields {
@@ -2134,6 +2159,24 @@ mod tests {
         }
         let seqs: Vec<u64> = s.records().iter().map(|r| r.sequence).collect();
         assert_eq!(seqs, vec![1, 2, 3]);
+    }
+
+    /// The sequence counter saturates rather than wraps: 2^64 appends is
+    /// unreachable, but a wrap would restart numbering at zero and collide
+    /// with retained rows, while a debug build would panic on the
+    /// increment. Same convention as the resume path, which saturates.
+    #[test]
+    fn the_sequence_counter_saturates_rather_than_wrapping() {
+        let mut s = stream(4);
+        s.next = u64::MAX;
+        assert!(push(&mut s, Outcome::Granted).was_recorded());
+        assert!(push(&mut s, Outcome::Granted).was_recorded());
+        let seqs: Vec<u64> = s.records().iter().map(|r| r.sequence).collect();
+        assert_eq!(
+            seqs,
+            vec![u64::MAX, u64::MAX],
+            "saturation keeps appending; only the numbering clamps"
+        );
     }
 
     /// **The refusal, which is the whole reason the ring is not a ring.**

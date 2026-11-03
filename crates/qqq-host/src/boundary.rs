@@ -119,7 +119,35 @@ impl Rejection {
 /// Deliberately small. A diagnostic exists to be read; an operator needs the
 /// first few bytes to recognise the mistake, not the whole payload — and echoing
 /// the whole payload is how a validation failure becomes a log-volume attack.
+///
+/// The bound carries a small fixed tolerance: the loop stops *before* pushing
+/// past [`MAX_ECHO_BYTES`], so one final character (or its escape sequence)
+/// plus the `…` marker can land just over it. The existing test pins
+/// `<= MAX_ECHO_BYTES + 8`; the tolerance is contract, not drift.
 pub const MAX_ECHO_BYTES: usize = 64;
+
+/// Invisible characters that forge layout without a newline.
+///
+/// Line/paragraph separators (`U+2028`/`U+2029`) break lines in renderers that
+/// honor them; bidirectional controls reorder the visible text. Neither is a
+/// C0/C1 control, so `char::is_control` misses both -- and both are name-
+/// and value-spoofing primitives, never legitimate in a validated field or a
+/// rendered diagnostic. Shared with [`crate::trap`]'s frame escaper so the
+/// two renderers cannot disagree on what "safe to print" means.
+#[must_use]
+pub(crate) fn is_layout_forgery(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2028}'
+            | '\u{2029}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{061C}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
 
 /// Render a guest value for a diagnostic, safely.
 ///
@@ -142,10 +170,12 @@ pub fn render_for_diagnostic(value: &str) -> String {
         }
         match ch {
             // Escape everything that could forge structure in a log consumer.
+            // Layout-forgers (`U+2028`, bidi controls) are not C0/C1, so they
+            // get their own arm sharing the predicate with the trap escaper.
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
+            c if c.is_control() || is_layout_forgery(c) => {
                 // Non-printable: show the code point rather than the byte, so a
                 // reader can tell what it was. `write!` into the `String` rather
                 // than `push_str(&format!(..))`, which allocates a temporary for
@@ -270,7 +300,9 @@ pub fn list_size(field: &'static str, elements: usize, total_bytes: usize) -> Ve
 ///
 /// It rejects **control characters and NUL**, because those forge structure in
 /// whatever consumes the string downstream — a log, a header, a filename, a
-/// terminal. It does *not* reject "unusual" printable characters: a check that
+/// terminal — and **invisible layout-forgers** (`U+2028`/`U+2029`, bidi
+/// controls, see [`is_layout_forgery`]), which reorder visible text without
+/// a newline anywhere. It does *not* reject "unusual" printable characters: a check that
 /// refused non-ASCII would break every legitimate internationalised name, and the
 /// places where a restricted alphabet is genuinely required (a route parameter, a
 /// DNS label) have their own checks below that say so explicitly. Being strict
@@ -293,11 +325,14 @@ pub fn text(field: &'static str, value: &str, max_bytes: usize) -> Verdict {
         }
         .with_field(field);
     }
-    if let Some(bad) = value.chars().find(|c| c.is_control() || *c == '\0') {
+    if let Some(bad) = value
+        .chars()
+        .find(|c| c.is_control() || *c == '\0' || is_layout_forgery(*c))
+    {
         return Verdict::Reject {
             reason: format!(
                 "contains a control character (U+{:04X}); control characters forge \
-                 structure in whatever consumes the value downstream",
+                 log lines and reorder visible text, so validated fields admit neither",
                 bad as u32
             ),
         }
@@ -344,9 +379,16 @@ pub fn path_shape(field: &'static str, path: &str) -> Verdict {
         }
         .with_field(field);
     }
-    if let Some(bad) = path.chars().find(|c| c.is_control() || *c == '\0') {
+    if let Some(bad) = path
+        .chars()
+        .find(|c| c.is_control() || *c == '\0' || is_layout_forgery(*c))
+    {
         return Verdict::Reject {
-            reason: format!("contains a control character (U+{:04X})", bad as u32),
+            reason: format!(
+                "contains a control character (U+{:04X}); validated paths admit \
+                 neither controls nor invisible layout-forgers",
+                bad as u32
+            ),
         }
         .with_field(field);
     }
@@ -1304,6 +1346,22 @@ mod tests {
         assert!(rendered.contains("\\u{0}"), "got {rendered:?}");
     }
 
+    /// Unicode layout forgery escapes like ASCII controls: `U+2028` breaks
+    /// lines in renderers that honor it, and bidi overrides reorder the
+    /// visible text. Same predicate as the trap escaper, so the two agree.
+    #[test]
+    fn rendering_escapes_unicode_layout_forgery() {
+        let rendered = render_for_diagnostic("ok\u{2028}\u{202E}forged");
+        assert!(
+            !rendered.contains('\u{2028}') && !rendered.contains('\u{202E}'),
+            "layout controls must not pass through: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\u{2028}") && rendered.contains("\\u{202e}"),
+            "each control escapes visibly: {rendered:?}"
+        );
+    }
+
     #[test]
     fn ordinary_text_passes_through_unchanged() {
         assert_eq!(render_for_diagnostic("orders-2026.csv"), "orders-2026.csv");
@@ -1439,6 +1497,21 @@ mod tests {
         assert!(text("name", "a\tb", MAX_IDENTIFIER_BYTES).is_reject());
     }
 
+    /// Invisible layout-forgers are refused like controls: a line separator
+    /// or bidi override in a validated value would reorder whatever renders
+    /// it, and no legitimate name needs one.
+    #[test]
+    fn text_refuses_unicode_layout_forgery() {
+        assert!(
+            text("name", "ok\u{2028}forged", MAX_IDENTIFIER_BYTES).is_reject(),
+            "a line separator must not pass validation"
+        );
+        assert!(
+            text("name", "ok\u{202E}forged", MAX_IDENTIFIER_BYTES).is_reject(),
+            "a bidi override must not pass validation"
+        );
+    }
+
     /// **The control that stops `text` becoming a useless check.**
     ///
     /// A validator that refused non-ASCII would break every internationalised
@@ -1510,6 +1583,10 @@ mod tests {
         assert!(path_shape("path", "").is_reject());
         assert!(path_shape("path", &"a".repeat(MAX_PATH_BYTES + 1)).is_reject());
         assert!(path_shape("path", "a\0b").is_reject());
+        // Layout-forgers ride the same predicate as controls: an invisible
+        // reorder in a path is a spoof, not a name.
+        assert!(path_shape("path", "a\u{2028}b").is_reject());
+        assert!(path_shape("path", "a\u{202E}b").is_reject());
     }
 
     /// **The regression guard for `§O-067`.** The prefix implementation would have

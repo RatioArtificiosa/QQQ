@@ -471,9 +471,16 @@ impl Metrics {
     }
 
     /// Record that an instance was returned to a pool intact.
+    ///
+    /// `fetch_update` rather than `fetch_sub` so the gauge saturates at zero
+    /// instead of wrapping: a double release is a pool bookkeeping bug, and a
+    /// wrapped gauge would report 2^64-1 live instances -- the most alarming
+    /// possible way to render it. Same shape as [`Metrics::note_memory_delta`].
     pub fn note_released(&self) {
         self.released.fetch_add(1, Ordering::Relaxed);
-        self.live.fetch_sub(1, Ordering::Relaxed);
+        let _ = self
+            .live
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1));
     }
 
     /// Record that an instance was discarded after a trap.
@@ -482,9 +489,14 @@ impl Metrics {
     /// that climbs steeply is the first sign of a hostile or broken guest, and
     /// it is invisible in a "requests succeeded" count because a trap is a
     /// failed request either way.
+    ///
+    /// Saturating, like [`Metrics::note_released`]: a wrapped gauge would
+    /// hide the very signal this metric exists to carry.
     pub fn note_discarded(&self) {
         self.discarded.fetch_add(1, Ordering::Relaxed);
-        self.live.fetch_sub(1, Ordering::Relaxed);
+        let _ = self
+            .live
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1));
     }
 
     /// Record that a pool had no free instance available.
@@ -1202,6 +1214,22 @@ mod tests {
         assert_eq!(m.live_memory(), 1024);
         m.note_memory_delta(-2048);
         assert_eq!(m.live_memory(), 0, "must clamp, not wrap");
+    }
+
+    /// The live-instance gauge must saturate at zero rather than wrap.
+    ///
+    /// A release or discard with nothing live is a pool bookkeeping bug, and
+    /// the gauge must render it as zero -- not as 2^64-1 live instances.
+    /// The event counters still count (the bug happened); only the gauge
+    /// clamps, because a negative occupancy is not meaningful.
+    #[test]
+    fn the_live_instance_gauge_saturates_at_zero() {
+        let m = Metrics::new();
+        m.note_released();
+        m.note_discarded();
+        assert_eq!(m.live(), 0, "must clamp, not wrap");
+        assert_eq!(m.released(), 1, "the event is still counted");
+        assert_eq!(m.discarded(), 1, "the event is still counted");
     }
 
     /// The exposition format must contain every series, including zero-valued

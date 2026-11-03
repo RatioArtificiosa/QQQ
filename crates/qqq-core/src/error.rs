@@ -166,6 +166,13 @@ pub enum ErrorCode {
     /// the toolchain version. Frames without a mapping report no location
     /// rather than a guessed one.
     DebugInfoInvalid = 1006,
+    /// A preloaded artifact's bytes do not match the content digest they
+    /// arrived with.
+    /// **Remediation:** recompute the digest from the artifact bytes; the
+    /// deploy pipeline passed a digest that names a different artifact, and
+    /// caching under that digest would serve these bytes to that artifact's
+    /// key. Do not relabel the bytes — find where the digest diverged.
+    ComponentDigestMismatch = 1007,
 
     // -- 2xxx: manifest / configuration --------------------------------------
     /// `qqq.toml` is not valid TOML.
@@ -490,6 +497,7 @@ impl ErrorCode {
             Self::WitInterfaceMismatch,
             Self::NonReproducibleBuild,
             Self::DebugInfoInvalid,
+            Self::ComponentDigestMismatch,
             Self::ManifestSyntaxInvalid,
             Self::ManifestSchemaViolation,
             Self::SecretUnresolvable,

@@ -72,8 +72,9 @@ pub struct PreloadItem {
     ///
     /// Taken as a field rather than computed here so a caller who has already
     /// digested the artifact -- `qqq-pkg` does, for content addressing -- does not
-    /// pay for it twice. The digest must be **of `bytes`**; a mismatch would
-    /// produce a cache entry under the wrong key, which [`preload`] cannot detect.
+    /// pay for it twice. The digest must be the hex-encoded SHA-256 **of
+    /// `bytes`**; [`preload`] verifies this and fails the item on a mismatch,
+    /// so a swapped pair can never produce a cache entry under the wrong key.
     pub digest: String,
 }
 
@@ -223,6 +224,37 @@ pub fn preload(
     for item in items {
         let began = Instant::now();
 
+        // Integrity before anything else: the cache is keyed on
+        // `item.digest`, so bytes that do not hash to it must fail HERE
+        // rather than be compiled and stored under a key that names a
+        // different artifact. A mismatch is a caller bug -- two artifacts
+        // swapped in the deploy pipeline -- and failing the item is what
+        // keeps it from becoming a poisoned cache entry at serve time.
+        let actual = content_digest(&item.bytes);
+        if actual != item.digest {
+            outcomes.push((
+                item.name.clone(),
+                PreloadOutcome::Failed {
+                    error: Box::new(
+                        Error::new(
+                            ErrorCode::ComponentDigestMismatch,
+                            format!(
+                                "`{}` digest `{}` does not match its bytes",
+                                item.name, item.digest
+                            ),
+                        )
+                        .with_cause(format!("sha256 of the bytes is `{actual}`"))
+                        .with_context("digest", item.digest.clone())
+                        .with_remediation(
+                            "recompute the digest from the artifact bytes; do not \
+                             relabel the bytes to fit the digest",
+                        ),
+                    ),
+                },
+            ));
+            continue;
+        }
+
         // Load-time shape validation (`F-10`): an artifact declaring more
         // memories, tables, or core modules than the pool allows per instance
         // is refused HERE, at deploy, with a limit code — not as an
@@ -288,6 +320,23 @@ pub fn preload(
     })
 }
 
+/// The content digest an item's bytes must hash to: hex-encoded SHA-256.
+///
+/// The same convention `qqq-run` uses for the audit record's component
+/// digest, so a digest computed anywhere in the pipeline means the same
+/// thing. Kept as a function rather than inline so the verification in
+/// [`preload`] and the test fixtures cannot drift into two algorithms.
+fn content_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    let sum = Sha256::digest(bytes);
+    let mut s = String::with_capacity(64);
+    for b in sum {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 /// The cache key an item's AOT artifact should be stored under.
 ///
 /// Exposed rather than left to the caller because the key must agree between the
@@ -343,9 +392,9 @@ mod tests {
         PreloadItem {
             name: name.to_owned(),
             bytes: bytes.to_vec(),
-            // Not a real digest, deliberately: `preload` never reads it, and a
-            // test that computed one would be testing sha2 rather than this code.
-            digest: format!("digest-of-{name}"),
+            // A real digest, deliberately: `preload` verifies it, and a
+            // fixture with a fake one would fail for the wrong reason.
+            digest: content_digest(bytes),
         }
     }
 
@@ -530,7 +579,8 @@ mod tests {
     fn the_cache_key_is_stable_and_content_keyed() {
         let cfg = EngineConfig::default();
         let a = item("a", TINY);
-        let b = item("b", TINY);
+        // Different bytes, so a different digest: the key must follow content.
+        let b = item("b", b"\x00asm\x0d\x00\x01\x01");
 
         assert_eq!(cache_key_for(&a, &cfg), cache_key_for(&a, &cfg), "stable");
         assert_ne!(
@@ -575,7 +625,13 @@ mod tests {
     /// `Debug` must not dump the artifact bytes into a log line.
     #[test]
     fn the_item_debug_does_not_print_the_bytes() {
-        let i = item("a", &[0xAB_u8; 4096]);
+        // A fixed digest without a "171" substring, so the assertion below
+        // tests the byte dump and not the digest's hex.
+        let i = PreloadItem {
+            name: "a".to_owned(),
+            bytes: vec![0xAB_u8; 4096],
+            digest: "ab".repeat(32),
+        };
         let text = format!("{i:?}");
         assert!(text.contains('a'), "the name must appear");
         assert!(text.contains("4096 B"), "the size must appear");
@@ -583,5 +639,36 @@ mod tests {
             !text.contains("171"),
             "raw byte values must not appear: {text}"
         );
+    }
+
+    /// **The digest is verified, not trusted.** Bytes accompanied by a digest
+    /// that names a different artifact must fail as that item, so a cache
+    /// entry is never written under a key that names something else. A caller
+    /// that mixes up two artifacts in its own pipeline gets a per-item
+    /// failure at deploy, not a poisoned cache at serve time.
+    #[test]
+    fn a_digest_that_does_not_match_the_bytes_fails_the_item() {
+        let mut mismatched = item("swapped", TINY);
+        mismatched.digest = "0".repeat(64);
+        assert_ne!(
+            mismatched.digest,
+            content_digest(TINY),
+            "the fixture must mismatch"
+        );
+
+        let report = preload(&[mismatched], &limits(), &EngineConfig::default(), &roomy())
+            .expect("the call itself succeeds; the item fails");
+
+        assert_eq!(report.failures(), 1);
+        let (_, outcome) = &report.outcomes[0];
+        let PreloadOutcome::Failed { error } = outcome else {
+            panic!("a mislabeled artifact must not compile: {outcome:?}");
+        };
+        assert_eq!(error.code, ErrorCode::ComponentDigestMismatch);
+        assert!(
+            error.context.iter().any(|(k, _)| k == "digest"),
+            "the claimed digest must be in the context: {error}"
+        );
+        assert!(error.remediation.is_some(), "a failure needs a remediation");
     }
 }

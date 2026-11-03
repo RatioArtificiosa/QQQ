@@ -34,7 +34,7 @@
 //! |---|---|---|
 //! | [`HandleTable`] | 64-bit `(generation, slot)` integer | The table is a field of one instance's [`StoreData`], and [`StoreData`] is not `Sync` and never shared between stores |
 //! | Host-side resources | `T` in `HandleTable<T>` | Reachable only *through* a table lookup, so it inherits the table's containment |
-//! | Tenant identity | [`TenantScope`] | Checked on entry and on every mutation of an instance's identity |
+//! | Tenant identity | [`TenantScope`] | Backstopped, not gated: production isolation is structural (one [`StoreData`] per instance, never shared; V1 builds the instance per request), and `probe` names both sides the moment a host cache keys a resource by less than the full [`InstanceKey`] -- exercised by the test suite, which drives every refusal branch with hand-built scopes |
 //!
 //! The middle row is the one that makes the first row sufficient for the
 //! guest-visible surface, but it is not sufficient for the *host*: a host that
@@ -259,6 +259,20 @@ pub enum ScopeRefusal {
         /// The digest the resource was created under.
         resource: GrantDigest,
     },
+    /// The store was built for a different artifact.
+    ///
+    /// [`InstanceKey`] documents why the component digest is key material:
+    /// two different artifacts under one grant set must not share an
+    /// instance. The scope mirrors all three key fields so the probe catches
+    /// a component mismatch the same way it catches a tenant or grant
+    /// mismatch, rather than checking two of the three fields the pool keys
+    /// on.
+    StaleComponent {
+        /// The digest the store was built for.
+        store: ComponentDigest,
+        /// The digest the resource was created for.
+        resource: ComponentDigest,
+    },
 }
 
 impl fmt::Display for ScopeRefusal {
@@ -274,6 +288,12 @@ impl fmt::Display for ScopeRefusal {
                 "handle use refused: this store was built against grant digest \
                  `{store}` but the handle was created under `{resource}`, so the \
                  instance may hold authority the current manifest revoked"
+            ),
+            Self::StaleComponent { store, resource } => write!(
+                f,
+                "handle use refused: this store was built for component digest \
+                 `{store}` but the handle was created for `{resource}`, so the \
+                 instance may be bound to the wrong artifact"
             ),
         }
     }
@@ -292,23 +312,40 @@ impl fmt::Display for ScopeRefusal {
 /// have to prove that nothing from the old grant set survived into the store --
 /// handle tables, ambient state, the linker -- and proving that by inspection
 /// is strictly harder than not doing it.
+///
+/// The component digest is immutable for the same reason. [`InstanceKey`]
+/// keys the pool on tenant, component, **and** grants; a scope that checked
+/// only two of the three would accept a handle built for a different artifact
+/// under the same tenant and grant set, and an AOT-compiled instance is bound
+/// to one compiled module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TenantScope {
     tenant: TenantId,
+    component: ComponentDigest,
     grants: GrantDigest,
 }
 
 impl TenantScope {
-    /// Scope an instance to a tenant and a grant set.
+    /// Scope an instance to a tenant, a component, and a grant set.
     #[must_use]
-    pub fn new(tenant: TenantId, grants: GrantDigest) -> Self {
-        Self { tenant, grants }
+    pub fn new(tenant: TenantId, component: ComponentDigest, grants: GrantDigest) -> Self {
+        Self {
+            tenant,
+            component,
+            grants,
+        }
     }
 
     /// The tenant this instance serves.
     #[must_use]
     pub fn tenant(&self) -> &TenantId {
         &self.tenant
+    }
+
+    /// The component digest the instance was built for.
+    #[must_use]
+    pub fn component(&self) -> &ComponentDigest {
+        &self.component
     }
 
     /// The grant digest the instance was built against.
@@ -318,7 +355,7 @@ impl TenantScope {
     }
 
     /// The only operation that resembles re-scoping: derive a scope for the
-    /// *same* tenant under a different grant set.
+    /// *same* tenant and component under a different grant set.
     ///
     /// # Why this exists instead of `set_tenant`
     ///
@@ -330,11 +367,15 @@ impl TenantScope {
     ///
     /// Returns a **new** scope. It does not mutate `self`, so an instance that
     /// already holds one cannot acquire a second identity by having a scope
-    /// cloned and edited underneath it.
+    /// cloned and edited underneath it. The component travels unchanged: a
+    /// narrower grant set is still a scope for the same artifact, so there is
+    /// deliberately no `for_same_grants` that would let a caller re-point a
+    /// warm instance at a different module.
     #[must_use]
     pub fn for_same_tenant(&self, grants: GrantDigest) -> Self {
         Self {
             tenant: self.tenant.clone(),
+            component: self.component.clone(),
             grants,
         }
     }
@@ -352,14 +393,32 @@ impl TenantScope {
     /// # Why a `Result` and not a `debug_assert`
     ///
     /// A `debug_assert` compiles out of release builds, which is where the
-    /// server runs. The cost here is two comparisons on a path already doing a
-    /// `BTreeSet` lookup; making it always-on means the invariant is enforced
-    /// in the artifact that ships.
-    pub fn probe(&self, tenant: &TenantId, grants: &GrantDigest) -> Result<(), ScopeRefusal> {
+    /// server runs. The cost here is three digest comparisons on a path
+    /// already doing a `BTreeSet` lookup; making it always-on means the
+    /// invariant is enforced in the artifact that ships.
+    ///
+    /// # Why tenant, then component, then grants
+    ///
+    /// The check order mirrors [`InstanceKey`]'s field order, so the refusal
+    /// for a handle that differs in several fields names the earliest field
+    /// of the key. Tenant first: a cross-tenant use is the §7.1 threat and
+    /// must never be misreported as a lesser mismatch.
+    pub fn probe(
+        &self,
+        tenant: &TenantId,
+        component: &ComponentDigest,
+        grants: &GrantDigest,
+    ) -> Result<(), ScopeRefusal> {
         if &self.tenant != tenant {
             return Err(ScopeRefusal::ForeignTenant {
                 store: self.tenant.clone(),
                 resource: tenant.clone(),
+            });
+        }
+        if &self.component != component {
+            return Err(ScopeRefusal::StaleComponent {
+                store: self.component.clone(),
+                resource: component.clone(),
             });
         }
         if &self.grants != grants {
@@ -374,12 +433,13 @@ impl TenantScope {
     /// Render as the audit record's tenant fields (§10.1).
     ///
     /// The audit stream records tenant, component digest and manifest revision
-    /// per event; this produces the tenant half of that, in a stable order, so
+    /// per event; this produces the scope's three fields in a stable order, so
     /// two records of the same instance render identically.
     #[must_use]
-    pub fn audit_fields(&self) -> [(&'static str, String); 2] {
+    pub fn audit_fields(&self) -> [(&'static str, String); 3] {
         [
             ("tenant", self.tenant.as_str().to_owned()),
+            ("component_digest", self.component.as_str().to_owned()),
             ("grant_digest", self.grants.as_str().to_owned()),
         ]
     }
@@ -387,7 +447,9 @@ impl TenantScope {
 
 impl fmt::Display for TenantScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}#{}", self.tenant, self.grants)
+        // Mirrors [`InstanceKey`]'s `tenant@component#grants` rendering so the
+        // scope reads the same way as the pool key it backstops.
+        write!(f, "{}@{}#{}", self.tenant, self.component, self.grants)
     }
 }
 
@@ -778,24 +840,27 @@ mod tests {
 
     #[test]
     fn a_scope_probes_true_for_its_own_identity() {
-        let s = TenantScope::new(tenant("acme"), grants(&hex(64)));
-        assert!(s.probe(&tenant("acme"), &grants(&hex(64))).is_ok());
+        let s = TenantScope::new(tenant("acme"), component(&hex(64)), grants(&hex(64)));
+        assert!(
+            s.probe(&tenant("acme"), &component(&hex(64)), &grants(&hex(64)))
+                .is_ok()
+        );
     }
 
     /// The refusal branch, reached deliberately. This is the fault injection
     /// that makes `probe` a check rather than decoration.
     #[test]
     fn a_scope_probe_refuses_a_foreign_tenant_and_names_both() {
-        let s = TenantScope::new(tenant("acme"), grants(&hex(64)));
+        let s = TenantScope::new(tenant("acme"), component(&hex(64)), grants(&hex(64)));
         let err = s
-            .probe(&tenant("globex"), &grants(&hex(64)))
+            .probe(&tenant("globex"), &component(&hex(64)), &grants(&hex(64)))
             .expect_err("a foreign tenant must be refused");
         match &err {
             ScopeRefusal::ForeignTenant { store, resource } => {
                 assert_eq!(store.as_str(), "acme");
                 assert_eq!(resource.as_str(), "globex");
             }
-            other @ ScopeRefusal::StaleGrants { .. } => {
+            other @ (ScopeRefusal::StaleGrants { .. } | ScopeRefusal::StaleComponent { .. }) => {
                 panic!("expected ForeignTenant, got {other:?}")
             }
         }
@@ -806,12 +871,34 @@ mod tests {
 
     #[test]
     fn a_scope_probe_refuses_stale_grants() {
-        let s = TenantScope::new(tenant("acme"), grants(&hex(64)));
+        let s = TenantScope::new(tenant("acme"), component(&hex(64)), grants(&hex(64)));
         let err = s
-            .probe(&tenant("acme"), &grants(&hex(16)))
+            .probe(&tenant("acme"), &component(&hex(64)), &grants(&hex(16)))
             .expect_err("a different grant set must be refused");
         assert!(matches!(err, ScopeRefusal::StaleGrants { .. }));
         assert!(err.to_string().contains("revoked"), "{err}");
+    }
+
+    /// The component half of the [`InstanceKey`] separation argument: the same
+    /// tenant under the same grant set, but a different artifact, must still
+    /// be refused -- and the refusal must name both component digests, because
+    /// "wrong artifact" is not actionable without them.
+    #[test]
+    fn a_scope_probe_refuses_a_foreign_component_and_names_both() {
+        let s = TenantScope::new(tenant("acme"), component(&hex(64)), grants(&hex(64)));
+        let err = s
+            .probe(&tenant("acme"), &component(&hex(32)), &grants(&hex(64)))
+            .expect_err("a different artifact must be refused");
+        match &err {
+            ScopeRefusal::StaleComponent { store, resource } => {
+                assert_eq!(store.as_str(), hex(64));
+                assert_eq!(resource.as_str(), hex(32));
+            }
+            other => panic!("expected StaleComponent, got {other:?}"),
+        }
+        let text = err.to_string();
+        assert!(text.contains(&hex(64)) && text.contains(&hex(32)), "{text}");
+        assert!(text.contains("component digest"), "{text}");
     }
 
     /// A refused probe must check the tenant *before* the grants, so the error
@@ -819,33 +906,51 @@ mod tests {
     /// is a user-visible choice, so it is pinned.
     #[test]
     fn the_tenant_is_checked_before_the_grant_digest() {
-        let s = TenantScope::new(tenant("acme"), grants(&hex(64)));
+        let s = TenantScope::new(tenant("acme"), component(&hex(64)), grants(&hex(64)));
         let err = s
-            .probe(&tenant("globex"), &grants(&hex(16)))
-            .expect_err("both differ");
+            .probe(&tenant("globex"), &component(&hex(32)), &grants(&hex(16)))
+            .expect_err("all three differ");
         assert!(matches!(err, ScopeRefusal::ForeignTenant { .. }));
+    }
+
+    /// The component is checked before the grants, mirroring
+    /// [`InstanceKey`]'s field order: a handle that differs in both names the
+    /// artifact mismatch, not the grant mismatch. Ordering is a user-visible
+    /// choice, so it is pinned.
+    #[test]
+    fn the_component_is_checked_before_the_grant_digest() {
+        let s = TenantScope::new(tenant("acme"), component(&hex(64)), grants(&hex(64)));
+        let err = s
+            .probe(&tenant("acme"), &component(&hex(32)), &grants(&hex(16)))
+            .expect_err("component and grants differ");
+        assert!(matches!(err, ScopeRefusal::StaleComponent { .. }));
     }
 
     #[test]
     fn re_scoping_is_same_tenant_only_and_does_not_mutate() {
-        let s = TenantScope::new(tenant("acme"), grants(&hex(64)));
+        let s = TenantScope::new(tenant("acme"), component(&hex(64)), grants(&hex(64)));
         let narrowed = s.for_same_tenant(grants(&hex(16)));
         assert_eq!(narrowed.tenant().as_str(), "acme");
+        assert_eq!(narrowed.component().as_str(), hex(64));
         assert_eq!(narrowed.grants().as_str(), hex(16));
         // The original is untouched: an instance cannot have its identity
         // edited underneath it by a caller that cloned the scope.
         assert_eq!(s.grants().as_str(), hex(64));
+        assert_eq!(s.component().as_str(), hex(64));
     }
 
     #[test]
-    fn a_scope_renders_its_two_fields_stably() {
-        let s = TenantScope::new(tenant("acme"), grants("ab12"));
-        assert_eq!(s.to_string(), "acme#ab12");
+    fn a_scope_renders_its_three_fields_stably() {
+        let s = TenantScope::new(tenant("acme"), component("ab12"), grants("cd34"));
+        // Mirrors `InstanceKey`'s `tenant@component#grants` rendering.
+        assert_eq!(s.to_string(), "acme@ab12#cd34");
         let fields = s.audit_fields();
         assert_eq!(fields[0].0, "tenant");
         assert_eq!(fields[0].1, "acme");
-        assert_eq!(fields[1].0, "grant_digest");
+        assert_eq!(fields[1].0, "component_digest");
         assert_eq!(fields[1].1, "ab12");
+        assert_eq!(fields[2].0, "grant_digest");
+        assert_eq!(fields[2].1, "cd34");
     }
 
     // -- TenantLedger -----------------------------------------------------

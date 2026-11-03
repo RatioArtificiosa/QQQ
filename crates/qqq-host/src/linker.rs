@@ -2808,21 +2808,27 @@ mod tests {
     /// a pre-/post-normalization mismatch would enter.
     #[test]
     fn a_scoped_store_carries_the_tenant_and_the_grant_digest_it_was_keyed_on() {
-        use crate::tenant::{GrantDigest, TenantScope};
+        use crate::tenant::{ComponentDigest, GrantDigest, TenantScope};
         use qqq_cap::egress::TenantId;
 
         let grants =
             GrantSet::from_manifest(&Manifest::parse(MINIMAL_MANIFEST).expect("test manifest"));
         let digest = GrantDigest::new(&grants.digest()).expect("GrantSet::digest is canonical hex");
+        let component =
+            ComponentDigest::new("00112233445566778899aabbccddeeff").expect("canonical hex");
         let tenant = TenantId::new("acme").expect("test tenant");
 
-        let data =
-            StoreData::new(grants).with_tenant(TenantScope::new(tenant.clone(), digest.clone()));
+        let data = StoreData::new(grants).with_tenant(TenantScope::new(
+            tenant.clone(),
+            component.clone(),
+            digest.clone(),
+        ));
 
         let scope = data.tenant_scope().expect("the store is scoped");
         assert_eq!(scope.tenant(), &tenant);
+        assert_eq!(scope.component(), &component);
         assert_eq!(scope.grants(), &digest);
-        assert!(scope.probe(&tenant, &digest).is_ok());
+        assert!(scope.probe(&tenant, &component, &digest).is_ok());
     }
 
     /// **The end-to-end isolation test.**
@@ -2916,19 +2922,28 @@ mod tests {
         let globex = TenantId::new("globex").expect("tenant");
 
         let acme_store = StoreData::new(GrantSet::from_manifest(&manifest))
-            .with_tenant(TenantScope::new(acme.clone(), gd.clone()));
+            .with_tenant(TenantScope::new(acme.clone(), cd.clone(), gd.clone()));
         let globex_store = StoreData::new(GrantSet::from_manifest(&manifest))
-            .with_tenant(TenantScope::new(globex.clone(), gd.clone()));
+            .with_tenant(TenantScope::new(globex.clone(), cd.clone(), gd.clone()));
 
         let acme_scope = acme_store.tenant_scope().expect("scoped");
         let globex_scope = globex_store.tenant_scope().expect("scoped");
 
         // Each refuses the other, and the refusal names both sides.
         let err = acme_scope
-            .probe(&globex, &gd)
+            .probe(&globex, &cd, &gd)
             .expect_err("acme must refuse globex's identity");
         assert!(err.to_string().contains("globex"), "{err}");
-        assert!(globex_scope.probe(&acme, &gd).is_err());
+        assert!(globex_scope.probe(&acme, &cd, &gd).is_err());
+
+        // Same tenant and grants, but a different artifact, is still refused:
+        // the scope mirrors all three pool-key fields, not two.
+        let other_cd =
+            ComponentDigest::new("ffeeddccbbaa99887766554433221100").expect("canonical hex");
+        let err = acme_scope
+            .probe(&acme, &other_cd, &gd)
+            .expect_err("acme must refuse another artifact's identity");
+        assert!(err.to_string().contains("component digest"), "{err}");
 
         // The pool keys diverge even though component and grants are shared.
         let acme_key = InstanceKey::new(acme, cd.clone(), gd.clone());
@@ -2952,7 +2967,7 @@ mod tests {
     /// nothing while looking like it does (`§O-105`).
     #[test]
     fn narrowing_the_grants_invalidates_a_warm_instances_scope() {
-        use crate::tenant::{GrantDigest, TenantScope};
+        use crate::tenant::{ComponentDigest, GrantDigest, TenantScope};
         use qqq_cap::egress::TenantId;
 
         // The wide set really does grant something.
@@ -2968,10 +2983,12 @@ mod tests {
         assert!(!wide.capabilities().is_empty(), "the wide set is not empty");
 
         let tenant = TenantId::new("acme").expect("tenant");
-        let scope = TenantScope::new(tenant.clone(), wide_digest);
+        let component =
+            ComponentDigest::new("00112233445566778899aabbccddeeff").expect("canonical hex");
+        let scope = TenantScope::new(tenant.clone(), component.clone(), wide_digest);
 
         let refusal = scope
-            .probe(&tenant, &narrow_digest)
+            .probe(&tenant, &component, &narrow_digest)
             .expect_err("the narrowed digest must not match the warm instance");
         assert!(
             refusal.to_string().contains("revoked"),

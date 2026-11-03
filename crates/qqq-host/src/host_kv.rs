@@ -629,6 +629,10 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
         store: String,
         key: String,
     ) -> std::result::Result<Option<Vec<u8>>, WitKvError> {
+        // The audit seam first: the grant denial currently comes first in
+        // `check_read`, so recording here preserves the refusal precedence
+        // exactly while making the consultation visible.
+        crate::ambient::require(self, KvRead, "kv_get").map_err(|_| WitKvError::NotGranted)?;
         check_read(self, &store)?;
         check_key(&key)?;
         let now = now_or_fail(self)?;
@@ -642,6 +646,16 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
         value: Vec<u8>,
         ttl_seconds: Option<u64>,
     ) -> std::result::Result<(), WitKvError> {
+        // The direction exercised is write, so a write-only manifest records
+        // `Granted` here; `check_write` below keeps the exact refusal
+        // precedence (membership before direction), so a read-only manifest
+        // still answers `read-only`, not `not-granted`.
+        let cap = if self.grants.grants(KvWrite) {
+            KvWrite
+        } else {
+            KvRead
+        };
+        crate::ambient::require(self, cap, "kv_set").map_err(|_| WitKvError::NotGranted)?;
         check_write(self, &store)?;
         let now = now_or_fail(self)?;
         let expires_at = if ttl_seconds.is_some() {
@@ -657,6 +671,14 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
     }
 
     fn delete(&mut self, store: String, key: String) -> std::result::Result<(), WitKvError> {
+        // Same direction-first recording as `set`: the seam records, and
+        // `check_write` keeps the refusal names callers already match on.
+        let cap = if self.grants.grants(KvWrite) {
+            KvWrite
+        } else {
+            KvRead
+        };
+        crate::ambient::require(self, cap, "kv_delete").map_err(|_| WitKvError::NotGranted)?;
         check_write(self, &store)?;
         check_key(&key)?;
         lock_backend(self).delete(&store, &key);
@@ -664,6 +686,7 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
     }
 
     fn exists(&mut self, store: String, key: String) -> std::result::Result<bool, WitKvError> {
+        crate::ambient::require(self, KvRead, "kv_exists").map_err(|_| WitKvError::NotGranted)?;
         check_read(self, &store)?;
         check_key(&key)?;
         let now = now_or_fail(self)?;
@@ -676,6 +699,7 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
         prefix: String,
         limit: u32,
     ) -> std::result::Result<Vec<String>, WitKvError> {
+        crate::ambient::require(self, KvRead, "kv_keys").map_err(|_| WitKvError::NotGranted)?;
         check_read(self, &store)?;
         // A prefix is a key fragment: bounding it by the key bound keeps a
         // megabyte prefix from turning every comparison into a long one.
@@ -691,6 +715,7 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
         store: String,
         keys: Vec<String>,
     ) -> std::result::Result<Vec<Option<Vec<u8>>>, WitKvError> {
+        crate::ambient::require(self, KvRead, "kv_get_many").map_err(|_| WitKvError::NotGranted)?;
         check_read(self, &store)?;
         // Count is quota, not entry size: 129 tiny keys fail `quota-exceeded`
         // because no single key is too large, and blaming an entry would
@@ -716,7 +741,15 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
         // Infallible by WIT design (the manifest set is public), so the
         // grant re-check fails closed by answering empty rather than by
         // erroring: an ungranted caller learns nothing, including membership.
-        if !(self.grants.grants(KvRead) || self.grants.grants(KvWrite)) {
+        // The consultation is still recorded, under the direction the caller
+        // holds -- a write-only manifest records `Granted`, and a manifest
+        // with neither direction records `Denied`.
+        let cap = if self.grants.grants(KvRead) {
+            KvRead
+        } else {
+            KvWrite
+        };
+        if crate::ambient::require(self, cap, "kv_stores").is_err() {
             return Vec::new();
         }
         self.kv.config.stores.clone()
@@ -958,6 +991,107 @@ mod tests {
         )
         .expect_err("read-only");
         assert!(matches!(err, WitKvError::ReadOnly));
+    }
+
+    /// Every kv body records through the audit seam: a direct grant check
+    /// would answer identically while leaving the caller looking
+    /// capability-clean to `assert-caps-only`. Counted, not `contains`.
+    #[test]
+    fn every_kv_body_records_through_the_audit_seam() {
+        let production = include_str!("host_kv.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 7,
+            "every kv body (get, set, delete, exists, keys, get_many, stores) must consult \
+             the audit seam; found {seams} seam call(s)"
+        );
+    }
+
+    /// A store whose capability uses are recorded, so the seam tests can
+    /// assert on the rows rather than on the return value alone.
+    fn audited_store(
+        write: bool,
+    ) -> (
+        StoreData,
+        std::sync::Arc<std::sync::Mutex<crate::audit::AuditStream>>,
+    ) {
+        let mut data = granted_store(write);
+        let stream = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::audit::AuditStream::with_default_capacity(),
+        ));
+        let digest = data.grants.digest();
+        data.audit = Some(crate::audit::AuditHandle::new(
+            std::sync::Arc::clone(&stream),
+            crate::tenant::ComponentDigest::new("0011223344556677").expect("digest"),
+            crate::tenant::GrantDigest::new(&digest).expect("digest"),
+            None,
+        ));
+        (data, stream)
+    }
+
+    /// A granted read records a `Granted` row naming the capability and the
+    /// host function -- the row an auditor aggregates, not a constant.
+    #[test]
+    fn a_granted_get_records_a_granted_row() {
+        let (mut data, stream) = audited_store(true);
+        let got = bindings::qqq::kv::store::Host::get(&mut data, "s".to_owned(), "k".to_owned())
+            .expect("granted");
+        assert_eq!(got, None, "the store is empty; the row is the assertion");
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 1, "one consultation, one row");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].capability,
+            qqq_cap::capability::Capability::KvRead
+        );
+        assert_eq!(records[0].function, "kv_get");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Granted);
+    }
+
+    /// A refused write records a `Denied` row even though the call fails --
+    /// a refusal is the row an auditor most wants.
+    #[test]
+    fn a_denied_set_records_a_denied_row() {
+        let mut data = ungranted_store();
+        let stream = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::audit::AuditStream::with_default_capacity(),
+        ));
+        let digest = data.grants.digest();
+        data.audit = Some(crate::audit::AuditHandle::new(
+            std::sync::Arc::clone(&stream),
+            crate::tenant::ComponentDigest::new("0011223344556677").expect("digest"),
+            crate::tenant::GrantDigest::new(&digest).expect("digest"),
+            None,
+        ));
+        // The backend view is attached the way a real instance carries it;
+        // the seam refuses before it is touched.
+        data.kv = KvView::new(
+            Arc::new(KvConfig::new(vec!["s".to_owned()], true)),
+            Arc::new(Mutex::new(KvBackend::new())),
+        );
+        let err = bindings::qqq::kv::store::Host::set(
+            &mut data,
+            "s".to_owned(),
+            "k".to_owned(),
+            b"v".to_vec(),
+            None,
+        )
+        .expect_err("no grant");
+        assert!(matches!(err, WitKvError::NotGranted));
+        // Rows buffer request-locally until the commit, so read the stream
+        // after committing, the way the served path does.
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 1, "the denial must be recorded");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].function, "kv_set");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Denied);
     }
 
     /// Unlisted stores are unconfigured, even for reads: the allowlist is

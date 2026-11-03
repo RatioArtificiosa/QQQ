@@ -397,11 +397,14 @@ impl SecretStore {
     #[must_use]
     pub(crate) fn is_secret_value(&self, value: &[u8]) -> bool {
         use constant_time_eq::constant_time_eq;
-        !value.is_empty()
-            && self
-                .material
-                .values()
-                .any(|m| constant_time_eq(&m.value, value))
+        // No early exit: `any()` would stop at the first match and leak the
+        // matching index via timing. Accumulate over all materials so the
+        // duration is independent of which secret matched (or none did).
+        let mut hit = 0u8;
+        for m in self.material.values() {
+            hit |= u8::from(constant_time_eq(&m.value, value));
+        }
+        !value.is_empty() && hit == 1
     }
 
     /// `exists(name)`: whether a granted secret is resolved and usable.

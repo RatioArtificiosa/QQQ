@@ -100,6 +100,11 @@ pub use bindings::qqq::queue::messaging::QueueError as WitQueueError;
 /// Symmetric with the kv value bound: one guest, one budget shape to learn.
 pub(crate) const MAX_QUEUE_MESSAGE_BYTES: usize = 64 * 1024;
 
+/// Delivery ids are `{queue}:{counter:020}`; queue names cap at 256 bytes,
+/// so no live lease id exceeds 256 + 1 + 20 bytes. Longer ids fail closed
+/// as `lease-expired` without touching the map.
+pub(crate) const MAX_DELIVERY_ID_BYTES: usize = 256 + 1 + 20;
+
 /// The most messages one `publish-many` call may carry.
 ///
 /// Batch-first per the WIT style guide; unbounded batches would be one call's
@@ -436,6 +441,12 @@ impl QueueBackend {
         id: &str,
         now: u64,
     ) -> std::result::Result<(), WitQueueError> {
+        // Ids are `{queue}:{counter:020}` (max 256 + 1 + 20 = 277 bytes). A
+        // longer id can never name a live lease, so refuse without touching
+        // the map: a megabyte id must not cost a `BTree` compare.
+        if id.len() > MAX_DELIVERY_ID_BYTES {
+            return Err(WitQueueError::LeaseExpired);
+        }
         self.reap_expired(queue, now);
         match self.queues.get_mut(queue).and_then(|state| {
             let flight = state.in_flight.get(id)?;
@@ -485,6 +496,9 @@ impl QueueBackend {
         id: &str,
         now: u64,
     ) -> std::result::Result<(), WitQueueError> {
+        if id.len() > MAX_DELIVERY_ID_BYTES {
+            return Err(WitQueueError::LeaseExpired);
+        }
         self.reap_expired(queue, now);
         let flight = self
             .queues
@@ -991,6 +1005,22 @@ mod tests {
         ));
         assert!(matches!(
             backend.reject("q", "q:999", 0),
+            Err(WitQueueError::LeaseExpired)
+        ));
+    }
+
+    /// Oversize delivery ids fail without touching the map: no live id
+    /// exceeds 277 bytes, so a megabyte id is not a lookup.
+    #[test]
+    fn oversize_ids_fail_closed() {
+        let mut backend = QueueBackend::new();
+        let big = "x".repeat(MAX_DELIVERY_ID_BYTES + 1);
+        assert!(matches!(
+            backend.acknowledge("q", &big, 0),
+            Err(WitQueueError::LeaseExpired)
+        ));
+        assert!(matches!(
+            backend.reject("q", &big, 0),
             Err(WitQueueError::LeaseExpired)
         ));
     }

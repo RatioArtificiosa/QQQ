@@ -1014,6 +1014,13 @@ pub fn hash_data(
     input: &[u8],
 ) -> Result<Vec<u8>, HostCallError> {
     require(data, Capability::CryptoHash, "hash_data")?;
+    // Defense in depth: `host_crypto` gates via `boundary::size` before
+    // calling here, but this function is `pub` and hashing is linear in the
+    // input, so an unbounded direct call would price host CPU at the guest's
+    // chosen size. Same 64 MiB ceiling as `host_crypto::MAX_HASH_INPUT`.
+    if input.len() > 64 * 1024 * 1024 {
+        return Err(HostCallError::TooLong);
+    }
     let alg = HashAlgorithm::parse(algorithm)
         .ok_or_else(|| HostCallError::AlgorithmNotAllowed(algorithm.to_owned()))?;
     // The allowlist is enforced by the host, so a guest cannot use an algorithm
@@ -1228,6 +1235,18 @@ mod tests {
             "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85",
             "BLAKE3 of \"abc\" must match the published test vector"
         );
+    }
+
+    /// An oversize hash input is refused before hashing: hashing is linear,
+    /// so an unbounded call prices host CPU at the guest's chosen size.
+    #[test]
+    fn oversize_hash_input_is_refused() {
+        let data = crypto_store();
+        let big = vec![0u8; 64 * 1024 * 1024 + 1];
+        assert!(matches!(
+            hash_data(&data, "sha256", &big),
+            Err(HostCallError::TooLong)
+        ));
     }
 
     #[test]

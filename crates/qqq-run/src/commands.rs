@@ -1323,6 +1323,29 @@ pub fn sibling_lockfile(loaded: &LoadedManifest) -> Option<qqq_pkg::lock::Lockfi
     qqq_pkg::lock::Lockfile::parse(&text).ok()
 }
 
+/// Whether one capability exposes the posture on its own.
+///
+/// The single statement of the rule `classify_posture` and the audit's
+/// finding filter both read: a second copy would drift, and drift here
+/// names the wrong grants or misses one. `pub(crate)` so the audit uses
+/// this rather than restating the list.
+#[must_use]
+pub(crate) fn exposes_posture(cap: Capability) -> bool {
+    matches!(
+        cap,
+        Capability::FsWrite
+            | Capability::FsWatch
+            | Capability::HttpClient
+            | Capability::HttpServer
+            | Capability::SqlExecute
+            | Capability::KvWrite
+            | Capability::QueuePublish
+            | Capability::QueueSubscribe
+            | Capability::DnsResolve
+            | Capability::AiInfer
+    )
+}
+
 /// Classify a grant set's security posture.
 ///
 /// The rule is deliberately simple and stated here rather than inferred:
@@ -1333,21 +1356,7 @@ pub fn classify_posture(caps: &[Capability]) -> Posture {
     if caps.is_empty() {
         return Posture::Minimal;
     }
-    let exposes = caps.iter().any(|c| {
-        matches!(
-            c,
-            Capability::FsWrite
-                | Capability::FsWatch
-                | Capability::HttpClient
-                | Capability::HttpServer
-                | Capability::SqlExecute
-                | Capability::KvWrite
-                | Capability::QueuePublish
-                | Capability::QueueSubscribe
-                | Capability::DnsResolve
-                | Capability::AiInfer
-        )
-    });
+    let exposes = caps.iter().any(|c| exposes_posture(*c));
     if exposes {
         Posture::Exposed
     } else {

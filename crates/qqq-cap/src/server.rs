@@ -629,6 +629,25 @@ impl Server {
             methods.push(canonical);
         }
 
+        // A method listed twice on one route is the same defect as two entries
+        // for one path and method: the author wrote one intention twice, and
+        // the table would carry a duplicate no reader can distinguish from a
+        // merge. Refused here rather than in `RouteTable`, which should never
+        // see ambiguity the manifest could have named.
+        {
+            let mut seen = std::collections::BTreeSet::new();
+            for m in &methods {
+                if !seen.insert(*m) {
+                    return Err(ManifestError::InvalidField {
+                        field: format!("{where_}.methods"),
+                        reason: format!(
+                            "`{m}` is listed twice on one route; list each method once"
+                        ),
+                    });
+                }
+            }
+        }
+
         // A duplicate is an error rather than a last-wins merge: two entries for
         // the same path and method mean the author has two intentions, and picking
         // one silently is how the other is discovered in production. Paths
@@ -702,6 +721,14 @@ fn validate_stateful_methods(
             reason: "an `sse` route must list only `GET`: event polls \
                      replay the head with no body, so a stream declared \
                      for another method would run blind"
+                .to_owned(),
+        });
+    }
+    if route.kind == crate::manifest::RouteKind::Sse && !methods.contains(&"GET") {
+        return Err(ManifestError::InvalidField {
+            field: format!("{where_}.methods"),
+            reason: "an `sse` route must list `GET`: without it no event \
+                     poll can ever arrive"
                 .to_owned(),
         });
     }
@@ -1056,13 +1083,26 @@ mod tests {
     /// no body, so any other method would run with a body the guest never sees.
     #[test]
     fn an_sse_route_with_a_non_get_method_is_refused() {
-        let mut r = route("/events", &["GET", "POST"]);
-        r.kind = crate::manifest::RouteKind::Sse;
-        let err = server(vec![r]).validate().expect_err("must refuse");
-        assert!(err.to_string().contains("GET"), "{err}");
+        for methods in [&["GET", "POST"][..], &["POST"][..]] {
+            let mut r = route("/events", methods);
+            r.kind = crate::manifest::RouteKind::Sse;
+            let err = server(vec![r]).validate().expect_err("must refuse");
+            let text = err.to_string();
+            assert!(text.contains("methods"), "{text}");
+            assert!(text.contains("only `GET`"), "{text}");
+        }
         let mut ok = route("/events", &["GET"]);
         ok.kind = crate::manifest::RouteKind::Sse;
         assert!(server(vec![ok]).validate().is_ok());
+    }
+
+    /// A method listed twice on one route is refused: the table would carry
+    /// a duplicate no reader can distinguish from a merge.
+    #[test]
+    fn a_duplicate_method_on_one_route_is_refused() {
+        let s = server(vec![route("/orders", &["GET", "GET"])]);
+        let err = s.validate().expect_err("must refuse");
+        assert!(err.to_string().contains("twice"), "{err}");
     }
 
     /// Ultra-review r1: CORS origins follow the websocket shape discipline —

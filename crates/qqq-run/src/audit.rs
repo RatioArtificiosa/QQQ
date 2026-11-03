@@ -218,8 +218,8 @@ impl AuditReport {
         format!(
             "limits in force: memory {}, fuel {}, epoch deadline {} ms, \
              max instances {}, max open handles {}, max subrequests {}, \
-             max poll per tick {}; posture checked over caps, limits, supply \
-             chain and provenance",
+             max poll per tick {}; posture checked over caps, limits, unused grants, \
+             supply chain and provenance",
             limits.memory,
             limits.fuel,
             limits.epoch_deadline_ms,
@@ -418,28 +418,6 @@ fn unused_grants_from(
     )]
 }
 
-/// Whether one capability exposes the posture on its own.
-///
-/// The single statement of the rule `caps_and_posture` filters by: a grant
-/// exposes iff `classify_posture` says so for the singleton, so the finding
-/// names exactly the grants the verdict blames. `PartialEq` between the two
-/// is asserted, not assumed.
-fn exposes(cap: qqq_cap::Capability) -> bool {
-    matches!(
-        cap,
-        qqq_cap::Capability::FsWrite
-            | qqq_cap::Capability::FsWatch
-            | qqq_cap::Capability::HttpClient
-            | qqq_cap::Capability::HttpServer
-            | qqq_cap::Capability::SqlExecute
-            | qqq_cap::Capability::KvWrite
-            | qqq_cap::Capability::QueuePublish
-            | qqq_cap::Capability::QueueSubscribe
-            | qqq_cap::Capability::DnsResolve
-            | qqq_cap::Capability::AiInfer
-    )
-}
-
 /// The exposure question: can this component write or reach the network?
 ///
 /// # Why the capability list is filtered rather than the posture re-derived
@@ -459,14 +437,13 @@ fn caps_and_posture(loaded: &LoadedManifest) -> Vec<Finding> {
         return Vec::new();
     }
 
-    // The filter below must agree with `classify_posture`: it decides whether
-    // the posture is exposed, this decides which grants made it so. A second
-    // statement of the rule would drift, so the predicate lives once, here,
-    // and `every_exposing_capability_matches_the_posture` asserts the two
-    // cannot disagree on any capability.
+    // The filter reads the same rule as `classify_posture` — the single
+    // statement in `commands::exposes_posture` — so the finding names exactly
+    // the grants the verdict blames. `every_exposing_capability_matches_the_posture`
+    // pins the agreement on every capability.
     let exposing: Vec<&str> = caps
         .iter()
-        .filter(|c| exposes(**c))
+        .filter(|c| crate::commands::exposes_posture(**c))
         .map(|c| c.name())
         .collect();
 
@@ -717,12 +694,18 @@ impl crate::output::CommandOutput for AuditOutput {
     fn summary(&self) -> String {
         match (self.findings.len(), self.worst) {
             (0, _) => {
-                "no findings: caps, limits, supply chain and provenance all check out".to_owned()
+                "no findings: caps, limits, unused grants, supply chain and provenance all check out".to_owned()
             }
             (n, Some(worst)) => format!(
-                "{n} finding(s) over caps, limits, supply chain and provenance; worst severity: {worst}"
+                "{n} finding(s) over caps, limits, unused grants, supply chain and provenance; worst severity: {worst}"
             ),
-            (n, None) => format!("{n} finding(s)"),
+            (n, None) => {
+                debug_assert!(
+                    false,
+                    "a non-empty report always has a worst severity: {n} findings"
+                );
+                format!("{n} finding(s)")
+            }
         }
     }
 
@@ -957,18 +940,16 @@ mod tests {
 
     // -- The rules, each made to FIRE -------------------------------------
 
-    /// The `exposes` predicate and `classify_posture` agree on every capability.
-    ///
-    /// Two statements of one rule drift; a new exposing capability added to
-    /// one but not the other would blame the wrong grants or miss one.
+    /// The filter and the verdict read one rule; this test pins that on
+    /// every capability so neither side can drift it alone.
     #[test]
     fn every_exposing_capability_matches_the_posture() {
         use crate::commands::Posture;
         for cap in qqq_cap::Capability::all() {
             assert_eq!(
-                exposes(*cap),
+                crate::commands::exposes_posture(*cap),
                 crate::commands::classify_posture(&[*cap]) == Posture::Exposed,
-                "exposes() and classify_posture disagree on {}",
+                "exposes_posture and classify_posture disagree on {}",
                 cap.name()
             );
         }
@@ -1151,7 +1132,7 @@ mod tests {
     #[test]
     fn no_lockfile_means_no_supply_chain_findings() {
         let report = audit(&loaded(CHOSEN), None);
-        for rule in ["qqq/unpinned-dependency", "qqq/capability-escalation"] {
+        for rule in ["qqq/unsigned-manifest", "qqq/capability-escalation"] {
             assert!(
                 !report.findings.iter().any(|f| f.rule == rule),
                 "{rule} fired"

@@ -813,9 +813,7 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c if c.is_control() => {
+            c if c.is_control() || qqq_cap::text::is_layout_forgery(c) => {
                 use std::fmt::Write as _;
                 let _ = write!(out, "\\u{:04x}", u32::from(c));
             }

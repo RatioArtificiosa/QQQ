@@ -884,19 +884,18 @@ fn truncate(s: &str, max: usize) -> String {
 /// dropping the byte could make two different forged messages render identically.
 #[must_use]
 fn one_line(s: &str) -> String {
-    // `is_control` misses U+2028 and U+2029: they are separators, not
-    // controls, but they break lines in terminals and in JavaScript string
-    // literals alike — so they are mapped with the controls rather than
-    // passed through.
+    // `is_control` misses separators and bidi overrides; the shared predicate
+    // covers them, so this stays consistent with every other renderer by
+    // construction rather than by parallel lists.
     if s.chars()
-        .all(|c| !c.is_control() && c != '\u{2028}' && c != '\u{2029}')
+        .all(|c| !c.is_control() && !qqq_host::is_layout_forgery(c))
     {
         // The common case: no allocation and no copy.
         return s.to_owned();
     }
     s.chars()
         .map(|c| {
-            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+            if c.is_control() || qqq_host::is_layout_forgery(c) {
                 '\u{FFFD}'
             } else {
                 c

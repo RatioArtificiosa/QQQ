@@ -1509,6 +1509,10 @@ pub fn is_host_controlled_header(name: &str) -> bool {
 /// assert_eq!(escape_header_value("nul\x00del\x7f"), "nul%00del%7F");
 /// assert_eq!(escape_header_value("a\u{2028}b"), "a%E2%80%A8b");
 /// assert_eq!(escape_header_value("a\u{85}b"), "a%C2%85b");
+///
+/// U+0085 *is* a control (C1); only the line/paragraph separators need
+/// naming beside it. Bidi overrides take the same arm via the shared
+/// `qqq_cap::text` predicate: they reorder display text without a newline.
 /// ```
 #[must_use]
 pub fn escape_header_value(value: &str) -> String {
@@ -1525,8 +1529,9 @@ pub fn escape_header_value(value: &str) -> String {
             '\t' => out.push('\t'),
             // Any other control (C0, DEL, C1) percent-encodes as its UTF-8
             // bytes: `c as u8` would truncate multibyte controls, and a raw
-            // byte would let the value terminate its own line.
-            c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
+            // byte would let the value terminate its own line. Layout-forgers
+            // take the same arm through the shared predicate.
+            c if c.is_control() || qqq_cap::text::is_layout_forgery(c) => {
                 let mut buf = [0u8; 4];
                 for b in c.encode_utf8(&mut buf).bytes() {
                     let _ = write!(out, "%{b:02X}");

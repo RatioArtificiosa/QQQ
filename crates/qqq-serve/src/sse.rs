@@ -274,12 +274,22 @@ impl Event {
 }
 
 /// Fold every line break to a space, for a field that must stay on one line.
+///
+/// `\n` and `\r` are the framing breaks; U+0085, U+2028 and U+2029 break
+/// display lines the same way without being ASCII controls, so they fold
+/// too rather than riding through raw.
 fn fold_newlines(s: &str) -> String {
-    if !s.contains(['\n', '\r']) {
+    if !s.contains(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']) {
         return s.to_owned();
     }
     s.chars()
-        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .map(|c| {
+            if c == '\n' || c == '\r' || c == '\u{85}' || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -389,6 +399,15 @@ mod tests {
     }
 
     // -- the headers -------------------------------------------------------
+
+    /// Separators fold like line breaks: a U+2028 in an event type would
+    /// otherwise ride through as a raw display line break.
+    #[test]
+    fn separators_fold_like_line_breaks() {
+        assert_eq!(fold_newlines("a\u{2028}b"), "a b");
+        assert_eq!(fold_newlines("a\u{2029}b"), "a b");
+        assert_eq!(fold_newlines("a\rb\nc"), "a b c");
+    }
 
     /// The three headers that make a response a working SSE stream.
     #[test]

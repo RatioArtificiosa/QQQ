@@ -799,6 +799,10 @@ pub fn parse_fail_on(text: &str) -> Result<Severity> {
 }
 
 /// Escape a string for a hand-written JSON document.
+///
+/// U+2028/U+2029 are valid JSON but were line terminators in JavaScript
+/// string literals before ES2019; a consumer parsing SARIF with an old
+/// engine would throw on the raw characters, so they escape like controls.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -808,6 +812,8 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
             c if c.is_control() => {
                 use std::fmt::Write as _;
                 let _ = write!(out, "\\u{:04x}", u32::from(c));
@@ -1502,6 +1508,8 @@ mod tests {
         assert_eq!(json_escape("a\"b"), "a\\\"b");
         assert_eq!(json_escape("a\nb"), "a\\nb");
         assert_eq!(json_escape("a\\b"), "a\\\\b");
+        assert_eq!(json_escape("a\u{2028}b"), "a\\u2028b");
+        assert_eq!(json_escape("a\u{2029}b"), "a\\u2029b");
         let doc = format!(
             "{{\"text\":\"{}\"}}",
             json_escape("he said \"hi\"\nthen left")
@@ -1526,10 +1534,16 @@ mod tests {
             format!("audit of `{}`\n", report.project),
             "a clean report has no detail to render"
         );
-        // ... and the surface list lives in the summary, which still names all four.
+        // ... and the surface list lives in the summary, which still names all five.
         let out = AuditOutput::from(&report);
         let summary = crate::output::CommandOutput::summary(&out);
-        for surface in ["caps", "limits", "supply chain", "provenance"] {
+        for surface in [
+            "caps",
+            "limits",
+            "unused grants",
+            "supply chain",
+            "provenance",
+        ] {
             assert!(
                 summary.contains(surface),
                 "the summary must name what was checked ({surface}): {summary}"

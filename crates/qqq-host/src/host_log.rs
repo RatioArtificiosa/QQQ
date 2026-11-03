@@ -410,11 +410,12 @@ pub fn format_record(record: &LogRecord) -> String {
 fn quote(s: &str) -> String {
     use std::fmt::Write as _;
     // U+2028/U+2029 are separators, not controls, but break lines the same
-    // way: the trigger checks them explicitly so a value holding one is
-    // quoted and escaped rather than passed through.
+    // way; U+0085 is a control outside ASCII, so the byte scan below cannot
+    // see it. The trigger checks all three explicitly so a value holding only
+    // one of them is still quoted and escaped rather than passed through.
     if s.bytes()
         .any(|b| b.is_ascii_whitespace() || b == b'"' || b == b'\\' || b.is_ascii_control())
-        || s.contains(['\u{2028}', '\u{2029}'])
+        || s.contains(['\u{85}', '\u{2028}', '\u{2029}'])
     {
         let mut escaped = String::with_capacity(s.len() + 2);
         escaped.push('"');
@@ -1037,6 +1038,24 @@ mod tests {
         );
     }
 
+    /// Separators and lone non-ASCII controls trigger quoting and escape:
+    /// a value holding only U+2028 must not pass through bare.
+    #[test]
+    fn quote_covers_separators_and_lone_controls() {
+        assert_eq!(quote("plain"), "plain");
+        assert_eq!(quote("a b"), "\"a b\"");
+        assert!(
+            quote("x\u{2028}y").contains("\\u2028"),
+            "U+2028 must escape"
+        );
+        assert!(
+            quote("x\u{2029}y").contains("\\u2029"),
+            "U+2029 must escape"
+        );
+        assert!(quote("x\u{85}y").contains("\\u0085"), "U+0085 must escape");
+        assert!(quote("t").chars().all(|c| !c.is_control()));
+    }
+
     #[test]
     fn format_keeps_one_record_on_one_line() {
         let record = LogRecord {
@@ -1050,6 +1069,32 @@ mod tests {
         let line = format_record(&record);
         assert!(!line.contains('\n'), "one record is one line: {line}");
         assert!(!line.contains('\t'), "tabs are escaped: {line}");
+    }
+
+    /// Separators and tenant text are neutralised too: U+2028/U+2029 break
+    /// lines without being controls, and the tenant rides unquoted unless it
+    /// needs quoting.
+    #[test]
+    fn format_neutralises_separators_and_tenant_text() {
+        let record = LogRecord {
+            tenant: "acme".to_owned(),
+            trace_id: None,
+            level: 2,
+            message: "a\u{2028}b".to_owned(),
+            attributes: vec![("k".to_owned(), AttributeValue::Text("x\u{85}y".to_owned()))],
+            redacted: false,
+        };
+        let line = format_record(&record);
+        assert!(
+            !line
+                .chars()
+                .any(|c| c == '\u{2028}' || c == '\u{2029}' || c == '\u{85}'),
+            "no separator survives raw: {line}"
+        );
+        assert!(line.contains("\\u2028"), "separators escape: {line}");
+        assert!(line.contains("\\u0085"), "NEL escapes: {line}");
+        // A tenant needing no quoting renders bare, exactly as before.
+        assert!(line.starts_with("tenant=acme "), "{line}");
     }
 
     /// The register links only when granted.

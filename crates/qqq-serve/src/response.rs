@@ -235,7 +235,14 @@ pub fn validate_outbound(response: &Response, body_cap_bytes: u64) -> Result<(),
                 detail: format!("header name {name:?} is not a valid token"),
             });
         }
-        if value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
+        // Bytes catch ASCII controls; the char check catches the rest:
+        // C1 controls ride multibyte UTF-8 past a byte scan, and U+2028/29
+        // break lines without being controls at all. Tab stays legal.
+        if value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f)
+            || value
+                .chars()
+                .any(|c| (c.is_control() && c != '\t') || c == '\u{2028}' || c == '\u{2029}')
+        {
             return Err(OutboundRefusal {
                 detail: format!("header {name:?} value carries a control byte"),
             });
@@ -878,14 +885,19 @@ pub fn not_found() -> Response {
 
 /// Sanitize a client-controlled value reflected into a response body.
 ///
-/// Truncates to 64 chars and strips control characters (including CR/LF):
-/// a `Host` or `:protocol` header is attacker-controlled and bounded only
-/// by the header caps, so reflecting it verbatim is log injection and
-/// response amplification. The refusal still names the host — the fix for
-/// an unmapped host is evident — just never more than 64 clean chars of it.
+/// Truncates to 64 chars and strips line-breaking characters: a `Host` or
+/// `:protocol` header is attacker-controlled and bounded only by the header
+/// caps, so reflecting it verbatim is log injection and response
+/// amplification. U+2028/U+2029 are separators, not controls, but break lines
+/// the same way. The refusal still names the host — the fix for an unmapped
+/// host is evident — just never more than 64 clean chars of it.
 #[must_use]
 pub fn sanitize_reflected(value: &str) -> String {
-    value.chars().filter(|c| !c.is_control()).take(64).collect()
+    value
+        .chars()
+        .filter(|c| !c.is_control() && *c != '\u{2028}' && *c != '\u{2029}')
+        .take(64)
+        .collect()
 }
 
 /// Build the response for a request whose host no tenant mapping covers.
@@ -1046,6 +1058,13 @@ mod tests {
             r.set_header("X-V", value);
             super::validate_outbound(&r, 1 << 20)
                 .expect_err(format!("control byte in {value:?} must refuse").as_str());
+        }
+        // Non-ASCII line breaks ride multibyte UTF-8 past a byte scan.
+        for value in ["a\u{2028}b", "a\u{85}b", "a\u{2029}b"] {
+            let mut r = Response::text(200, "hi");
+            r.set_header("X-V", value);
+            super::validate_outbound(&r, 1 << 20)
+                .expect_err(format!("separator in {value:?} must refuse").as_str());
         }
     }
 

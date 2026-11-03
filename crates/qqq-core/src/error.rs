@@ -781,9 +781,11 @@ impl fmt::Display for Error {
     /// Displays as `<CODE>: <message>`.
     ///
     /// Deliberately terse so it composes inside `anyhow`-style chains without
-    /// producing multi-line noise. Use [`Error::render`] for the full block.
+    /// producing multi-line noise. Sanitized like [`Error::render`]: this is
+    /// the form that reaches logs and composed errors, so a raw control
+    /// character here would bypass the render-time guarantee.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.id(), self.message)
+        write!(f, "{}: {}", self.id(), one_line(&self.message))
     }
 }
 
@@ -1077,16 +1079,33 @@ mod tests {
     #[test]
     fn render_neutralises_control_characters() {
         let e = Error::new(ErrorCode::CapabilityDenied, "denied\x1b[31mred")
-            .with_cause("line break")
-            .with_context("path", "/tmp/x");
+            .with_cause("line\u{2028}break")
+            .with_context("path", "/tmp/x")
+            .with_remediation("see docs\u{2029}then retry");
         let out = e.render();
         assert!(
             !out.chars()
                 .any(|c| (c.is_control() || c == '\u{2028}' || c == '\u{2029}') && c != '\n'),
             "no line-breaking characters survive: {out:?}"
         );
-        assert!(out.contains("denied�[31mred"), "{out}");
-        assert!(out.contains("line�break"), "{out}");
+        assert!(out.contains("denied\u{fffd}[31mred"), "{out}");
+        assert!(out.contains("line\u{fffd}break"), "{out}");
+        assert!(out.contains("see docs\u{fffd}then retry"), "{out}");
+    }
+
+    /// `Display` sanitizes like `render`: it is the form that reaches logs
+    /// and composed errors, so a raw control character here would bypass the
+    /// render-time guarantee.
+    #[test]
+    fn display_sanitizes_control_characters() {
+        let e = Error::new(ErrorCode::CapabilityDenied, "denied\x1b[31mred");
+        let out = format!("{e}");
+        assert!(
+            !out.chars()
+                .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}'),
+            "no line-breaking characters survive Display: {out:?}"
+        );
+        assert!(out.contains("denied\u{fffd}[31mred"), "{out}");
     }
 
     #[test]

@@ -1352,6 +1352,12 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         {
             return Err(WitSqlError::ReadOnlyConnection);
         }
+        // The host table says this transaction is open; SQLite must agree.
+        // Without this, a handle whose SQLite transaction already closed
+        // (smuggled control, failed commit path) would mint statement
+        // handles that squat the 256-slot table and can never run.
+        // Mirrors `txn query`/`execute`, which check before running.
+        require_txn_open(connection_for(self, &db)?)?;
         let txn = handle.rep();
         let id = mint_id(self)?;
         self.sql_state
@@ -2045,6 +2051,46 @@ mod tests {
         assert!(
             matches!(err, WitSqlError::ReadOnlyConnection),
             "the refusal names the direction, not the grant: {err:?}"
+        );
+        assert_eq!(
+            data.sql_state.txn_statements.len(),
+            minted_before,
+            "the refused prepare must hold no handle-table slot"
+        );
+    }
+
+    /// Preparing on a transaction SQLite already closed mints nothing: the
+    /// host table says open, SQLite says autocommit, and the entry path
+    /// checks SQLite state before minting (mirrors `txn query`/`execute`).
+    #[test]
+    fn txn_prepare_on_a_closed_transaction_mints_nothing() {
+        use super::bindings::qqq::sql::transaction::{Host as _, HostTxn as _};
+        let path = test_path("txn-desync-prepare");
+        let mut writer = store_for(&path, true, true);
+        query_once(
+            &mut writer,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("create runs");
+        drop(writer);
+        let mut data = store_for(&path, true, true);
+        let txn = data.begin("orders".to_owned()).expect("begin runs");
+        // Simulate smuggled control that closed SQLite behind the handle's
+        // back: the host table still lists the transaction as open.
+        {
+            let db = data.sql.config.find("orders").cloned().expect("configured");
+            let connection = super::connection_for(&mut data, &db).expect("open");
+            connection.execute_batch("COMMIT").expect("desync");
+        }
+        let minted_before = data.sql_state.txn_statements.len();
+        let err = data
+            .prepare(txn, "SELECT 1".to_owned())
+            .expect_err("a closed transaction must not prepare");
+        assert!(
+            matches!(err, WitSqlError::ExecutionFailed(_)),
+            "the refusal names the desync: {err:?}"
         );
         assert_eq!(
             data.sql_state.txn_statements.len(),

@@ -6173,6 +6173,19 @@ fn serve_manifest_alias_matches_config() {
     );
 }
 
+/// A broken file behind `--manifest` proves the alias loads the file.
+///
+/// The missing-file comparison above proves the value is consumed; this
+/// proves it reaches the loader — the error names the broken file.
+#[test]
+fn serve_manifest_alias_loads_the_named_file() {
+    let s = Sandbox::new("serve-manifest-loads");
+    s.write("qqq.toml", MINIMAL);
+    s.write("broken.toml", "this is not toml {{{");
+    let run = s.run(&["serve", "--manifest", "broken.toml"]);
+    run.assert_failed().assert_contains("broken.toml");
+}
+
 /// `--accept-limit 0` would serve nothing, so it is refused at parse.
 #[test]
 fn serve_refuses_accept_limit_zero() {

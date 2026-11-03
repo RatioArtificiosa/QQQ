@@ -600,10 +600,13 @@ impl Redactor {
     /// let redactor = Redactor::from_dotenv("TOKEN=s3cr3t\n# a comment\nUNSET=\n").expect("parses");
     /// assert_eq!(redactor.len(), 1, "the empty value is not a secret to redact");
     ///
-    /// // A line with no `=` is refused, naming the line -- a silent misparse would mean a secret
-    /// // is NOT redacted while the operator sees a server that started normally.
+    /// // A line with no `=` is refused by number, never by content: echoing the
+    /// // line would print a secret the operator mistyped as a bare value, and
+    /// // a silent misparse would mean a secret is NOT redacted while the
+    /// // operator sees a server that started normally.
     /// let err = Redactor::from_dotenv("GOOD=x\nNOT A PAIR\n").unwrap_err();
     /// assert!(err.contains("line 2"), "{err}");
+    /// assert!(!err.contains("NOT A PAIR"), "the error must not echo the line: {err}");
     /// ```
     pub fn from_dotenv(text: &str) -> Result<Self, String> {
         let mut values = Vec::new();
@@ -613,10 +616,7 @@ impl Redactor {
                 continue;
             }
             let Some((name, value)) = line.split_once('=') else {
-                return Err(format!(
-                    "line {} has no `=`, so it names no secret: {line:?}",
-                    i + 1
-                ));
+                return Err(format!("line {} has no `=`, so it names no secret", i + 1));
             };
             let name = name.trim();
             if name.is_empty() {

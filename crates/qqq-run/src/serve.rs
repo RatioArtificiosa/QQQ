@@ -450,6 +450,12 @@ fn parse_deterministic_flag(opts: &mut ServeOptions, arg: &str) -> bool {
 /// server that starts with a flag silently ignored is worse than one that refuses to start.
 pub fn options(args: &[String]) -> Result<ServeOptions> {
     let mut opts = ServeOptions::default();
+    // `--flag=value` twins for every value flag: without this, `dev` and `run`
+    // accept `=` while `serve` calls the same spelling unknown. Expanding up
+    // front keeps every arm — and its validation — single-sourced, and values
+    // never start with `--`, so only real flags split.
+    let expanded = expand_equals(args);
+    let args = expanded.as_slice();
     let mut i = 0;
 
     while let Some(arg) = args.get(i).map(String::as_str) {
@@ -587,7 +593,8 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
 /// # Errors
 ///
 /// `QQQ-7001` when `--allow-deterministic-public` is given without
-/// `--deterministic`, or `--audit-hmac-key-file` without `--audit-log`.
+/// `--deterministic`, `--audit-hmac-key-file` without `--audit-log`,
+/// or `--trace-keep-failures` without `--trace-sample`.
 fn validate_standalone_flags(opts: &ServeOptions) -> Result<()> {
     if opts.allow_deterministic_public && !opts.deterministic {
         return Err(
@@ -605,7 +612,50 @@ fn validate_standalone_flags(opts: &ServeOptions) -> Result<()> {
             ),
         );
     }
+    if opts.trace_keep_failures && opts.trace_rate.is_none() {
+        return Err(
+            usage("`--trace-keep-failures` needs `--trace-sample`").with_remediation(
+                "kept failures are sampled spans; without `--trace-sample` there is no sampler \
+             to keep them, so add it or drop the flag",
+            ),
+        );
+    }
     Ok(())
+}
+
+/// Split `--flag=value` into `--flag value` for the value flags.
+///
+/// Only the flags that take a value split; anything else keeps its spelling
+/// so the unknown-flag error names what the user typed. Values never start
+/// with `--`, so a value containing `=` is never mistaken for a flag.
+fn expand_equals(args: &[String]) -> Vec<String> {
+    const VALUE_FLAGS: [&str; 12] = [
+        "--aot-cache",
+        "--listen",
+        "--workers",
+        "--config",
+        "--manifest",
+        "--trace-sample",
+        "--metrics-path",
+        "--log-format",
+        "--redact-from",
+        "--audit-log",
+        "--audit-hmac-key-file",
+        "--accept-limit",
+    ];
+    let mut out = Vec::with_capacity(args.len());
+    for arg in args {
+        if let Some((flag, value)) = arg.split_once('=')
+            && flag.starts_with("--")
+            && VALUE_FLAGS.contains(&flag)
+        {
+            out.push(flag.to_owned());
+            out.push(value.to_owned());
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    out
 }
 
 /// Read the value that follows a flag.
@@ -688,6 +738,10 @@ pub fn deterministic_mode_warning(public: bool) -> String {
 /// * `QQQ-1002` — a component was found but is not a QQQ application.
 pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared> {
     let server = &loaded.manifest.server;
+
+    // The redactor loads before anything that builds: a bad file must not
+    // cost a guest compile, and `Prepared` promises a server ready to bind.
+    let redactor = load_redactor(opts)?;
 
     // A metrics path that collides with a declared route would silently shadow one of them, and
     // neither failure is visible from outside -- so it is refused here, where the operator can act.
@@ -868,7 +922,7 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
         tenant_live: built.tenant_live,
         loopback,
         deterministic: built.deterministic,
-        redactor: load_redactor(opts)?,
+        redactor,
     })
 }
 
@@ -2128,7 +2182,54 @@ mod tests {
         .expect("the pair must parse");
     }
 
-    /// **`--manifest` is the `--config` spelling the rest of the CLI uses.**
+    /// **`--trace-keep-failures` alone is refused at parse time.**
+    ///
+    /// Kept failures are sampled spans; without `--trace-sample` there is no
+    /// sampler to keep them — the same lone-flag class as the two refusals
+    /// above.
+    #[test]
+    fn lone_trace_keep_failures_is_refused() {
+        let err = options(&args(&["--trace-keep-failures"])).expect_err("must be refused");
+        assert!(
+            err.message.contains("--trace-keep-failures") && err.message.contains("--trace-sample"),
+            "the refusal must name the flag and its companion: {}",
+            err.message
+        );
+        options(&args(&["--trace-sample", "on", "--trace-keep-failures"]))
+            .expect("the pair must parse");
+    }
+
+    /// **Every value flag accepts `--flag=value`.**
+    ///
+    /// `dev` and `run` grew `=` twins while `serve` called the same spelling
+    /// unknown; the expansion up front keeps every arm single-sourced.
+    #[test]
+    fn equals_forms_parse_like_space_forms() {
+        let o = options(&args(&[
+            "--listen=0.0.0.0:8080",
+            "--workers=1",
+            "--config=prod.toml",
+            "--accept-limit=3",
+            "--audit-log=a.jsonl",
+            "--trace-sample=on",
+        ]))
+        .expect("= forms must parse");
+        assert_eq!(o.listen, "0.0.0.0:8080");
+        assert_eq!(o.workers, 1);
+        assert_eq!(o.config.as_deref(), Some("prod.toml"));
+        assert_eq!(o.accept_limit, Some(3));
+        assert_eq!(o.audit_log.as_deref(), Some("a.jsonl"));
+        assert_eq!(o.trace_rate.as_deref(), Some("on"));
+        // Unknown flags keep their spelling, so the error names the whole thing.
+        let err = options(&args(&["--bogus=x"])).expect_err("must be refused");
+        assert!(
+            err.message.contains("--bogus"),
+            "the refusal must name the flag: {}",
+            err.message
+        );
+    }
+
+    /// **`--manifest` is the `--config` spelling the rest of the CLI uses.
     ///
     /// `serve` documents `--config` while every other project command takes
     /// `--manifest`; rejecting the global spelling punishes consistency. Same

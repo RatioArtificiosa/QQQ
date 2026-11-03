@@ -377,10 +377,14 @@ fn walk(
             // edits via symlinked sources reload: the link path is the key,
             // the target's metadata the value. Links to directories still
             // never descend (ancestor loop, per the comment above), and
-            // dangling links skip like unreadable entries.
+            // dangling links skip like unreadable entries. Both the link and
+            // its target are judged: a link into an ignored tree would
+            // otherwise watch build output, and a link and its in-tree target
+            // report as two changes for one edit (the debouncer fires once).
             if let Ok(target) = std::fs::metadata(&path)
                 && target.is_file()
                 && !rules.is_ignored(root, &path)
+                && !symlink_target_ignored(&path, root, rules)
             {
                 out.insert(path, fingerprint(&target));
             }
@@ -397,6 +401,22 @@ fn walk(
         }
         out.insert(path, fingerprint(&meta));
     }
+}
+
+/// Whether the target of a symlink is itself ignored.
+///
+/// The link path is judged by the caller; this judges where the link *points*,
+/// so a link into an ignored tree (`src/gen.rs -> ../target/out`) does not
+/// watch build output. Relative targets join the link's parent; components
+/// decide, so `..` needs no canonicalization.
+fn symlink_target_ignored(link: &Path, root: &Path, rules: &IgnoreRules) -> bool {
+    let Ok(raw) = std::fs::read_link(link) else {
+        return false;
+    };
+    let target = link
+        .parent()
+        .map_or_else(|| raw.clone(), |parent| parent.join(&raw));
+    rules.is_ignored(root, &target)
 }
 
 /// Convert metadata into a comparable fingerprint.
@@ -839,6 +859,27 @@ mod tests {
         assert!(
             changes.iter().any(|c| c.path() == dir.join("link.rs")),
             "an edit through the link must reload: {changes:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink into an ignored tree is not watched.
+    ///
+    /// Otherwise a link at `src/gen.rs` pointing at `../target/out.rs` would
+    /// watch build output and loop the rebuilder. Unix-only, like the link
+    /// test above.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_into_an_ignored_tree_is_skipped() {
+        let dir = temp_dir("snap-symlink-ignore");
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("target/out.rs"), "built").unwrap();
+        std::os::unix::fs::symlink(dir.join("target/out.rs"), dir.join("gen.rs")).unwrap();
+        let snap = Snapshot::take(&dir, &IgnoreRules::default());
+        assert!(
+            !snap.files.contains_key(&dir.join("gen.rs")),
+            "the ignored target must not be watched through the link: {:?}",
+            snap.files.keys().collect::<Vec<_>>()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

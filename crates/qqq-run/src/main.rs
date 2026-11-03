@@ -3158,6 +3158,8 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
                 } else if other == "--manifest" {
                     // Owned by `with_manifest`; skip its value.
                     i += 1;
+                } else if other.starts_with("--manifest=") {
+                    // `--manifest=x` twin: consumed by `with_manifest`.
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
                         qqq_core::ErrorCode::McpArgumentInvalid,
@@ -3165,7 +3167,8 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
                     )
                     .with_remediation(
                         "`dev` accepts --port, --host, --watch, --ignore, --inspect, \
-                         --reload-limit, --deterministic, --open, --https and --once",
+                         --reload-limit, --open, --https and --once (`--deterministic` is \
+                         not supported by `dev`; use `serve`)",
                     ));
                 }
             }
@@ -3436,9 +3439,22 @@ fn dispatch_why(
 }
 
 /// Read the value following a flag, e.g. `--manifest path/to/qqq.toml`.
+///
+/// Both the space form and `--manifest=path/to/qqq.toml` resolve: without the
+/// second, the `=` spelling is silently ignored and the wrong manifest loads.
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    let idx = args.iter().position(|a| a == flag)?;
-    args.get(idx + 1).cloned()
+    let prefix = format!("{flag}=");
+    let mut rest = args;
+    while let Some((a, tail)) = rest.split_first() {
+        if a == flag {
+            return tail.first().cloned();
+        }
+        if let Some(v) = a.strip_prefix(prefix.as_str()) {
+            return Some(v.to_owned());
+        }
+        rest = tail;
+    }
+    None
 }
 
 /// Decode `qqqai build`'s own flags.
@@ -3602,6 +3618,8 @@ fn run_options(
                     opts.replay = Some(std::path::PathBuf::from(v));
                 } else if let Some(v) = other.strip_prefix("--replay-log=") {
                     opts.replay_log = Some(std::path::PathBuf::from(v));
+                } else if other.starts_with("--manifest=") {
+                    // `--manifest=x` twin: consumed by `with_manifest`.
                 } else if TAKES_VALUE.contains(&other) {
                     // `--manifest` is consumed by `with_manifest`; skip its
                     // value here so it is not mistaken for a positional.
@@ -3612,8 +3630,8 @@ fn run_options(
                         format!("unknown flag `{other}` for `run`"),
                     )
                     .with_remediation(
-                        "`run` accepts --cap, --artifact, --deterministic, --replay, \
-                         --replay-log and -- <args>; use `--` before arguments meant for the \
+                        "`run` accepts --cap, --artifact, --aot-cache, --deterministic, \
+                         --replay, --replay-log and -- <args>; use `--` before arguments meant for the \
                          component",
                     ));
                 }
@@ -5393,5 +5411,22 @@ mod tests {
         assert_eq!(o.replay, Some(std::path::PathBuf::from("run.jsonl")));
         assert_eq!(o.replay_log, Some(std::path::PathBuf::from("clock.jsonl")));
         assert!(o.deterministic);
+    }
+
+    /// **`--manifest=x` resolves like `--manifest x`.**
+    ///
+    /// `flag_value` is the global manifest extractor; exact-match only meant
+    /// the `=` spelling silently loaded the wrong manifest.
+    #[test]
+    fn manifest_equals_form_resolves() {
+        assert_eq!(
+            flag_value(&argv(&["--manifest", "a.toml"]), "--manifest"),
+            Some("a.toml".to_owned())
+        );
+        assert_eq!(
+            flag_value(&argv(&["--manifest=a.toml"]), "--manifest"),
+            Some("a.toml".to_owned())
+        );
+        assert_eq!(flag_value(&argv(&["build"]), "--manifest"), None);
     }
 }

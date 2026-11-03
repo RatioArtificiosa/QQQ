@@ -422,23 +422,23 @@ impl HandleQuota {
                  `limits.max_open_handles` in `qqq.toml`",
             ));
         }
-        if additional > 0 {
-            let last_index = table_len.saturating_add(additional).saturating_sub(1);
-            if last_index >= self.limit {
-                self.exhaustion_attempts = self.exhaustion_attempts.saturating_add(1);
-                return Err(Error::new(
-                    ErrorCode::LimitOutOfRange,
-                    format!(
-                        "the guest holds {table_len} handles and asked for {additional} more \
-                         against a limit of {}",
-                        self.limit
-                    ),
-                )
-                .with_remediation(
-                    "close handles that are no longer needed, or raise \
-                     `limits.max_open_handles` in `qqq.toml`",
-                ));
-            }
+        // Exact arithmetic in `u64`: `saturating_add` would wrap 1 + MAX to
+        // MAX and admit a batch no `u32` table could hold. The sum either fits
+        // or it does not — saturation is not an answer here.
+        if u64::from(table_len) + u64::from(additional) > u64::from(self.limit) {
+            self.exhaustion_attempts = self.exhaustion_attempts.saturating_add(1);
+            return Err(Error::new(
+                ErrorCode::LimitOutOfRange,
+                format!(
+                    "the guest holds {table_len} handles and asked for {additional} more \
+                     against a limit of {}",
+                    self.limit
+                ),
+            )
+            .with_remediation(
+                "close handles that are no longer needed, or raise \
+                 `limits.max_open_handles` in `qqq.toml`",
+            ));
         }
         Ok(())
     }
@@ -715,6 +715,15 @@ mod tests {
         // already at the limit.
         assert!(q.try_open_batch(3, 0).is_ok());
         assert_eq!(q.exhaustion_attempts(), 1);
+    }
+
+    /// Saturating arithmetic must not admit an unrepresentable batch: 1 held
+    /// + `u32::MAX` more saturates to `MAX`, which the old `saturating_add`
+    ///   check read as fitting. Exact `u64` math refuses it.
+    #[test]
+    fn try_open_batch_refuses_saturating_overflow() {
+        let mut q = HandleQuota::new(u32::MAX);
+        assert!(q.try_open_batch(1, u32::MAX).is_err());
     }
 
     #[test]

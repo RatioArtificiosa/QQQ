@@ -78,12 +78,12 @@ impl TenantId {
     /// # Errors
     ///
     /// Rejects an empty name, a name with leading or trailing whitespace, a
-    /// name containing control characters, and a name containing the Unicode
-    /// line/paragraph separators (U+2028/U+2029, which are separators rather
-    /// than controls but break lines the same way). The first two would make two
-    /// spellings of the same tenant compare unequal — a policy that applies to
-    /// `"acme"` but not `"acme "` is a policy with a hole nobody can see — and the
-    /// third would let a name forge a log line.
+    /// name with control characters, and a name with invisible layout-forgers
+    /// ([`crate::text`]: line/paragraph separators, bidi overrides). The first
+    /// two would make two spellings of the same tenant compare unequal — a
+    /// policy that applies to `"acme"` but not `"acme "` is a policy with a
+    /// hole nobody can see — and the rest would let a name forge a log line
+    /// or reorder the text around it.
     pub fn new(name: &str) -> Result<Self, String> {
         if name.is_empty() {
             return Err("a tenant id must not be empty".to_owned());
@@ -110,7 +110,7 @@ impl TenantId {
         }
         if name
             .chars()
-            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+            .any(|c| c.is_control() || crate::text::is_layout_forgery(c))
         {
             return Err(
                 "a tenant id must not contain control characters; they would \

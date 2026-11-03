@@ -299,23 +299,24 @@ pub struct RuleInfo {
 /// Blank control characters for terminal and log output.
 ///
 /// A `\n` or ANSI escape in rendered text forges lines on the reader's
-/// terminal; U+2028/U+2029 are separators, not controls, but break lines the
-/// same way. The replacement is U+FFFD rather than a space or a deletion: a
-/// visibly broken character tells the reader something was there, while
-/// dropping the byte could make two different forged messages render
-/// identically. Mirrors `one_line` in `qqq-core` and the access-log
-/// redactor, which face the same forgery.
+/// terminal; layout-forgers (separators, bidi overrides — see
+/// `qqq_cap::text`) reorder or break the visible text the same way. The
+/// replacement is U+FFFD rather than a space or a deletion: a visibly broken
+/// character tells the reader something was there, while dropping the byte
+/// could make two different forged messages render identically. Mirrors
+/// `one_line` in `qqq-core` and the access-log redactor, which face the same
+/// forgery.
 /// `pub(crate)` so the guest failure path shares it: guest-influenced error
 /// text reaches the operator's log through the same shape.
 pub(crate) fn sanitize_log_line(s: &str) -> String {
     if s.chars()
-        .all(|c| !c.is_control() && c != '\u{2028}' && c != '\u{2029}')
+        .all(|c| !c.is_control() && !qqq_cap::text::is_layout_forgery(c))
     {
         return s.to_owned();
     }
     s.chars()
         .map(|c| {
-            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+            if c.is_control() || qqq_cap::text::is_layout_forgery(c) {
                 '\u{FFFD}'
             } else {
                 c

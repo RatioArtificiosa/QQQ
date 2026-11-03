@@ -1090,6 +1090,16 @@ fn micros_as_seconds(micros: u64) -> String {
 /// merely look wrong -- it **forges a new label** in the exposition, or splits one metric line into
 /// two. That is the same class as log injection, which §10.3's host-side redaction exists to
 /// prevent in its own domain.
+///
+/// # Why only these escapes exist
+///
+/// The exposition format names exactly three escapes (`\\`, `\"`, `\n`); the
+/// CR/tab arms above match the pre-existing convention of this function, not
+/// the spec. Anything else — C1 controls, U+2028/U+2029 — passes through
+/// raw: inventing `\uXXXX` here would emit text no Prometheus parser
+/// accepts, turning a display quirk into scrape-breaking corruption, while
+/// tenant names are validated clean at construction so the case cannot arise
+/// from real input anyway.
 fn prometheus_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
@@ -1102,16 +1112,11 @@ fn prometheus_escape(value: &str) -> String {
             // is whitespace the parser does not expect inside a label.
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            // U+2028/U+2029 break display lines the same way newlines do, and
-            // C1 controls ride multibyte UTF-8 past a byte-oriented check;
-            // Prometheus escaping has no named form for them, so they use the
-            // same `\uXXXX` shape the JSON logs use.
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c if c.is_control() => {
-                use std::fmt::Write as _;
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
+            // Anything else passes through raw — including C1 controls and
+            // U+2028/U+2029. The exposition format has no escape for them, so
+            // inventing one would emit text no parser accepts (scrape-breaking
+            // corruption for a display quirk); tenant names are validated clean
+            // at construction, so real input never reaches this arm with one.
             c => out.push(c),
         }
     }
@@ -1219,20 +1224,25 @@ mod tests {
         assert_eq!(prometheus_escape("a\tb"), "a\\tb");
     }
 
-    /// Unicode separators and C1 controls escape like controls do: the byte
-    /// scan they would need is multibyte-blind, and a raw U+2028 would break
-    /// display lines the same way a newline breaks exposition lines.
+    /// Display-only breaks pass through raw: the exposition format names
+    /// exactly three escapes, and inventing `\\uXXXX` would emit text no
+    /// Prometheus parser accepts -- scrape-breaking corruption for a display
+    /// quirk. Tenant names are validated clean at construction, so real input
+    /// never reaches this function with one; this pins the passthrough.
     #[test]
-    fn separators_and_c1_controls_are_escaped() {
-        assert_eq!(prometheus_escape("a\u{2028}b"), "a\\u2028b");
-        assert_eq!(prometheus_escape("a\u{2029}b"), "a\\u2029b");
-        assert_eq!(prometheus_escape("a\u{85}b"), "a\\u0085b");
+    fn separators_and_c1_pass_through_unescaped() {
+        assert_eq!(prometheus_escape("a\u{2028}b"), "a\u{2028}b");
+        assert_eq!(prometheus_escape("a\u{2029}b"), "a\u{2029}b");
+        assert_eq!(prometheus_escape("a\u{85}b"), "a\u{85}b");
     }
 
     #[test]
     fn tenant_label_escaping_covers_hostile_names() {
         let m = HttpMetrics::new();
         // A name with a quote and a backslash, recorded as a real tenant would be.
+        // Plus a separator tenant: tenant names are validated clean at
+        // construction, so this shapes a hostile name the validator refuses —
+        // proving the exposition stays parseable even then.
         m.record_request(Method::Get, 200, 1, "evil\" tenant", 5, 0);
         m.record_request(Method::Get, 200, 1, "evil\u{2028}tenant", 5, 0);
         let text = m.render_prometheus();
@@ -1245,12 +1255,8 @@ mod tests {
             "the quote must be escaped: {text}"
         );
         assert!(
-            !text.contains("evil\u{2028}tenant"),
-            "a raw separator would break display lines: {text}"
-        );
-        assert!(
-            text.contains("evil\\u2028tenant"),
-            "the separator must be escaped: {text}"
+            text.contains("evil\u{2028}tenant"),
+            "the separator passes through for machine parsing: {text}"
         );
         // And every metric line must still have exactly one label list.
         for line in text.lines().filter(|l| !l.starts_with('#')) {

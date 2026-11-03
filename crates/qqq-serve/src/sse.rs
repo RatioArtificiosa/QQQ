@@ -275,21 +275,19 @@ impl Event {
 
 /// Fold every line break to a space, for a field that must stay on one line.
 ///
-/// `\n` and `\r` are the framing breaks; U+0085, U+2028 and U+2029 break
-/// display lines the same way without being ASCII controls, so they fold
-/// too rather than riding through raw.
+/// Only `\n` and `\r` fold: they are the framing breaks the SSE specification
+/// names, and an unfolded one would start a second field on the next line.
+/// U+0085/U+2028/U+2029 are display line breaks, not framing ones — folding
+/// them would corrupt the field for consumers that match it exactly (an event
+/// type is dispatched by value), while passing them through keeps the bytes
+/// the guest wrote. Display renderers must assume responsibility for their
+/// own line breaking.
 fn fold_newlines(s: &str) -> String {
-    if !s.contains(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']) {
+    if !s.contains(['\n', '\r']) {
         return s.to_owned();
     }
     s.chars()
-        .map(|c| {
-            if c == '\n' || c == '\r' || c == '\u{85}' || c == '\u{2028}' || c == '\u{2029}' {
-                ' '
-            } else {
-                c
-            }
-        })
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
         .collect()
 }
 
@@ -400,13 +398,15 @@ mod tests {
 
     // -- the headers -------------------------------------------------------
 
-    /// Separators fold like line breaks: a U+2028 in an event type would
-    /// otherwise ride through as a raw display line break.
+    /// Only framing breaks fold: `\n` and `\r` would start a second field,
+    /// while display-only breaks pass through byte-identical so consumers
+    /// that match the field exactly keep seeing what the guest wrote.
     #[test]
-    fn separators_fold_like_line_breaks() {
-        assert_eq!(fold_newlines("a\u{2028}b"), "a b");
-        assert_eq!(fold_newlines("a\u{2029}b"), "a b");
+    fn only_framing_breaks_fold() {
         assert_eq!(fold_newlines("a\rb\nc"), "a b c");
+        assert_eq!(fold_newlines("a\u{2028}b"), "a\u{2028}b");
+        assert_eq!(fold_newlines("a\u{2029}b"), "a\u{2029}b");
+        assert_eq!(fold_newlines("a\u{85}b"), "a\u{85}b");
     }
 
     /// The three headers that make a response a working SSE stream.

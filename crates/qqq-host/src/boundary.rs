@@ -128,26 +128,11 @@ pub const MAX_ECHO_BYTES: usize = 64;
 
 /// Invisible characters that forge layout without a newline.
 ///
-/// Line/paragraph separators (`U+2028`/`U+2029`) break lines in renderers that
-/// honor them; bidirectional controls reorder the visible text. Neither is a
-/// C0/C1 control, so `char::is_control` misses both -- and both are name-
-/// and value-spoofing primitives, never legitimate in a validated field or a
-/// rendered diagnostic. Shared with [`crate::trap`]'s frame escaper so the
-/// two renderers cannot disagree on what "safe to print" means.
-#[must_use]
-pub(crate) fn is_layout_forgery(c: char) -> bool {
-    matches!(
-        c,
-        '\u{2028}'
-            | '\u{2029}'
-            | '\u{200E}'
-            | '\u{200F}'
-            | '\u{061C}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{FEFF}'
-    )
-}
+/// Single home: [`qqq_cap::is_layout_forgery`]. Re-exported here so the
+/// trap escaper, every boundary check, and downstream crates (the serve
+/// log encoders face the same forgery) keep spelling the same path while
+/// the definition lives with the other validation primitives.
+pub use qqq_cap::is_layout_forgery;
 
 /// Render a guest value for a diagnostic, safely.
 ///

@@ -925,12 +925,11 @@ fn json_string(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0c}' => out.push_str("\\f"),
-            // Every other control character, so no raw control byte reaches the
-            // stream. JSON requires these escaped; a reader that tolerated them
-            // would be the only thing standing between a log and a forged line.
-            // U+2028/U+2029 are separators, not controls, but break lines the
-            // same way and throw pre-ES2019 JSON parsers — escaped like controls.
-            c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
+            // Every other control, plus invisible layout-forgers: JSON requires
+            // the controls escaped and old JS engines throw on raw U+2028/29,
+            // so both escape the same way. The shared predicate keeps this
+            // encoder agreeing with the audit and host-log ones.
+            c if c.is_control() || qqq_host::is_layout_forgery(c) => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c => out.push(c),

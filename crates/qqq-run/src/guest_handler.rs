@@ -1508,6 +1508,7 @@ pub fn is_host_controlled_header(name: &str) -> bool {
 /// assert_eq!(escape_header_value("  padded  "), "padded");
 /// assert_eq!(escape_header_value("nul\x00del\x7f"), "nul%00del%7F");
 /// assert_eq!(escape_header_value("a\u{2028}b"), "a%E2%80%A8b");
+/// assert_eq!(escape_header_value("a\u{85}b"), "a%C2%85b");
 /// ```
 #[must_use]
 pub fn escape_header_value(value: &str) -> String {
@@ -1520,16 +1521,17 @@ pub fn escape_header_value(value: &str) -> String {
             '\n' => out.push_str("%0A"),
             // Tab passes through: it is legal field whitespace, and the trim
             // above already removed it from the edges. This arm must precede
-            // the control guard below — `\t` IS an ASCII control.
+            // the control guard below — `\t` IS a control.
             '\t' => out.push('\t'),
-            c if c.is_ascii_control() => {
-                let _ = write!(out, "%{c:02X}", c = c as u8);
+            // Any other control (C0, DEL, C1) percent-encodes as its UTF-8
+            // bytes: `c as u8` would truncate multibyte controls, and a raw
+            // byte would let the value terminate its own line.
+            c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    let _ = write!(out, "%{b:02X}");
+                }
             }
-            // Non-ASCII line breaks: percent-encode the UTF-8 bytes so no raw
-            // line-breaking byte reaches the wire.
-            '\u{85}' => out.push_str("%C2%85"),
-            '\u{2028}' => out.push_str("%E2%80%A8"),
-            '\u{2029}' => out.push_str("%E2%80%A9"),
             _ => out.push(c),
         }
     }

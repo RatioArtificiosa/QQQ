@@ -895,7 +895,7 @@ pub fn not_found() -> Response {
 pub fn sanitize_reflected(value: &str) -> String {
     value
         .chars()
-        .filter(|c| !c.is_control() && *c != '\u{2028}' && *c != '\u{2029}')
+        .filter(|c| !c.is_control() && !qqq_host::boundary::is_layout_forgery(*c))
         .take(64)
         .collect()
 }

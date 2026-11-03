@@ -410,16 +410,15 @@ pub fn format_record(record: &LogRecord) -> String {
 fn quote(s: &str) -> String {
     use std::fmt::Write as _;
     // Byte checks cannot see multibyte characters: U+0085 rides two bytes past
-    // the ASCII-control test, and U+2028/U+2029 are separators, not controls.
-    // The trigger is therefore char-level, so a value holding only one of them
-    // is still quoted and escaped rather than passed through bare.
+    // the ASCII-control test. The trigger is therefore char-level, and the
+    // shared layout-forgery predicate covers the separators and bidi controls
+    // that are not controls at all.
     if s.chars().any(|c| {
         c.is_control()
             || c.is_whitespace()
             || c == '"'
             || c == '\\'
-            || c == '\u{2028}'
-            || c == '\u{2029}'
+            || crate::boundary::is_layout_forgery(c)
     }) {
         let mut escaped = String::with_capacity(s.len() + 2);
         escaped.push('"');
@@ -430,9 +429,7 @@ fn quote(s: &str) -> String {
                 '\n' => escaped.push_str("\\n"),
                 '\r' => escaped.push_str("\\r"),
                 '\t' => escaped.push_str("\\t"),
-                '\u{2028}' => escaped.push_str("\\u2028"),
-                '\u{2029}' => escaped.push_str("\\u2029"),
-                c if c.is_control() => {
+                c if c.is_control() || crate::boundary::is_layout_forgery(c) => {
                     let _ = write!(escaped, "\\u{:04x}", c as u32);
                 }
                 c => escaped.push(c),
@@ -1057,6 +1054,10 @@ mod tests {
             "U+2029 must escape"
         );
         assert!(quote("x\u{85}y").contains("\\u0085"), "U+0085 must escape");
+        assert!(
+            quote("x\u{202e}y").contains("\\u202e"),
+            "bidi overrides must escape"
+        );
         assert!(quote("t").chars().all(|c| !c.is_control()));
     }
 

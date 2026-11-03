@@ -52,6 +52,7 @@ pub mod normalize;
 pub mod policy;
 pub mod resolve;
 pub mod server;
+pub mod text;
 pub mod token;
 
 pub use capability::{
@@ -73,3 +74,4 @@ pub use policy::{
 pub use resolve::{
     CapabilityExplanation, GrantSet, Layer, NarrowMode, Overlay, Resolution, WhyNode, denial,
 };
+pub use text::is_layout_forgery;

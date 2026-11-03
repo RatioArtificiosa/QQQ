@@ -225,6 +225,13 @@ pub(crate) const MAX_TRACE_ATTRIBUTES: usize = 64;
 /// The largest single attribute value, in bytes.
 pub(crate) const MAX_TRACE_VALUE_BYTES: usize = 64 * 1024;
 
+/// The largest total attribute bytes one span may hold.
+///
+/// Per-value (64 KiB) × per-span count (64) × spans (256) is ~1 GiB without
+/// a total: a guest could fill host memory with individually-legal values.
+/// 256 KiB per span caps the instance at 64 MiB in the pathological case.
+pub(crate) const MAX_SPAN_BYTES: usize = 256 * 1024;
+
 /// The host implementation of `qqq:trace/tracing`.
 ///
 /// # Why spans live in the store's own resource table
@@ -360,10 +367,28 @@ impl HostSpan for crate::linker::StoreData {
             self,
             &handle,
             |span| -> std::result::Result<(), WitTraceError> {
+                fn attr_bytes(key: &str, value: &LogAttributeValue) -> usize {
+                    let v = match value {
+                        LogAttributeValue::Text(t) => t.len(),
+                        // Formatted numbers/bools are short; 8 covers them
+                        // with headroom (mirrors `host_log::record_bytes`).
+                        _ => 8,
+                    };
+                    key.len() + v
+                }
+                let mut total: usize = span.attributes.iter().map(|(k, v)| attr_bytes(k, v)).sum();
                 for (key, value) in checked {
                     if span.attributes.len() >= MAX_TRACE_ATTRIBUTES
                         && !span.attributes.contains_key(&key)
                     {
+                        return Err(WitTraceError::SpanTooLarge);
+                    }
+                    // Replacing an existing key frees its old bytes first.
+                    if let Some(old) = span.attributes.get(&key) {
+                        total = total.saturating_sub(attr_bytes(&key, old));
+                    }
+                    total = total.saturating_add(attr_bytes(&key, &value));
+                    if total > MAX_SPAN_BYTES {
                         return Err(WitTraceError::SpanTooLarge);
                     }
                     span.attributes.insert(key, value);
@@ -1068,6 +1093,40 @@ mod tests {
         assert!(
             matches!(err, WitTraceError::SpanClosed),
             "liveness first, like `event`: {err:?}"
+        );
+    }
+
+    /// Total attribute bytes per span are bounded: individually-legal 64 KiB
+    /// values must not sum to a gigabyte on one span.
+    #[test]
+    fn set_attributes_refuses_past_the_span_byte_cap() {
+        let mut data = granted_store();
+        let root = start_span_impl(&mut data, "root", None).expect("root starts");
+        // Four 60 KiB values fit (240 KiB + keys); a 64 KiB fifth exceeds
+        // the 256 KiB cap.
+        for i in 0..4 {
+            <StoreData as HostSpan>::set_attributes(
+                &mut data,
+                rep_from_index(rep_index(&root)),
+                vec![WitAttribute {
+                    name: format!("k{i}"),
+                    value: WitTraceAttribute::Text("x".repeat(60 * 1024)),
+                }],
+            )
+            .expect("within cap stores");
+        }
+        let err = <StoreData as HostSpan>::set_attributes(
+            &mut data,
+            rep_from_index(rep_index(&root)),
+            vec![WitAttribute {
+                name: "over".to_owned(),
+                value: WitTraceAttribute::Text("x".repeat(64 * 1024)),
+            }],
+        )
+        .expect_err("past the cap refuses");
+        assert!(
+            matches!(err, WitTraceError::SpanTooLarge),
+            "total overflow is span-too-large: {err:?}"
         );
     }
 

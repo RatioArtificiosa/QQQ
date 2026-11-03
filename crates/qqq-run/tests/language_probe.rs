@@ -16,16 +16,24 @@ use qqq_host::{LimitSet, config::EngineConfig};
 use qqq_run::guest_handler::GuestApp;
 
 /// The probe is an inbound HTTP server, so its test manifest must grant the
-/// capability that makes the `qqq:http/http` type instance linkable.
+/// capability that makes the `qqq:http/http` type instance linkable, plus
+/// the randomness the language runtimes need during `_initialize`.
 ///
 /// C and `AssemblyScript` happen to lower the handler without importing that
 /// instance. Python and TypeScript retain the imported type interface, which
 /// exposed that the old empty grant set was testing an impossible deployment.
 /// Keeping the grant in the test (rather than widening the host linker) makes
 /// the probe exercise the same least-privilege policy as a real server.
+///
+/// `random = true` is a runtime requirement, not an app requirement:
+/// `TinyGo` seeds its scheduler during `_initialize` via `wasi:random
+/// get-random-u64`, which the host shadows with a grant-gated shim (an
+/// ungranted guest traps at instantiation, not at first use). Guests that
+/// never call random ignore the unused grant; the probe still exercises
+/// least-privilege for everything else.
 fn server_grants() -> GrantSet {
     let manifest = Manifest::parse(
-        "[package]\nname = \"language-probe\"\nversion = \"0.0.0\"\n\n[capabilities.http]\nserver = true\n",
+        "[package]\nname = \"language-probe\"\nversion = \"0.0.0\"\n\n[capabilities.http]\nserver = true\n[capabilities.crypto]\nrandom = true\n",
     )
     .expect("the probe manifest is static and valid");
     GrantSet::from_manifest(&manifest)

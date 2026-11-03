@@ -1082,7 +1082,11 @@ impl bindings::qqq::sql::database::HostStatement for crate::linker::StoreData {
         check_no_open_transaction(self, &db)?;
         let bound = bind_args(args)?;
         charge_one_subrequest(self)?;
-        let connection = connection_for(self, &db)?;
+        // Reads open read-only even on writable databases (mirrors
+        // `prepare`'s probe): a query never writes, so it must never create
+        // directories or files as a side effect. A missing file fails the
+        // open instead of materializing.
+        let connection = connection_for_readonly(self, &db)?;
         let mut statement = connection
             .prepare(&sql)
             .map_err(|error| WitSqlError::PrepareFailed(error.to_string()))?;

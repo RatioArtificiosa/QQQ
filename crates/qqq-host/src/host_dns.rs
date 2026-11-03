@@ -156,6 +156,11 @@ impl DnsResolver for SystemResolver {
                     })
                     .collect();
                 sort_addrs(&mut out);
+                // Bound the answer: a name with hundreds of records would
+                // otherwise materialize them all for one lookup. 32 covers
+                // anycast + multi-homing with headroom; the guest retries
+                // for more via narrower names.
+                out.truncate(32);
                 if out.is_empty() {
                     Err(LookupFailure::NotFound)
                 } else {
@@ -457,18 +462,25 @@ impl bindings::qqq::dns::resolver::Host for crate::linker::StoreData {
         &mut self,
         name: String,
     ) -> std::result::Result<Vec<bindings::qqq::dns::resolver::Address>, WitDnsError> {
-        // `check` returns the normalized name; the lookup below must use
-        // *it*, not the raw guest string, or a differently-cased query
-        // would pass the gate and then miss the table.
-        let name = check(self, &name)?;
+        // Grant first, then charge the attempt before judging the name: an
+        // unlisted spray spends budget like a listed lookup (attempts, not
+        // successes). Total bytes are bounded by the batch count (128) times
+        // the per-name wire limit (253 B), so no separate byte cap is needed.
+        if !self.grants.grants(DnsResolve) {
+            return Err(WitDnsError::NotGranted);
+        }
         // The subrequest budget binds the lookup, not just the gate: each
         // resolution is a resolver round-trip, and an unbound loop of them
-        // is amplification the fuel budget cannot see. The WIT type has no
+        // is amplification the fuel budget cannot see. Charged before the
+        // allowlist check so unlisted names cost too. The WIT type has no
         // budget case; `resolver-failed` carries the message because the
         // refusal is the host's, not any single entry's.
         self.charge_subrequest().map_err(|error| {
             WitDnsError::ResolverFailed(format!("subrequest budget exhausted: {}", error.message))
         })?;
+        // `check` returns the normalized name (grant re-checked harmlessly);
+        // the lookup below must use *it*, not the raw guest string.
+        let name = check(self, &name)?;
         match self.dns.resolver.lookup(&name) {
             Ok(addrs) if !addrs.is_empty() => Ok(addrs
                 .into_iter()
@@ -620,6 +632,27 @@ mod tests {
         assert!(
             matches!(err, WitDnsError::ResolverFailed(_)),
             "the refusal names the host side, not the entry: {err:?}"
+        );
+    }
+
+    /// An unlisted name spends budget like a listed one: the charge lands
+    /// before the allowlist check, so a spray of unlisted names cannot probe
+    /// for free (attempts, not successes).
+    #[test]
+    fn unlisted_names_spend_budget() {
+        let mut data = granted_store();
+        data.subrequests = crate::quota::SubrequestBudget::new(1);
+        let err =
+            bindings::qqq::dns::resolver::Host::resolve(&mut data, "evil.example.com".to_owned())
+                .expect_err("unlisted refused");
+        assert!(
+            matches!(err, WitDnsError::NameNotAllowed),
+            "unlisted is still name-not-allowed: {err:?}"
+        );
+        assert_eq!(
+            data.subrequests.spent(),
+            1,
+            "the refused attempt spent the unit"
         );
     }
 

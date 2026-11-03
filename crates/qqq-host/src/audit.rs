@@ -2070,12 +2070,12 @@ mod tests {
                 }
             }
         }
-        // A floor, not just non-zero: the Capability/Outcome shape filter
-        // must never grow so strict it scans nothing. The tree holds ~30
-        // audit call sites; 20 leaves headroom for deletions while catching
-        // a filter that blinds the scan.
+        // A floor, not just non-zero: the shape filter must never grow so
+        // strict it scans nothing. The census is 26 counted spans
+        // (test-dominated); the floor sits two under it, so blinding three
+        // sites fails while routine deletions pass.
         assert!(
-            checked >= 20,
+            checked >= 24,
             "the scan must find the audit call sites, found only {checked}"
         );
     }
@@ -2149,11 +2149,17 @@ mod tests {
             if projected.contains("ReplayValue") {
                 continue;
             }
-            // Only the audit shape: a function name beside an outcome. This
-            // keeps `self.record("sign", key)` (the secrets op log) and any
-            // other same-named method out of the audit allowlist.
-            if !projected.contains("Outcome") && !projected.contains("Capability") {
-                continue;
+            // Only the audit shape: a function name beside an outcome or a
+            // capability, spelled as a path (`Outcome::`, `Capability::`) or
+            // carried in a variable (the export helper's `outcome` /
+            // `capability` parameters). This keeps `self.record("sign", key)`
+            // (the secrets op log) and any other same-named method out of
+            // the audit allowlist: their spans name neither.
+            {
+                let lowered = projected.to_ascii_lowercase();
+                if !lowered.contains("outcome") && !lowered.contains("capability") {
+                    continue;
+                }
             }
             count += 1;
             check_record_span(span);
@@ -2165,7 +2171,12 @@ mod tests {
     /// before the outcome argument (`"name", Outcome::X` or `"name",
     /// outcome`); other literals in the span (tenant fixtures via
     /// `tenant(..)`) are not function names and are not checked here.
+    /// A span with no outcome-adjacent literal must forward the `function`
+    /// parameter itself (the `require` seam's `audit.record(c, function,
+    /// outcome)` and `commit`'s `row.function`): any other identifier in
+    /// that position is an unchecked name and fails loudly.
     fn check_record_span(span: &str) {
+        let mut found_outcome_literal = false;
         let mut arg = span;
         while let Some(q) = arg.find('"') {
             let after_open = &arg[q + 1..];
@@ -2180,11 +2191,15 @@ mod tests {
                 .unwrap_or("")
                 .trim_start_matches([' ', '\t', '\n', '\r']);
             let is_outcome = tail.starts_with("Outcome::")
+                    // A qualified path (`crate::audit::Outcome::Granted`)
+                    // names the same variant; some call sites qualify.
+                    || tail.contains("::Outcome::")
                 || tail.split([',', ')']).next().is_some_and(|w| {
                     !w.trim().is_empty()
                         && w.trim().chars().all(|c| c.is_ascii_lowercase() || c == '_')
                 });
             if is_outcome {
+                found_outcome_literal = true;
                 assert!(
                     RECORDED_FUNCTIONS.contains(&literal),
                     "an audit `record` passes `{literal}`, which is not in \
@@ -2192,6 +2207,12 @@ mod tests {
                 );
             }
             arg = after;
+        }
+        if !found_outcome_literal {
+            assert!(
+                span.contains("function"),
+                "an audit `record` passes an identifier that is not the forwarded `function` parameter"
+            );
         }
     }
 
@@ -2257,8 +2278,12 @@ mod tests {
         // already decided these lex as strings, not identifiers. Returns
         // the hash count and the text after the opening quote.
         fn raw_open(rest: &str) -> Option<(usize, &str)> {
+            // `b` only starts a raw string as `br`: a bare `b"..."` is a
+            // *cooked* byte string whose escapes stay live, and treating it
+            // as raw mis-closes at an escaped quote and desyncs the rest of
+            // the file.
             let s = match rest.strip_prefix('b') {
-                Some(tail) if tail.starts_with('"') || tail.starts_with('r') => tail,
+                Some(tail) if tail.starts_with('r') => tail,
                 _ => rest,
             };
             let s = s.strip_prefix('r').unwrap_or(s);

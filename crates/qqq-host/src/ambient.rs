@@ -1330,6 +1330,32 @@ mod tests {
                  allowlist scan above cannot see: {rest:?}"
             );
         }
+        // The same literal-only rule for the other two recorders: only
+        // `note`'s internal `log.record(function, value)` forwarder may pass
+        // a parameter through (its inputs are the literals pinned above),
+        // so any other non-literal call is an unchecked name.
+        for needle in [".record(", ".next_replayed("] {
+            for (at, _) in production.match_indices(needle) {
+                let rest = &production[at + needle.len()..];
+                if rest.trim_start().starts_with('"') {
+                    continue;
+                }
+                // The one legitimate forwarder: `note`'s
+                // `log.record(function, value)`, whose inputs are the
+                // literals pinned above. Anything else passing an
+                // identifier is an unchecked name.
+                let tail = rest.trim_start();
+                let is_forwarder = tail
+                    .strip_prefix("function")
+                    .is_some_and(|t| t.trim_start().starts_with([',', ')']));
+                assert!(
+                    is_forwarder,
+                    "a `{needle}` call passes a non-literal function name outside \
+                     the `note` forwarder, which the allowlist scan cannot \
+                     see: {rest:?}"
+                );
+            }
+        }
     }
 
     /// **Every name in `RECORDED_FUNCTIONS` survives a round trip through the file format.**

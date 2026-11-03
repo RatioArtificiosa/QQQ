@@ -700,6 +700,21 @@ mod tests {
         );
     }
 
+    /// The cache key contract is enforced, not just documented: an
+    /// unverified digest (wrong shape) panics in any profile rather than
+    /// keying the cache on an attacker's spelling.
+    #[test]
+    #[should_panic(expected = "verified digests")]
+    fn the_cache_key_refuses_an_unverified_digest() {
+        let cfg = EngineConfig::default();
+        let item = PreloadItem {
+            name: "evil".to_owned(),
+            bytes: TINY.to_vec(),
+            digest: "not-a-digest".to_owned(),
+        };
+        let _ = cache_key_for(&item, &cfg, 64 << 20);
+    }
+
     #[test]
     fn the_outcome_names_are_bounded_and_distinct() {
         let outcomes = [

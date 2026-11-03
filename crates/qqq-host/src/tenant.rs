@@ -134,7 +134,7 @@ impl GrantDigest {
         // staying four orders of magnitude under the line bound.
         if digest.len() > 256 {
             return Err(format!(
-                "a grant digest must not exceed 256 bytes (got {});                  longer digests would not survive the audit line bound",
+                "a grant digest must not exceed 256 bytes (got {})",
                 digest.len()
             ));
         }
@@ -187,7 +187,7 @@ impl ComponentDigest {
         // refuses at load. Real digests are 64 hex characters.
         if digest.len() > 256 {
             return Err(format!(
-                "a component digest must not exceed 256 bytes (got {});                  longer digests would not survive the audit line bound",
+                "a component digest must not exceed 256 bytes (got {})",
                 digest.len()
             ));
         }
@@ -747,8 +747,20 @@ pub fn tenant_key(ip: std::net::IpAddr) -> TenantKey {
 /// let key = tenant_key_with_prefix(ip, 56);
 /// assert_eq!(tenant_label_with_prefix(key, 56), "2001:db8::/56");
 /// ```
+///
+/// # Panics
+///
+/// Panics on a zero prefix, like the key constructor: a `/0` label would
+/// claim the whole internet as one tenant.
 #[must_use]
 pub fn tenant_label_with_prefix(key: TenantKey, prefix_bits: u8) -> String {
+    // Mirrors the constructor's guard: a `/0` label would claim the whole
+    // internet as one tenant, and the mismatch (key built for 64, labelled
+    // for 0) is a programming error, failed loudly like the key itself.
+    assert!(
+        prefix_bits > 0,
+        "a zero prefix collapses every address into one tenant; never configure it"
+    );
     match key {
         TenantKey::V4(n) => std::net::Ipv4Addr::from(n).to_string(),
         TenantKey::V6Prefix(p) => {

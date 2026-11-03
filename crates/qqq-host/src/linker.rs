@@ -984,6 +984,12 @@ impl StoreData {
     /// The default ceiling is `usize::MAX` because the caller that knows the
     /// manifest's memory limit is [`StoreData::install_trapping_limiter`], which
     /// takes it; this form exists for stores with no explicit limit.
+    ///
+    /// # Panics
+    ///
+    /// Panics when undrained egress rows outlive their lifecycle. Draining
+    /// per lifecycle is the consumer's contract; the release alternative is
+    /// rows quietly changing owners across requests.
     pub fn set_limits(&mut self, limiter: StoreLimits, limits: crate::config::StoreLimits) {
         self.resource_limits = TrappingLimiter::new(limiter, usize::MAX);
         // Re-derive BOTH quotas from the same `limits` value the memory ceiling
@@ -998,8 +1004,10 @@ impl StoreData {
         // A lifecycle boundary, so undrained egress rows fail loudly here
         // rather than accumulating silently across reuses: rows belong to
         // the lifecycle that emitted them, and the consumer drains per
-        // lifecycle with `take_egress_audit`.
-        debug_assert!(
+        // lifecycle with `take_egress_audit`. `assert!`, not `debug_assert!`:
+        // in release the alternative is cross-request misattribution, not a
+        // blank report -- rows must never quietly change owners.
+        assert!(
             self.egress_audit.is_empty(),
             "egress audit rows outlived their lifecycle: drain with take_egress_audit"
         );

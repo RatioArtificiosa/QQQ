@@ -1959,8 +1959,16 @@ fn is_secret_header(name: &str) -> bool {
         "set-cookie",
         "x-api-key",
         "api-key",
+        "apikey",
+        "x-apikey",
         "x-auth-token",
         "auth-token",
+        "authtoken",
+        "accesstoken",
+        "accesskey",
+        "authkey",
+        "secretkey",
+        "sessionkey",
     ];
     const SECRET_TOKENS: &[&str] = &[
         "auth",
@@ -1991,7 +1999,11 @@ fn is_secret_header(name: &str) -> bool {
     // `pas` matches nothing -- the check below is harmless but explicit).
     // `cookie` rides the token tier so `x-cookies` is caught by the same
     // rule; the exact `cookie`/`set-cookie` names stay for the bare forms.
-    lower.split(['-', '_']).any(|token| {
+    // Dots split too: `x.api.key` is the same evasion with a different
+    // separator (dots are legal token characters, so the shape reaches
+    // here). A bare `api` still travels -- only exact names and secret
+    // tokens strip, so version/tracing headers are untouched.
+    lower.split(['-', '_', '.']).any(|token| {
         SECRET_TOKENS.contains(&token)
             || token
                 .strip_suffix('s')

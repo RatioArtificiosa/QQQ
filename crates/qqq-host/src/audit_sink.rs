@@ -3126,7 +3126,13 @@ mod tests {
             .append(by_sequence(6))
             .expect("row 6 arms the timer");
         wait_for(&appender, "row 6 to sort", |s| s.submitted == 5);
-        std::thread::sleep(Duration::from_millis(300));
+        // Ten times the 50 ms timeout: the expiry being measured started no
+        // later than the `submitted == 5` poll above, so this margin covers
+        // scheduling delays far beyond any healthy CI worker. A slower
+        // machine sleeps the same wall time and still passes; only a wedged
+        // worker (which the 10 s watchdog turns into a loud failure)
+        // outlasts it.
+        std::thread::sleep(Duration::from_millis(500));
         // Row 7 trips the iteration that fires the skip past 3.
         appender
             .append(by_sequence(7))

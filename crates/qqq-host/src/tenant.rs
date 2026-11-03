@@ -127,6 +127,17 @@ impl GrantDigest {
         if digest.is_empty() {
             return Err("a grant digest must not be empty".to_owned());
         }
+        // Bounded like the tenant id: digests travel inside audit lines, and
+        // an unbounded digest becomes an unbounded line the reader refuses
+        // at load -- a row that bricks the whole file on restart. Real
+        // digests are 64 hex characters; 256 leaves that headroom while
+        // staying four orders of magnitude under the line bound.
+        if digest.len() > 256 {
+            return Err(format!(
+                "a grant digest must not exceed 256 bytes (got {});                  longer digests would not survive the audit line bound",
+                digest.len()
+            ));
+        }
         if !digest
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -170,6 +181,15 @@ impl ComponentDigest {
     pub fn new(digest: &str) -> Result<Self, String> {
         if digest.is_empty() {
             return Err("a component digest must not be empty".to_owned());
+        }
+        // Same poison-file bound as the grant digest above: an unbounded
+        // component digest becomes an unbounded audit line the reader
+        // refuses at load. Real digests are 64 hex characters.
+        if digest.len() > 256 {
+            return Err(format!(
+                "a component digest must not exceed 256 bytes (got {});                  longer digests would not survive the audit line bound",
+                digest.len()
+            ));
         }
         if !digest
             .bytes()
@@ -649,6 +669,12 @@ pub const DEFAULT_IPV6_PREFIX_BITS: u8 = 64;
 /// uses the default; narrower values exist for deployments under
 /// prefix-rotation attack, and no legitimate narrowing reaches zero.
 ///
+/// # Panics
+///
+/// Panics on a zero prefix. That is a programming error, never operator
+/// input reaching this helper, and running one-tenant mode silently would
+/// be the worse failure.
+///
 /// ```
 /// use qqq_host::tenant::{tenant_key_with_prefix, TenantKey};
 ///
@@ -669,9 +695,10 @@ pub const DEFAULT_IPV6_PREFIX_BITS: u8 = 64;
 pub fn tenant_key_with_prefix(ip: std::net::IpAddr, prefix_bits: u8) -> TenantKey {
     // A `/0` masks everything away, collapsing the whole IPv6 internet into
     // one tenant. The only caller uses the default 64; narrower values exist
-    // for prefix-rotation deployments, and none legitimately reaches zero --
-    // so zero is a programming error, failed loudly, not a tenant key.
-    debug_assert!(
+    // for prefix-rotation deployments, and none legitimately reaches zero.
+    // `assert!`, not `debug_assert!`: a zero prefix is a programming error,
+    // and a release build must fail loudly rather than run one-tenant mode.
+    assert!(
         prefix_bits > 0,
         "a zero prefix collapses every address into one tenant; never configure it"
     );
@@ -788,6 +815,18 @@ mod tests {
         assert!(GrantDigest::new("dead beef").is_err());
         assert!(GrantDigest::new(&hex(64)).is_ok());
         assert!(ComponentDigest::new(&hex(64)).is_ok());
+        // Unbounded digests become unbounded audit lines the reader refuses
+        // at load: a 10 MB hex string is valid hex but a file-bricking row.
+        assert!(GrantDigest::new(&hex(256)).is_ok());
+        assert!(
+            GrantDigest::new(&hex(257)).is_err(),
+            "byte 257 must refuse, like the tenant id"
+        );
+        assert!(ComponentDigest::new(&hex(256)).is_ok());
+        assert!(
+            ComponentDigest::new(&hex(257)).is_err(),
+            "byte 257 must refuse, like the tenant id"
+        );
     }
 
     #[test]

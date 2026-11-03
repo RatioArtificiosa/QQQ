@@ -2070,10 +2070,26 @@ mod tests {
                 }
             }
         }
-        assert!(checked > 0, "the scan must find record calls");
+        // A floor, not just non-zero: the Capability/Outcome shape filter
+        // must never grow so strict it scans nothing. The tree holds ~30
+        // audit call sites; 20 leaves headroom for deletions while catching
+        // a filter that blinds the scan.
+        assert!(
+            checked >= 20,
+            "the scan must find the audit call sites, found only {checked}"
+        );
     }
 
-    /// Check one file's `.record(` calls; returns the call count.
+    /// Check one file's audit `.record(` call sites; returns the call count.
+    ///
+    /// The `require(` seam forwards names too, but those are pinned by the
+    /// dedicated `every_audit_seam_name_is_a_recorded_function` test in
+    /// `ambient` (which parses the seam's own three-argument shape,
+    /// including the `require_random` forwarder); scanning them here as well
+    /// would double the maintenance for the same property. `commit`
+    /// re-records `PendingRow::function`, which only ever holds literals
+    /// this scan or the seam test already checked (and the runtime `assert!`
+    /// in `record` is the backstop for all three).
     ///
     /// The scan runs on a code-only projection (string contents and comments
     /// blanked): prose and doc examples mentioning `.record(` are not calls,
@@ -2081,10 +2097,28 @@ mod tests {
     /// needle text, which must not match itself.
     fn check_record_calls(path: &std::path::Path) -> usize {
         let text = std::fs::read_to_string(path).expect("source must read");
+        // Positions in the projection match the original byte-for-byte
+        // (blanking preserves length), so spans found in code-only space
+        // read their literals from the original text.
         let code = code_projection(&text);
+        // The projection must be byte-exact or every span below misreads;
+        // length equality is the whole invariant in one assertion.
+        assert_eq!(
+            code.len(),
+            text.len(),
+            "{path:?}: projection changed the byte length; spans would misread"
+        );
+        check_needle(&code, &text, ".record(")
+    }
+
+    /// Check one needle's call spans. Spans without `Outcome` or `Capability`
+    /// are a different `record` (the secrets op log, the replay log without
+    /// its value type in view): only the audit shape carries both a function
+    /// name and an outcome, so only it is checked here.
+    fn check_needle(code: &str, text: &str, needle: &str) -> usize {
         let mut count = 0;
         let mut at = 0;
-        while let Some(found) = code[at..].find(".record(") {
+        while let Some(found) = code[at..].find(needle) {
             let start = at + found;
             let mut depth = 0usize;
             let mut end = None;
@@ -2102,116 +2136,212 @@ mod tests {
                 }
             }
             let Some(stop) = end else {
-                at = start + 8;
+                at = start + needle.len();
                 continue;
             };
+            // The projection for the kind checks: a `ReplayValue` smuggled
+            // inside a comment must not excuse the span, so the check runs
+            // where comments are already blanked.
+            let projected = &code[start..stop];
             let span = &text[start..stop];
             at = stop;
             // A different `record`: the replay log's, keyed by its value type.
-            if span.contains("ReplayValue") {
+            if projected.contains("ReplayValue") {
+                continue;
+            }
+            // Only the audit shape: a function name beside an outcome. This
+            // keeps `self.record("sign", key)` (the secrets op log) and any
+            // other same-named method out of the audit allowlist.
+            if !projected.contains("Outcome") && !projected.contains("Capability") {
                 continue;
             }
             count += 1;
-            // The function argument is the literal immediately before the
-            // outcome argument (`"name", Outcome::X` or `"name", outcome`);
-            // other literals in the span (tenant fixtures via `tenant(..)`)
-            // are not function names and are not checked here.
-            let mut arg = span;
-            while let Some(q) = arg.find('"') {
-                let after_open = &arg[q + 1..];
-                let Some(close) = after_open.find('"') else {
-                    break;
-                };
-                let literal = &after_open[..close];
-                let after = &after_open[close + 1..];
-                let tail = after
-                    .trim_start_matches([' ', '\t', '\n', '\r'])
-                    .strip_prefix(',')
-                    .unwrap_or("")
-                    .trim_start_matches([' ', '\t', '\n', '\r']);
-                let is_outcome = tail.starts_with("Outcome::")
-                    || tail.split([',', ')']).next().is_some_and(|w| {
-                        !w.trim().is_empty()
-                            && w.trim().chars().all(|c| c.is_ascii_lowercase() || c == '_')
-                    });
-                if is_outcome {
-                    assert!(
-                        RECORDED_FUNCTIONS.contains(&literal),
-                        "{path:?} passes `{literal}` to an audit `record`, which is not in \
-                         RECORDED_FUNCTIONS; add it there (and to the round-trip test) or fix the call"
-                    );
-                }
-                arg = after;
-            }
+            check_record_span(span);
         }
         count
     }
 
-    /// Blanks string-literal contents and comments, preserving length so
-    /// diagnostics still point at the right neighbourhood. Quotes stay;
-    /// contents become spaces, so no needle can match inside prose.
-    /// Char literals blank through the closing quote when one is on the same
-    /// line (a lone `'` is a lifetime, left alone).
+    /// The `.record(` rule: the function argument is the literal immediately
+    /// before the outcome argument (`"name", Outcome::X` or `"name",
+    /// outcome`); other literals in the span (tenant fixtures via
+    /// `tenant(..)`) are not function names and are not checked here.
+    fn check_record_span(span: &str) {
+        let mut arg = span;
+        while let Some(q) = arg.find('"') {
+            let after_open = &arg[q + 1..];
+            let Some(close) = after_open.find('"') else {
+                break;
+            };
+            let literal = &after_open[..close];
+            let after = &after_open[close + 1..];
+            let tail = after
+                .trim_start_matches([' ', '\t', '\n', '\r'])
+                .strip_prefix(',')
+                .unwrap_or("")
+                .trim_start_matches([' ', '\t', '\n', '\r']);
+            let is_outcome = tail.starts_with("Outcome::")
+                || tail.split([',', ')']).next().is_some_and(|w| {
+                    !w.trim().is_empty()
+                        && w.trim().chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                });
+            if is_outcome {
+                assert!(
+                    RECORDED_FUNCTIONS.contains(&literal),
+                    "an audit `record` passes `{literal}`, which is not in \
+                     RECORDED_FUNCTIONS; add it there (and to the round-trip test) or fix the call"
+                );
+            }
+            arg = after;
+        }
+    }
+
+    /// Blanks string-literal contents and comments, preserving byte length
+    /// so spans cut from the projection index the original exactly (each
+    /// source byte becomes one output byte; newlines stay newlines so line
+    /// structure survives). Quotes stay; contents become spaces, so no needle
+    /// can match inside prose.
+    ///
+    /// A single quote opens a char literal only in char shape (one char, an
+    /// escape, or a unicode escape, each closed by a quote); a lone quote is
+    /// a lifetime and is left alone. Raw and byte strings blank through
+    /// their closing delimiter, so a comment opener inside one cannot cut
+    /// the line and hide a registration.
+    // One function, not five: the projection is a single state machine over
+    // the source, and splitting it across items would scatter the
+    // string/comment/char/raw states it exists to keep consistent.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "test-only structural scanner; one state machine reads clearer split apart"
+    )]
     fn code_projection(text: &str) -> String {
-        let chars: Vec<char> = text.chars().collect();
+        fn blanks(out: &mut String, byte_len: usize) {
+            for _ in 0..byte_len {
+                out.push(' ');
+            }
+        }
+        // Blank a segment, preserving newlines: one space per byte otherwise.
+        fn push_blanked(out: &mut String, s: &str) {
+            for part in s.split_inclusive('\n') {
+                if let Some(body) = part.strip_suffix('\n') {
+                    blanks(out, body.len());
+                    out.push('\n');
+                } else {
+                    blanks(out, part.len());
+                }
+            }
+        }
+        // Blank a raw-string body through its closing delimiter.
+        fn blank_raw_body<'a>(
+            out: &mut String,
+            mut rest: &'a str,
+            closer: &str,
+            hashes: usize,
+        ) -> &'a str {
+            loop {
+                if rest.is_empty() {
+                    break;
+                }
+                if rest.starts_with(closer) {
+                    out.push('"');
+                    blanks(out, hashes);
+                    rest = &rest[1 + hashes..];
+                    break;
+                }
+                let c = rest.chars().next().expect("non-empty");
+                push_blanked(out, &rest[..c.len_utf8()]);
+                rest = &rest[c.len_utf8()..];
+            }
+            rest
+        }
+        // Raw or byte string at this position. Code context, so max-munch
+        // already decided these lex as strings, not identifiers. Returns
+        // the hash count and the text after the opening quote.
+        fn raw_open(rest: &str) -> Option<(usize, &str)> {
+            let s = match rest.strip_prefix('b') {
+                Some(tail) if tail.starts_with('"') || tail.starts_with('r') => tail,
+                _ => rest,
+            };
+            let s = s.strip_prefix('r').unwrap_or(s);
+            let hashes = s.chars().take_while(|c| *c == '#').count();
+            s[hashes..].strip_prefix('"').map(|body| (hashes, body))
+        }
+        // Byte length of the char literal at the start of `rest` (which
+        // starts with a quote), or `None` for a lifetime.
+        fn char_len(rest: &str) -> Option<usize> {
+            let tail = &rest[1..];
+            if let Some(body) = tail.strip_prefix('\\') {
+                if let Some(after_u) = body.strip_prefix("u{") {
+                    let i = after_u.find('}')?;
+                    if !after_u[i + 1..].starts_with('\'') {
+                        return None;
+                    }
+                    return Some(1 + 1 + 2 + i + 2);
+                }
+                if body.len() >= 2 && body[1..].starts_with('\'') {
+                    return Some(4);
+                }
+                return None;
+            }
+            let c = tail.chars().next()?;
+            if tail[c.len_utf8()..].starts_with('\'') {
+                Some(1 + c.len_utf8() + 1)
+            } else {
+                None
+            }
+        }
         let mut out = String::with_capacity(text.len());
-        let mut i = 0;
-        while i < chars.len() {
-            let c = chars[i];
-            if c == '"' {
-                out.push(c);
-                i += 1;
-                while i < chars.len() {
-                    let d = chars[i];
-                    if d == '\\' {
-                        out.push(' ');
-                        out.push(' ');
-                        i += 2;
-                    } else if d == '"' {
-                        out.push(d);
-                        i += 1;
+        let mut rest = text;
+        while !rest.is_empty() {
+            if rest.starts_with('"') {
+                out.push('"');
+                rest = &rest[1..];
+                while !rest.is_empty() {
+                    if rest.starts_with('\\') {
+                        blanks(&mut out, 2);
+                        rest = &rest[2..];
+                    } else if rest.starts_with('"') {
+                        out.push('"');
+                        rest = &rest[1..];
                         break;
                     } else {
-                        out.push(if d == '\n' { '\n' } else { ' ' });
-                        i += 1;
+                        let c = rest.chars().next().expect("non-empty");
+                        push_blanked(&mut out, &rest[..c.len_utf8()]);
+                        rest = &rest[c.len_utf8()..];
                     }
                 }
-            } else if c == '/' && chars.get(i + 1) == Some(&'/') {
-                while i < chars.len() && chars[i] != '\n' {
-                    out.push(' ');
-                    i += 1;
-                }
-            } else if c == '/' && chars.get(i + 1) == Some(&'*') {
-                out.push(' ');
-                out.push(' ');
-                i += 2;
-                while i < chars.len() {
-                    if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
-                        out.push(' ');
-                        out.push(' ');
-                        i += 2;
-                        break;
-                    }
-                    out.push(if chars[i] == '\n' { '\n' } else { ' ' });
-                    i += 1;
-                }
-            } else if c == '\'' {
-                let mut j = i + 1;
-                while j < chars.len() && chars[j] != '\n' && chars[j] != '\'' && j - i < 12 {
-                    j += 1;
-                }
-                if j < chars.len() && chars[j] == '\'' {
-                    for _ in i..=j {
-                        out.push(' ');
-                    }
-                    i = j + 1;
+            } else if rest.starts_with("//") {
+                let end = rest.find('\n').unwrap_or(rest.len());
+                blanks(&mut out, end);
+                rest = &rest[end..];
+            } else if rest.starts_with("/*") {
+                let end = rest.find("*/").map_or(rest.len(), |i| i + 2);
+                let (comment, tail) = rest.split_at(end);
+                push_blanked(&mut out, comment);
+                rest = tail;
+            } else if let Some((hashes, body)) = raw_open(rest) {
+                // `body` is a suffix of `rest`, so the opening length is
+                // the difference; the quote itself is kept as the anchor.
+                let open_len = rest.len() - body.len();
+                blanks(&mut out, open_len - 1);
+                out.push('"');
+                rest = body;
+                let closer: String = std::iter::once('"')
+                    .chain(std::iter::repeat_n('#', hashes))
+                    .collect();
+                rest = blank_raw_body(&mut out, rest, &closer, hashes);
+            } else if rest.starts_with('\'') {
+                if let Some(len) = char_len(rest) {
+                    let len = len.min(rest.len());
+                    blanks(&mut out, len);
+                    rest = &rest[len..];
                 } else {
-                    out.push(c);
-                    i += 1;
+                    out.push('\'');
+                    rest = &rest[1..];
                 }
             } else {
+                let c = rest.chars().next().expect("non-empty");
                 out.push(c);
-                i += 1;
+                rest = &rest[c.len_utf8()..];
             }
         }
         out

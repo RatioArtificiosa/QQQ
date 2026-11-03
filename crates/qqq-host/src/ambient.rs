@@ -1156,7 +1156,7 @@ mod tests {
 
     /// **Every audit-seam call site names a `RECORDED_FUNCTIONS` entry.**
     ///
-    /// `record`'s writer-side check is a `debug_assert`: a typo'd name in a
+    /// `record`'s writer-side check is an `assert!`: a typo'd name in a
     /// new seam would buffer rows in every build, and the reader -- which
     /// refuses unknown names -- would drop them at resume. That is a
     /// persisted record that cannot be reported on, discovered at restart.

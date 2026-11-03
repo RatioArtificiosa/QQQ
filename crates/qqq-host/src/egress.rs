@@ -1973,6 +1973,7 @@ fn is_secret_header(name: &str) -> bool {
         "signature",
         "credentials",
         "credential",
+        "cookie",
         "session",
         "sessionid",
         "passwd",
@@ -1984,9 +1985,18 @@ fn is_secret_header(name: &str) -> bool {
     if SECRET_NAMES.contains(&lower.as_str()) {
         return true;
     }
-    lower
-        .split(['-', '_'])
-        .any(|token| SECRET_TOKENS.contains(&token))
+    // Plurals travel too (`x-api-keys`, `x-tokens`): a secret word with one
+    // trailing `s` still names the secret. Both forms are checked because
+    // stripping blindly would mangle `pass` (no trailing `s` to strip, and
+    // `pas` matches nothing -- the check below is harmless but explicit).
+    // `cookie` rides the token tier so `x-cookies` is caught by the same
+    // rule; the exact `cookie`/`set-cookie` names stay for the bare forms.
+    lower.split(['-', '_']).any(|token| {
+        SECRET_TOKENS.contains(&token)
+            || token
+                .strip_suffix('s')
+                .is_some_and(|stem| SECRET_TOKENS.contains(&stem))
+    })
 }
 
 fn safe_host(url: &str) -> String {
@@ -3843,6 +3853,9 @@ mod redirect_tests {
                 ("x-authenticate".to_owned(), "NEGOTIATE".to_owned()),
                 ("x-bearer-info".to_owned(), "tokenish".to_owned()),
                 ("x-hub-signature".to_owned(), "sha256=abc".to_owned()),
+                ("x-api-keys".to_owned(), "plural smuggling".to_owned()),
+                ("x-tokens".to_owned(), "plural smuggling".to_owned()),
+                ("x-cookies".to_owned(), "plural smuggling".to_owned()),
                 ("author".to_owned(), "not a credential".to_owned()),
                 ("x-keep".to_owned(), "yes".to_owned()),
             ],

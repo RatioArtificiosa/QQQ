@@ -406,6 +406,12 @@ fn check_item_digest(item: &PreloadItem) -> std::result::Result<(), Error> {
 /// and the ceiling of the admitting manifest: an unverified digest keys the
 /// cache on an attacker's spelling, and a missing ceiling reuses a pooled
 /// artifact compiled for another reservation.
+///
+/// # Panics
+///
+/// Panics when the digest lacks the verified shape. That is a miswired
+/// caller, never guest input, and failing loudly beats caching on an
+/// attacker's spelling.
 #[must_use]
 pub fn cache_key_for(
     item: &PreloadItem,
@@ -415,7 +421,11 @@ pub fn cache_key_for(
     // Tripwire, not validation: the contract above says verified bytes, and
     // a caller wiring this before the digest check has miswired it. Shape is
     // what the check enforces first, so shape is what is re-asserted here.
-    debug_assert!(
+    // `assert!`, not `debug_assert!`: a miswired caller must fail loudly in
+    // any profile rather than key the cache on an attacker's spelling. No
+    // in-tree caller exists yet (the managed wasmtime cache serves
+    // production); the assertion guards the contract's first real user.
+    assert!(
         digest_shape_valid(&item.digest),
         "cache_key_for takes verified digests; check the item first"
     );

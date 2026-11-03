@@ -718,33 +718,63 @@ impl Error {
     /// The order is fixed and load-bearing: *what happened*, the code and docs
     /// URL, *why*, *the fix*. Error output is a product surface, and an
     /// agent-facing benchmark is run against it.
+    ///
+    /// Interpolated text is passed through [`one_line`]: messages, causes, and
+    /// context arrive from manifests, lockfiles, and guest-influenced paths, and
+    /// a control character or Unicode line separator in any of them would forge
+    /// terminal lines on the reader. The shape is unchanged for clean text, so
+    /// the benchmark and every exact-assertion test still match.
     #[must_use]
     pub fn render(&self) -> String {
         use std::fmt::Write as _;
 
         let mut out = String::new();
         // What happened.
-        let _ = writeln!(out, "error[{}]: {}", self.id(), self.message);
+        let _ = writeln!(out, "error[{}]: {}", self.id(), one_line(&self.message));
         // Why.
         for c in &self.cause {
-            let _ = writeln!(out, "  caused by: {c}");
+            let _ = writeln!(out, "  caused by: {}", one_line(c));
         }
         // Where.
         if !self.context.is_empty() {
             let _ = writeln!(out);
             for (k, v) in &self.context {
-                let _ = writeln!(out, "  {k}: {v}");
+                let _ = writeln!(out, "  {}: {}", one_line(k), one_line(v));
             }
         }
         // The fix.
         if let Some(r) = &self.remediation {
             let _ = writeln!(out);
-            let _ = writeln!(out, "  → {r}");
+            let _ = writeln!(out, "  → {}", one_line(r));
         }
         let _ = writeln!(out);
         let _ = writeln!(out, "  Docs: {}", self.docs_url());
         out
     }
+}
+
+/// Collapse a string to one display line for terminal output.
+///
+/// Control characters and the Unicode line separators U+2028/U+2029 become
+/// U+FFFD rather than a deletion: a visibly broken character tells the reader
+/// that something was there, while dropping the byte could make two different
+/// forged messages render identically. Mirrors the mapping in
+/// `qqq-serve`'s access-log redactor, which faces the same forgery.
+fn one_line(s: &str) -> String {
+    if s.chars()
+        .all(|c| !c.is_control() && c != '\u{2028}' && c != '\u{2029}')
+    {
+        return s.to_owned();
+    }
+    s.chars()
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 impl fmt::Display for Error {
@@ -1038,6 +1068,25 @@ mod tests {
             i_head < i_cause && i_cause < i_ctx && i_ctx < i_fix && i_fix < i_docs,
             "render() elements are out of order:\n{out}"
         );
+    }
+
+    /// Rendered text carries no line-breaking characters: messages, causes,
+    /// and context arrive from manifests, lockfiles, and guest-influenced
+    /// paths, and a control character or U+2028/U+2029 in any of them would
+    /// forge terminal lines on the reader.
+    #[test]
+    fn render_neutralises_control_characters() {
+        let e = Error::new(ErrorCode::CapabilityDenied, "denied\x1b[31mred")
+            .with_cause("line break")
+            .with_context("path", "/tmp/x");
+        let out = e.render();
+        assert!(
+            !out.chars()
+                .any(|c| (c.is_control() || c == '\u{2028}' || c == '\u{2029}') && c != '\n'),
+            "no line-breaking characters survive: {out:?}"
+        );
+        assert!(out.contains("denied�[31mred"), "{out}");
+        assert!(out.contains("line�break"), "{out}");
     }
 
     #[test]

@@ -1494,9 +1494,11 @@ pub fn is_host_controlled_header(name: &str) -> bool {
 /// tab after — so `%0D` in input becomes `%250D` rather than decoding back
 /// into a split, and NUL or DEL cannot ride through where only `\r` and `\n`
 /// were expected. Tab passes through: it is legal field whitespace, and the
-/// trim already removed it from the edges. The result never contains a raw
-/// control byte, which is the property that matters: a value that cannot
-/// terminate its own line cannot inject the next one.
+/// trim already removed it from the edges. U+0085, U+2028 and U+2029 are not
+/// ASCII controls but break lines the same way, so they encode as their
+/// UTF-8 bytes rather than riding through raw. The result never contains a
+/// raw line-breaking byte, which is the property that matters: a value that
+/// cannot terminate its own line cannot inject the next one.
 ///
 /// ```rust
 /// use qqq_run::guest_handler::escape_header_value;
@@ -1505,6 +1507,7 @@ pub fn is_host_controlled_header(name: &str) -> bool {
 /// assert_eq!(escape_header_value("%0D"), "%250D");
 /// assert_eq!(escape_header_value("  padded  "), "padded");
 /// assert_eq!(escape_header_value("nul\x00del\x7f"), "nul%00del%7F");
+/// assert_eq!(escape_header_value("a\u{2028}b"), "a%E2%80%A8b");
 /// ```
 #[must_use]
 pub fn escape_header_value(value: &str) -> String {
@@ -1522,6 +1525,11 @@ pub fn escape_header_value(value: &str) -> String {
             c if c.is_ascii_control() => {
                 let _ = write!(out, "%{c:02X}", c = c as u8);
             }
+            // Non-ASCII line breaks: percent-encode the UTF-8 bytes so no raw
+            // line-breaking byte reaches the wire.
+            '\u{85}' => out.push_str("%C2%85"),
+            '\u{2028}' => out.push_str("%E2%80%A8"),
+            '\u{2029}' => out.push_str("%E2%80%A9"),
             _ => out.push(c),
         }
     }
@@ -4132,10 +4140,12 @@ mod tests {
         let evil = Error::new(ErrorCode::GuestResponseRefused, "bad\x1b[31mred");
         let clean = failure_detail(&evil);
         assert!(
-            !clean.chars().any(char::is_control),
-            "no control characters survive: {clean:?}"
+            !clean
+                .chars()
+                .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}'),
+            "no line-breaking characters survive: {clean:?}"
         );
-        assert!(clean.contains("bad [31mred"), "{clean}");
+        assert!(clean.contains("bad�[31mred"), "{clean}");
     }
 
     /// **Oversized header sets are refused before serialization.**

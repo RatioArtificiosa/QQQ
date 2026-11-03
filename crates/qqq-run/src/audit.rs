@@ -299,12 +299,28 @@ pub struct RuleInfo {
 /// Blank control characters for terminal and log output.
 ///
 /// A `\n` or ANSI escape in rendered text forges lines on the reader's
-/// terminal; words stay separated through spaces without executing anything.
+/// terminal; U+2028/U+2029 are separators, not controls, but break lines the
+/// same way. The replacement is U+FFFD rather than a space or a deletion: a
+/// visibly broken character tells the reader something was there, while
+/// dropping the byte could make two different forged messages render
+/// identically. Mirrors `one_line` in `qqq-core` and the access-log
+/// redactor, which face the same forgery.
 /// `pub(crate)` so the guest failure path shares it: guest-influenced error
 /// text reaches the operator's log through the same shape.
 pub(crate) fn sanitize_log_line(s: &str) -> String {
+    if s.chars()
+        .all(|c| !c.is_control() && c != '\u{2028}' && c != '\u{2029}')
+    {
+        return s.to_owned();
+    }
     s.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -1568,12 +1584,17 @@ mod tests {
     /// of them would forge terminal lines on the reader.
     #[test]
     fn render_blanks_control_characters() {
-        assert_eq!(sanitize_log_line("a\nb\x1b[31mc\td"), "a b [31mc d");
+        assert_eq!(
+            sanitize_log_line("a\nb\x1b[31mc\td\u{2028}e"),
+            "a�b�[31mc�d�e"
+        );
         let report = audit(&loaded(CHOSEN), None);
         let text = report.render();
         assert!(
-            !text.chars().any(|c| c.is_control() && c != '\n'),
-            "rendered lines must not carry control characters: {text:?}"
+            !text
+                .chars()
+                .any(|c| (c.is_control() || c == '\u{2028}' || c == '\u{2029}') && c != '\n'),
+            "rendered lines must not carry line-breaking characters: {text:?}"
         );
     }
 

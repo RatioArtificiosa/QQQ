@@ -386,7 +386,7 @@ pub fn format_record(record: &LogRecord) -> String {
         .unwrap_or("unknown");
     let mut out = format!(
         "tenant={} level={level} msg={}",
-        record.tenant,
+        quote(&record.tenant),
         quote(&record.message)
     );
     for (k, v) in &record.attributes {
@@ -409,8 +409,12 @@ pub fn format_record(record: &LogRecord) -> String {
 
 fn quote(s: &str) -> String {
     use std::fmt::Write as _;
+    // U+2028/U+2029 are separators, not controls, but break lines the same
+    // way: the trigger checks them explicitly so a value holding one is
+    // quoted and escaped rather than passed through.
     if s.bytes()
         .any(|b| b.is_ascii_whitespace() || b == b'"' || b == b'\\' || b.is_ascii_control())
+        || s.contains(['\u{2028}', '\u{2029}'])
     {
         let mut escaped = String::with_capacity(s.len() + 2);
         escaped.push('"');
@@ -421,6 +425,8 @@ fn quote(s: &str) -> String {
                 '\n' => escaped.push_str("\\n"),
                 '\r' => escaped.push_str("\\r"),
                 '\t' => escaped.push_str("\\t"),
+                '\u{2028}' => escaped.push_str("\\u2028"),
+                '\u{2029}' => escaped.push_str("\\u2029"),
                 c if c.is_control() => {
                     let _ = write!(escaped, "\\u{:04x}", c as u32);
                 }

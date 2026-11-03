@@ -492,6 +492,18 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 }
                 let mut wanted = Vec::new();
                 for name in &allowed {
+                    // Bound each entry before resolving: the `String`s arrive
+                    // allocated, but cloning a megabyte name into
+                    // `UnknownCapability` would keep it. Refuse oversize
+                    // entries as `NotAssertable` with the length, not the
+                    // content.
+                    if name.len() > crate::host_log::MAX_LOG_FIELD_BYTES {
+                        return Ok((Err(AssertionError::NotAssertable(format!(
+                            "allowed entry is {} bytes, past the {}-byte bound",
+                            name.len(),
+                            crate::host_log::MAX_LOG_FIELD_BYTES
+                        ))),));
+                    }
                     match capability_named(name) {
                         Some(c) => wanted.push(c),
                         None => {
@@ -600,6 +612,27 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                     )),));
                 };
                 if !passed {
+                    // Bound each field before formatting: the `String`s
+                    // arrive allocated from the guest (Wasmtime materialized
+                    // them), but formatting a megabyte `location` into the
+                    // failure would double it. Refuse oversize fields as
+                    // `NotAssertable` before the `format!`.
+                    if message.len() > crate::host_log::MAX_LOG_FIELD_BYTES {
+                        return Ok((Err(AssertionError::NotAssertable(format!(
+                            "failure message is {} bytes, past the {}-byte bound",
+                            message.len(),
+                            crate::host_log::MAX_LOG_FIELD_BYTES
+                        ))),));
+                    }
+                    if let Some(at) = &location
+                        && at.len() > crate::host_log::MAX_LOG_FIELD_BYTES
+                    {
+                        return Ok((Err(AssertionError::NotAssertable(format!(
+                            "failure location is {} bytes, past the {}-byte bound",
+                            at.len(),
+                            crate::host_log::MAX_LOG_FIELD_BYTES
+                        ))),));
+                    }
                     let failure = match location {
                         Some(at) => format!("{message} (at {at})"),
                         None => message,

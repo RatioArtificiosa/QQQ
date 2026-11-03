@@ -2057,11 +2057,18 @@ fn is_secret_header(name: &str) -> bool {
     }
     // `client-id` is the only hyphenated secret name with no secret half
     // (`client` and `id` are innocent alone, so neither is a token): affixed
-    // hyphen shapes (`x-my-client-id`, `x-client-id-box`, `x-client-ids`)
-    // would otherwise split into innocent tokens and travel. De-hyphenating
-    // catches the joined spelling whatever the separators were; no innocent
-    // header spells `clientid` continuously.
-    if norm.replace('-', "").contains("clientid") {
+    // hyphen shapes (`x-my-client-id`, `x-client-id-box`, `x-client-ids`,
+    // `x-client-id2`, `x-client-2-id`, `x-client2-id`) would otherwise split
+    // into innocent tokens and travel. Comparing letters only catches the
+    // joined spelling through any separators or interior digits; no tracked
+    // innocent header spells `clientid` that way (`x-client-identity`-shaped
+    // names fail-closed strip, documented as intended).
+    if norm
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .collect::<String>()
+        .contains("clientid")
+    {
         return true;
     }
     // Plurals are checked too (`x-api-keys`, `x-tokens`): a secret word with one
@@ -4147,6 +4154,9 @@ mod redirect_tests {
             ("x-client-id-box".to_owned(), "affixed client id".to_owned()),
             ("x-client-ids".to_owned(), "plural client id".to_owned()),
             ("x-client-id2".to_owned(), "numbered client id".to_owned()),
+            ("x-client-2-id".to_owned(), "split client id".to_owned()),
+            ("x-client2-id".to_owned(), "numbered client id".to_owned()),
+            ("x-client12id".to_owned(), "numbered client id".to_owned()),
             ("x-refresh".to_owned(), "refresh token secret".to_owned()),
         ]
     }
@@ -4285,12 +4295,12 @@ mod redirect_tests {
         let first_lower = first.to_ascii_lowercase();
         for (name, value) in hostile_request_headers() {
             assert!(
-                first_lower.contains(&format!("{}:", name.to_ascii_lowercase())),
+                first_lower.contains(&format!(
+                    "{}: {}",
+                    name.to_ascii_lowercase(),
+                    value.to_ascii_lowercase()
+                )),
                 "the first hop carries {name} to its own origin: {first:?}"
-            );
-            assert!(
-                first_lower.contains(&value.to_ascii_lowercase()),
-                "the first hop carries {name}'s value to its own origin: {first:?}"
             );
         }
         assert_eq!(rows.len(), 3, "one row per hop");

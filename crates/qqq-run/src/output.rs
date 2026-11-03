@@ -88,7 +88,7 @@ pub enum CommandName {
     ///
     /// They are two documents that share a format and nearly a name, and `§O-297` recorded the
     /// risk of conflating them. `Audit` reads an **artifact** and answers *"is this configured
-    /// safely?"* — capabilities, limits, supply chain, provenance. `AuditLog` reads an
+    /// safely?"* — capabilities, limits, unused grants, supply chain, provenance. `AuditLog` reads an
     /// **execution record** and answers *"what did this code do, and was it permitted?"*. The
     /// first changes when the manifest changes; the second changes when the server runs.
     AuditLog,

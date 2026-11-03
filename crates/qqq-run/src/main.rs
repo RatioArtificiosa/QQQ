@@ -918,10 +918,10 @@ fn dispatch_inspect(
 ///
 /// # What §5.2 asks for
 ///
-/// > | `qqqai audit <artifact>` | Full security posture: caps, limits, supply
-/// > chain, provenance | `--json`, `--sarif`, `--fail-on <severity>` |
+/// > | `qqqai audit <artifact>` | Full security posture: caps, limits, unused
+/// > grants, supply chain, provenance | `--json`, `--sarif`, `--fail-on <severity>` |
 ///
-/// Four surfaces, all reported; two output modes plus a threshold. The SARIF mode
+/// Five surfaces, all reported; two output modes plus a threshold. The SARIF mode
 /// is what earns the command its place: GitHub code scanning reads it, so a
 /// capability change appears in the **Security tab of a pull request** beside the
 /// `CodeQL` results, with no QQQ-specific integration.

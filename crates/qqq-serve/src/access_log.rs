@@ -928,7 +928,9 @@ fn json_string(s: &str) -> String {
             // Every other control character, so no raw control byte reaches the
             // stream. JSON requires these escaped; a reader that tolerated them
             // would be the only thing standing between a log and a forged line.
-            c if c < '\u{20}' => {
+            // U+2028/U+2029 are separators, not controls, but break lines the
+            // same way and throw pre-ES2019 JSON parsers — escaped like controls.
+            c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c => out.push(c),
@@ -1150,6 +1152,26 @@ mod tests {
         let json = r.render_json();
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(v["msg"], "quote \" backslash \\ tab \t bell \u{07}");
+    }
+
+    /// DEL, C1 controls and Unicode separators escape like controls do: the
+    /// byte-oriented check that preceded this one could not see multibyte
+    /// characters, and U+2028/U+2029 throw pre-ES2019 JSON parsers.
+    #[test]
+    fn separators_and_non_ascii_controls_are_escaped() {
+        let escaped = json_string("del\u{7f}c1\u{85}sep\u{2028}sep\u{2029}end");
+        assert!(
+            !escaped
+                .chars()
+                .any(|c| c == '\u{7f}' || c.is_control() || c == '\u{2028}' || c == '\u{2029}'),
+            "no raw separator or control survives: {escaped:?}"
+        );
+        for seq in ["\\u007f", "\\u0085", "\\u2028", "\\u2029"] {
+            assert!(escaped.contains(seq), "{seq} must be escaped: {escaped:?}");
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&format!("{{\"v\":{escaped}}}")).expect("valid JSON");
+        assert_eq!(v["v"], "del\u{7f}c1\u{85}sep\u{2028}sep\u{2029}end");
     }
 
     /// The human rendering is one line and names the level first.

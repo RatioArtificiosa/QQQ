@@ -77,8 +77,10 @@ impl TenantId {
     ///
     /// # Errors
     ///
-    /// Rejects an empty name, a name with leading or trailing whitespace, and a
-    /// name containing ASCII control characters. The first two would make two
+    /// Rejects an empty name, a name with leading or trailing whitespace, a
+    /// name containing control characters, and a name containing the Unicode
+    /// line/paragraph separators (U+2028/U+2029, which are separators rather
+    /// than controls but break lines the same way). The first two would make two
     /// spellings of the same tenant compare unequal — a policy that applies to
     /// `"acme"` but not `"acme "` is a policy with a hole nobody can see — and the
     /// third would let a name forge a log line.
@@ -106,7 +108,10 @@ impl TenantId {
                  a policy that matches one but not the other has a hole in it."
             ));
         }
-        if name.chars().any(char::is_control) {
+        if name
+            .chars()
+            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+        {
             return Err(
                 "a tenant id must not contain control characters; they would \
                  allow a forged line in the audit log"
@@ -1188,6 +1193,16 @@ mod tests {
         assert!(TenantId::new("acme\x00").is_err());
         assert!(TenantId::new("acme").is_ok());
         assert!(TenantId::new("acme-corp.eu").is_ok());
+    }
+
+    /// Interior Unicode separators are rejected like controls: U+2028/U+2029
+    /// are not `is_control`, but break log lines the same way. Surrounding
+    /// ones are already refused by the trim check; this pins the interior.
+    #[test]
+    fn a_tenant_id_rejects_interior_separators() {
+        assert!(TenantId::new("acme\u{2028}corp").is_err());
+        assert!(TenantId::new("acme\u{2029}corp").is_err());
+        assert!(TenantId::new("acme\u{85}corp").is_err());
     }
 
     /// Quotes and backslashes never name a tenant: they would desynchronise

@@ -1102,6 +1102,16 @@ fn prometheus_escape(value: &str) -> String {
             // is whitespace the parser does not expect inside a label.
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            // U+2028/U+2029 break display lines the same way newlines do, and
+            // C1 controls ride multibyte UTF-8 past a byte-oriented check;
+            // Prometheus escaping has no named form for them, so they use the
+            // same `\uXXXX` shape the JSON logs use.
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c if c.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }
@@ -1207,10 +1217,24 @@ mod tests {
         // whitespace the parser does not expect inside a label.
         assert_eq!(prometheus_escape("a\rb"), "a\\rb");
         assert_eq!(prometheus_escape("a\tb"), "a\\tb");
+    }
 
+    /// Unicode separators and C1 controls escape like controls do: the byte
+    /// scan they would need is multibyte-blind, and a raw U+2028 would break
+    /// display lines the same way a newline breaks exposition lines.
+    #[test]
+    fn separators_and_c1_controls_are_escaped() {
+        assert_eq!(prometheus_escape("a\u{2028}b"), "a\\u2028b");
+        assert_eq!(prometheus_escape("a\u{2029}b"), "a\\u2029b");
+        assert_eq!(prometheus_escape("a\u{85}b"), "a\\u0085b");
+    }
+
+    #[test]
+    fn tenant_label_escaping_covers_hostile_names() {
         let m = HttpMetrics::new();
         // A name with a quote and a backslash, recorded as a real tenant would be.
         m.record_request(Method::Get, 200, 1, "evil\" tenant", 5, 0);
+        m.record_request(Method::Get, 200, 1, "evil\u{2028}tenant", 5, 0);
         let text = m.render_prometheus();
         assert!(
             !text.contains("tenant=\"evil\" tenant\""),
@@ -1219,6 +1243,14 @@ mod tests {
         assert!(
             text.contains("tenant=\"evil\\\" tenant\""),
             "the quote must be escaped: {text}"
+        );
+        assert!(
+            !text.contains("evil\u{2028}tenant"),
+            "a raw separator would break display lines: {text}"
+        );
+        assert!(
+            text.contains("evil\\u2028tenant"),
+            "the separator must be escaped: {text}"
         );
         // And every metric line must still have exactly one label list.
         for line in text.lines().filter(|l| !l.starts_with('#')) {

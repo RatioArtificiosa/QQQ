@@ -409,14 +409,18 @@ pub fn format_record(record: &LogRecord) -> String {
 
 fn quote(s: &str) -> String {
     use std::fmt::Write as _;
-    // U+2028/U+2029 are separators, not controls, but break lines the same
-    // way; U+0085 is a control outside ASCII, so the byte scan below cannot
-    // see it. The trigger checks all three explicitly so a value holding only
-    // one of them is still quoted and escaped rather than passed through.
-    if s.bytes()
-        .any(|b| b.is_ascii_whitespace() || b == b'"' || b == b'\\' || b.is_ascii_control())
-        || s.contains(['\u{85}', '\u{2028}', '\u{2029}'])
-    {
+    // Byte checks cannot see multibyte characters: U+0085 rides two bytes past
+    // the ASCII-control test, and U+2028/U+2029 are separators, not controls.
+    // The trigger is therefore char-level, so a value holding only one of them
+    // is still quoted and escaped rather than passed through bare.
+    if s.chars().any(|c| {
+        c.is_control()
+            || c.is_whitespace()
+            || c == '"'
+            || c == '\\'
+            || c == '\u{2028}'
+            || c == '\u{2029}'
+    }) {
         let mut escaped = String::with_capacity(s.len() + 2);
         escaped.push('"');
         for c in s.chars() {

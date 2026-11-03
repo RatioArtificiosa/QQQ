@@ -577,9 +577,14 @@ fn watch(
             ok: err.is_none(),
             error: err.as_ref().map(|e| e.message.clone()),
         });
+        // The message is sanitized: build errors echo compiler output, and a
+        // control character in it would forge terminal lines on the operator.
+        let detail = err
+            .as_ref()
+            .map(|e| crate::audit::sanitize_log_line(&e.message));
         eprintln!(
             "reload {cycle}: {}",
-            err.as_ref().map_or("activated", |e| e.message.as_str())
+            detail.as_deref().unwrap_or("activated")
         );
         last_pending.clear();
 

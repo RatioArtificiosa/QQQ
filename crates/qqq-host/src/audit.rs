@@ -527,6 +527,31 @@ fn json_unescape(s: &str) -> Option<String> {
     Some(out)
 }
 
+/// Extract a JSON field that must be 64 lowercase hex, checking the raw
+/// slice BEFORE allocating: `json_string_field` below builds an owned
+/// `String` via `json_unescape`, so validating only the owned value would
+/// price an 8 MiB allocation for a hostile line the 8 MiB line bound
+/// already admits. The writer emits canonical hex (no escapes), so the
+/// validated slice *is* the value -- no unescape step, no intermediary
+/// allocation. Anything else, including an escaped encoding of a valid
+/// digest, is refused as non-canonical.
+fn json_hex64_field(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":\"");
+    let start = json.find(&needle)? + needle.len();
+    let rest = &json[start..];
+    let raw = rest.get(..64)?;
+    if !raw
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    if rest.as_bytes().get(64) != Some(&b'"') {
+        return None;
+    }
+    Some(raw.to_owned())
+}
+
 /// Extract a JSON string field, or `None` when the key is absent or malformed.
 ///
 /// # Why a hand-written scan and not a JSON library
@@ -645,21 +670,18 @@ impl AuditRecord {
                 )
             })?;
 
-        let previous = json_string_field(json, "previous")
-            .ok_or_else(|| "an audit record must carry its `previous` digest".to_owned())?;
         // Chain links are 64 lowercase hex, no more and no less: an 8 MiB
         // `previous` would otherwise parse, store, and bloat every `load`
-        // with bytes `verify_chain` never asked for. The writer only ever
-        // emits `genesis_digest` and SHA-256 hex, so anything else is a
-        // hostile or corrupt row, refused before it costs memory.
-        if !is_chain_digest(&previous) {
-            return Err("`previous` must be a 64-character lowercase hex digest".to_owned());
-        }
-        let chain = json_string_field(json, "chain")
-            .ok_or_else(|| "an audit record must carry its `chain` digest".to_owned())?;
-        if !is_chain_digest(&chain) {
-            return Err("`chain` must be a 64-character lowercase hex digest".to_owned());
-        }
+        // with bytes `verify_chain` never asked for, and the 8 MiB line
+        // bound admits the line itself. The writer only ever emits
+        // `genesis_digest` and SHA-256 hex, so anything else is a hostile
+        // or corrupt row, refused before it costs an allocation.
+        let previous = json_hex64_field(json, "previous").ok_or_else(|| {
+            "an audit record must carry a 64-character lowercase hex `previous` digest".to_owned()
+        })?;
+        let chain = json_hex64_field(json, "chain").ok_or_else(|| {
+            "an audit record must carry a 64-character lowercase hex `chain` digest".to_owned()
+        })?;
 
         // The version dispatch: absent `v` is a v1 record, which also lacks
         // `timestamp_unix_ms` and reads it as zero. A present `v` must be a
@@ -705,19 +727,6 @@ impl AuditRecord {
             v: u8::try_from(v).map_err(|_| "record version out of range".to_owned())?,
         })
     }
-}
-
-/// Whether a chain link has the writer's shape: exactly 64 lowercase hex.
-///
-/// The writer only emits `genesis_digest()` and SHA-256 hex digests. Anything
-/// else in `previous`/`chain` is hostile or corrupt input, and refusing it at
-/// parse keeps an 8 MiB line of `previous` from becoming an 8 MiB allocation
-/// `load` never needed.
-fn is_chain_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Hash one field with a length prefix, so the encoding is injective.
@@ -2204,15 +2213,25 @@ mod tests {
     /// `test_scan::is_forwarded_call`): any other identifier in that
     /// position is an unchecked name and fails loudly.
     fn check_record_span(span: &str, projected: &str) {
+        // Literal boundaries come from the projection, values from the
+        // original at the same offsets: the projection blanks escape
+        // sequences (`\"` becomes two spaces), so a naive text scan would
+        // split `"a\"handle_request"` at the escaped quote and bless the
+        // `handle_request` fragment of an unlisted name. Offsets are
+        // interchangeable because the projection preserves byte length
+        // (asserted per file above).
         let mut found_outcome_literal = false;
-        let mut arg = span;
-        while let Some(q) = arg.find('"') {
-            let after_open = &arg[q + 1..];
-            let Some(close) = after_open.find('"') else {
+        let mut rest_p = projected;
+        let mut rest_s = span;
+        assert_eq!(rest_p.len(), rest_s.len());
+        while let Some(q) = rest_p.find('"') {
+            let after_open_p = &rest_p[q + 1..];
+            let after_open_s = &rest_s[q + 1..];
+            let Some(close) = after_open_p.find('"') else {
                 break;
             };
-            let literal = &after_open[..close];
-            let after = &after_open[close + 1..];
+            let literal = &after_open_s[..close];
+            let after = &after_open_s[close + 1..];
             let tail = after
                 .trim_start_matches([' ', '\t', '\n', '\r'])
                 .strip_prefix(',')
@@ -2234,7 +2253,9 @@ mod tests {
                      RECORDED_FUNCTIONS; add it there (and to the round-trip test) or fix the call"
                 );
             }
-            arg = after;
+            let consumed = q + 1 + close + 1;
+            rest_p = &rest_p[consumed..];
+            rest_s = &rest_s[consumed..];
         }
         if !found_outcome_literal {
             assert!(
@@ -3196,7 +3217,16 @@ mod tests {
             Outcome::Granted,
         );
         let row = stream.records()[0].to_json();
-        for hostile in ["0".repeat(8 << 20), "xyz".to_owned(), "ABCDEF".repeat(11)] {
+        // A 64-char all-uppercase hex scans the shape the length check
+        // alone would bless: length is right, case is not canonical.
+        let upper_hex = "ABCDEF".repeat(10) + "ABCD";
+        assert_eq!(upper_hex.len(), 64);
+        for hostile in [
+            "0".repeat(8 << 20),
+            "xyz".to_owned(),
+            "ABCDEF".repeat(11),
+            upper_hex,
+        ] {
             for key in ["previous", "chain"] {
                 let start =
                     row.find(&format!("\"{key}\":\"")).expect("key present") + key.len() + 4;

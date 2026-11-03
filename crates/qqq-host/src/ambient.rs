@@ -1335,10 +1335,6 @@ mod tests {
         // The whole file, minus `#[cfg(test)]` items: production code after
         // inline test helpers must scan too (a split at the first test gate
         // hid the `clock.monotonic`, `crypto.random`, and require-forwarding
-        // seams below it). Test items are stripped, not scanned.
-        // The whole file, minus `#[cfg(test)]` items: production code after
-        // inline test helpers must scan too (a split at the first test gate
-        // hid the `clock.monotonic`, `crypto.random`, and require-forwarding
         // seams below it). Test items are stripped, not scanned: fixtures
         // name real functions and prove nothing. Matching runs on the
         // projection (blanked comments cannot fake a call); literals are

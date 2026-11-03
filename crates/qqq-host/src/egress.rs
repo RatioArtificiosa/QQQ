@@ -1977,7 +1977,6 @@ fn is_secret_header(name: &str) -> bool {
         "authentication",
         "authn",
         "apikey",
-        "x-apikey",
         "authtoken",
         "accesstoken",
         "authkey",

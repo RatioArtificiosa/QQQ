@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Structural-scan helpers for the allowlist tests.
 //!
 //! The audit and replay allowlist tests (`audit::tests`,
@@ -86,6 +88,17 @@ pub(crate) fn code_projection(text: &str) -> String {
     fn char_len(rest: &str) -> Option<usize> {
         let tail = &rest[1..];
         if let Some(body) = tail.strip_prefix('\\') {
+            // backslash-x-N-N: backslash, x, two hex digits, closing quote.
+            if body.len() >= 4
+                && body.starts_with('x')
+                && body
+                    .as_bytes()
+                    .get(1..3)
+                    .is_some_and(|w| w.iter().all(u8::is_ascii_hexdigit))
+                && body[3..].starts_with('\'')
+            {
+                return Some(6);
+            }
             if let Some(after_u) = body.strip_prefix("u{") {
                 let i = after_u.find('}')?;
                 if !after_u[i + 1..].starts_with('\'') {
@@ -231,22 +244,55 @@ pub(crate) fn top_level_commas(projected_span: &str) -> usize {
 /// same-named loop variable over the allowlist itself, which is safe by
 /// construction and shares the name.
 pub(crate) fn is_forwarded_call(projected_span: &str) -> bool {
-    if projected_span.contains("row.function") {
+    // Bare `function` must be a whole top-level argument: the seam's
+    // `audit.record(c, function, outcome)` and the test loops'
+    // `stream.record(.., function, ..)`.
+    if split_top_level(projected_span)
+        .iter()
+        .any(|arg| arg.trim() == "function")
+    {
         return true;
     }
-    let mut rest = projected_span;
-    let word = "function";
-    while let Some(i) = rest.find(word) {
-        let before = rest[..i].chars().next_back();
-        let after = rest[i + word.len()..].chars().next();
-        let before_ok = matches!(before, None | Some('(' | ',' | ' ' | '\t' | '\n' | '\r'));
-        let after_ok = matches!(after, None | Some(',' | ')' | ' ' | '\t' | '\n' | '\r'));
-        if before_ok && after_ok {
-            return true;
+    // `row.function` as a whole token: the commit path re-records the
+    // pending row's function. Word-bounded on both sides, so
+    // `narrow.function` and `row.functionality` do not match.
+    projected_span
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+        .any(|w| w == "row.function")
+}
+
+/// Split a projected call span at its top-level commas (depth 1 inside
+/// the call's own parens). Strings and comments are already blanked, so
+/// every comma counted is structural.
+pub(crate) fn split_top_level(projected_span: &str) -> Vec<&str> {
+    // Arguments only: the span starts at the callee name, so content
+    // before the first paren is the head, not an argument. Trailing text
+    // past the matching close paren is dropped the same way.
+    let body = match projected_span.find('(') {
+        Some(i) => &projected_span[i + 1..],
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, c) in body.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    out.push(&body[start..i]);
+                    break;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => {
+                out.push(&body[start..i]);
+                start = i + 1;
+            }
+            _ => {}
         }
-        rest = &rest[i + 1..];
     }
-    false
+    out
 }
 
 /// Whether the `name` at `start` opens a *method or path* call:
@@ -256,8 +302,18 @@ pub(crate) fn is_forwarded_call(projected_span: &str) -> bool {
 /// `a.record(`; a bare `record` (free helper, definition, prose) never
 /// qualifies.
 pub(crate) fn is_method_call(code: &str, start: usize, name: &str) -> Option<usize> {
-    let prev = code[..start].chars().next_back()?;
-    if !matches!(prev, '.' | ':') {
+    // Trailing whitespace skipped: `a .record(` and `A :: record(` are
+    // valid Rust a spaced-out dot away from the canonical shape, and the
+    // projection blanks comments, so `a /**/ .record(` matches too.
+    let mut before = code[..start].trim_end();
+    // A path separator with spaces (`A :: record`): strip one colon, then
+    // whitespace, then require the second.
+    if let Some(tail) = before.strip_suffix(':') {
+        before = tail.trim_end();
+        if !before.ends_with(':') {
+            return None;
+        }
+    } else if !before.ends_with('.') {
         return None;
     }
     find_call_open(code, start + name.len())
@@ -375,4 +431,92 @@ pub(crate) fn strip_test_items(source: &str) -> (String, String) {
     text_out.push_str(&source[prev..]);
     code_out.push_str(&code[prev..]);
     (text_out, code_out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projection_preserves_byte_length_over_hostile_input() {
+        let src = "fn f() { let s = \"a\\\"b\u{2028}x\"; /* c // d */ let c = '\x41'; let r = r#\"e\"f\"#; }\n";
+        let code = code_projection(src);
+        assert_eq!(
+            code.len(),
+            src.len(),
+            "every source byte must map to exactly one output byte"
+        );
+        assert_eq!(
+            code.matches('\n').count(),
+            src.matches('\n').count(),
+            "newlines survive so line numbers stay aligned"
+        );
+    }
+
+    #[test]
+    fn projection_blanks_strings_and_comments_but_keeps_code() {
+        let code = code_projection("a.record(\"name\"); // func_wrap(\"ghost\", x);\n");
+        assert!(code.contains("a.record("), "code survives");
+        assert!(!code.contains("ghost"), "line comments do not scan");
+        assert!(!code.contains("name"), "string contents do not scan");
+    }
+
+    #[test]
+    fn projection_tracks_block_comments_spanning_lines() {
+        let code = code_projection("a(1);\n/* func_wrap(\"x\", y);\nstill comment */\nb(2);\n");
+        assert!(code.contains("a(1);"), "code before survives");
+        assert!(code.contains("b(2);"), "code after survives");
+        assert!(!code.contains("func_wrap"), "block comment hidden");
+    }
+
+    #[test]
+    fn projection_handles_raw_strings_char_literals_and_lifetimes() {
+        // A `//` inside a raw string must not cut the line.
+        let code = code_projection("a.func_wrap(\"x\"); let r = r#\"a // b\"#;\n");
+        assert!(code.contains("a.func_wrap("), "code survives");
+        // A char literal blanks to spaces; a lifetime stays.
+        assert_eq!(code_projection("let c = 'x';\n"), "let c =    ;\n");
+        assert_eq!(code_projection("let c = '\\x41';\n"), "let c =       ;\n");
+        assert!(code_projection("let r = &\u{27}a str;\n").contains("&\u{27}a"));
+        // Byte-exactness over multibyte content: one space per byte.
+        let code = code_projection("\u{2028}\n");
+        assert_eq!(code.len(), 4, "U+2028 is 3 bytes plus newline");
+    }
+
+    #[test]
+    fn split_top_level_counts_structural_commas_only() {
+        assert_eq!(split_top_level("record(a, b, c)"), vec!["a", " b", " c"]);
+        assert_eq!(split_top_level("f(g(1, 2), h)").len(), 2);
+        assert_eq!(
+            top_level_commas("log.record(function, value)"),
+            1,
+            "the replay forwarder has one comma"
+        );
+        assert!(top_level_commas("self.record(\"sign\", key)") < 2);
+    }
+
+    #[test]
+    fn is_forwarded_call_accepts_only_the_closed_set() {
+        assert!(is_forwarded_call("record(c, function, outcome)"));
+        assert!(is_forwarded_call("record(function, value)"));
+        assert!(is_forwarded_call(
+            "record(row.tenant, &c, row.function, row.outcome)"
+        ));
+        assert!(!is_forwarded_call("record(c, dysfunction, outcome)"));
+        assert!(!is_forwarded_call("record(c, my_function, outcome)"));
+        assert!(!is_forwarded_call("record(c, function2, outcome)"));
+        assert!(!is_forwarded_call("record(c, evil, foo(function))"));
+        assert!(!is_forwarded_call("record(narrow.function, outcome)"));
+        assert!(!is_forwarded_call("record(row.functionality, outcome)"));
+    }
+
+    #[test]
+    fn strip_test_items_removes_gated_code_but_keeps_production() {
+        let src = "fn live() { require(a, b, \"x\"); }\n#[cfg(test)]\nfn dead() { require(a, b, \"y\"); }\nfn live2() {}\n";
+        let (text, code) = strip_test_items(src);
+        assert!(text.contains("live()"), "production kept");
+        assert!(!text.contains("dead()"), "gated item stripped");
+        assert!(!code.contains("\"y\""), "gated literal not scanned");
+        assert_eq!(text.len(), code.len(), "aligned outputs");
+    }
 }

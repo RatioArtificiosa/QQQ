@@ -1936,6 +1936,69 @@ fn strip_credentials(headers: &mut Vec<(String, String)>) {
     headers.retain(|(name, _)| !is_secret_header(name));
 }
 
+/// Well-known secret names (exact match) and credential token
+/// fragments (hyphen-separated match). Shared by `is_secret_header` and
+/// `is_secret_token`; one list so the two tiers cannot disagree on a word.
+const SECRET_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api-key",
+    "apikey",
+    "x-apikey",
+    "x-auth-token",
+    "auth-token",
+    "authtoken",
+    "accesstoken",
+    "accesskey",
+    "authkey",
+    "secretkey",
+    "sessionkey",
+];
+const SECRET_TOKENS: &[&str] = &[
+    "auth",
+    "authenticate",
+    "authentication",
+    "authn",
+    "apikey",
+    "authorization",
+    "secrettoken",
+    "sessiontoken",
+    "apitoken",
+    "authtoken",
+    "bearertoken",
+    "passkey",
+    "passphrase",
+    "passes",
+    "cred",
+    "pw",
+    "jwt",
+    "sid",
+    "sig",
+    "accesstoken",
+    "authkey",
+    "secretkey",
+    "sessionkey",
+    "accesskey",
+    "token",
+    "bearer",
+    "secret",
+    "signature",
+    "credentials",
+    "credential",
+    "cookie",
+    "session",
+    "sessionid",
+    "passwd",
+    "password",
+    "pass",
+    "pwd",
+    "creds",
+    "key",
+];
+
 /// Whether a header name carries a credential by convention.
 ///
 /// Two-tier: well-known full names (including the `x-` spellings operators
@@ -1953,53 +2016,6 @@ fn strip_credentials(headers: &mut Vec<(String, String)>) {
 /// site secrets to custom header names; the allowlisted grant, not the
 /// header, is the trust boundary.)
 fn is_secret_header(name: &str) -> bool {
-    const SECRET_NAMES: &[&str] = &[
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "set-cookie",
-        "x-api-key",
-        "api-key",
-        "apikey",
-        "x-apikey",
-        "x-auth-token",
-        "auth-token",
-        "authtoken",
-        "accesstoken",
-        "accesskey",
-        "authkey",
-        "secretkey",
-        "sessionkey",
-    ];
-    const SECRET_TOKENS: &[&str] = &[
-        "auth",
-        "authenticate",
-        "authentication",
-        "authn",
-        "apikey",
-        "authorization",
-        "authtoken",
-        "accesstoken",
-        "authkey",
-        "secretkey",
-        "sessionkey",
-        "accesskey",
-        "token",
-        "bearer",
-        "secret",
-        "signature",
-        "credentials",
-        "credential",
-        "cookie",
-        "session",
-        "sessionid",
-        "passwd",
-        "password",
-        "pass",
-        "pwd",
-        "creds",
-        "key",
-    ];
     let lower = name.to_ascii_lowercase();
     // One separator: `x_apikey`, `x.apikey`, and `x-apikey` are the same
     // evasion with different punctuation. Normalizing before the exact-name
@@ -2024,13 +2040,28 @@ fn is_secret_header(name: &str) -> bool {
     // tokens strip, so version/tracing headers are untouched.
     // Numbers do not launder a name either: `x-token2` strips trailing
     // digits back to `token` before the other checks run.
-    norm.split('-').any(|token| {
-        let token = token.trim_end_matches(|c: char| c.is_ascii_digit());
-        SECRET_TOKENS.contains(&token)
-            || token
-                .strip_suffix('s')
-                .is_some_and(|stem| SECRET_TOKENS.contains(&stem))
-    })
+    norm.split('-').any(is_secret_token)
+}
+
+/// Whether one hyphen-separated token names a secret, after stripping the
+/// disguises a trailing digit run or a plural `s` provides: `token2`,
+/// `tokens`, and `token2s` all land on `token`, and an exact hit
+/// short-circuits before any stripping (so `pass` and `passes` both
+/// match). Each pass shortens the token or stops, so the loop always
+/// terminates. An all-digit token strips to empty and matches nothing.
+fn is_secret_token(token: &str) -> bool {
+    let mut word = token.trim_end_matches(|c: char| c.is_ascii_digit());
+    loop {
+        if SECRET_TOKENS.contains(&word) {
+            return true;
+        }
+        match word.strip_suffix('s') {
+            Some(stem) if stem.len() != word.len() => {
+                word = stem.trim_end_matches(|c: char| c.is_ascii_digit());
+            }
+            _ => return false,
+        }
+    }
 }
 
 fn safe_host(url: &str) -> String {
@@ -3902,6 +3933,19 @@ mod redirect_tests {
                 ("x-creds".to_owned(), "abbreviated secret".to_owned()),
                 ("x-token2".to_owned(), "numbered secret".to_owned()),
                 ("x-secret2".to_owned(), "numbered secret".to_owned()),
+                ("x-secrettoken".to_owned(), "concatenated secret".to_owned()),
+                (
+                    "x-sessiontoken".to_owned(),
+                    "concatenated secret".to_owned(),
+                ),
+                ("x-apitoken".to_owned(), "concatenated secret".to_owned()),
+                ("x-bearertoken".to_owned(), "concatenated secret".to_owned()),
+                ("x-token2s".to_owned(), "number-then-plural".to_owned()),
+                ("x-cred".to_owned(), "abbreviated secret".to_owned()),
+                ("x-pw".to_owned(), "abbreviated secret".to_owned()),
+                ("x-jwt".to_owned(), "abbreviated secret".to_owned()),
+                ("x-sig".to_owned(), "abbreviated secret".to_owned()),
+                ("x-passes".to_owned(), "plural-es secret".to_owned()),
                 ("author".to_owned(), "not a credential".to_owned()),
                 ("x-keep".to_owned(), "yes".to_owned()),
             ],

@@ -2055,6 +2055,15 @@ fn is_secret_header(name: &str) -> bool {
     if SECRET_NAMES.contains(&norm.as_str()) {
         return true;
     }
+    // `client-id` is the only hyphenated secret name with no secret half
+    // (`client` and `id` are innocent alone, so neither is a token): affixed
+    // hyphen shapes (`x-my-client-id`, `x-client-id-box`, `x-client-ids`)
+    // would otherwise split into innocent tokens and travel. De-hyphenating
+    // catches the joined spelling whatever the separators were; no innocent
+    // header spells `clientid` continuously.
+    if norm.replace('-', "").contains("clientid") {
+        return true;
+    }
     // Plurals are checked too (`x-api-keys`, `x-tokens`): a secret word with one
     // trailing `s` still names the secret. Both forms are checked because
     // stripping blindly would mangle `pass` (no trailing `s` to strip, and
@@ -4134,6 +4143,10 @@ mod redirect_tests {
             ("x-zmfaz".to_owned(), "padded short secret".to_owned()),
             ("x-clientid".to_owned(), "client id secret".to_owned()),
             ("x-client-id".to_owned(), "client id secret".to_owned()),
+            ("x-my-client-id".to_owned(), "affixed client id".to_owned()),
+            ("x-client-id-box".to_owned(), "affixed client id".to_owned()),
+            ("x-client-ids".to_owned(), "plural client id".to_owned()),
+            ("x-client-id2".to_owned(), "numbered client id".to_owned()),
             ("x-refresh".to_owned(), "refresh token secret".to_owned()),
         ]
     }
@@ -4270,10 +4283,14 @@ mod redirect_tests {
         // is what this test proves. Case-insensitive: the hop preserves
         // the sent spelling, so compare lowercase on both sides.
         let first_lower = first.to_ascii_lowercase();
-        for (name, _) in hostile_request_headers() {
+        for (name, value) in hostile_request_headers() {
             assert!(
                 first_lower.contains(&format!("{}:", name.to_ascii_lowercase())),
                 "the first hop carries {name} to its own origin: {first:?}"
+            );
+            assert!(
+                first_lower.contains(&value.to_ascii_lowercase()),
+                "the first hop carries {name}'s value to its own origin: {first:?}"
             );
         }
         assert_eq!(rows.len(), 3, "one row per hop");

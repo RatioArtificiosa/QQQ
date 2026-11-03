@@ -980,6 +980,14 @@ fn register_apply(
                         crypto_grant_for(PermittedOp::Decrypt),
                     ),
                     WitSecretOp::Verify(record) => {
+                        // The two-input rule covers `verify` too: the record
+                        // carries `input` + `signature`, so the trailing
+                        // `input` slot must be empty. Dropping a non-empty
+                        // trailing input would silently ignore guest bytes
+                        // that the two-carrier rule refuses everywhere else.
+                        if !input.is_empty() {
+                            return Ok((Err(WitSecretError::OperationNotPermitted),));
+                        }
                         return Ok(verify_call(data, &name, &record.input, &record.signature));
                     }
                     WitSecretOp::PublicKey => {

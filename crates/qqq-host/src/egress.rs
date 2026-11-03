@@ -2015,6 +2015,12 @@ const SECRET_TOKENS: &[&str] = &[
     "key",
 ];
 
+/// Innocent words whose infix is a short credential token (`design`/`assign`
+/// hold `sig`, `upward` holds `pw`, `consider` holds `sid`). The only words
+/// the secret-token match spares; everything else fail-closed strips.
+/// Pinned by travel rows in `sensitive_headers_stripped_cross_origin`.
+const INNOCENT_INFIX: &[&str] = &["design", "upward", "assign", "consider"];
+
 /// Whether a header name carries a credential by convention.
 ///
 /// Two-tier: well-known full names (including the `x-` spellings operators
@@ -2045,7 +2051,7 @@ fn is_secret_header(name: &str) -> bool {
     if SECRET_NAMES.contains(&norm.as_str()) {
         return true;
     }
-    // Plurals travel too (`x-api-keys`, `x-tokens`): a secret word with one
+    // Plurals are checked too (`x-api-keys`, `x-tokens`): a secret word with one
     // trailing `s` still names the secret. Both forms are checked because
     // stripping blindly would mangle `pass` (no trailing `s` to strip, and
     // `pas` matches nothing -- the check below is harmless but explicit).
@@ -2063,8 +2069,9 @@ fn is_secret_header(name: &str) -> bool {
 /// the disguises a digit run or a plural `s` provides. An exact hit
 /// short-circuits first (so digit-led `2fa` matches itself and is never
 /// mangled), then leading digits strip (`x-2token` -> `token`); the author
-/// family (`author`/`authors`) is refused here, before any affix rule can
-/// re-catch it. Then a fixed-point loop strips trailing digits and one
+/// family (`author`/`authors`) is refused in bare and digit/plural-decorated
+/// form before any affix rule runs, while affixed forms (`x-authorsbox`,
+/// `x-myauthor`) still strip fail-closed. Then a fixed-point loop strips trailing digits and one
 /// trailing `s` (`token2s` -> `token`), and finally a proper substring
 /// match catches concatenated names on any side (`x-mysecret`,
 /// `x-secretbox`): any known credential word inside the token strips. Each pass shortens
@@ -2075,9 +2082,11 @@ fn is_secret_header(name: &str) -> bool {
 /// forms (`x-mysecret`, `x-secretbox`, `x-ztokenz`) are all caught.
 /// Fail-closed on collisions: `x-keyboard`/`x-tokenizer`-shaped names strip
 /// because they contain a secret word, while `x-authors` travels because
-/// the author family is carved out above. Interior leet (`x-t0ken`,
-/// `x-s3cret`) travels: digit folding would mangle real words and site
-/// secrets do not spell themselves that way; documented residual.
+/// the author family is carved out above. Four pinned innocent words whose
+/// infix is a short token (`design`, `assign`, `upward`, `consider`) travel
+/// via an explicit allowlist; everything else fail-closed strips. Interior
+/// leet (`x-t0ken`, `x-s3cret`) travels: digit folding would mangle real
+/// words and site secrets do not spell themselves that way; documented residual.
 fn is_secret_token(token: &str) -> bool {
     // Exact hit first: protects digit-led names like `2fa` from mangling.
     if SECRET_TOKENS.contains(&token) {
@@ -2113,22 +2122,25 @@ fn is_secret_token(token: &str) -> bool {
         return false;
     }
     // Any remaining form that is, or contains, a known credential word.
-    // Three tiers: exact hits; proper prefix/suffix affixes (any length, so
-    // `x-mysecret` and `x-2fa`-suffixed shapes strip); and proper substring
-    // matches restricted to credential words of length 4 or more, so short
-    // tokens (`pw`, `sid`, `sig`, `tok`, `key`) strip exact and affixed
-    // (`x-mypw`) but no longer swallow innocent infix words (`x-design`,
-    // `x-upward`, `x-consider`, `x-assign`). Fail-closed otherwise: an innocent word
-    // containing a long secret token (e.g. `x-keyboard`, `x-passport`,
-    // `x-myauthor` via `auth`) strips rather than travels; the documented
-    // exceptions are the author family above and the `api`-style non-tokens
-    // below.
+    // Exact hits; proper prefix/suffix affixes (`x-mysecret`, `x-authorization`);
+    // and proper substrings anywhere in the word (`x-ztokenz`, `x-mysecretbox`,
+    // `x-zkeyz`), so bilateral padding cannot launder a short token either.
+    // Fail-closed: an innocent word containing a secret token (e.g. `x-passport`
+    // and `x-myauthor` via long tokens, `x-keyboard` via the short `key` prefix,
+    // `x-monkey`/`x-turkey`/`x-keyword` via `key`, `x-sidebar` via `sid`,
+    // `x-signal` via `sig`, `x-pwned` via `pw`, `x-possession` via `sess`,
+    // `x-discredited` via `cred`) strips rather than travels. The only
+    // exceptions are the author family above, the `api`-style non-tokens
+    // described in `is_secret_header` above, and four pinned innocent words
+    // whose infix is a short token (`design`/`assign` hold `sig`, `upward`
+    // holds `pw`, `consider` holds `sid`).
     forms.iter().any(|&word| {
-        SECRET_TOKENS.iter().any(|&t| {
-            word == t
-                || (word.len() > t.len() && (word.starts_with(t) || word.ends_with(t)))
-                || (t.len() >= 4 && word.len() > t.len() && word.contains(t))
-        })
+        !INNOCENT_INFIX.contains(&word)
+            && SECRET_TOKENS.iter().any(|&t| {
+                word == t
+                    || (word.len() > t.len()
+                        && (word.starts_with(t) || word.ends_with(t) || word.contains(t)))
+            })
     })
 }
 
@@ -4096,6 +4108,14 @@ mod redirect_tests {
             ),
             ("x-api!key".to_owned(), "punctuation secret".to_owned()),
             ("x-secret*token".to_owned(), "punctuation secret".to_owned()),
+            ("x-zkeyz".to_owned(), "padded short secret".to_owned()),
+            ("x-ztokz".to_owned(), "padded short secret".to_owned()),
+            ("x-zpwz".to_owned(), "padded short secret".to_owned()),
+            ("x-zsidz".to_owned(), "padded short secret".to_owned()),
+            ("x-zsigz".to_owned(), "padded short secret".to_owned()),
+            ("x-a2fab".to_owned(), "padded short secret".to_owned()),
+            ("x-zjwtz".to_owned(), "padded short secret".to_owned()),
+            ("x-zmfaz".to_owned(), "padded short secret".to_owned()),
         ]
     }
 
@@ -4177,7 +4197,7 @@ mod redirect_tests {
                 names,
                 // No `content-length`: the redirected hop is a GET with an empty
                 // body, and `exchange` writes the length only when a body travels.
-                // The five `x-*` negatives travel: they name no credential.
+                // The ten `x-*` negatives travel: they name no credential.
                 [
                     "author",
                     "connection",
@@ -4209,6 +4229,14 @@ mod redirect_tests {
         assert!(
             first.contains("x-secret2: numbered secret"),
             "the first hop carries secrets to its own origin: {first:?}"
+        );
+        assert!(
+            first.contains("x-keyboard: prefixed secret"),
+            "the first hop carries affixed secrets to its own origin: {first:?}"
+        );
+        assert!(
+            first.contains("x-myauthor: auth-infix secret"),
+            "the first hop carries infix secrets to its own origin: {first:?}"
         );
         assert_eq!(rows.len(), 3, "one row per hop");
     }

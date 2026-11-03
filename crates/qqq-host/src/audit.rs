@@ -854,9 +854,10 @@ impl AppendCounters {
 ///
 /// Adding a host function that records means adding its name here, and the test
 /// `every_recorded_function_round_trips` fails until it is.
-pub(crate) const RECORDED_FUNCTIONS: [&str; 31] = [
+pub(crate) const RECORDED_FUNCTIONS: [&str; 36] = [
     "handle_request",
     "hash_data",
+    "random_get",
     "hmac_compute",
     "hmac_verify",
     "aead_encrypt",
@@ -886,6 +887,10 @@ pub(crate) const RECORDED_FUNCTIONS: [&str; 31] = [
     "trace_set_attributes",
     "trace_set_error",
     "trace_drop",
+    "http_send",
+    "http_incoming_authority",
+    "dns_resolve",
+    "dns_resolve_many",
 ];
 
 // The pre-commit buffer bound: pending rows live in the requesting task, so an

@@ -424,12 +424,13 @@ pub fn register(
     Ok(())
 }
 
-/// Check a resolution and return the normalized name to resolve.
+/// Check a resolution's shape and allowlist membership, and return the
+/// normalized name to resolve.
 ///
-/// Grant first (an ungranted call fails before its name is judged), then
-/// shape, then membership. An unlistable name is `name-not-allowed`, never
-/// a failed lookup: the resolver must never see a name the allowlist
-/// could not have contained.
+/// The grant is checked by the caller through the audit seam (`resolve`
+/// records `dns_resolve`); this checks shape then membership. An unlistable
+/// name is `name-not-allowed`, never a failed lookup: the resolver must
+/// never see a name the allowlist could not have contained.
 ///
 /// Normalization happens exactly once, here: trim plus ASCII-lowercase per
 /// RFC 4343 §2.1, matching `Normalized::dns_allows` and the deploy-time
@@ -438,9 +439,6 @@ pub fn register(
 /// asking `API.EXAMPLE.COM` and a manifest listing `api.example.com`
 /// agree everywhere instead of only at the gate.
 fn check(data: &crate::linker::StoreData, name: &str) -> std::result::Result<String, WitDnsError> {
-    if !data.grants.grants(DnsResolve) {
-        return Err(WitDnsError::NotGranted);
-    }
     let normalized = name.trim().to_ascii_lowercase();
     if !valid_name(&normalized) || !data.dns.config.allows(&normalized) {
         return Err(WitDnsError::NameNotAllowed);
@@ -462,13 +460,14 @@ impl bindings::qqq::dns::resolver::Host for crate::linker::StoreData {
         &mut self,
         name: String,
     ) -> std::result::Result<Vec<bindings::qqq::dns::resolver::Address>, WitDnsError> {
-        // Grant first, then charge the attempt before judging the name: an
-        // unlisted spray spends budget like a listed lookup (attempts, not
-        // successes). Total bytes are bounded by the batch count (128) times
-        // the per-name wire limit (253 B), so no separate byte cap is needed.
-        if !self.grants.grants(DnsResolve) {
-            return Err(WitDnsError::NotGranted);
-        }
+        // Grant first, through the audit seam so the attempt records a row
+        // `assert-caps-only` can read, then charge the attempt before judging
+        // the name: an unlisted spray spends budget like a listed lookup
+        // (attempts, not successes). Total bytes are bounded by the batch
+        // count (128) times the per-name wire limit (253 B), so no separate
+        // byte cap is needed.
+        crate::ambient::require(self, DnsResolve, "dns_resolve")
+            .map_err(|_| WitDnsError::NotGranted)?;
         // The subrequest budget binds the lookup, not just the gate: each
         // resolution is a resolver round-trip, and an unbound loop of them
         // is amplification the fuel budget cannot see. Charged before the
@@ -478,7 +477,7 @@ impl bindings::qqq::dns::resolver::Host for crate::linker::StoreData {
         self.charge_subrequest().map_err(|error| {
             WitDnsError::ResolverFailed(format!("subrequest budget exhausted: {}", error.message))
         })?;
-        // `check` returns the normalized name (grant re-checked harmlessly);
+        // `check` returns the normalized name for shape and membership;
         // the lookup below must use *it*, not the raw guest string.
         let name = check(self, &name)?;
         match self.dns.resolver.lookup(&name) {
@@ -504,13 +503,12 @@ impl bindings::qqq::dns::resolver::Host for crate::linker::StoreData {
         Vec<std::result::Result<Vec<bindings::qqq::dns::resolver::Address>, WitDnsError>>,
         WitDnsError,
     > {
-        // Grant first, like every other method: an ungranted oversize batch
-        // is denied for the missing grant, not for its size — the module's
-        // own grant-first rule, applied uniformly rather than where it is
-        // convenient.
-        if !self.grants.grants(DnsResolve) {
-            return Err(WitDnsError::NotGranted);
-        }
+        // Grant first, through the audit seam like every other method: an
+        // ungranted oversize batch is denied for the missing grant, not for
+        // its size — the module's own grant-first rule, applied uniformly
+        // rather than where it is convenient.
+        crate::ambient::require(self, DnsResolve, "dns_resolve_many")
+            .map_err(|_| WitDnsError::NotGranted)?;
         // The batch count is bounded before any lookup runs: each name is a
         // resolver round-trip, and an unbounded batch is unbounded resolver
         // load for one call. `resolver-failed` names the host's own refusal
@@ -589,6 +587,24 @@ mod tests {
 
     /// A granted, listed name resolves through the injected table, v4 first
     /// in table order — no network touched.
+    #[test]
+    fn every_dns_body_records_through_the_audit_seam() {
+        // Every DNS entry point records through the audit seam: a direct
+        // grant check would answer identically while leaving the caller
+        // looking capability-clean to `assert-caps-only`. Counted, not
+        // `contains`.
+        let production = include_str!("host_dns.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 2,
+            "every dns body (resolve, resolve-many) must consult the audit seam; \
+             found {seams} seam call(s)"
+        );
+    }
+
     #[test]
     fn granted_listed_name_resolves() {
         let mut data = granted_store();

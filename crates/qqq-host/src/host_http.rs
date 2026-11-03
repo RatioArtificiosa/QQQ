@@ -193,8 +193,12 @@ impl bindings::qqq::http::http::Host for StoreData {
     /// it here without a parser would be exactly the "trusting the authority section"
     /// hazard `qqq-http.wit` warns about.
     fn send(&mut self, req: Request) -> std::result::Result<Response, HttpError> {
-        // The call-time re-check, before anything reads `req`.
-        if !self.grants.grants(Capability::HttpClient) {
+        // The call-time re-check, before anything reads `req` — through the
+        // audit seam, like every other entry point, so the attempt records
+        // a `Granted`/`Denied` row `assert-caps-only` can read. An inline
+        // grant check would answer identically while leaving an ungranted
+        // `send` invisible to the capability audit.
+        if crate::ambient::require(self, Capability::HttpClient, "http_send").is_err() {
             // Loud, not silent: an ungranted `send` is a probing signal (or a
             // mis-built linker), and an operator who cannot see it cannot
             // distinguish probing from quiet. The row names the attempted
@@ -292,7 +296,10 @@ impl bindings::qqq::http::http::Host for StoreData {
     /// Wasmtime's frames toward the F-01 abort guard — the failure
     /// `guard.rs` exists to contain.
     fn incoming_authority(&mut self) -> (String, u16) {
-        if !self.grants.grants(Capability::HttpServer) {
+        // Through the audit seam: an ungranted caller gets the sentinel, but
+        // the attempt still records a row instead of passing silently.
+        if crate::ambient::require(self, Capability::HttpServer, "http_incoming_authority").is_err()
+        {
             return (UNGRANTED_AUTHORITY.to_owned(), 0);
         }
 
@@ -651,6 +658,23 @@ mod tests {
             headers: vec![],
             body: None,
         }
+    }
+
+    /// Every HTTP entry point records through the audit seam: a direct
+    /// grant check would answer identically while leaving the caller looking
+    /// capability-clean to `assert-caps-only`. Counted, not `contains`.
+    #[test]
+    fn every_http_body_records_through_the_audit_seam() {
+        let production = include_str!("host_http.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 2,
+            "every http body (send, incoming-authority) must consult the audit seam; \
+             found {seams} seam call(s)"
+        );
     }
 
     #[test]

@@ -510,9 +510,12 @@ impl bindings::qqq::crypto::random::Host for crate::linker::StoreData {
         // (the H1 checker enforces that), and the return channel is the
         // WIT `result` — a host fault would have nowhere to go but a case
         // the WIT does not define.
-        if !self.grants.grants(Capability::CryptoRandom) {
-            return Err(RandomError::NotGranted);
-        }
+        //
+        // Through the audit seam, like every other crypto entry point: an
+        // inline grant check would answer identically while leaving a
+        // `random.get` caller looking capability-clean to `assert-caps-only`.
+        crate::ambient::require(self, Capability::CryptoRandom, "random_get")
+            .map_err(|_| RandomError::NotGranted)?;
         // **`SEC-011`: the boundary check, before any host work.**
         //
         // Charged ahead of the allocation, not after: `random_bytes`
@@ -2233,6 +2236,23 @@ mod tests {
     /// the boundary verdict is applied at the call site and its rejection
     /// reaches the guest as the WIT error. The guest-compiled probe covers
     /// the same paths end to end; these pin each refusal case by name.
+    /// Every crypto entry point records through the audit seam: a direct
+    /// grant check would answer identically while leaving the caller looking
+    /// capability-clean to `assert-caps-only`. Counted, not `contains`.
+    #[test]
+    fn every_crypto_body_records_through_the_audit_seam() {
+        let production = include_str!("host_crypto.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 8,
+            "every crypto body (random.get, hmac x2, aead x2, signing x3) must consult \
+             the audit seam; found {seams} seam call(s)"
+        );
+    }
+
     #[test]
     fn random_get_refuses_by_name() {
         use super::bindings::qqq::crypto::random::{Host as _, RandomError};

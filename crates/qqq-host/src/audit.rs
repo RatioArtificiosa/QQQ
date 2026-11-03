@@ -1078,8 +1078,22 @@ impl AuditHandle {
     /// assert_eq!(rows.len(), 1, "the commit assigns the sequence");
     /// assert_eq!(rows[0].sequence, 1);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics when `function` is not in [`RECORDED_FUNCTIONS`]. That is a
+    /// programmer error, never guest input (`function` is always a
+    /// code-chosen literal), and panicking at the poison source beats
+    /// persisting a row the reader refuses.
     pub fn record(&self, capability: Capability, function: &'static str, outcome: Outcome) {
-        debug_assert!(
+        // `assert!`, not `debug_assert!`: an unlisted name persists a row
+        // `from_json` refuses, bricking the whole file on the next load.
+        // `function` is always a code-chosen literal (never guest bytes),
+        // so this fires only on a programmer error -- and refusing at the
+        // poison source beats persisting a file-bricking row. The structural
+        // test `every_record_call_names_a_recorded_function` keeps such a
+        // literal from ever shipping.
+        assert!(
             RECORDED_FUNCTIONS.contains(&function),
             "`{function}` is not in RECORDED_FUNCTIONS; add it there and to the round-trip test"
         );
@@ -1552,6 +1566,11 @@ impl AuditStream {
     /// ring stream evicts the oldest row instead and never refuses — see
     /// the module docs for why refusing beats overwriting, and why the
     /// sink-backed exception exists.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `function` is not in [`RECORDED_FUNCTIONS`], like the
+    /// handle `record` above: a programmer error, never guest input.
     pub fn record(
         &mut self,
         tenant: Option<&TenantId>,
@@ -1561,7 +1580,10 @@ impl AuditStream {
         function: &'static str,
         outcome: Outcome,
     ) -> Append {
-        debug_assert!(
+        // Same poison-source rule as the handle `record` above: `assert!`,
+        // not `debug_assert!`, so a release build can never persist a row
+        // the reader refuses.
+        assert!(
             RECORDED_FUNCTIONS.contains(&function),
             "`{function}` is not in RECORDED_FUNCTIONS; record through the audit seam instead"
         );
@@ -2020,6 +2042,179 @@ mod tests {
 
     fn grants() -> GrantDigest {
         GrantDigest::new("aabbccdd").expect("test digest")
+    }
+
+    /// Every audit `record(` call site names a recorded function.
+    ///
+    /// `record` takes `&'static str`, so a call site *could* pass any static
+    /// string -- and an unlisted name persists a row `from_json` refuses,
+    /// bricking the whole file on the next load (the `assert!` in `record`
+    /// fails first, but only if that path executes). This test fails at CI
+    /// time instead: it scans every `.record(` call in this crate's sources,
+    /// extracts the string literals in each call, and requires each to be a
+    /// member of [`RECORDED_FUNCTIONS`]. Replay-log calls (a different
+    /// `record` taking a [`crate::replay::ReplayValue`]) are skipped; they
+    /// have their own allowlist test in `ambient`.
+    #[test]
+    fn every_record_call_names_a_recorded_function() {
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![src];
+        let mut checked = 0;
+        while let Some(dir) = files.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src must list") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    files.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    checked += check_record_calls(&path);
+                }
+            }
+        }
+        assert!(checked > 0, "the scan must find record calls");
+    }
+
+    /// Check one file's `.record(` calls; returns the call count.
+    ///
+    /// The scan runs on a code-only projection (string contents and comments
+    /// blanked): prose and doc examples mentioning `.record(` are not calls,
+    /// and -- crucially -- this test's own scanner source contains the
+    /// needle text, which must not match itself.
+    fn check_record_calls(path: &std::path::Path) -> usize {
+        let text = std::fs::read_to_string(path).expect("source must read");
+        let code = code_projection(&text);
+        let mut count = 0;
+        let mut at = 0;
+        while let Some(found) = code[at..].find(".record(") {
+            let start = at + found;
+            let mut depth = 0usize;
+            let mut end = None;
+            for (i, c) in code[start..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(start + i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(stop) = end else {
+                at = start + 8;
+                continue;
+            };
+            let span = &text[start..stop];
+            at = stop;
+            // A different `record`: the replay log's, keyed by its value type.
+            if span.contains("ReplayValue") {
+                continue;
+            }
+            count += 1;
+            // The function argument is the literal immediately before the
+            // outcome argument (`"name", Outcome::X` or `"name", outcome`);
+            // other literals in the span (tenant fixtures via `tenant(..)`)
+            // are not function names and are not checked here.
+            let mut arg = span;
+            while let Some(q) = arg.find('"') {
+                let after_open = &arg[q + 1..];
+                let Some(close) = after_open.find('"') else {
+                    break;
+                };
+                let literal = &after_open[..close];
+                let after = &after_open[close + 1..];
+                let tail = after
+                    .trim_start_matches([' ', '\t', '\n', '\r'])
+                    .strip_prefix(',')
+                    .unwrap_or("")
+                    .trim_start_matches([' ', '\t', '\n', '\r']);
+                let is_outcome = tail.starts_with("Outcome::")
+                    || tail.split([',', ')']).next().is_some_and(|w| {
+                        !w.trim().is_empty()
+                            && w.trim().chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    });
+                if is_outcome {
+                    assert!(
+                        RECORDED_FUNCTIONS.contains(&literal),
+                        "{path:?} passes `{literal}` to an audit `record`, which is not in \
+                         RECORDED_FUNCTIONS; add it there (and to the round-trip test) or fix the call"
+                    );
+                }
+                arg = after;
+            }
+        }
+        count
+    }
+
+    /// Blanks string-literal contents and comments, preserving length so
+    /// diagnostics still point at the right neighbourhood. Quotes stay;
+    /// contents become spaces, so no needle can match inside prose.
+    /// Char literals blank through the closing quote when one is on the same
+    /// line (a lone `'` is a lifetime, left alone).
+    fn code_projection(text: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '"' {
+                out.push(c);
+                i += 1;
+                while i < chars.len() {
+                    let d = chars[i];
+                    if d == '\\' {
+                        out.push(' ');
+                        out.push(' ');
+                        i += 2;
+                    } else if d == '"' {
+                        out.push(d);
+                        i += 1;
+                        break;
+                    } else {
+                        out.push(if d == '\n' { '\n' } else { ' ' });
+                        i += 1;
+                    }
+                }
+            } else if c == '/' && chars.get(i + 1) == Some(&'/') {
+                while i < chars.len() && chars[i] != '\n' {
+                    out.push(' ');
+                    i += 1;
+                }
+            } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+                out.push(' ');
+                out.push(' ');
+                i += 2;
+                while i < chars.len() {
+                    if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                        out.push(' ');
+                        out.push(' ');
+                        i += 2;
+                        break;
+                    }
+                    out.push(if chars[i] == '\n' { '\n' } else { ' ' });
+                    i += 1;
+                }
+            } else if c == '\'' {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '\n' && chars[j] != '\'' && j - i < 12 {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == '\'' {
+                    for _ in i..=j {
+                        out.push(' ');
+                    }
+                    i = j + 1;
+                } else {
+                    out.push(c);
+                    i += 1;
+                }
+            } else {
+                out.push(c);
+                i += 1;
+            }
+        }
+        out
     }
 
     fn stream(capacity: usize) -> AuditStream {

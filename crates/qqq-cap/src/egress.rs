@@ -86,6 +86,19 @@ impl TenantId {
         if name.is_empty() {
             return Err("a tenant id must not be empty".to_owned());
         }
+        // Bounded like every other guest-supplied identifier (the host's
+        // `MAX_IDENTIFIER_BYTES` is 256; this crate owns no host bound, so
+        // the value is stated here with the reason). An unbounded tenant
+        // becomes an unbounded audit line, and the line reader refuses
+        // over-limit lines at load -- so an over-long tenant would persist
+        // a row that bricks the whole file on restart. No legitimate tenant
+        // (DNS names, peer labels, mapped identities) approaches this.
+        if name.len() > 256 {
+            return Err(format!(
+                "a tenant id must not exceed 256 bytes (got {});                  longer names would not survive the audit line bound",
+                name.len()
+            ));
+        }
         if name.trim() != name {
             return Err(format!(
                 "a tenant id must not have surrounding whitespace: {name:?}. \
@@ -1181,6 +1194,15 @@ mod tests {
     /// the hand-written audit JSON parser, turning the tenant's own rows
     /// unverifiable on restart. DNS names, peer labels, and mapped
     /// identities never need either character.
+    #[test]
+    fn a_tenant_id_rejects_overlong_names() {
+        assert!(TenantId::new(&"a".repeat(256)).is_ok());
+        assert!(
+            TenantId::new(&"a".repeat(257)).is_err(),
+            "byte 257 must refuse: the audit line bound would refuse the row at load"
+        );
+    }
+
     #[test]
     fn a_tenant_id_rejects_json_significant_characters() {
         for hostile in [

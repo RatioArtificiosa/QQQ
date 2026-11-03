@@ -1226,41 +1226,76 @@ pub fn boundaries_checking(class: CheckClass) -> Vec<&'static Boundary> {
 /// other direction — so the two together fail if either the detector or the table
 /// drifts. A full parser would be more precise and would also be a dependency, on
 /// the hot path of nothing, to answer a question a 40-line scan answers.
+///
+/// Concretely unhandled: raw strings (`r#"..."#` — a `//` inside one cuts the
+/// line, hiding a registration) and char literals (`'"'` toggles the
+/// string tracker, so a trailing `//` after one is kept as code). Both fail
+/// the same direction: a *missed* registration fails the paired structural
+/// test loudly, or a *phantom* name fails the table match loudly. Neither
+/// fails silently, which is the property a parser would buy and the reason
+/// neither is worth one. Tracking `'` is unsound in a lexical scan anyway:
+/// lifetimes (`'a`) are not literals, and distinguishing them is parsing.
 #[must_use]
 pub fn registered_names(source: &str) -> Vec<String> {
-    // Strip `//`-to-end-of-line comments, and drop string-literal *contents* so a
-    // doc example cannot be mistaken for code.
+    // Strip comments, keeping string-literal *contents*: the needle is
+    // `func_wrap("` plus the name, so the contents are the signal and only
+    // the comments are noise. A `//` inside a string never cuts (cutting
+    // there would truncate code and make the detector miss a registration
+    // it should have found); a `//` or `func_wrap(` inside a comment never
+    // counts (a detector that reads prose finds phantom boundaries).
+    //
+    // Block comments span lines, so the state rides across them; strings
+    // reset per line like before (a `"`-tracking pass cannot see a literal
+    // that started on an earlier line, which the residual note below owns).
     let mut code = String::with_capacity(source.len());
+    let mut in_block = false;
     for line in source.lines() {
-        let trimmed = line.trim_start();
-        // Whole-line comments (doc comments are `///` or `//!`).
-        if trimmed.starts_with("//") {
-            continue;
-        }
-        // A trailing `//` comment: keep the code before it, unless the `//`
-        // sits inside a string literal (escape-aware: `\"` does not end the
-        // literal). Cutting inside a literal would truncate code and make
-        // the detector miss a registration it should have found; char
-        // literals cannot hold an unescaped `//` pair, so tracking `"` is
-        // sufficient.
+        let mut kept = String::with_capacity(line.len());
         let mut in_string = false;
         let mut escaped = false;
-        let mut cut = line.len();
-        for (i, c) in line.char_indices() {
-            if in_string {
-                if c == '"' && !escaped {
+        let mut i = 0;
+        while i < line.len() {
+            let rest = &line[i..];
+            if in_block {
+                if let Some(end) = rest.find("*/") {
+                    i += end + 2;
+                    in_block = false;
+                } else {
+                    break;
+                }
+            } else if in_string {
+                let Some(c) = rest.chars().next() else {
+                    // Unreachable: the loop runs only while `i < line.len()`.
+                    break;
+                };
+                kept.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
                     in_string = false;
                 }
-                escaped = c == '\\' && !escaped;
-            } else if c == '"' {
-                in_string = true;
-                escaped = false;
-            } else if c == '/' && line[i..].starts_with("//") {
-                cut = i;
+                i += c.len_utf8();
+            } else if rest.starts_with("//") {
                 break;
+            } else if rest.starts_with("/*") {
+                in_block = true;
+                i += 2;
+            } else {
+                let Some(c) = rest.chars().next() else {
+                    // Unreachable: the loop runs only while `i < line.len()`.
+                    break;
+                };
+                if c == '"' {
+                    in_string = true;
+                    escaped = false;
+                }
+                kept.push(c);
+                i += c.len_utf8();
             }
         }
-        code.push_str(&line[..cut]);
+        code.push_str(&kept);
         code.push('\n');
     }
 
@@ -1864,6 +1899,23 @@ inst.func_wrap("real", |s, p| Ok(()));
         // The same shape laid out across lines must still be found.
         let multiline = "inst\n    .func_wrap(\n        \"digest\",\n        |s, p| Ok(()),\n    )";
         assert_eq!(registered_names(multiline), vec!["digest".to_owned()]);
+
+        // Block comments are comments too: a needle inside one -- single or
+        // multi-line -- is prose, not a registration, and code around the
+        // block still counts.
+        let blocked = "/* func_wrap(\"phantom\", g); */\ninst.func_wrap(\"real\", f);";
+        assert_eq!(
+            registered_names(blocked),
+            vec!["real".to_owned()],
+            "a block comment is not code: {blocked:?}"
+        );
+        let spanning = "inst.func_wrap(\"before\", f);\n/* func_wrap(\"phantom\", g);\nstill comment */\ninst.func_wrap(\"after\", h);";
+        assert_eq!(
+            registered_names(spanning),
+            // Sorted and deduplicated, like every detector result.
+            vec!["after".to_owned(), "before".to_owned()],
+            "a multi-line block comment hides no code and invents none: {spanning:?}"
+        );
     }
 
     /// The detector deduplicates, so a name registered in two interfaces is

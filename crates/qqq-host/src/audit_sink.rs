@@ -1093,6 +1093,12 @@ pub fn resume_or_start_ring(
 
 /// Load a file for *reporting* without touching it.
 ///
+/// The `records.clone()` below is load-bearing, not waste: the contract
+/// returns both the workable window (`stream`) and the file truth
+/// (`loaded` -- full count for the window note, flags, quarantine path).
+/// Sharing one `Vec` between them would alias the window to the evidence;
+/// the transient double memory is the price of that separation.
+///
 /// `resume_or_start` quarantines and truncates a torn tail, which is correct
 /// when the caller is about to append -- the next record would otherwise
 /// land on the fragment. A reporter never appends, so mutating the evidence
@@ -1171,18 +1177,11 @@ fn quarantine_path(path: &Path) -> PathBuf {
 /// `create_new` refuses an existing file rather than overwriting evidence,
 /// so a collision (same-millisecond crash, coarse clock, or a leftover
 /// from an uncleaned crash) retries with a counter suffix instead of
-/// failing the resume. The counter is unbounded in principle and tiny in
-/// practice: collisions need identical milliseconds *and* an uncleaned
-/// predecessor.
-/// Quarantine a torn tail, retrying past name collisions.
-///
-/// `create_new` refuses an existing file rather than overwriting evidence,
-/// so a collision (same-millisecond crash, coarse clock, or a leftover
-/// from an uncleaned crash) retries with a counter suffix instead of
 /// failing the resume. Collisions need an identical millisecond *and* an
 /// uncleaned predecessor, so the counter stays small in practice; the loop
-/// itself is unbounded because refusing to quarantine would refuse to
-/// restart, which is the worse failure.
+/// is bounded by `u32::MAX` attempts (overflow is a loud I/O error, not a
+/// silent spin) because refusing to quarantine would refuse to restart,
+/// which is the worse failure.
 /// The quarantine name for a collision-retry attempt: attempt 0 is the
 /// base millisecond name, later attempts append a counter suffix.
 ///
@@ -1205,7 +1204,15 @@ fn quarantine_unique_at(base: &Path, tail: &[u8]) -> Result<PathBuf, SinkError> 
         match write_quarantine(&candidate, tail) {
             Ok(()) => return Ok(candidate),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                attempt = attempt.saturating_add(1);
+                // `checked_add`, not `saturating_add`: saturation would pin
+                // `attempt` at `u32::MAX` and spin forever if that name were
+                // also taken. Unreachable in practice (4 billion collisions),
+                // but an unreachable path must still terminate loudly.
+                attempt = attempt.checked_add(1).ok_or_else(|| SinkError::Io {
+                    path: candidate.clone(),
+                    reason: "quarantine collided 2^32 times; the directory holds                              more crash evidence than attempts can name"
+                        .to_owned(),
+                })?;
             }
             Err(e) => {
                 return Err(SinkError::Io {
@@ -1222,6 +1229,11 @@ fn quarantine_unique(path: &Path, tail: &[u8]) -> Result<PathBuf, SinkError> {
 }
 
 /// Read every byte from `offset` to end-of-file.
+///
+/// Bounded by construction: `load` only reports a torn tail for a fragment
+/// `bounded_read_line` accepted, so the tail is at most
+/// [`MAX_AUDIT_LINE_BYTES`]. An over-limit final fragment is an
+/// `UnreadableLine` error, never a quarantine write.
 fn read_tail(path: &Path, offset: u64) -> Result<Vec<u8>, SinkError> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = File::open(path).map_err(|e| SinkError::Io {
@@ -1433,6 +1445,17 @@ const HANDOFF_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 /// the caller must not assume persistence. `through` names the horizon the
 /// caller asked about -- covered by a barrier, or requested but never
 /// installed when the handoff itself expires.
+///
+/// Deliver-first, check-second: a zero timeout with room in the queue still
+/// delivers, because the `try_send` runs before the budget is consulted.
+/// Zero means "no waiting", not "no work" -- refusing a deliverable handoff
+/// would manufacture a timeout the queue never caused.
+///
+/// Blocking by design: the 1 ms sleeps run on the caller's thread, so this
+/// must only run where blocking is already acceptable. It is: every caller
+/// is on the guest-execution path, where the Wasmtime call itself blocks
+/// the thread for the whole guest run. Making one leaf async while the
+/// engine call around it blocks would be theater, not latency engineering.
 fn send_before(
     tx: Option<&std::sync::mpsc::SyncSender<Work>>,
     work: Work,
@@ -1462,6 +1485,12 @@ fn send_before(
 }
 
 /// What the worker reports across a barrier.
+///
+/// The count is global (every record the worker persisted), not per-call:
+/// two `persist` calls racing each other each observe the same standing
+/// total, and a caller must compare against the horizon it asked about
+/// (`through`) rather than reading the number as its own rows. A barrier
+/// answers "at least this much is durable", never "your rows are durable".
 ///
 /// ```
 /// use qqq_host::audit_sink::BarrierAck;
@@ -3027,6 +3056,101 @@ mod tests {
             report.stats
         );
         assert_eq!(file_sequences(&path), vec![1, 2, 4, 5]);
+    }
+
+    /// **A row that arrives after its gap was skipped is counted, not stored.**
+    ///
+    /// The `drained_cleanly` unit test constructs its snapshot by hand, so it
+    /// proves the report reads the counter but not that the worker ever sets
+    /// it. This drives the real path through `sort_work`.
+    ///
+    /// The choreography matters because the worker only evaluates the stall
+    /// timer when work arrives (`recv` blocks otherwise), and arming and
+    /// firing are separate iterations: 1, 2, 4, 5 land and 1, 2 persist;
+    /// 6 arrives and its iteration *arms* the timer on the observed gap; the
+    /// sleep outlives the 50 ms timeout; 7 arrives and its iteration *fires*
+    /// the skip past 3; *then* 3 arrives late, with the frontier past it
+    /// (`next == 4`) but nothing past it written (`written == 3`) -- the one
+    /// state `sort_work` counts as `late_after_skip` rather than a
+    /// duplicate. The waits poll the worker's own counters (persisted,
+    /// submitted, unpersisted), so each handoff lands only after the
+    /// previous iteration provably completed -- except the timeout sleep,
+    /// which is wall time by nature and kept at six times the timeout.
+    /// Appending 3 any earlier would fill the gap cleanly, and batching 3
+    /// with 7 would sort before the skip fires.
+    #[test]
+    fn a_row_arriving_after_its_gap_was_skipped_is_counted_late() {
+        use std::time::{Duration, Instant};
+        fn wait_for(
+            appender: &AuditAppender,
+            what: &str,
+            mut done: impl FnMut(AppenderSnapshot) -> bool,
+        ) {
+            let start = Instant::now();
+            while !done(appender.stats()) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "the worker never reached {what}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let scratch = Scratch::new("late-after-skip");
+        let path = scratch.file();
+        let records = chained_records(7, &["acme"]);
+        let by_sequence = |sequence: u64| {
+            records
+                .iter()
+                .find(|record| record.sequence == sequence)
+                .expect("the fixture holds sequences 1..=7")
+        };
+        let file = AuditFile::open(&path, 0).expect("open");
+        let appender = AuditAppender::spawn(
+            file,
+            AppenderConfig {
+                stall_timeout: Duration::from_millis(50),
+                ..AppenderConfig::default()
+            },
+        )
+        .expect("spawn");
+        for record in records
+            .iter()
+            .filter(|record| record.sequence != 3 && record.sequence != 6 && record.sequence != 7)
+        {
+            appender.append(record).expect("append");
+        }
+        // 1 and 2 persist; the worker then blocks with 4 and 5 pending.
+        wait_for(&appender, "the 1, 2 write", |s| s.persisted == 2);
+        // Row 6 trips an iteration that arms the stall timer on the gap.
+        appender
+            .append(by_sequence(6))
+            .expect("row 6 arms the timer");
+        wait_for(&appender, "row 6 to sort", |s| s.submitted == 5);
+        std::thread::sleep(Duration::from_millis(300));
+        // Row 7 trips the iteration that fires the skip past 3.
+        appender
+            .append(by_sequence(7))
+            .expect("row 7 fires the skip");
+        wait_for(&appender, "the skip", |s| s.unpersisted_after_failure == 1);
+        // Now 3 is late: past the frontier, before anything written past it.
+        appender
+            .append(by_sequence(3))
+            .expect("a late row still hands off");
+        let report = appender.shutdown();
+        assert_eq!(
+            report.stats.late_after_skip, 1,
+            "exactly the late row is counted: {:?}",
+            report.stats
+        );
+        assert!(
+            !report.drained_cleanly,
+            "a row that fits nowhere is not a clean drain"
+        );
+        assert_eq!(
+            report.stats.persisted, 6,
+            "1, 2, 4, 5, 6, 7 persist; the late row must not be written: {:?}",
+            report.stats
+        );
     }
 
     /// **Buffered mode really buffers: the disk stays empty until shutdown.**

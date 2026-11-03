@@ -1319,6 +1319,17 @@ mod tests {
                 );
             }
         }
+        // `note` forwards its name into the log, so a non-literal argument
+        // would bypass the scan above while reaching the file: pin the
+        // literal-only shape, not just the names found.
+        for (at, _) in production.match_indices(".note(") {
+            let rest = &production[at + ".note(".len()..];
+            assert!(
+                rest.trim_start().starts_with('"'),
+                "a `.note(` call passes a non-literal function name, which the \
+                 allowlist scan above cannot see: {rest:?}"
+            );
+        }
     }
 
     /// **Every name in `RECORDED_FUNCTIONS` survives a round trip through the file format.**

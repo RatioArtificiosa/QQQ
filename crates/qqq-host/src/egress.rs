@@ -1944,6 +1944,13 @@ fn strip_credentials(headers: &mut Vec<(String, String)>) {
 /// an innocent `author` is not `auth`. Matched case-insensitively because
 /// header names are. Ordinary headers (tracing IDs, content negotiation)
 /// match neither tier and travel untouched.
+///
+/// (`session-id` needs no entry: the split never yields it, and the
+/// `session` token already catches the header. A denylist cannot name
+/// every future credential spelling -- a novel secret under a novel
+/// token-less name still travels -- so operators must not entrust
+/// site secrets to custom header names; the allowlisted grant, not the
+/// header, is the trust boundary.)
 fn is_secret_header(name: &str) -> bool {
     const SECRET_NAMES: &[&str] = &[
         "authorization",
@@ -1957,16 +1964,21 @@ fn is_secret_header(name: &str) -> bool {
     ];
     const SECRET_TOKENS: &[&str] = &[
         "auth",
+        "authenticate",
         "authentication",
+        "authn",
         "token",
+        "bearer",
         "secret",
+        "signature",
         "credentials",
         "credential",
         "session",
         "sessionid",
-        "session-id",
         "passwd",
         "password",
+        "pass",
+        "key",
     ];
     let lower = name.to_ascii_lowercase();
     if SECRET_NAMES.contains(&lower.as_str()) {
@@ -3826,6 +3838,11 @@ mod redirect_tests {
                 ("authorization".to_owned(), "Bearer secret".to_owned()),
                 ("x-api-key".to_owned(), "key-secret".to_owned()),
                 ("x-acme-secret".to_owned(), "site-secret".to_owned()),
+                ("x-acme-api-key".to_owned(), "site key".to_owned()),
+                ("x-pass".to_owned(), "s3cr3t".to_owned()),
+                ("x-authenticate".to_owned(), "NEGOTIATE".to_owned()),
+                ("x-bearer-info".to_owned(), "tokenish".to_owned()),
+                ("x-hub-signature".to_owned(), "sha256=abc".to_owned()),
                 ("author".to_owned(), "not a credential".to_owned()),
                 ("x-keep".to_owned(), "yes".to_owned()),
             ],
@@ -3847,16 +3864,27 @@ mod redirect_tests {
         for host in ["b.test", "c.test"] {
             let seen = transport.seen_for(host);
             let seen = String::from_utf8_lossy(&seen).into_owned();
-            let lowered = seen.to_ascii_lowercase();
-            for secret in ["authorization", "x-api-key", "x-acme-secret"] {
-                assert!(
-                    !lowered.contains(secret),
-                    "{secret} stripped before {host}: {seen:?}"
-                );
-            }
-            assert!(
-                seen.contains("x-keep: yes"),
-                "ordinary headers travel to {host}: {seen:?}"
+            // Exact header set, not substring absence: a secret that travels
+            // under a renamed spelling fails here rather than hiding behind
+            // the three spelled-out names.
+            let mut names: Vec<String> = seen
+                .split("\r\n")
+                .skip(1)
+                .take_while(|line| !line.is_empty())
+                .map(|line| {
+                    line.split(':')
+                        .next()
+                        .expect("a head line names its header")
+                        .to_ascii_lowercase()
+                })
+                .collect();
+            names.sort();
+            assert_eq!(
+                names,
+                // No `content-length`: the redirected hop is a GET with an empty
+                // body, and `exchange` writes the length only when a body travels.
+                ["author", "connection", "host", "x-keep"],
+                "only connector-owned and ordinary headers reach {host}: {seen:?}"
             );
             assert!(
                 seen.contains("author: not a credential"),

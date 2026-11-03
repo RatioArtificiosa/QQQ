@@ -348,7 +348,10 @@ fn capped_digest(digest: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(digest);
     }
     let prefix: String = digest.chars().take(32).collect();
-    std::borrow::Cow::Owned(format!("{prefix}…[{} chars]", digest.len()))
+    // Character count, not byte length: the message says "chars", and a
+    // multi-byte claim must not misreport its own size.
+    let chars = digest.chars().count();
+    std::borrow::Cow::Owned(format!("{prefix}…[{chars} chars]"))
 }
 
 /// Verify an item's claimed digest: shape first, then the hash.
@@ -398,13 +401,34 @@ fn check_item_digest(item: &PreloadItem) -> std::result::Result<(), Error> {
 /// different deploys. A key computed differently in the two places is a cache that
 /// silently never hits -- the failure mode that makes an AOT cache look useless
 /// rather than broken.
+///
+/// The caller passes the digest of *verified* bytes (post-`check_item_digest`)
+/// and the ceiling of the admitting manifest: an unverified digest keys the
+/// cache on an attacker's spelling, and a missing ceiling reuses a pooled
+/// artifact compiled for another reservation.
 #[must_use]
-pub fn cache_key_for(item: &PreloadItem, engine_config: &EngineConfig) -> String {
+pub fn cache_key_for(
+    item: &PreloadItem,
+    engine_config: &EngineConfig,
+    memory_ceiling_bytes: u64,
+) -> String {
+    // Tripwire, not validation: the contract above says verified bytes, and
+    // a caller wiring this before the digest check has miswired it. Shape is
+    // what the check enforces first, so shape is what is re-asserted here.
+    debug_assert!(
+        digest_shape_valid(&item.digest),
+        "cache_key_for takes verified digests; check the item first"
+    );
     // `target_triple()` already returns `&'static str` and `aot_cache_key` takes
     // `&str`, so neither a borrow nor a binding is needed. Two earlier versions
     // of this line each added one, from assumptions about the return type rather
     // than from reading its signature.
-    aot_cache_key(&item.digest, target_triple(), engine_config)
+    aot_cache_key(
+        &item.digest,
+        target_triple(),
+        engine_config,
+        memory_ceiling_bytes,
+    )
 }
 
 // Test indexing (`F-18`): assertions index vectors built inline above.
@@ -636,13 +660,21 @@ mod tests {
         // Different bytes, so a different digest: the key must follow content.
         let b = item("b", b"\x00asm\x0d\x00\x01\x01");
 
-        assert_eq!(cache_key_for(&a, &cfg), cache_key_for(&a, &cfg), "stable");
+        assert_eq!(
+            cache_key_for(&a, &cfg, 64 << 20),
+            cache_key_for(&a, &cfg, 64 << 20),
+            "stable"
+        );
         assert_ne!(
-            cache_key_for(&a, &cfg),
-            cache_key_for(&b, &cfg),
+            cache_key_for(&a, &cfg, 64 << 20),
+            cache_key_for(&b, &cfg, 64 << 20),
             "different digests must produce different keys"
         );
-        assert_eq!(cache_key_for(&a, &cfg).len(), 64, "a sha256 hex digest");
+        assert_eq!(
+            cache_key_for(&a, &cfg, 64 << 20).len(),
+            64,
+            "a sha256 hex digest"
+        );
     }
 
     /// Deterministic mode changes codegen, so it must change the key -- otherwise
@@ -652,8 +684,8 @@ mod tests {
     fn the_cache_key_changes_with_the_engine_configuration() {
         let a = item("a", TINY);
         assert_ne!(
-            cache_key_for(&a, &EngineConfig::default()),
-            cache_key_for(&a, &EngineConfig::deterministic()),
+            cache_key_for(&a, &EngineConfig::default(), 64 << 20),
+            cache_key_for(&a, &EngineConfig::deterministic(), 64 << 20),
             "a deterministic engine must not load a non-deterministic artifact"
         );
     }

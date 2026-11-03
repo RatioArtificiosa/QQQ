@@ -1384,7 +1384,6 @@ impl bindings::qqq::sql::transaction::Host for crate::linker::StoreData {
         // without spending, so a doomed call costs no budget. Charging
         // after the config lookup keeps a typo'd database name from
         // spending, for the same reason.
-        // Cap before charge, like every other minting path.
         check_handles(self)?;
         charge_one_subrequest(self)?;
         // Writers take the lock up front; readers defer it, so a read-only
@@ -3228,6 +3227,47 @@ mod tests {
             data.subrequests.spent(),
             spent_before,
             "the refused begin must not spend budget"
+        );
+    }
+
+    /// Direction refusals mint nothing on the plain path either: a read-only
+    /// guest preparing a write must get `ReadOnlyConnection` with an empty
+    /// statement table -- not a held write handle it can never execute.
+    /// The attempt still spends its unit (attempts, not successes, like the
+    /// PRAGMA gate above); the pin is on the mint, not the charge.
+    #[test]
+    fn prepare_of_a_write_by_a_read_only_guest_mints_nothing() {
+        use super::bindings::qqq::sql::database::Host as _;
+        let path = test_path("prepare-direction");
+        // The file must exist first: on a missing file the read-only open
+        // fails before direction is known (fail closed), which is a
+        // different refusal than the one pinned here.
+        let mut setup = store_for(&path, true, true);
+        query_once(
+            &mut setup,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("setup creates the table");
+        drop(setup);
+        let mut data = store_for(&path, true, false);
+        let spent_before = data.subrequests.spent();
+        let err = data
+            .prepare("orders".to_owned(), "INSERT INTO t VALUES (1)".to_owned())
+            .expect_err("a read-only guest cannot prepare a write");
+        assert!(
+            matches!(err, WitSqlError::ReadOnlyConnection),
+            "a direction refusal, not any other failure: {err:?}"
+        );
+        assert!(
+            data.sql_state.statements.is_empty(),
+            "the refused prepare must mint no handle"
+        );
+        assert_eq!(
+            data.subrequests.spent(),
+            spent_before + 1,
+            "the attempt spends its unit even though the direction refuses"
         );
     }
 

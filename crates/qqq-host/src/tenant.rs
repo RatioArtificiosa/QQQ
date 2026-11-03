@@ -667,6 +667,14 @@ pub const DEFAULT_IPV6_PREFIX_BITS: u8 = 64;
 /// ```
 #[must_use]
 pub fn tenant_key_with_prefix(ip: std::net::IpAddr, prefix_bits: u8) -> TenantKey {
+    // A `/0` masks everything away, collapsing the whole IPv6 internet into
+    // one tenant. The only caller uses the default 64; narrower values exist
+    // for prefix-rotation deployments, and none legitimately reaches zero --
+    // so zero is a programming error, failed loudly, not a tenant key.
+    debug_assert!(
+        prefix_bits > 0,
+        "a zero prefix collapses every address into one tenant; never configure it"
+    );
     match ip.to_canonical() {
         std::net::IpAddr::V4(v4) => TenantKey::V4(u32::from(v4)),
         std::net::IpAddr::V6(v6) => {

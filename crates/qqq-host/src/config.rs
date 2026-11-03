@@ -601,16 +601,26 @@ pub const TARGET_TRIPLE: &str = env!("QQQ_TARGET_TRIPLE");
 /// * the component bytes (digest),
 /// * the engine version that produced it (codegen changes between releases),
 /// * the target triple (a different CPU or OS cannot run it),
-/// * the engine configuration (dropping `nan_canonicalization` changes codegen).
+/// * the engine configuration (dropping `nan_canonicalization` changes codegen),
+/// * the memory ceiling in bytes (pooling reserves `max_memory_size` from it,
+///   so the same component under two ceilings compiles to two artifacts).
 ///
 /// Omitting any of these produces a cache hit that yields subtly wrong native
 /// code — the exact class of bug that manifests as "worked in staging,
-/// corrupted data in production". Computing the key from all four is cheap and
-/// makes the failure mode impossible rather than unlikely.
+/// corrupted data in production". Computing the key from all five is cheap and
+/// makes the failure mode impossible rather than unlikely. The ceiling rides
+/// along even when pooling is off: it then only costs a cache miss on a
+/// ceiling change (fail-safe), never a wrong hit, and one rule beats a
+/// conditional one the reader must re-derive.
 ///
 /// See Proposal §9.4 and Checklist `HOST-013`.
 #[must_use]
-pub fn aot_cache_key(component_digest: &str, target: &str, cfg: &EngineConfig) -> String {
+pub fn aot_cache_key(
+    component_digest: &str,
+    target: &str,
+    cfg: &EngineConfig,
+    memory_ceiling_bytes: u64,
+) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(component_digest.as_bytes());
@@ -632,6 +642,8 @@ pub fn aot_cache_key(component_digest: &str, target: &str, cfg: &EngineConfig) -
     h.update([u8::from(cfg.deterministic)]);
     h.update([u8::from(cfg.debug_info)]);
     h.update([u8::from(cfg.pooling)]);
+    h.update(b"\x00");
+    h.update(memory_ceiling_bytes.to_le_bytes());
     let out = h.finalize();
     let mut s = String::with_capacity(64);
     for b in out {
@@ -1159,8 +1171,8 @@ mod tests {
     #[test]
     fn cache_key_is_stable_for_identical_inputs() {
         let cfg = EngineConfig::default();
-        let a = aot_cache_key("sha256:abc", "x86_64-unknown-linux-gnu", &cfg);
-        let b = aot_cache_key("sha256:abc", "x86_64-unknown-linux-gnu", &cfg);
+        let a = aot_cache_key("sha256:abc", "x86_64-unknown-linux-gnu", &cfg, 64 << 20);
+        let b = aot_cache_key("sha256:abc", "x86_64-unknown-linux-gnu", &cfg, 64 << 20);
         assert_eq!(a, b);
         assert_eq!(a.len(), 64, "sha256 hex");
     }
@@ -1172,21 +1184,26 @@ mod tests {
     #[test]
     fn cache_key_changes_with_every_input() {
         let cfg = EngineConfig::default();
-        let base = aot_cache_key("digest-a", "target-a", &cfg);
+        let base = aot_cache_key("digest-a", "target-a", &cfg, 64 << 20);
 
         assert_ne!(
             base,
-            aot_cache_key("digest-b", "target-a", &cfg),
+            aot_cache_key("digest-b", "target-a", &cfg, 64 << 20),
             "component digest must affect the key"
         );
         assert_ne!(
             base,
-            aot_cache_key("digest-a", "target-b", &cfg),
+            aot_cache_key("digest-a", "target-b", &cfg, 64 << 20),
             "target must affect the key"
         );
         assert_ne!(
             base,
-            aot_cache_key("digest-a", "target-a", &EngineConfig::deterministic()),
+            aot_cache_key(
+                "digest-a",
+                "target-a",
+                &EngineConfig::deterministic(),
+                64 << 20
+            ),
             "determinism must affect the key, since it changes codegen"
         );
         assert_ne!(
@@ -1197,7 +1214,8 @@ mod tests {
                 &EngineConfig {
                     debug_info: true,
                     ..EngineConfig::default()
-                }
+                },
+                64 << 20
             ),
             "debug info must affect the key"
         );
@@ -1209,10 +1227,24 @@ mod tests {
                 &EngineConfig {
                     pooling: false,
                     ..EngineConfig::default()
-                }
+                },
+                64 << 20
             ),
             "the allocation strategy must affect the key: pooled and on-demand \
              instances address memory differently"
+        );
+    }
+
+    /// The memory ceiling feeds `max_memory_size` under pooling, so two
+    /// ceilings must never share an artifact: the same component admitted
+    /// under a 64 MiB manifest and a 1 GiB manifest compiles differently.
+    #[test]
+    fn cache_key_changes_with_the_memory_ceiling() {
+        let cfg = EngineConfig::default();
+        assert_ne!(
+            aot_cache_key("digest-a", "target-a", &cfg, 64 << 20),
+            aot_cache_key("digest-a", "target-a", &cfg, 1024 << 20),
+            "the pooling reservation depends on the ceiling, so the key must too"
         );
     }
 
@@ -1222,8 +1254,8 @@ mod tests {
     fn cache_key_has_no_field_boundary_ambiguity() {
         let cfg = EngineConfig::default();
         assert_ne!(
-            aot_cache_key("ab", "c", &cfg),
-            aot_cache_key("a", "bc", &cfg)
+            aot_cache_key("ab", "c", &cfg, 64 << 20),
+            aot_cache_key("a", "bc", &cfg, 64 << 20)
         );
     }
 

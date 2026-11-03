@@ -233,14 +233,24 @@ impl KvBackend {
     /// the failure path keeps the refusal honest — and each eviction is
     /// progress, so repeated failing writes cannot loop forever.
     fn reap_expired(&mut self, store: &str, now: u64) -> u64 {
-        let expired: Vec<String> = self
-            .entries
-            .iter()
-            .filter(|((entry_store, _), entry)| {
-                entry_store == store && entry.expires_at.is_some_and(|at| now >= at)
-            })
-            .map(|((_, key), _)| key.clone())
-            .collect();
+        // Range-bounded, like `keys`: entries key on `(store, key)`, so one
+        // store's keys are contiguous. A full-map filter would walk another
+        // tenant's million on every pressured write (host iteration is not
+        // fuel-metered). One call reaps at most the listing cap; the rest is
+        // progress for the next call, not a missed free.
+        let mut expired: Vec<String> = Vec::new();
+        let start = (store.to_owned(), String::new());
+        for ((entry_store, key), entry) in self.entries.range(start..) {
+            if entry_store != store {
+                break;
+            }
+            if expired.len() >= MAX_KV_KEYS_LIMIT as usize {
+                break;
+            }
+            if entry.expires_at.is_some_and(|at| now >= at) {
+                expired.push(key.clone());
+            }
+        }
         let mut freed = 0u64;
         for key in expired {
             if let Some(entry) = self.entries.remove(&(store.to_owned(), key.clone())) {
@@ -393,6 +403,13 @@ impl KvBackend {
     /// ```
     pub fn keys(&mut self, store: &str, prefix: &str, limit: u32, now: u64) -> Vec<String> {
         let take = limit.min(MAX_KV_KEYS_LIMIT) as usize;
+        // Fast path: `limit = 0` asks for nothing, so answer without
+        // scanning. Walking the whole prefix range to reap dead keys would
+        // price a 1M-expired store at a full scan for an empty answer;
+        // the dead keys wait for a later listing or a pressured write.
+        if take == 0 {
+            return Vec::new();
+        }
         // Expired keys evicted per call, so one listing over a store choked
         // with dead keys cannot materialize an unbounded `expired` buffer.
         // The scan itself still runs to completion — correctness first: a
@@ -1036,6 +1053,30 @@ mod tests {
         );
     }
 
+    /// Reaping stays within its store: a neighbor's expired million does not
+    /// slow this store's pressured write.
+    #[test]
+    fn reap_stays_within_its_store() {
+        let mut backend = KvBackend::new();
+        for i in 0..500u32 {
+            backend
+                .set("neighbor", &format!("n{i:04}"), b"v".to_vec(), Some(10), 0)
+                .expect("neighbor fits");
+        }
+        for i in 0..10u32 {
+            backend
+                .set("s", &format!("k{i:02}"), b"v".to_vec(), Some(10), 0)
+                .expect("s fits");
+        }
+        // Past every deadline, a fresh write to `s` reaps `s` only: the
+        // neighbor's dead bytes are untouched and `s` still fits.
+        backend
+            .set("s", "fresh", b"v".to_vec(), None, 1_000)
+            .expect("own dead bytes reap first");
+        assert_eq!(backend.get("neighbor", "n0000", 1_000), None);
+        assert_eq!(backend.get("s", "fresh", 1_000), Some(b"v".to_vec()));
+    }
+
     /// Listings honor small limits and cap huge ones: `limit = 0` answers
     /// empty, and no listing materializes more than the host cap.
     #[test]
@@ -1046,6 +1087,14 @@ mod tests {
                 .set("s", &format!("k{i:04}"), b"v".to_vec(), None, 0)
                 .expect("fits");
         }
+        // `limit = 0` answers without scanning: even a store choked with
+        // expired keys costs nothing for an empty answer.
+        for i in 0..100u32 {
+            backend
+                .set("dead", &format!("d{i:03}"), b"v".to_vec(), Some(10), 0)
+                .expect("fits");
+        }
+        assert_eq!(backend.keys("dead", "", 0, 1_000), Vec::<String>::new());
         assert_eq!(backend.keys("s", "", 0, 0), Vec::<String>::new());
         let capped = backend.keys("s", "", u32::MAX, 0);
         assert_eq!(capped.len(), MAX_KV_KEYS_LIMIT as usize);

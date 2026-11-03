@@ -1956,6 +1956,8 @@ const SECRET_NAMES: &[&str] = &[
     "authkey",
     "secretkey",
     "sessionkey",
+    "client-id",
+    "x-client-id",
 ];
 const SECRET_TOKENS: &[&str] = &[
     "auth",
@@ -2013,6 +2015,8 @@ const SECRET_TOKENS: &[&str] = &[
     "pwd",
     "creds",
     "key",
+    "clientid",
+    "refresh",
 ];
 
 /// Innocent words whose infix is a short credential token (`design`/`assign`
@@ -2071,8 +2075,8 @@ fn is_secret_header(name: &str) -> bool {
 /// mangled), then leading digits strip (`x-2token` -> `token`); the author
 /// family (`author`/`authors`) is refused in bare and digit/plural-decorated
 /// form before any affix rule runs, while affixed forms (`x-authorsbox`,
-/// `x-myauthor`) still strip fail-closed. Then a fixed-point loop strips trailing digits and one
-/// trailing `s` (`token2s` -> `token`), and finally a proper substring
+/// `x-myauthor`) still strip fail-closed. Then a fixed-point loop strips
+/// digit runs on either side and one trailing `s` (`token2s` -> `token`), and finally a proper substring
 /// match catches concatenated names on any side (`x-mysecret`,
 /// `x-secretbox`): any known credential word inside the token strips. Each pass shortens
 /// the token or stops, so the loop always terminates; an all-digit token
@@ -2085,8 +2089,10 @@ fn is_secret_header(name: &str) -> bool {
 /// the author family is carved out above. Four pinned innocent words whose
 /// infix is a short token (`design`, `assign`, `upward`, `consider`) travel
 /// via an explicit allowlist; everything else fail-closed strips. Interior
-/// leet (`x-t0ken`, `x-s3cret`) travels: digit folding would mangle real
-/// words and site secrets do not spell themselves that way; documented residual.
+/// leet (`x-t0ken`, `x-s3cret`), inserted digits (`x-sec2ret`), and split
+/// tokens (`x-2-fa`) travel: canonicalization only strips affix digits and
+/// one trailing `s`, and digit folding would mangle real words; site secrets
+/// do not spell themselves that way; documented residual.
 fn is_secret_token(token: &str) -> bool {
     // Exact hit first: protects digit-led names like `2fa` from mangling.
     if SECRET_TOKENS.contains(&token) {
@@ -2121,11 +2127,20 @@ fn is_secret_token(token: &str) -> bool {
     if forms.iter().any(|w| *w == "author" || *w == "authors") {
         return false;
     }
-    // Any remaining form that is, or contains, a known credential word.
-    // Exact hits; proper prefix/suffix affixes (`x-mysecret`, `x-authorization`);
-    // and proper substrings anywhere in the word (`x-ztokenz`, `x-mysecretbox`,
-    // `x-zkeyz`), so bilateral padding cannot launder a short token either.
-    // Fail-closed: an innocent word containing a secret token (e.g. `x-passport`
+    // Decorated innocents travel too: a digit run or plural `s` on an
+    // allowlisted word (`x-upwards`, `x-designs`, `x-assigns`, `x-considers`)
+    // is an innocent decoration, not a secret. Existential over the forms,
+    // mirroring the author carve-out; no smuggling risk, since stripping
+    // digits and a trailing `s` can only reveal the same innocent word.
+    // Further-decorated shapes (`x-designer`, `x-redesign`, `x-considered`)
+    // still strip fail-closed as documented above.
+    if forms.iter().any(|w| INNOCENT_INFIX.contains(w)) {
+        return false;
+    }
+    // Any remaining form that is, or properly contains, a known credential
+    // word (`x-mysecret`, `x-authorization`, `x-ztokenz`, `x-zkeyz`):
+    // a proper substring anywhere in the word strips, so bilateral padding
+    // cannot launder a short token either. Fail-closed: an innocent word containing a secret token (e.g. `x-passport`
     // and `x-myauthor` via long tokens, `x-keyboard` via the short `key` prefix,
     // `x-monkey`/`x-turkey`/`x-keyword` via `key`, `x-sidebar` via `sid`,
     // `x-signal` via `sig`, `x-pwned` via `pw`, `x-possession` via `sess`,
@@ -2135,12 +2150,9 @@ fn is_secret_token(token: &str) -> bool {
     // whose infix is a short token (`design`/`assign` hold `sig`, `upward`
     // holds `pw`, `consider` holds `sid`).
     forms.iter().any(|&word| {
-        !INNOCENT_INFIX.contains(&word)
-            && SECRET_TOKENS.iter().any(|&t| {
-                word == t
-                    || (word.len() > t.len()
-                        && (word.starts_with(t) || word.ends_with(t) || word.contains(t)))
-            })
+        SECRET_TOKENS
+            .iter()
+            .any(|&t| word == t || (word.len() > t.len() && word.contains(t)))
     })
 }
 
@@ -3682,6 +3694,10 @@ mod redirect_tests {
     fn redirect_limits(hops: u8) -> Limits {
         Limits {
             max_redirects: hops,
+            // The hostile header barrage models dozens of smuggled secrets;
+            // the default 100-header cap would refuse the fixture before the
+            // stripper runs. The product default stays 100.
+            max_request_headers: 256,
             ..Limits::default()
         }
     }
@@ -4116,6 +4132,9 @@ mod redirect_tests {
             ("x-a2fab".to_owned(), "padded short secret".to_owned()),
             ("x-zjwtz".to_owned(), "padded short secret".to_owned()),
             ("x-zmfaz".to_owned(), "padded short secret".to_owned()),
+            ("x-clientid".to_owned(), "client id secret".to_owned()),
+            ("x-client-id".to_owned(), "client id secret".to_owned()),
+            ("x-refresh".to_owned(), "refresh token secret".to_owned()),
         ]
     }
 
@@ -4139,10 +4158,26 @@ mod redirect_tests {
                 "digit-decorated author travels".to_owned(),
             ),
             ("x-t0ken".to_owned(), "leet spelling travels".to_owned()),
-            ("x-design".to_owned(), "innocent infix travels".to_owned()),
-            ("x-upward".to_owned(), "innocent infix travels".to_owned()),
             ("x-assign".to_owned(), "innocent infix travels".to_owned()),
+            (
+                "x-assigns".to_owned(),
+                "decorated innocent travels".to_owned(),
+            ),
             ("x-consider".to_owned(), "innocent infix travels".to_owned()),
+            (
+                "x-considers".to_owned(),
+                "decorated innocent travels".to_owned(),
+            ),
+            ("x-design".to_owned(), "innocent infix travels".to_owned()),
+            (
+                "x-designs".to_owned(),
+                "decorated innocent travels".to_owned(),
+            ),
+            ("x-upward".to_owned(), "innocent infix travels".to_owned()),
+            (
+                "x-upwards".to_owned(),
+                "decorated innocent travels".to_owned(),
+            ),
             ("author".to_owned(), "not a credential".to_owned()),
             ("x-keep".to_owned(), "yes".to_owned()),
         ]
@@ -4197,21 +4232,25 @@ mod redirect_tests {
                 names,
                 // No `content-length`: the redirected hop is a GET with an empty
                 // body, and `exchange` writes the length only when a body travels.
-                // The ten `x-*` negatives travel: they name no credential.
+                // The fourteen `x-*` negatives travel: they name no credential.
                 [
                     "author",
                     "connection",
                     "host",
                     "x-2authors2s",
                     "x-assign",
+                    "x-assigns",
                     "x-author",
                     "x-author2",
                     "x-authors",
                     "x-consider",
+                    "x-considers",
                     "x-design",
+                    "x-designs",
                     "x-keep",
                     "x-t0ken",
                     "x-upward",
+                    "x-upwards",
                 ],
                 "only connector-owned and ordinary headers reach {host}: {seen:?}"
             );
@@ -4226,18 +4265,17 @@ mod redirect_tests {
         // is what this test proves.
         let first = transport.seen_for("a.test");
         let first = String::from_utf8_lossy(&first).into_owned();
-        assert!(
-            first.contains("x-secret2: numbered secret"),
-            "the first hop carries secrets to its own origin: {first:?}"
-        );
-        assert!(
-            first.contains("x-keyboard: prefixed secret"),
-            "the first hop carries affixed secrets to its own origin: {first:?}"
-        );
-        assert!(
-            first.contains("x-myauthor: auth-infix secret"),
-            "the first hop carries infix secrets to its own origin: {first:?}"
-        );
+        // Every hostile header reached the first origin (none dropped
+        // pre-hop): stripping at the boundary, not absence at the source,
+        // is what this test proves. Case-insensitive: the hop preserves
+        // the sent spelling, so compare lowercase on both sides.
+        let first_lower = first.to_ascii_lowercase();
+        for (name, _) in hostile_request_headers() {
+            assert!(
+                first_lower.contains(&format!("{}:", name.to_ascii_lowercase())),
+                "the first hop carries {name} to its own origin: {first:?}"
+            );
+        }
         assert_eq!(rows.len(), 3, "one row per hop");
     }
 

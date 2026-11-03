@@ -1977,6 +1977,7 @@ fn is_secret_header(name: &str) -> bool {
         "authentication",
         "authn",
         "apikey",
+        "authorization",
         "authtoken",
         "accesstoken",
         "authkey",
@@ -1995,6 +1996,8 @@ fn is_secret_header(name: &str) -> bool {
         "passwd",
         "password",
         "pass",
+        "pwd",
+        "creds",
         "key",
     ];
     let lower = name.to_ascii_lowercase();
@@ -2017,9 +2020,12 @@ fn is_secret_header(name: &str) -> bool {
     // rule; the exact `cookie`/`set-cookie` names stay for the bare forms.
     // Dots split too: `x.api.key` is the same evasion with a different
     // separator (dots are legal token characters, so the shape reaches
-    // here). A bare `api` still travels -- only exact names and secret
+    // here). A bare `api` still travels: only exact names and secret
     // tokens strip, so version/tracing headers are untouched.
+    // Numbers do not launder a name either: `x-token2` strips trailing
+    // digits back to `token` before the other checks run.
     norm.split('-').any(|token| {
+        let token = token.trim_end_matches(|c: char| c.is_ascii_digit());
         SECRET_TOKENS.contains(&token)
             || token
                 .strip_suffix('s')
@@ -3891,6 +3897,11 @@ mod redirect_tests {
                     "plural-concat smuggling".to_owned(),
                 ),
                 ("x_secretkey".to_owned(), "underscore smuggling".to_owned()),
+                ("x-authorization".to_owned(), "prefixed secret".to_owned()),
+                ("x-pwd".to_owned(), "abbreviated secret".to_owned()),
+                ("x-creds".to_owned(), "abbreviated secret".to_owned()),
+                ("x-token2".to_owned(), "numbered secret".to_owned()),
+                ("x-secret2".to_owned(), "numbered secret".to_owned()),
                 ("author".to_owned(), "not a credential".to_owned()),
                 ("x-keep".to_owned(), "yes".to_owned()),
             ],

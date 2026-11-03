@@ -244,13 +244,27 @@ impl LogHost for crate::linker::StoreData {
             .map_err(|_| WitLogError::RecordTooLarge)?;
         let mut validated = Vec::with_capacity(records.len());
         let mut levels = Vec::with_capacity(records.len());
+        // Accumulate the byte total as each record validates, failing fast:
+        // a batch that overflows on its first record must not pay to
+        // validate the remaining thousands. The batch stays atomic — a
+        // failure stores nothing — it just fails earlier.
+        let base_bytes = buffered_bytes(&self.logs);
+        let mut additional: usize = 0;
         for (level, message, attributes) in &records {
             levels.push(level_index(*level));
-            validated.push(validate_record(self, message, attributes)?);
+            let v = validate_record(self, message, attributes)?;
+            additional = additional.saturating_add(v.size);
+            if self.logs.len() + validated.len() + 1 > MAX_LOG_RECORDS
+                || base_bytes.saturating_add(additional) > MAX_LOG_TOTAL_BYTES
+            {
+                return Err(WitLogError::RecordTooLarge);
+            }
+            validated.push(v);
         }
-        let additional: usize = validated.iter().map(|v| v.size).sum();
         // The batch is atomic and the quota binds on the would-be total, so a
         // batch that overflows is refused whole rather than half-applied.
+        // (Checked incrementally above; this re-check pins the invariant for
+        // readers that skip the loop.)
         if self.logs.len() + validated.len() > MAX_LOG_RECORDS
             || buffered_bytes(&self.logs) + additional > MAX_LOG_TOTAL_BYTES
         {
@@ -445,8 +459,13 @@ fn level_index(level: Level) -> u8 {
 /// rather than buffers. The headroom between any plausible sum of records
 /// and `MAX_LOG_TOTAL_BYTES` absorbs the framing; the scan-vs-counter
 /// reasoning below says why no running total tracks it.
+///
+/// The constant below prices that framing into the estimate anyway, so the
+/// bound holds even when the buffer fills with maximally-framed records.
+pub(crate) const RECORD_FRAMING_BYTES: usize = 64;
+
 pub(crate) fn record_bytes(message: &str, attributes: &[(String, AttributeValue)]) -> usize {
-    let mut total = message.len();
+    let mut total = RECORD_FRAMING_BYTES + message.len();
     for (name, value) in attributes {
         total += name.len();
         // Worst-case rendered widths, not averages: `i64::MIN` is 20
@@ -887,8 +906,8 @@ mod tests {
         ];
         assert_eq!(
             record_bytes("msg", &attrs),
-            3 + (1 + 20) + (1 + 24) + (1 + 5),
-            "message plus per-attribute name and worst-case value widths"
+            RECORD_FRAMING_BYTES + 3 + (1 + 20) + (1 + 24) + (1 + 5),
+            "message plus per-attribute name and worst-case value widths, plus framing"
         );
     }
 

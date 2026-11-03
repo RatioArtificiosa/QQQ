@@ -99,30 +99,31 @@ pub struct AuditedCall {
 /// How a host function's call-time authority is checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Enforcement {
-    /// The `func_wrap` sits inside a `register_*` function that the interface's
-    /// `register` only calls when the capability is granted, **and** the
-    /// function's own body repeats the check.
+    /// The registration sits inside a gated `register` path (a `register_*`
+    /// function for `func_wrap`, a grant-conditional `add_to_linker` for
+    /// `bindgen!` trait methods), **and** the function's own body repeats
+    /// the check.
     ///
     /// This is the strongest form §4.4 describes: the interface is absent
     /// without the grant, and the function refuses a mis-built linker.
     PerFunction,
-    /// The `func_wrap` sits inside a gated `register_*`, and its body relies on
+    /// The registration sits inside a gated `register` path, and its body relies on
     /// a shared helper that performs the check.
     ///
     /// Equivalent to [`Self::PerFunction`] in force — the check happens on every
     /// call — but the check is not visible in the registration's own text, which
     /// is exactly what made the first audit of this item report a false gap.
     ViaHelper,
-    /// The `func_wrap` sits inside a gated `register_*` and performs no check of
+    /// The registration sits inside a gated `register` path and performs no check of
     /// its own, because it is a pure function of data the interface's own
-    /// gating already covers.
+    /// gating already covers — or because it exercises no authority at all
+    /// (idempotent handle cleanup, public construction parameters).
     ///
-    /// No current row uses this: every audited call re-checks its grant per
-    /// call (the host-b review moved the last constant-answer rows to
-    /// [`Self::PerFunction`]). The variant stays because the classification
-    /// must be able to describe a pure function honestly if one is ever
-    /// registered — collapsing the taxonomy to "everything re-checks" would
-    /// make that future row claim a check its body does not have.
+    /// Current rows of this form: the AEAD length constants and the
+    /// statement/transaction `close`/`drop` cleanup paths. Each names the
+    /// gating grant explicitly, so a future edit that gives such a function
+    /// a reason to read the store must move it to [`Self::PerFunction`] —
+    /// a visible change to this table rather than an invisible one to a body.
     ///
     /// # Why this variant is allowed to exist
     ///
@@ -174,7 +175,7 @@ impl Enforcement {
 /// disagree in either direction, so a `func_wrap` added without a row here is a
 /// test failure rather than an unexamined call path. That is the property that
 /// makes the table a check rather than documentation.
-pub const AUDITED: [AuditedCall; 26] = [
+pub const AUDITED: [AuditedCall; 80] = [
     AuditedCall {
         file: "host_clock.rs",
         function: "now",
@@ -418,11 +419,478 @@ pub const AUDITED: [AuditedCall; 26] = [
         // A seed is key material by another name: same grant, same check.
         enforced_by: Enforcement::PerFunction,
     },
+    // -- bindgen entry points (`C4`) -------------------------------------
+    //
+    // Files that bind through the generated `add_to_linker` have no
+    // `func_wrap`, so the scanner above learns them from `impl
+    // bindings::…::Host*` blocks instead. Each row below names the
+    // capability that justifies the call and how the body re-checks it;
+    // where either of two direction grants opens the call, the row names
+    // the first grant in the body's disjunction and the comment records
+    // the other.
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "get",
+        interface: "qqq:crypto/random@1.0.0",
+        capability: Some(Capability::CryptoRandom),
+        // Seam re-check: an ungranted guest fails before the length is
+        // judged, and the attempt records a row.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "digest",
+        interface: "qqq:crypto/hashing@1.0.0",
+        capability: Some(Capability::CryptoHash),
+        // Delegates to the `hash_data` helper, which requires the grant
+        // and enforces the input ceiling.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "digest-many",
+        interface: "qqq:crypto/hashing@1.0.0",
+        capability: Some(Capability::CryptoHash),
+        // Same helper as `digest`, per input element.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "compute",
+        interface: "qqq:crypto/hmac@1.0.0",
+        capability: Some(Capability::CryptoHmac),
+        // Seam re-check plus the algorithm allowlist per call.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "verify",
+        interface: "qqq:crypto/hmac@1.0.0",
+        capability: Some(Capability::CryptoHmac),
+        // Same seam and allowlist as `compute`.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "nonce-length",
+        interface: "qqq:crypto/aead@1.0.0",
+        capability: Some(Capability::CryptoAead),
+        // Public construction parameter, infallible by WIT design: no
+        // per-call check, and registration is grant-gated, so a mis-built
+        // linker still cannot move a byte (`encrypt`/`decrypt` re-check).
+        enforced_by: Enforcement::InterfaceGated,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "key-length",
+        interface: "qqq:crypto/aead@1.0.0",
+        capability: Some(Capability::CryptoAead),
+        // Same reasoning as `nonce-length`.
+        enforced_by: Enforcement::InterfaceGated,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "encrypt",
+        interface: "qqq:crypto/aead@1.0.0",
+        capability: Some(Capability::CryptoAead),
+        // Seam re-check plus the construction allowlist per call.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "decrypt",
+        interface: "qqq:crypto/aead@1.0.0",
+        capability: Some(Capability::CryptoAead),
+        // Same seam and allowlist as `encrypt`.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "sign",
+        interface: "qqq:crypto/signing@1.0.0",
+        capability: Some(Capability::CryptoSign),
+        // Seam re-check plus the algorithm allowlist per call.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "verify",
+        interface: "qqq:crypto/signing@1.0.0",
+        capability: Some(Capability::CryptoSign),
+        // Same seam and allowlist as `sign`.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_crypto.rs",
+        function: "public-key",
+        interface: "qqq:crypto/signing@1.0.0",
+        capability: Some(Capability::CryptoSign),
+        // Same seam and allowlist as `sign`.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_dns.rs",
+        function: "resolve",
+        interface: "qqq:dns/resolver@1.0.0",
+        capability: Some(Capability::DnsResolve),
+        // Seam re-check, then the subrequest budget, then the allowlist:
+        // an unlisted spray spends budget like a listed lookup.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_dns.rs",
+        function: "resolve-many",
+        interface: "qqq:dns/resolver@1.0.0",
+        capability: Some(Capability::DnsResolve),
+        // Same ordering as `resolve`, per entry through `resolve`.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_dns.rs",
+        function: "allowed-names",
+        interface: "qqq:dns/resolver@1.0.0",
+        capability: Some(Capability::DnsResolve),
+        // Infallible by WIT design; an ungranted caller gets an empty
+        // list, learning nothing including membership.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_http.rs",
+        function: "send",
+        interface: "qqq:http/http@1.0.0",
+        capability: Some(Capability::HttpClient),
+        // Seam re-check; an ungranted send still charges budget and writes
+        // the egress row, so probing cannot loop for free.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_http.rs",
+        function: "incoming-authority",
+        interface: "qqq:http/http@1.0.0",
+        capability: Some(Capability::HttpServer),
+        // Seam re-check; an ungranted caller gets the sentinel authority,
+        // and the attempt records a row.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_kv.rs",
+        function: "get",
+        interface: "qqq:kv/store@1.0.0",
+        capability: Some(Capability::KvRead),
+        // Through the `check_read` helper: grant, name shape, membership.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_kv.rs",
+        function: "set",
+        interface: "qqq:kv/store@1.0.0",
+        capability: Some(Capability::KvWrite),
+        // Through the `check_write` helper: grant, name shape, membership.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_kv.rs",
+        function: "delete",
+        interface: "qqq:kv/store@1.0.0",
+        capability: Some(Capability::KvWrite),
+        // Same helper as `set`; deleting an absent key succeeds.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_kv.rs",
+        function: "exists",
+        interface: "qqq:kv/store@1.0.0",
+        capability: Some(Capability::KvRead),
+        // Same helper as `get`, without transferring the value.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_kv.rs",
+        function: "keys",
+        interface: "qqq:kv/store@1.0.0",
+        capability: Some(Capability::KvRead),
+        // Same helper as `get`, plus the prefix length gate.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_kv.rs",
+        function: "get-many",
+        interface: "qqq:kv/store@1.0.0",
+        capability: Some(Capability::KvRead),
+        // Same helper as `get`, plus the batch count and per-key gates.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_kv.rs",
+        function: "stores",
+        interface: "qqq:kv/store@1.0.0",
+        capability: Some(Capability::KvRead),
+        // Infallible by WIT design; either direction grant opens it (the
+        // row names the first), and an ungranted caller gets an empty list.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_log.rs",
+        function: "emit",
+        interface: "qqq:log/logging@1.0.0",
+        capability: Some(Capability::LogWrite),
+        // Through the `emit_record` helper: grant, size, quota, redaction.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_log.rs",
+        function: "emit-many",
+        interface: "qqq:log/logging@1.0.0",
+        capability: Some(Capability::LogWrite),
+        // Grant and quota up front, then per-record validation with an
+        // early-failing byte total; atomic, so a refused batch stores nothing.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_log.rs",
+        function: "enabled",
+        interface: "qqq:log/logging@1.0.0",
+        capability: Some(Capability::LogWrite),
+        // No level filter is configured, so the answer is the grant itself.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_queue.rs",
+        function: "publish",
+        interface: "qqq:queue/messaging@1.0.0",
+        capability: Some(Capability::QueuePublish),
+        // Through the `check_publish` helper: grant, then membership.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_queue.rs",
+        function: "publish-many",
+        interface: "qqq:queue/messaging@1.0.0",
+        capability: Some(Capability::QueuePublish),
+        // Same helper as `publish`, plus the batch count and per-body gates.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_queue.rs",
+        function: "receive",
+        interface: "qqq:queue/messaging@1.0.0",
+        capability: Some(Capability::QueueSubscribe),
+        // Through the `check_subscribe` helper: grant, then membership.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_queue.rs",
+        function: "acknowledge",
+        interface: "qqq:queue/messaging@1.0.0",
+        capability: Some(Capability::QueueSubscribe),
+        // Same helper as `receive`, plus the delivery-id length gate.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_queue.rs",
+        function: "reject",
+        interface: "qqq:queue/messaging@1.0.0",
+        capability: Some(Capability::QueueSubscribe),
+        // Same helper and id gate as `acknowledge`.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_queue.rs",
+        function: "queues",
+        interface: "qqq:queue/messaging@1.0.0",
+        capability: Some(Capability::QueuePublish),
+        // Infallible by WIT design; either direction grant opens it (the
+        // row names the first), and an ungranted caller gets an empty list.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "prepare",
+        interface: "qqq:sql/database@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Either direction grant opens the call (the row names the first);
+        // the statement's own nature decides the direction below.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "query-once",
+        interface: "qqq:sql/database@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Same dual-grant entry as `prepare`, one-shot.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "query",
+        interface: "qqq:sql/database@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Query-only grant; reads open read-only so a missing file fails
+        // closed instead of materializing.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "execute",
+        interface: "qqq:sql/database@1.0.0",
+        capability: Some(Capability::SqlExecute),
+        // Either direction grant opens the call (the row names the write
+        // side); membership and direction follow, then the write runs.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "close",
+        interface: "qqq:sql/database@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Idempotent handle removal: registration is direction-gated, and
+        // closing exercises no authority of its own.
+        enforced_by: Enforcement::InterfaceGated,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "drop",
+        interface: "qqq:sql/database@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Same reasoning as `close`: cleanup, not authority.
+        enforced_by: Enforcement::InterfaceGated,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "databases",
+        interface: "qqq:sql/database@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Infallible by WIT design; either direction grant opens it (the
+        // row names the first), and an ungranted caller gets an empty list.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "begin",
+        interface: "qqq:sql/transaction@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Through the `check_any` helper: either direction grant opens a
+        // transaction (the row names the first); direction is decided by
+        // the statements inside it.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "prepare",
+        interface: "qqq:sql/transaction@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Same dual-grant entry as database `prepare`, plus the SQLite
+        // open-transaction agreement check before minting.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "commit",
+        interface: "qqq:sql/transaction@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Through `check_any`; the journal write is charged like any
+        // other execution.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "rollback",
+        interface: "qqq:sql/transaction@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Same helper and charging as `commit`.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "drop",
+        interface: "qqq:sql/transaction@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Dropping rolls back and invalidates: cleanup of the instance's
+        // own handles, gated by the registration.
+        enforced_by: Enforcement::InterfaceGated,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "query",
+        interface: "qqq:sql/transaction@1.0.0",
+        capability: Some(Capability::SqlQuery),
+        // Query-only grant plus the SQLite open-transaction agreement
+        // check before running.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_sql.rs",
+        function: "execute",
+        interface: "qqq:sql/transaction@1.0.0",
+        capability: Some(Capability::SqlExecute),
+        // Either direction grant opens the call (the row names the write
+        // side); the write-membership check and the agreement check follow.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_trace.rs",
+        function: "start-span",
+        interface: "qqq:trace/tracing@1.0.0",
+        capability: Some(Capability::TraceWrite),
+        // Through the `start_span_impl` helper: seam re-check, then the
+        // table bound.
+        enforced_by: Enforcement::ViaHelper,
+    },
+    AuditedCall {
+        file: "host_trace.rs",
+        function: "current-traceparent",
+        interface: "qqq:trace/tracing@1.0.0",
+        capability: Some(Capability::TraceWrite),
+        // Seam re-check; an ungranted caller reads absent trace.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_trace.rs",
+        function: "child",
+        interface: "qqq:trace/tracing@1.0.0",
+        capability: Some(Capability::TraceWrite),
+        // Seam first, then liveness: the error kind never leaks handle
+        // validity without the grant.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_trace.rs",
+        function: "event",
+        interface: "qqq:trace/tracing@1.0.0",
+        capability: Some(Capability::TraceWrite),
+        // Seam re-check with the length bound before liveness.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_trace.rs",
+        function: "set-attributes",
+        interface: "qqq:trace/tracing@1.0.0",
+        capability: Some(Capability::TraceWrite),
+        // Seam re-check, then liveness, then the per-value and total
+        // byte caps.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_trace.rs",
+        function: "set-error",
+        interface: "qqq:trace/tracing@1.0.0",
+        capability: Some(Capability::TraceWrite),
+        // Seam re-check with the length bound before the failure flag.
+        enforced_by: Enforcement::PerFunction,
+    },
+    AuditedCall {
+        file: "host_trace.rs",
+        function: "drop",
+        interface: "qqq:trace/tracing@1.0.0",
+        capability: Some(Capability::TraceWrite),
+        // Seam re-check; a dropped handle is gone either way.
+        enforced_by: Enforcement::PerFunction,
+    },
 ];
 
-/// Why the table lists no `hmac`, `hashing`, or `qqq:crypto/random` rows.
+/// Why the table once listed no `hmac`, `hashing`, or `qqq:crypto/random` rows.
 ///
-/// # The rows that moved, and why the table did not follow
+/// # The rows that moved, and why the table did not follow — until `C4`
 ///
 /// The first version of [`AUDITED`] listed eleven calls, including
 /// `hmac-algorithm.name` and `hmac.get`, taken from the WIT's `hmac` interface
@@ -434,29 +902,21 @@ pub const AUDITED: [AuditedCall; 26] = [
 /// could express because the scanner only sees `func_wrap`).
 ///
 /// `bindgen!` trait methods are not `func_wrap` registrations, so the
-/// table's machinery — which matches scanned registrations against rows —
-/// cannot see them. (`CryptoRandom` stays covered through the wasi random
+/// table's machinery — which matched scanned registrations against rows —
+/// could not see them. (`CryptoRandom` stayed covered through the wasi random
 /// shims, which are `func_wrap` with seam checks.) Their grant re-checks
-/// are proven instead by direct execution tests on the trait
+/// were proven instead by direct execution tests on the trait
 /// (`random_get_refuses_by_name`, `hashing_refuses_by_name`,
 /// `hmac_grants_and_allowlist_are_checked`) and by the guest-compiled
-/// `iface_crypto` probe, exactly as for `hmac`/`aead`/`signing` before
-/// them. A row claiming source-text coverage of a `bindgen!` method would
-/// be documentation rather than a check, and the table refuses to be that:
-/// the scanner's `Unlisted`/`Stale` findings only fire on `func_wrap`, so
-/// a row with no `func_wrap` to match is a claim no test can falsify
-/// through this module.
-///
-/// `CryptoHmac`, `CryptoHash`, `CryptoAead` and `CryptoSign` therefore appear
-/// in no row, and `the_table_covers_every_capability_the_host_can_bind`
-/// does **not** require them — the capabilities are grantable and
-/// implemented, which the direct tests and the probe prove, and which
-/// `describe_gap` reports at instantiation when ungranted.
+/// `iface_crypto` probe. The `C4` review closed the gap the other way: the
+/// scanner now learns `impl bindings::…::Host*` blocks too, so every
+/// bindgen entry point has a row above and the execution tests pin the
+/// behavior the rows claim.
 ///
 /// A disagreement between [`AUDITED`] and the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuditFinding {
-    /// A `func_wrap` in the source that no table row names.
+    /// A registration in the source that no table row names.
     Unlisted {
         /// The file.
         file: String,
@@ -465,7 +925,7 @@ pub enum AuditFinding {
         /// The line, so the reader can look at it.
         line: usize,
     },
-    /// A table row naming a `func_wrap` the source does not contain.
+    /// A table row naming a registration the source does not contain.
     ///
     /// Keyed by `(file, interface, function)`, not `(file, function)`: the
     /// wall and monotonic clocks share function names in one file, and a
@@ -550,7 +1010,25 @@ pub struct Registered {
 /// hand and [`audit`] cross-checks. The list is short, explicit, and a helper
 /// that starts gating must be added to it — whereupon the `UnbackedClaim` check
 /// begins validating the rows that depend on it.
-pub const CHECKING_HELPERS: [&str; 3] = ["hash_data(", "ambient::require(", "require_random("];
+pub const CHECKING_HELPERS: [&str; 10] = [
+    "hash_data(",
+    "ambient::require(",
+    "require_random(",
+    // Per-module grant-gate helpers that bindgen bodies call instead of
+    // checking inline: kv, sql and queue route their entry points through
+    // these, log routes `emit` through `emit_record`, and trace routes
+    // `start-span` through `start_span_impl` — so a body reaching one
+    // re-checks the grant on every call.
+    // (Quota helpers like `check_handles` are deliberately absent: a full
+    // table is not a grant decision.)
+    "check_read(",
+    "check_write(",
+    "check_any(",
+    "check_publish(",
+    "check_subscribe(",
+    "emit_record(",
+    "start_span_impl(",
+];
 
 /// Cross-check [`AUDITED`] against the source in `sources`.
 ///
@@ -636,8 +1114,11 @@ fn interface_suffix(interface: &str) -> &str {
     interface.rsplit('/').next().unwrap_or(interface)
 }
 
-/// Find every `func_wrap("name", …)` in one **production** source, and whether
-/// its body reaches a capability check.
+/// Find every guest-callable registration in one **production** source, and
+/// whether its body reaches a capability check.
+///
+/// `func_wrap("name", …)` call sites and `impl bindings::…::Host*` trait
+/// methods alike; see `bindgen_methods` for the second shape.
 ///
 /// # Why the scan strips comments and stops at the test module
 ///
@@ -713,7 +1194,225 @@ pub fn scan(file: &str, text: &str) -> Vec<Registered> {
             checks_capability: checks,
         });
     }
+    // **Bindgen trait methods are registrations too.** Files that bind through
+    // the generated `add_to_linker` (records, variants and resources need the
+    // canonical ABI's lifting) have no `func_wrap`, so the loop above sees
+    // none of their entry points — which is how whole capability modules
+    // escaped the audit while its tests stayed green. An
+    // `impl bindings::A::B::C::Host*` block contributes one registration per
+    // `    fn name(` method, with the WIT interface resolved from the file's
+    // own interface literals.
+    out.extend(bindgen_methods(file, text, &production));
+    // Collapse repeat registrations of one audit identity: `txn` and
+    // `txn-statement` each define `drop` under the same WIT interface, so the
+    // scan finds two sites for one `(interface, function)` key — and the
+    // table, keyed the same way, holds one row covering both. The survivor
+    // keeps the first line; its check flag is the AND of the twins, so a
+    // checked twin never vouches for an unchecked one (that pair fails loud
+    // as `UnbackedClaim` instead of passing quiet).
+    let mut deduped: Vec<Registered> = Vec::with_capacity(out.len());
+    for reg in out {
+        match deduped
+            .iter_mut()
+            .find(|r| r.interface == reg.interface && r.function == reg.function)
+        {
+            // Same audit identity twice: keep the first line, AND the
+            // check flags, so a checked twin never vouches for an
+            // unchecked one.
+            Some(first) => {
+                first.checks_capability = first.checks_capability && reg.checks_capability;
+            }
+            None => deduped.push(reg),
+        }
+    }
+    deduped
+}
+
+/// Every `bindings::…::Host*` trait-method registration in one production
+/// source, and whether its body reaches a capability check.
+///
+/// Only guest-callable impl blocks count: `impl bindings::…::Host*` and
+/// bare-trait `impl XxxHost for StoreData` shapes. Inherent `impl StoreData`
+/// helpers are not guest-callable and must not appear here. Method bodies run
+/// from their `    fn ` line to the next one, exactly like the `func_wrap`
+/// slicing above — a shape change fails loud (a missing row) rather than
+/// quiet.
+fn bindgen_methods(file: &str, text: &str, production: &str) -> Vec<Registered> {
+    let interfaces = wit_interfaces(text);
+    let lines: Vec<&str> = production.lines().collect();
+    let mut out = Vec::new();
+    let mut idx = 0;
+    while let Some(line) = lines.get(idx) {
+        // Bindings impls name their path (`impl bindings::qqq::kv::store::Host
+        // for …`); log and trace import the trait instead (`impl LogHost
+        // for StoreData`). Both spell a guest-callable interface: the shared
+        // test is a `Host`-naming trait implemented for the store.
+        // Inherent blocks (`impl StoreData`), unrelated traits
+        // (`impl Default`), and wasmtime-internal shims
+        // (`impl HostWallClock for DeniedClock`,
+        // `impl SecretCrypto for HostSecretCrypto`) match neither the trait
+        // nor the recipient shape and stay invisible, as before.
+        let path = if let Some(p) = line.strip_prefix("impl bindings::") {
+            Some((p, false))
+        } else if line.starts_with("impl ") && line.contains("Host") && is_store_recipient(line) {
+            Some(("", true))
+        } else {
+            None
+        };
+        let Some((path, bare)) = path else {
+            idx += 1;
+            continue;
+        };
+        // The block runs to the next column-zero line (any top-level item)
+        // or end of file; method bodies are always indented.
+        let mut end = idx + 1;
+        while let Some(next) = lines.get(end) {
+            if next.is_empty() || next.starts_with(char::is_whitespace) {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        let interface = if bare {
+            single_interface(&interfaces)
+        } else {
+            interface_for_path(path, &interfaces)
+        };
+        let mut m = idx + 1;
+        while m < end {
+            let method = lines.get(m).and_then(|l| l.strip_prefix("    fn "));
+            let Some(rest) = method else {
+                m += 1;
+                continue;
+            };
+            let name_end = rest.find('(').unwrap_or(rest.len());
+            let name = rest[..name_end].replace('_', "-");
+            if !is_identifier(&name) {
+                m += 1;
+                continue;
+            }
+            let mut body = String::new();
+            let mut mend = m + 1;
+            while let Some(next) = lines.get(mend) {
+                if mend >= end || next.starts_with("    fn ") || *next == "    }" {
+                    break;
+                }
+                body.push_str(next);
+                body.push('\n');
+                mend += 1;
+            }
+            let code = code_without_strings_or_trailing_comments(&body);
+            let checks = code.contains("grants.grants(")
+                || CHECKING_HELPERS.iter().any(|h| code.contains(h));
+            out.push(Registered {
+                file: file.to_owned(),
+                interface: interface.clone(),
+                function: name,
+                line: m + 1,
+                checks_capability: checks,
+            });
+            m = mend;
+        }
+        idx = end;
+    }
     out
+}
+
+/// Every WIT interface (`qqq:kv/store@1.0.0`) named in the source.
+///
+/// The `INTERFACE`-style constants and the `bindgen!` `interfaces` strings
+/// both spell full interfaces; the latter packs several into one literal
+/// (`"import qqq:sql/database@1.0.0; import …"`), so extraction is
+/// token-shaped rather than literal-shaped: exactly one `:` then one `/`
+/// then one `@version`, like the WIT package syntax itself.
+fn wit_interfaces(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in source.split(|c: char| {
+        !(c.is_ascii_alphanumeric() || c == ':' || c == '/' || c == '@' || c == '.' || c == '-')
+    }) {
+        let mut at_parts = token.split('@');
+        let head = at_parts.next().unwrap_or("");
+        let version = at_parts.next().unwrap_or("");
+        if at_parts.next().is_some()
+            || version.is_empty()
+            || !version.chars().all(|c| c.is_ascii_digit() || c == '.')
+        {
+            continue;
+        }
+        let mut head_parts = head.split(':');
+        let pkg = head_parts.next().unwrap_or("");
+        let iface = head_parts.next().unwrap_or("");
+        if head_parts.next().is_some() || pkg.is_empty() || iface.is_empty() || !iface.contains('/')
+        {
+            continue;
+        }
+        out.push(token.to_owned());
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Whether an `impl` line implements its trait for the store.
+///
+/// Guest-callable host traits are implemented for `StoreData` (itself or
+/// `crate::linker::StoreData`); wasmtime-internal shims (`DeniedClock`,
+/// `HostSecretCrypto`) and inherent blocks are not. The recipient is the
+/// first token after ` for `.
+fn is_store_recipient(line: &str) -> bool {
+    let Some(at) = line.find(" for ") else {
+        return false;
+    };
+    let after = line[at + " for ".len()..]
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+        .next()
+        .unwrap_or("");
+    after == "StoreData" || after.ends_with("::StoreData")
+}
+
+/// The file's single full WIT interface, when it names exactly one.
+///
+/// Bare-trait impls (`impl LogHost for …`) carry no path to resolve, so the
+/// interface must be unambiguous in the file: exactly one literal shaped
+/// `package/interface@version`. Two literals (crypto's five, sql's two) mean
+/// the file's impls must use `bindings::` paths instead — an empty answer
+/// here fails loud downstream rather than guessing.
+fn single_interface(interfaces: &[String]) -> String {
+    let full: Vec<&String> = interfaces
+        .iter()
+        .filter(|i| i.split('/').nth(1).is_some_and(|s| !s.is_empty()))
+        .collect();
+    if full.len() == 1 {
+        full.first().map(|s| (*s).clone()).unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+/// The full WIT interface for an `impl bindings::…` path, resolved against
+/// the file's own interface literals.
+///
+/// `bindings::qqq::kv::store::Host` contributes the key `kv/store`, which
+/// names the literal containing `kv/store@`. A path with no match yields an
+/// empty interface, which matches no row — a loud `Unlisted` failure rather
+/// than a quiet pass.
+fn interface_for_path(path: &str, interfaces: &[String]) -> String {
+    let segments: Vec<&str> = path.split("::").collect();
+    let host_at = segments.iter().position(|s| s.starts_with("Host"));
+    let end = host_at.unwrap_or(segments.len());
+    if end < 2 {
+        return String::new();
+    }
+    let (Some(a), Some(b)) = (segments.get(end - 2), segments.get(end - 1)) else {
+        return String::new();
+    };
+    let key = format!("{a}/{b}");
+    let needle = format!("{key}@");
+    interfaces
+        .iter()
+        .find(|i| i.contains(&needle))
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The interface the registration is attached to, from the nearest preceding
@@ -1166,8 +1865,7 @@ mod tests {
     /// Named honestly: this fixture has no `linker.instance(..)`, so the
     /// scan cannot attach an interface and the audit reports it (if at
     /// all) as unlisted, never as an unbacked claim. It pins the
-    /// separation of the two findings, not any row's classification —
-    /// the table currently holds no `InterfaceGated` rows at all.
+    /// separation of the two findings, not any row's classification.
     #[test]
     fn an_unlisted_function_is_not_an_unbacked_claim() {
         let source = r#"
@@ -1302,25 +2000,33 @@ mod tests {
             );
         }
         // `CryptoHash`, `CryptoHmac`, `CryptoAead` and `CryptoSign` are
-        // deliberately absent: their interfaces bind through `bindgen!`
-        // trait implementations, which the `func_wrap` scanner cannot see
-        // (`CryptoRandom` stays covered through the wasi random shims, which
-        // are `func_wrap`). Their per-call re-checks are proven instead by
-        // direct execution tests (`random_get_refuses_by_name`,
-        // `hashing_refuses_by_name`, `hmac_grants_and_allowlist_are_checked`)
-        // and the guest-compiled `iface_crypto` probe. Asserting their absence
-        // pins that, so the day a `func_wrap` reappears for one the table
-        // must gain a row — and `the_table_and_the_real_sources_agree` will
-        // say so, because the new `func_wrap` will be unlisted.
-        for absent in [
+        // covered through `bindgen!` trait-implementation rows (the scanner
+        // learns `impl bindings::…::Host*` blocks as well as `func_wrap`),
+        // with per-call re-checks proven by direct execution tests
+        // (`random_get_refuses_by_name`, `hashing_refuses_by_name`,
+        // `hmac_grants_and_allowlist_are_checked`) and the guest-compiled
+        // `iface_crypto` probe.
+        for present in [
             Capability::CryptoHash,
             Capability::CryptoHmac,
             Capability::CryptoAead,
             Capability::CryptoSign,
+            Capability::CryptoRandom,
+            Capability::DnsResolve,
+            Capability::HttpClient,
+            Capability::HttpServer,
+            Capability::KvRead,
+            Capability::KvWrite,
+            Capability::LogWrite,
+            Capability::QueuePublish,
+            Capability::QueueSubscribe,
+            Capability::SqlQuery,
+            Capability::SqlExecute,
+            Capability::TraceWrite,
         ] {
             assert!(
-                !covered.contains(&absent),
-                "a {absent:?} row now exists; it must be backed by a func_wrap the scanner sees"
+                covered.contains(&present),
+                "a {present:?} row must exist; the scanner sees its registration"
             );
         }
     }

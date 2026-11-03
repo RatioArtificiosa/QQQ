@@ -132,7 +132,7 @@ pub const HOST_MODULES: [&str; 14] = [
 /// The number is not a transcription: [`registered_from_sources`] derives it from
 /// the source with the standard library available, and `arch012`'s
 /// both-directions scan independently confirms `AUDITED` matches the tree.
-pub const EXPECTED_REGISTRATIONS: usize = 26;
+pub const EXPECTED_REGISTRATIONS: usize = 80;
 
 /// Why a WIT-definition check could not be completed.
 ///
@@ -400,10 +400,14 @@ pub fn wit_declares_function(src: &str, name: &str) -> bool {
 /// [`Indeterminate`] when the scan cannot be trusted. **Handling this is not
 /// optional**: an `Err` means the rule is unproven, not satisfied.
 pub fn dissenting_functions() -> Result<Vec<Registration>, Indeterminate> {
+    // Resource destructors are ABI-implicit: the canonical ABI provides
+    // `resource-drop` for every resource type, so no WIT file declares
+    // `drop: func(`. The exemption matches that exact name, so nothing
+    // else can slip through it.
     let registrations = registered_from_sources()?;
     Ok(registrations
         .into_iter()
-        .filter(|r| !wit_defines(&r.name))
+        .filter(|r| !wit_defines(&r.name) && r.name != "drop")
         .collect())
 }
 

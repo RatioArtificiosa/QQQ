@@ -691,6 +691,457 @@ pub const BOUNDARIES: &[Boundary] = &[
         checks: &[CheckClass::Range, CheckClass::Shape],
         guest_controls: "`algorithm`, `key` (a 32-byte seed)",
     },
+    Boundary {
+        function: "resolve",
+        interface: "qqq:dns/resolver@1.0.0",
+        // Shape for the wire-limit name bound and dotted-label form;
+        // membership in the manifest allowlist is a second shape check.
+        // The subrequest budget binds the lookup itself.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`name` (253 B wire limit, dotted labels, allowlisted)",
+    },
+    Boundary {
+        function: "resolve-many",
+        interface: "qqq:dns/resolver@1.0.0",
+        // Same per-name checks as `resolve`, plus Size for the 128-name
+        // batch bound (total bytes follow: 128 × 253 B).
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`names`, a list of up to 128 allowlisted names",
+    },
+    Boundary {
+        function: "allowed-names",
+        interface: "qqq:dns/resolver@1.0.0",
+        checks: &[],
+        guest_controls: "nothing: no arguments; the return is the manifest's public name set.",
+    },
+    Boundary {
+        function: "send",
+        interface: "qqq:http/http@1.0.0",
+        // Shape for the method allowlist and URL form; Size for the URL
+        // (8 KiB), per-field (16 KiB) and total (1 MiB) bounds.
+        checks: &[CheckClass::Range, CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`method`, `url`, `headers`, `body`",
+    },
+    Boundary {
+        function: "incoming-authority",
+        interface: "qqq:http/http@1.0.0",
+        checks: &[],
+        guest_controls: "nothing: no arguments; the return is the bound address the server holds.",
+    },
+    Boundary {
+        function: "get",
+        interface: "qqq:kv/store@1.0.0",
+        // Shape for the store-name and key bounds; the key length gate
+        // precedes the map lookup so a megabyte key costs no allocation.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`store`, `key` (both bounded before the lookup)",
+    },
+    Boundary {
+        function: "set",
+        interface: "qqq:kv/store@1.0.0",
+        // Shape for names and keys, Size for the value (64 KiB) and the
+        // per-store byte quota the write is charged against.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`store`, `key`, `value`, `ttl-seconds`",
+    },
+    Boundary {
+        function: "delete",
+        interface: "qqq:kv/store@1.0.0",
+        // Same name and key gates as `get`; deleting an absent key succeeds.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`store`, `key` (both bounded before the lookup)",
+    },
+    Boundary {
+        function: "exists",
+        interface: "qqq:kv/store@1.0.0",
+        // Same gates as `get`, without transferring the value.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`store`, `key` (both bounded before the lookup)",
+    },
+    Boundary {
+        function: "keys",
+        interface: "qqq:kv/store@1.0.0",
+        // Shape for names and the prefix bound; Size for the limit cap
+        // (at most 1000 keys per call) and the range-bounded scan.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`store`, `prefix`, `limit`",
+    },
+    Boundary {
+        function: "get-many",
+        interface: "qqq:kv/store@1.0.0",
+        // Same per-key gates as `get`, plus Size for the 128-key batch
+        // bound; the batch reads as one atomic snapshot.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`store`, up to 128 bounded `keys`",
+    },
+    Boundary {
+        function: "stores",
+        interface: "qqq:kv/store@1.0.0",
+        checks: &[],
+        guest_controls: "nothing: no arguments; the return is the manifest's public store set.",
+    },
+    Boundary {
+        function: "emit",
+        interface: "qqq:log/logging@1.0.0",
+        // Size for the message and attribute bounds plus the table and
+        // byte quotas; secret values equal to resolved material are
+        // stored redacted.
+        checks: &[CheckClass::Size, CheckClass::Shape],
+        guest_controls: "`level`, `message`, `attributes`",
+    },
+    Boundary {
+        function: "emit-many",
+        interface: "qqq:log/logging@1.0.0",
+        // Same per-record checks as `emit`, validated atomically: a batch
+        // that fails on any record stores nothing, and the byte total
+        // fails fast instead of validating past the overflow.
+        checks: &[CheckClass::Size, CheckClass::Shape],
+        guest_controls: "a batch of records, each bounded like `emit`",
+    },
+    Boundary {
+        function: "enabled",
+        interface: "qqq:log/logging@1.0.0",
+        checks: &[],
+        guest_controls: "`level` only; the answer is the grant itself, as no level filter is configured.",
+    },
+    Boundary {
+        function: "publish",
+        interface: "qqq:queue/messaging@1.0.0",
+        // Size for the 64 KiB message bound and the depth quota; the
+        // subrequest budget binds the outbound effect.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`queue`, `body`",
+    },
+    Boundary {
+        function: "publish-many",
+        interface: "qqq:queue/messaging@1.0.0",
+        // Same per-message gates as `publish`, plus Size for the batch
+        // bound; atomic, with the budget charged per message up front.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`queue`, a batch of bounded bodies",
+    },
+    Boundary {
+        function: "receive",
+        interface: "qqq:queue/messaging@1.0.0",
+        // Shape for the queue name and membership; the timeout is
+        // accepted but never waited on.
+        checks: &[CheckClass::Shape],
+        guest_controls: "`queue`, `timeout-ms` (accepted, never waited on)",
+    },
+    Boundary {
+        function: "acknowledge",
+        interface: "qqq:queue/messaging@1.0.0",
+        // Shape for the queue name; the delivery id is length-gated
+        // (277 B) so a megabyte id costs no map lookup. Ids are
+        // single-use: an unknown or expired id reports `lease-expired`.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`queue`, `id` (a `{queue}:{counter:020}` handle)",
+    },
+    Boundary {
+        function: "reject",
+        interface: "qqq:queue/messaging@1.0.0",
+        // Same gates as `acknowledge`; the message returns to the front
+        // with its delivery count, keeping the same id.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`queue`, `id` (a `{queue}:{counter:020}` handle)",
+    },
+    Boundary {
+        function: "queues",
+        interface: "qqq:queue/messaging@1.0.0",
+        checks: &[],
+        guest_controls: "nothing: no arguments; the return is the manifest's public queue set with directions.",
+    },
+    Boundary {
+        function: "prepare",
+        interface: "qqq:sql/database@1.0.0",
+        // Shape for the database-name bound and statement size; Range for
+        // the direction the statement's nature decides. Either direction
+        // grant opens the call; the PRAGMA gate keeps mutating pragmas on
+        // the execute path.
+        checks: &[CheckClass::Range, CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`database`, `sql` (validated eagerly at prepare time)",
+    },
+    Boundary {
+        function: "query-once",
+        interface: "qqq:sql/database@1.0.0",
+        // Same gates as `prepare`, one-shot: direction, PRAGMA gate and
+        // size apply before any connection opens.
+        checks: &[CheckClass::Range, CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`database`, `sql`, `args`",
+    },
+    Boundary {
+        function: "query",
+        interface: "qqq:sql/database@1.0.0",
+        // Query-only grant; reads open read-only so a missing file fails
+        // instead of materializing. Consistency: the statement is
+        // re-prepared per execution, so the database decides readonly-ness.
+        checks: &[
+            CheckClass::Range,
+            CheckClass::Shape,
+            CheckClass::Consistency,
+        ],
+        guest_controls: "a prepared-statement handle plus `args`",
+    },
+    Boundary {
+        function: "execute",
+        interface: "qqq:sql/database@1.0.0",
+        // Either direction grant opens the call; membership, direction and
+        // the no-open-transaction rule follow, then the write runs.
+        checks: &[
+            CheckClass::Range,
+            CheckClass::Shape,
+            CheckClass::Consistency,
+        ],
+        guest_controls: "a prepared-statement handle plus `args`",
+    },
+    Boundary {
+        function: "close",
+        interface: "qqq:sql/database@1.0.0",
+        checks: &[],
+        guest_controls: "a statement handle; idempotent removal, no authority exercised.",
+    },
+    Boundary {
+        function: "drop",
+        interface: "qqq:sql/database@1.0.0",
+        checks: &[],
+        guest_controls: "a statement handle; cleanup, never an error.",
+    },
+    Boundary {
+        function: "databases",
+        interface: "qqq:sql/database@1.0.0",
+        checks: &[],
+        guest_controls: "nothing: no arguments; the return is the manifest's public database set.",
+    },
+    Boundary {
+        function: "begin",
+        interface: "qqq:sql/transaction@1.0.0",
+        // Either direction grant opens a transaction; the statements
+        // inside it decide direction. Charged like any other execution.
+        checks: &[CheckClass::Range, CheckClass::Shape],
+        guest_controls: "`database` (a configured name)",
+    },
+    Boundary {
+        function: "prepare",
+        interface: "qqq:sql/transaction@1.0.0",
+        checks: &[CheckClass::Range, CheckClass::Shape, CheckClass::Size],
+        guest_controls: "a transaction handle plus `sql`; the SQLite open-transaction agreement is checked before minting",
+    },
+    Boundary {
+        function: "commit",
+        interface: "qqq:sql/transaction@1.0.0",
+        checks: &[CheckClass::Range],
+        guest_controls: "a transaction handle; the journal write is charged like any other execution",
+    },
+    Boundary {
+        function: "rollback",
+        interface: "qqq:sql/transaction@1.0.0",
+        checks: &[CheckClass::Range],
+        guest_controls: "a transaction handle; same charging as `commit`",
+    },
+    Boundary {
+        function: "drop",
+        interface: "qqq:sql/transaction@1.0.0",
+        checks: &[],
+        guest_controls: "a transaction handle (or statement handle); dropping rolls back and invalidates, never an error. One row covers both resources.",
+    },
+    Boundary {
+        function: "query",
+        interface: "qqq:sql/transaction@1.0.0",
+        checks: &[
+            CheckClass::Range,
+            CheckClass::Shape,
+            CheckClass::Consistency,
+        ],
+        guest_controls: "a transaction-statement handle plus `args`; the SQLite agreement is checked before running",
+    },
+    Boundary {
+        function: "execute",
+        interface: "qqq:sql/transaction@1.0.0",
+        checks: &[
+            CheckClass::Range,
+            CheckClass::Shape,
+            CheckClass::Consistency,
+        ],
+        guest_controls: "a transaction-statement handle plus `args`; membership, direction and the agreement check precede the write",
+    },
+    Boundary {
+        function: "start-span",
+        interface: "qqq:trace/tracing@1.0.0",
+        // Shape for the table bound (256 live spans); the name is
+        // length-bounded through the log field bound.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`name`, optional parent span",
+    },
+    Boundary {
+        function: "current-traceparent",
+        interface: "qqq:trace/tracing@1.0.0",
+        checks: &[],
+        guest_controls: "nothing: no arguments; an ungranted caller reads absent trace.",
+    },
+    Boundary {
+        function: "child",
+        interface: "qqq:trace/tracing@1.0.0",
+        // Shape for liveness: a severed child fails `span-closed`, and the
+        // grant is judged first so the kind never leaks handle validity.
+        checks: &[CheckClass::Shape],
+        guest_controls: "a parent handle plus `name`",
+    },
+    Boundary {
+        function: "event",
+        interface: "qqq:trace/tracing@1.0.0",
+        // Shape for the name bound with the mirror prefix accounted for;
+        // attributes are validated like `set-attributes`.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "a span handle, `name`, `attributes`",
+    },
+    Boundary {
+        function: "set-attributes",
+        interface: "qqq:trace/tracing@1.0.0",
+        // Shape for names and the per-value bound, Size for the 64-entry
+        // and 256 KiB total caps; liveness is judged first.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "a span handle plus `attributes`",
+    },
+    Boundary {
+        function: "set-error",
+        interface: "qqq:trace/tracing@1.0.0",
+        // Shape for the message bound with the `error ` prefix accounted
+        // for; the length is judged before the failure flag is set.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "a span handle plus `message`",
+    },
+    Boundary {
+        function: "drop",
+        interface: "qqq:trace/tracing@1.0.0",
+        checks: &[],
+        guest_controls: "a span handle; a dropped handle is gone either way, and the allocator restarts when the table drains.",
+    },
+    Boundary {
+        function: "get-or",
+        interface: "qqq:env/environment@1.0.0",
+        // Same name bound as `get`; the fallback applies to `unset` only,
+        // never to a denied read.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`name` plus a caller-supplied fallback",
+    },
+    Boundary {
+        function: "mark-fuel",
+        interface: "qqq:test/assertions@1.0.0",
+        // Shape for the mark-name bound; the table holds 256 marks, and a
+        // full table refuses loudly rather than dropping the mark.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`name` (bounded) plus the fuel reading the host takes",
+    },
+    Boundary {
+        function: "fuel-since",
+        interface: "qqq:test/assertions@1.0.0",
+        // Shape for the mark-name bound; an unknown mark reports
+        // `no-fuel-baseline` rather than a number.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`name` (bounded)",
+    },
+    Boundary {
+        function: "assert-fuel-below",
+        interface: "qqq:test/assertions@1.0.0",
+        // Shape for the mark-name bound; the consumed fuel is host-measured,
+        // and a refusal to record names the bound, not the content.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`mark`, `limit`",
+    },
+    Boundary {
+        function: "assert-caps-only",
+        interface: "qqq:test/assertions@1.0.0",
+        // Shape for the 64-entry allowlist bound with per-entry length
+        // gates; each name must resolve or the assertion reports
+        // `unknown-capability`.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`allowed`, a list of at most 64 capability names",
+    },
+    Boundary {
+        function: "assert-no-capability",
+        interface: "qqq:test/assertions@1.0.0",
+        // Same per-name gates as `assert-caps-only`, for a single name.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`capability`, one name",
+    },
+    Boundary {
+        function: "report",
+        interface: "qqq:test/assertions@1.0.0",
+        // Shape and Size for the message and location bounds, judged
+        // before formatting so a megabyte field cannot double; the
+        // failure table holds 128 reports.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`passed`, `message`, optional `location`",
+    },
+    Boundary {
+        function: "get-random-bytes",
+        interface: "wasi:random/random@0.2.12",
+        // Size for the per-call ceiling; the same source and bound the
+        // `qqq:crypto/random` spelling uses.
+        checks: &[CheckClass::Size],
+        guest_controls: "`length`, which the host allocates for",
+    },
+    Boundary {
+        function: "get-random-u64",
+        interface: "wasi:random/random@0.2.12",
+        checks: &[],
+        guest_controls: "nothing: eight bytes from the same bounded source.",
+    },
+    Boundary {
+        function: "get-insecure-random-bytes",
+        interface: "wasi:random/insecure@0.2.12",
+        // Same ceiling as the secure spelling; insecure names the
+        // determinism contract, not a weaker bound.
+        checks: &[CheckClass::Size],
+        guest_controls: "`length`, which the host allocates for",
+    },
+    Boundary {
+        function: "get-insecure-random-u64",
+        interface: "wasi:random/insecure@0.2.12",
+        checks: &[],
+        guest_controls: "nothing: eight bytes from the same bounded source.",
+    },
+    Boundary {
+        function: "insecure-seed",
+        interface: "wasi:random/insecure-seed@0.2.12",
+        checks: &[],
+        guest_controls: "nothing: sixteen bytes from the same bounded source.",
+    },
+    Boundary {
+        function: "get-resolution",
+        interface: "wasi:clocks/monotonic-clock@0.3.2",
+        checks: &[],
+        guest_controls: "nothing: no arguments; the answer is configuration.",
+    },
+    Boundary {
+        function: "wait-until",
+        interface: "wasi:clocks/monotonic-clock@0.3.2",
+        checks: &[],
+        guest_controls: "nothing guest-influenced: an async refusal stub that always traps with its name, so an instantiation attempt fails closed with a message instead of hanging.",
+    },
+    Boundary {
+        function: "wait-for",
+        interface: "wasi:clocks/monotonic-clock@0.3.2",
+        checks: &[],
+        guest_controls: "nothing guest-influenced: same named-trap refusal as `wait-until`.",
+    },
+    Boundary {
+        function: "apply",
+        interface: "qqq:secrets/secret-use@1.0.0",
+        // Shape for the operation and the two-input rule (exactly one
+        // carrier; `verify` additionally requires an empty trailing
+        // input); Size for the per-call input ceiling.
+        checks: &[CheckClass::Range, CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`name`, `op` (sign/hmac/encrypt/decrypt/verify/public-key), `input`",
+    },
+    Boundary {
+        function: "permitted-operations",
+        interface: "qqq:secrets/secret-use@1.0.0",
+        // Shape for the name bound; an ungranted name answers empty,
+        // never an error, and names only — never values.
+        checks: &[CheckClass::Shape, CheckClass::Size],
+        guest_controls: "`name` (bounded)",
+    },
 ];
 
 /// Every interface name in the table, deduplicated and sorted.
@@ -1208,16 +1659,14 @@ mod tests {
     /// declare it fails the build.
     #[test]
     fn every_registered_host_function_is_declared_in_the_boundary_table() {
-        // The host modules that register guest-callable functions.
-        let sources: &[(&str, &str)] = &[
-            ("host_clock.rs", include_str!("host_clock.rs")),
-            ("host_crypto.rs", include_str!("host_crypto.rs")),
-        ];
-
+        // Every host module, through the shared arch012 scanner: `func_wrap`
+        // call sites and `bindgen!` trait-method definitions alike. The
+        // scanner is shared (not a second implementation) so the two tables
+        // cannot disagree about what exists.
         let mut registered = Vec::new();
-        for (file, source) in sources {
-            for name in registered_names(source) {
-                registered.push((*file, name));
+        for (file, source) in crate::arch003::HOST_SOURCES {
+            for found in crate::arch012::scan(file, source) {
+                registered.push((file, found.function));
             }
         }
 
@@ -1287,11 +1736,12 @@ mod tests {
     /// The table must not declare a boundary that no longer exists.
     #[test]
     fn every_declared_boundary_names_a_real_function() {
-        let sources = concat!(
-            include_str!("host_clock.rs"),
-            include_str!("host_crypto.rs")
-        );
-        let registered = registered_names(sources);
+        let mut registered = Vec::new();
+        for (file, source) in crate::arch003::HOST_SOURCES {
+            for found in crate::arch012::scan(file, source) {
+                registered.push(found.function);
+            }
+        }
         for b in BOUNDARIES {
             assert!(
                 registered.iter().any(|n| n == b.function),

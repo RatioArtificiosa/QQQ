@@ -433,7 +433,7 @@ impl Trap {
 
         let frames: Vec<WasmFrame> = err
             .downcast_ref::<wasmtime::WasmBacktrace>()
-            .map(|bt| bt.frames().iter().map(frame_from).collect())
+            .map(|bt| bt.frames().iter().take(64).map(frame_from).collect())
             .unwrap_or_default();
 
         if !frames.is_empty() {
@@ -444,7 +444,10 @@ impl Trap {
 
     /// Attach a parsed backtrace.
     #[must_use]
-    pub fn with_backtrace(mut self, frames: Vec<WasmFrame>) -> Self {
+    pub fn with_backtrace(mut self, mut frames: Vec<WasmFrame>) -> Self {
+        // Bound the stored frames: a deep recursion could hand back
+        // thousands, and the trap record lives in host memory.
+        frames.truncate(64);
         self.backtrace = frames;
         self
     }
@@ -640,6 +643,23 @@ mod tests {
         let short = Trap::from_engine_error("all fuel consumed by WebAssembly");
         assert_eq!(short.detail, "all fuel consumed by WebAssembly");
         assert_eq!(short.code, ErrorCode::FuelExhausted);
+    }
+
+    /// Stored backtraces are bounded: a deep recursion must not grow host
+    /// memory without limit.
+    #[test]
+    fn backtrace_frames_are_capped() {
+        let frames: Vec<WasmFrame> = (0u64..200)
+            .map(|i| WasmFrame {
+                module: Some("m".to_owned()),
+                func: format!("f{i}"),
+                offset: Some(i),
+                file: None,
+                line: None,
+            })
+            .collect();
+        let trap = Trap::from_engine_error("test").with_backtrace(frames);
+        assert_eq!(trap.backtrace.len(), 64);
     }
 
     #[test]

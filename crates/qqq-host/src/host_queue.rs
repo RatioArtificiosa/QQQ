@@ -740,6 +740,11 @@ fn now_or_fail(data: &crate::linker::StoreData) -> std::result::Result<u64, WitQ
 /// only the config says where.
 impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
     fn publish(&mut self, queue: String, body: Vec<u8>) -> std::result::Result<(), WitQueueError> {
+        // The audit seam first: the grant denial currently comes first in
+        // `check_publish`, so recording here preserves the refusal
+        // precedence exactly while making the consultation visible.
+        crate::ambient::require(self, QueuePublish, "queue_publish")
+            .map_err(|_| WitQueueError::NotGranted)?;
         check_publish(self, &queue)?;
         // The manifest quota first, the absolute depth second: `max_open_handles`
         // is the per-instance policy, `MAX_QUEUE_DEPTH` the shared backstop.
@@ -783,6 +788,10 @@ impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
         // Component Model materializes the batch before the host runs, so
         // the per-message bound governs storage, not transfer — and the
         // transfer itself is bounded by the instance's memory and fuel.
+        // The seam records the batch as one consultation (`queue_publish_many`,
+        // not per-message rows), so a large batch is one audit row.
+        crate::ambient::require(self, QueuePublish, "queue_publish_many")
+            .map_err(|_| WitQueueError::NotGranted)?;
         check_publish(self, &queue)?;
         if bodies.len() > MAX_QUEUE_BATCH_MESSAGES {
             return Err(WitQueueError::QuotaExceeded);
@@ -839,18 +848,24 @@ impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
         // A local backend makes waiting pointless — everything published
         // before the call is already visible — and sleeping would stall the
         // reactor and poison deterministic replay.
+        crate::ambient::require(self, QueueSubscribe, "queue_receive")
+            .map_err(|_| WitQueueError::NotGranted)?;
         check_subscribe(self, &queue)?;
         let now = now_or_fail(self)?;
         Ok(lock_backend(&self.queue.backend).receive(&queue, now))
     }
 
     fn acknowledge(&mut self, queue: String, id: String) -> std::result::Result<(), WitQueueError> {
+        crate::ambient::require(self, QueueSubscribe, "queue_acknowledge")
+            .map_err(|_| WitQueueError::NotGranted)?;
         check_subscribe(self, &queue)?;
         let now = now_or_fail(self)?;
         lock_backend(&self.queue.backend).acknowledge(&queue, &id, now)
     }
 
     fn reject(&mut self, queue: String, id: String) -> std::result::Result<(), WitQueueError> {
+        crate::ambient::require(self, QueueSubscribe, "queue_reject")
+            .map_err(|_| WitQueueError::NotGranted)?;
         check_subscribe(self, &queue)?;
         let now = now_or_fail(self)?;
         lock_backend(&self.queue.backend).reject(&queue, &id, now)
@@ -860,6 +875,16 @@ impl bindings::qqq::queue::messaging::Host for crate::linker::StoreData {
         // Infallible by WIT design (the manifest set is public), so the
         // grant re-check fails closed by answering empty rather than by
         // erroring: an ungranted caller learns nothing, including membership.
+        // The consultation is still recorded, under the direction the caller
+        // holds -- mirroring `kv::stores`/`sql::databases`.
+        let cap = if self.grants.grants(QueuePublish) {
+            QueuePublish
+        } else {
+            QueueSubscribe
+        };
+        if crate::ambient::require(self, cap, "queue_queues").is_err() {
+            return Vec::new();
+        }
         if !(self.grants.grants(QueuePublish) || self.grants.grants(QueueSubscribe)) {
             return Vec::new();
         }
@@ -1063,6 +1088,107 @@ mod tests {
         )
         .expect_err("subscribe cannot publish");
         assert!(matches!(err, WitQueueError::NotGranted));
+    }
+
+    /// Every queue body records through the audit seam: a direct grant check
+    /// would answer identically while leaving the caller looking
+    /// capability-clean to `assert-caps-only`. Counted, not `contains`.
+    #[test]
+    fn every_queue_body_records_through_the_audit_seam() {
+        let production = include_str!("host_queue.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 6,
+            "every queue body (publish, publish_many, receive, acknowledge, reject, queues) \
+             must consult the audit seam; found {seams} seam call(s)"
+        );
+    }
+
+    /// A store whose capability uses are recorded, so the seam tests can
+    /// assert on the rows rather than on the return value alone.
+    fn audited_store(
+        both: bool,
+        publish_only: bool,
+    ) -> (
+        StoreData,
+        std::sync::Arc<std::sync::Mutex<crate::audit::AuditStream>>,
+    ) {
+        let mut data = granted_store(both, publish_only);
+        let stream = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::audit::AuditStream::with_default_capacity(),
+        ));
+        let digest = data.grants.digest();
+        data.audit = Some(crate::audit::AuditHandle::new(
+            std::sync::Arc::clone(&stream),
+            crate::tenant::ComponentDigest::new("0011223344556677").expect("digest"),
+            crate::tenant::GrantDigest::new(&digest).expect("digest"),
+            None,
+        ));
+        (data, stream)
+    }
+
+    /// A granted call records a `Granted` row naming the capability and the
+    /// host function -- the row an auditor aggregates, not a constant.
+    /// `queues()` needs no quota or budget, so it exercises the seam with
+    /// no fixture headroom.
+    #[test]
+    fn a_granted_queues_call_records_a_granted_row() {
+        // Publish-only: one configured queue, so the listing has one row.
+        let (mut data, stream) = audited_store(false, true);
+        let names = bindings::qqq::queue::messaging::Host::queues(&mut data);
+        assert_eq!(names.len(), 1, "the configured queue must list");
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 1, "one consultation, one row");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].capability,
+            qqq_cap::capability::Capability::QueuePublish
+        );
+        assert_eq!(records[0].function, "queue_queues");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Granted);
+    }
+
+    /// A refused publish records a `Denied` row even though nothing is
+    /// stored -- a refusal is the row an auditor most wants.
+    #[test]
+    fn a_denied_publish_records_a_denied_row() {
+        let mut data = ungranted_store();
+        let stream = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::audit::AuditStream::with_default_capacity(),
+        ));
+        let digest = data.grants.digest();
+        data.audit = Some(crate::audit::AuditHandle::new(
+            std::sync::Arc::clone(&stream),
+            crate::tenant::ComponentDigest::new("0011223344556677").expect("digest"),
+            crate::tenant::GrantDigest::new(&digest).expect("digest"),
+            None,
+        ));
+        // The backend view is attached the way a real instance carries it;
+        // the seam refuses before it is touched.
+        let config = Arc::new(QueueConfig::new(vec![(
+            "q".to_owned(),
+            QueueDirection::Publish,
+        )]));
+        data.queue = QueueView::new(config, Arc::new(Mutex::new(QueueBackend::new())));
+        let err = bindings::qqq::queue::messaging::Host::publish(
+            &mut data,
+            "q".to_owned(),
+            b"v".to_vec(),
+        )
+        .expect_err("no grant");
+        assert!(matches!(err, WitQueueError::NotGranted));
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 1, "the denial must be recorded");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].function, "queue_publish");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Denied);
     }
 
     /// Unconfigured queues are unconfigured however the call arrived, and

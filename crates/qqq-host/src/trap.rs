@@ -132,7 +132,11 @@ pub fn classify_trap(detail: &str) -> ErrorCode {
     if d.contains("epoch") && (d.contains("deadline") || d.contains("interrupt")) {
         return ErrorCode::EpochDeadlineExceeded;
     }
-    if d.contains("trap: interrupt") {
+    if d.contains("trap: interrupt") || d.lines().any(|line| line.trim() == "interrupt") {
+        // `frame_message` collapses a genuine multi-colon engine message to
+        // its tail, so a line that is exactly `interrupt` is the epoch
+        // signal: an engine message that short occurs nowhere else, and
+        // guest names never occupy a whole line.
         return ErrorCode::EpochDeadlineExceeded;
     }
 
@@ -192,12 +196,17 @@ pub fn classify_trap(detail: &str) -> ErrorCode {
 /// does not understand would turn a future Wasmtime format change into silent
 /// misclassification, while keeping it preserves the old behaviour exactly.
 ///
-/// The split takes the *first* `": "` after the address, because the engine's
-/// own messages contain one (`"wasm trap: interrupt"`): splitting at the last
-/// would truncate genuine signals to their tail (`"interrupt"`), which matches
-/// nothing. A guest name containing `": "` can therefore smuggle a signal word
-/// into the suffix — that shape is exotic (no toolchain emits it), and the
-/// alternative of dropping the suffix loses genuine signals outright.
+/// The split takes the *last* `": "` after the address, because the engine
+/// appends its own message after the guest-controlled name: the last segment
+/// is always the engine's words, while the first segment is the name whenever
+/// the name contains `": "`. Splitting at the first would let a crafted name
+/// section (`m!evil: all fuel consumed: wasm trap: …`) smuggle a signal word
+/// into the match and forge a fuel metric plus its remediation. Genuine
+/// multi-colon engine messages (`"wasm trap: interrupt"`) collapse to their
+/// tail (`"interrupt"`), which the epoch arm matches line-exactly below --
+/// the tail alone can only arise from that message, or from a smuggled name
+/// on a trap whose engine message is empty (Wasmtime always emits one in
+/// practice), an accepted residual documented at the arm.
 #[must_use]
 fn frame_message(line: &str) -> &str {
     let Some((index, rest)) = line.trim_start().split_once(':') else {
@@ -212,7 +221,7 @@ fn frame_message(line: &str) -> &str {
     let Some((_, after_addr)) = rest.split_once(" - ") else {
         return line;
     };
-    match after_addr.split_once(": ") {
+    match after_addr.rsplit_once(": ") {
         Some((_, message)) => message,
         None => "",
     }
@@ -1111,6 +1120,22 @@ mod tests {
     fn classification_prefers_the_most_specific_signature() {
         let both = "all fuel consumed; memory limit also mentioned";
         assert_eq!(classify_trap(both), ErrorCode::FuelExhausted);
+    }
+
+    /// A guest name containing `": "` must not smuggle a signal into the
+    /// match: the engine appends its message after the name, so the last
+    /// segment is the engine's words and the injected middle is discarded.
+    /// Here the name shouts fuel while the engine reports out-of-bounds --
+    /// the code must follow the engine, not the name.
+    #[test]
+    fn a_name_section_smuggled_signal_does_not_reclassify_the_trap() {
+        let detail = "error while executing at wasm backtrace:\n\
+             0: 0x2d - m!evil: all fuel consumed by WebAssembly: wasm trap: out of bounds memory access";
+        assert_eq!(
+            classify_trap(detail),
+            ErrorCode::GuestOutOfBounds,
+            "the engine message decides, not the crafted name"
+        );
     }
 
     #[test]

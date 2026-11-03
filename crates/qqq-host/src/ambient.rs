@@ -1209,6 +1209,8 @@ mod tests {
             include_str!("host_http.rs"),
             include_str!("host_kv.rs"),
             include_str!("host_log.rs"),
+            include_str!("host_queue.rs"),
+            include_str!("host_secrets.rs"),
             include_str!("host_sql.rs"),
             include_str!("host_trace.rs"),
             include_str!("host_wasi.rs"),

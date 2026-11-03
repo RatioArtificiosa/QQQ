@@ -72,6 +72,15 @@
 //! only mutation available is [`TenantScope::for_same_tenant`], which refuses
 //! to change the tenant at all.
 //!
+//! Status of the wiring: the scope attaches at construction through
+//! [`crate::linker::StoreData::with_tenant`], and no production path attaches one today --
+//! instances are built per request and never shared, so the isolation those
+//! paths rely on is structural rather than scope-checked. The scope, the
+//! probe, and the ledger are the backstop for the day a host cache keys a
+//! resource by less than the full [`InstanceKey`]: `probe` names both sides
+//! the moment that happens, and the key already carries all three fields so
+//! the check is complete when it is wired in.
+//!
 //! # The runtime check, and why it is a probe rather than a guard
 //!
 //! [`TenantScope::probe`] answers "may this store touch a handle it believes

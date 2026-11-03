@@ -870,6 +870,12 @@ fn register_exists(
          (name,): (String,)|
          -> wasmtime::Result<(bool,)> {
             crate::guard::guard("qqq:secrets/secret-use.exists", || {
+                // The audit seam first: the grant denial currently comes
+                // first, so recording here preserves the fail-closed-to-false
+                // behavior exactly while making the consultation visible.
+                if crate::ambient::require(store.data(), SecretUse, "secret_exists").is_err() {
+                    return Ok((false,));
+                }
                 if !store.data().grants.grants(SecretUse) {
                     return Ok((false,));
                 }
@@ -894,6 +900,13 @@ fn register_permitted_operations(
          (name,): (String,)|
          -> wasmtime::Result<(Vec<String>,)> {
             crate::guard::guard("qqq:secrets/secret-use.permitted-operations", || {
+                // Same seam-first shape as `exists`: fail-closed to an empty
+                // list, with the consultation recorded.
+                if crate::ambient::require(store.data(), SecretUse, "secret_permitted_operations")
+                    .is_err()
+                {
+                    return Ok((Vec::new(),));
+                }
                 if !store.data().grants.grants(SecretUse) {
                     return Ok((Vec::new(),));
                 }
@@ -947,6 +960,11 @@ fn register_apply(
          -> wasmtime::Result<(std::result::Result<Vec<u8>, WitSecretError>,)> {
             crate::guard::guard("qqq:secrets/secret-use.apply", || {
                 let data = store.data();
+                // The audit seam first, like every other capability family:
+                // the grant denial below stays the refusal, now recorded.
+                if crate::ambient::require(data, SecretUse, "secret_apply").is_err() {
+                    return Ok((Err(WitSecretError::NotGranted),));
+                }
                 if !data.grants.grants(SecretUse) {
                     return Ok((Err(WitSecretError::NotGranted),));
                 }
@@ -1907,5 +1925,23 @@ mod tests {
         )
         .expect("manifest parses");
         link(&GrantSet::from_manifest(&m), EMPTY_INSTANCE).expect("a granted import links");
+    }
+
+    /// Every secrets body records through the audit seam: a direct grant
+    /// check would answer identically while leaving `SecretUse` -- the most
+    /// sensitive capability -- invisible to `assert-caps-only`. Counted, not
+    /// `contains`.
+    #[test]
+    fn every_secrets_body_records_through_the_audit_seam() {
+        let production = include_str!("host_secrets.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let seams = production.matches("ambient::require(").count();
+        assert_eq!(
+            seams, 3,
+            "every secrets body (exists, permitted-operations, apply) must consult \
+             the audit seam; found {seams} seam call(s)"
+        );
     }
 }

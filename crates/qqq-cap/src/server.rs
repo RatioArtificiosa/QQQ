@@ -657,29 +657,55 @@ impl Server {
         // dead for the same reason (no upgrade ever arrives as `POST`).
         // Refused here rather than as a runtime `400`, where the author
         // would debug the client instead of the manifest.
-        if route.kind == crate::manifest::RouteKind::Ws {
-            if !methods.contains(&"GET") {
-                return Err(ManifestError::InvalidField {
-                    field: format!("{where_}.methods"),
-                    reason: "a `ws` route must list `GET`: the WebSocket handshake \
-                             is a `GET` with `Upgrade: websocket`, so without it \
-                             no client can ever upgrade"
-                        .to_owned(),
-                });
-            }
-            if methods.iter().any(|m| *m != "GET") {
-                return Err(ManifestError::InvalidField {
-                    field: format!("{where_}.methods"),
-                    reason: "a `ws` route must list only `GET`: the handshake \
-                             never arrives as another method, so any other \
-                             entry is dead configuration"
-                        .to_owned(),
-                });
-            }
-        }
+        validate_stateful_methods(route, &methods, &where_)?;
 
         Ok(methods)
     }
+}
+
+/// Refuse dead methods on stateful (`ws`/`sse`) routes.
+///
+/// Extracted from `validate_route`: the two kind rules together pushed it
+/// past the line budget, and the method policy reads better beside itself
+/// than between the path checks. `sse` mirrors `ws` — an event poll replays
+/// the head with no body, so a stream declared for another method would run
+/// blind, the same shape as a handshake that never arrives.
+fn validate_stateful_methods(
+    route: &Route,
+    methods: &[&str],
+    where_: &str,
+) -> Result<(), ManifestError> {
+    if route.kind == crate::manifest::RouteKind::Ws {
+        if !methods.contains(&"GET") {
+            return Err(ManifestError::InvalidField {
+                field: format!("{where_}.methods"),
+                reason: "a `ws` route must list `GET`: the WebSocket handshake \
+                         is a `GET` with `Upgrade: websocket`, so without it \
+                         no client can ever upgrade"
+                    .to_owned(),
+            });
+        }
+        if methods.iter().any(|m| *m != "GET") {
+            return Err(ManifestError::InvalidField {
+                field: format!("{where_}.methods"),
+                reason: "a `ws` route must list only `GET`: the handshake \
+                         never arrives as another method, so any other \
+                         entry is dead configuration"
+                    .to_owned(),
+            });
+        }
+    }
+
+    if route.kind == crate::manifest::RouteKind::Sse && methods.iter().any(|m| *m != "GET") {
+        return Err(ManifestError::InvalidField {
+            field: format!("{where_}.methods"),
+            reason: "an `sse` route must list only `GET`: event polls \
+                     replay the head with no body, so a stream declared \
+                     for another method would run blind"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 impl Server {
@@ -1024,6 +1050,19 @@ mod tests {
         let mut r = route("/socket", &["GET"]);
         r.kind = crate::manifest::RouteKind::Ws;
         assert!(server(vec![r]).validate().is_ok());
+    }
+
+    /// An `sse` route must list only `GET`: event polls replay the head with
+    /// no body, so any other method would run with a body the guest never sees.
+    #[test]
+    fn an_sse_route_with_a_non_get_method_is_refused() {
+        let mut r = route("/events", &["GET", "POST"]);
+        r.kind = crate::manifest::RouteKind::Sse;
+        let err = server(vec![r]).validate().expect_err("must refuse");
+        assert!(err.to_string().contains("GET"), "{err}");
+        let mut ok = route("/events", &["GET"]);
+        ok.kind = crate::manifest::RouteKind::Sse;
+        assert!(server(vec![ok]).validate().is_ok());
     }
 
     /// Ultra-review r1: CORS origins follow the websocket shape discipline —

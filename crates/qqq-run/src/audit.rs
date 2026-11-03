@@ -7,7 +7,7 @@
 //! > | `qqqai audit <artifact>` | Full security posture: caps, limits, supply
 //! > chain, provenance | `--json`, `--sarif`, `--fail-on <severity>` |
 //!
-//! Four surfaces, and the command's job is to report **all four** rather than the
+//! Five surfaces, and the command's job is to report **all five** rather than the
 //! one a user happened to ask about. That is the difference between `audit` and
 //! `inspect`: `inspect` answers *"what can this do?"*, which is a static capability
 //! question, while `audit` answers *"is this safe to deploy?"*, which is a
@@ -216,9 +216,17 @@ impl AuditReport {
     #[must_use]
     pub fn summary(&self, limits: &qqq_cap::manifest::Limits) -> String {
         format!(
-            "limits in force: memory {}, fuel {}, epoch deadline {} ms; \
-             posture checked over caps, limits, supply chain and provenance",
-            limits.memory, limits.fuel, limits.epoch_deadline_ms
+            "limits in force: memory {}, fuel {}, epoch deadline {} ms, \
+             max instances {}, max open handles {}, max subrequests {}, \
+             max poll per tick {}; posture checked over caps, limits, supply \
+             chain and provenance",
+            limits.memory,
+            limits.fuel,
+            limits.epoch_deadline_ms,
+            limits.max_instances,
+            limits.max_open_handles,
+            limits.max_subrequests,
+            limits.max_poll_per_tick
         )
     }
 
@@ -298,7 +306,7 @@ pub struct RuleInfo {
 /// by the time it runs, the fallible work has already happened.
 #[must_use]
 pub fn audit(loaded: &LoadedManifest, lock: Option<&qqq_pkg::lock::Lockfile>) -> AuditReport {
-    // Four surfaces, four functions. The single body this replaced reached 114
+    // Five surfaces, five functions. The single body this replaced reached 114
     // lines, which is how a function grows when each surface is appended as the
     // module is written: every addition looked small on its own. Naming them
     // makes the coverage visible in the call list, and lets a test exercise one
@@ -410,6 +418,28 @@ fn unused_grants_from(
     )]
 }
 
+/// Whether one capability exposes the posture on its own.
+///
+/// The single statement of the rule `caps_and_posture` filters by: a grant
+/// exposes iff `classify_posture` says so for the singleton, so the finding
+/// names exactly the grants the verdict blames. `PartialEq` between the two
+/// is asserted, not assumed.
+fn exposes(cap: qqq_cap::Capability) -> bool {
+    matches!(
+        cap,
+        qqq_cap::Capability::FsWrite
+            | qqq_cap::Capability::FsWatch
+            | qqq_cap::Capability::HttpClient
+            | qqq_cap::Capability::HttpServer
+            | qqq_cap::Capability::SqlExecute
+            | qqq_cap::Capability::KvWrite
+            | qqq_cap::Capability::QueuePublish
+            | qqq_cap::Capability::QueueSubscribe
+            | qqq_cap::Capability::DnsResolve
+            | qqq_cap::Capability::AiInfer
+    )
+}
+
 /// The exposure question: can this component write or reach the network?
 ///
 /// # Why the capability list is filtered rather than the posture re-derived
@@ -429,23 +459,14 @@ fn caps_and_posture(loaded: &LoadedManifest) -> Vec<Finding> {
         return Vec::new();
     }
 
+    // The filter below must agree with `classify_posture`: it decides whether
+    // the posture is exposed, this decides which grants made it so. A second
+    // statement of the rule would drift, so the predicate lives once, here,
+    // and `every_exposing_capability_matches_the_posture` asserts the two
+    // cannot disagree on any capability.
     let exposing: Vec<&str> = caps
         .iter()
-        .filter(|c| {
-            matches!(
-                c,
-                qqq_cap::Capability::FsWrite
-                    | qqq_cap::Capability::FsWatch
-                    | qqq_cap::Capability::HttpClient
-                    | qqq_cap::Capability::HttpServer
-                    | qqq_cap::Capability::SqlExecute
-                    | qqq_cap::Capability::KvWrite
-                    | qqq_cap::Capability::QueuePublish
-                    | qqq_cap::Capability::QueueSubscribe
-                    | qqq_cap::Capability::DnsResolve
-                    | qqq_cap::Capability::AiInfer
-            )
-        })
+        .filter(|c| exposes(**c))
         .map(|c| c.name())
         .collect();
 
@@ -691,8 +712,8 @@ impl crate::output::CommandOutput for AuditOutput {
     /// The one-line conclusion a human and an agent both read.
     ///
     /// The sentence names what was **checked**, not only the count, because "no
-    /// findings" is a claim about four surfaces and a reader deserves to know
-    /// which four.
+    /// findings" is a claim about five surfaces and a reader deserves to know
+    /// which five.
     fn summary(&self) -> String {
         match (self.findings.len(), self.worst) {
             (0, _) => {
@@ -935,6 +956,23 @@ mod tests {
     }
 
     // -- The rules, each made to FIRE -------------------------------------
+
+    /// The `exposes` predicate and `classify_posture` agree on every capability.
+    ///
+    /// Two statements of one rule drift; a new exposing capability added to
+    /// one but not the other would blame the wrong grants or miss one.
+    #[test]
+    fn every_exposing_capability_matches_the_posture() {
+        use crate::commands::Posture;
+        for cap in qqq_cap::Capability::all() {
+            assert_eq!(
+                exposes(*cap),
+                crate::commands::classify_posture(&[*cap]) == Posture::Exposed,
+                "exposes() and classify_posture disagree on {}",
+                cap.name()
+            );
+        }
+    }
 
     /// A project granting `fs.write` is exposed, and the finding names the
     /// capability rather than saying "something is wrong".
@@ -1472,6 +1510,10 @@ mod tests {
         assert!(summary.contains("64MiB"), "{summary}");
         assert!(summary.contains("10000000"), "{summary}");
         assert!(summary.contains("2500"), "{summary}");
+        assert!(summary.contains("max instances 100"), "{summary}");
+        assert!(summary.contains("max open handles 128"), "{summary}");
+        assert!(summary.contains("max subrequests 16"), "{summary}");
+        assert!(summary.contains("max poll per tick 5"), "{summary}");
         assert!(summary.contains("posture"), "{summary}");
         assert!(
             summary.contains("supply chain") && summary.contains("provenance"),

@@ -250,17 +250,6 @@ fn kinds_from_routes(
             ));
             continue;
         }
-        if entry.kind == qqq_cap::manifest::RouteKind::Sse
-            && entry.methods.iter().any(|m| m != "GET")
-        {
-            problems.push(format!(
-                "server.routes[{i}] (`{}`): handler `{}` is `sse` but answers {:?}; \
-                 event polls replay the head with no body, so a POST stream would \
-                 run with a body the guest never sees — declare GET only",
-                entry.path, entry.handler, entry.methods
-            ));
-            continue;
-        }
         if http_handlers.contains(&entry.handler) {
             problems.push(format!(
                 "server.routes[{i}] (`{}`): handler `{}` also serves an HTTP route; \
@@ -685,27 +674,6 @@ default_auth = "none"
         let err = routes_from_manifest(&server, "qqq.toml").expect_err("must refuse");
         assert!(
             err.render().contains("chat"),
-            "the refusal must name the handler: {}",
-            err.render()
-        );
-    }
-
-    /// An `sse` route with a non-GET method is refused: event polls replay
-    /// the head with no body, so a POST stream would run with a body the
-    /// guest never sees.
-    #[test]
-    fn sse_routes_must_be_get_only() {
-        let server = server_from(
-            r#"
-routes = [
-  { path = "/events", methods = ["POST"], handler = "feed", kind = "sse" },
-]
-default_auth = "none"
-"#,
-        );
-        let err = routes_from_manifest(&server, "qqq.toml").expect_err("POST sse must be refused");
-        assert!(
-            err.render().contains("feed"),
             "the refusal must name the handler: {}",
             err.render()
         );

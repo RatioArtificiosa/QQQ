@@ -1676,10 +1676,18 @@ pub fn to_served(
 /// the operator (not the client) reads it — because an operator debugging an
 /// app still needs the app's reason rather than QQQ's.
 pub(crate) fn failure_response(e: &Error) -> Response {
-    eprintln!("guest call failed: {}", e.message);
+    eprintln!("guest call failed: {}", failure_detail(e));
     let mut r = Response::text(502, "the application failed");
     r.set_header("X-QQQ-Error", &format!("{:?}", e.code));
     r
+}
+
+/// The server-side half of a guest failure: the message the operator reads.
+///
+/// Split out so a test pins what the log carries without capturing stderr:
+/// the client sees the generic body, the log sees this.
+fn failure_detail(e: &Error) -> String {
+    format!("{:?}: {}", e.code, e.message)
 }
 
 /// The error for a request shed by the buffer budget (`F-03`).
@@ -4080,7 +4088,8 @@ mod tests {
     /// `failure_response` renders to unauthenticated clients, and the message
     /// carries paths, grant names, and SQL fragments. The code header is the
     /// client's machine-readable signal; the message is the operator's, in the
-    /// process log.
+    /// process log. `failure_detail` is the logged half, unit-testable without
+    /// capturing stderr.
     #[test]
     fn failure_response_hides_the_message() {
         let err = Error::new(
@@ -4103,6 +4112,19 @@ mod tests {
             Some("SecretUnresolvable"),
             "the code header is the client signal"
         );
+    }
+
+    /// The logged half names the code and keeps the message: what the
+    /// operator greps for, without a stderr capture.
+    #[test]
+    fn failure_detail_keeps_code_and_message() {
+        let err = Error::new(
+            ErrorCode::SecretUnresolvable,
+            "secret `K` needs environment variable `/etc/s3cr3t` which is not set",
+        );
+        let detail = failure_detail(&err);
+        assert!(detail.contains("SecretUnresolvable"), "{detail}");
+        assert!(detail.contains("/etc/s3cr3t"), "{detail}");
     }
 
     /// **Oversized header sets are refused before serialization.**

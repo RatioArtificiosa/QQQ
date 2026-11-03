@@ -957,6 +957,28 @@ mod tests {
                 "{hostile:?} must fail closed"
             );
         }
+        // Unicode whitespace, C1 controls, and invisible layout-forgers ride
+        // multibyte UTF-8 past a byte scan; the char-level check refuses them.
+        for hostile in [
+            "a\u{a0}b",
+            "a\u{85}b",
+            "a\u{2028}b",
+            "a\u{2029}b",
+            "a\u{202e}b",
+            "a\u{feff}b",
+        ] {
+            let err = emit_record(
+                &mut data,
+                2,
+                "ok",
+                &[attr(hostile, AttributeValue::Boolean(true))],
+            )
+            .expect_err("hostile unicode name refused");
+            assert!(
+                matches!(err, WitLogError::RecordTooLarge),
+                "{hostile:?} must fail closed"
+            );
+        }
         assert!(data.logs.is_empty(), "no hostile name is stored");
     }
 

@@ -375,6 +375,17 @@ fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// The one-line reload report.
+///
+/// Factored out of the watch loop so a unit test pins the wording (and the
+/// sanitization) without spawning a build and a file watcher.
+fn reload_message(err: Option<&qqq_core::Error>) -> String {
+    match err {
+        None => "activated".to_owned(),
+        Some(e) => crate::audit::sanitize_log_line(&e.message),
+    }
+}
+
 /// Run the dev server.
 ///
 /// # Errors
@@ -579,13 +590,8 @@ fn watch(
         });
         // The message is sanitized: build errors echo compiler output, and a
         // control character in it would forge terminal lines on the operator.
-        let detail = err
-            .as_ref()
-            .map(|e| crate::audit::sanitize_log_line(&e.message));
-        eprintln!(
-            "reload {cycle}: {}",
-            detail.as_deref().unwrap_or("activated")
-        );
+        // Factored so a unit test pins the wording without spawning a build.
+        eprintln!("reload {cycle}: {}", reload_message(err.as_ref()));
         last_pending.clear();
 
         if let Some(limit) = max_cycles
@@ -918,6 +924,23 @@ mod tests {
             u64::MAX,
             "an unrepresentable duration must saturate, not wrap"
         );
+    }
+
+    /// The reload line says `activated` on success and carries a sanitized
+    /// error otherwise: build output is guest/compiler-influenced and must
+    /// not forge terminal lines.
+    #[test]
+    fn reload_message_sanitizes_failures() {
+        assert_eq!(reload_message(None), "activated");
+        let err = qqq_core::Error::new(qqq_core::ErrorCode::CompilationFailed, "build failed");
+        assert_eq!(reload_message(Some(&err)), "build failed");
+        let evil = qqq_core::Error::new(qqq_core::ErrorCode::CompilationFailed, "fail\x1b[31mred");
+        let clean = reload_message(Some(&evil));
+        assert!(
+            !clean.chars().any(char::is_control),
+            "control characters must not reach the terminal: {clean:?}"
+        );
+        assert!(clean.contains("fail"), "{clean}");
     }
 
     #[test]

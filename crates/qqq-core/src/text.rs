@@ -8,11 +8,25 @@
 //! and value-spoofing primitives, never legitimate in a validated field or a
 //! rendered diagnostic. One home so validators and renderers cannot disagree
 //! on what "safe to print" means.
+//!
+//! ```rust
+//! use qqq_core::text::is_layout_forgery;
+//!
+//! assert!(is_layout_forgery('\u{2028}'));
+//! assert!(!is_layout_forgery('a'));
+//! ```
 ///
 /// Whether one character is an invisible layout-forger: a line/paragraph
 /// separator or a bidirectional control. Neither is a C0/C1 control, so
 /// `char::is_control` misses both -- check this alongside that predicate,
 /// never instead of it.
+///
+/// ```rust
+/// use qqq_core::is_layout_forgery;
+///
+/// assert!(is_layout_forgery('\u{202e}'));
+/// assert!(!is_layout_forgery('x'));
+/// ```
 #[must_use]
 pub fn is_layout_forgery(c: char) -> bool {
     matches!(

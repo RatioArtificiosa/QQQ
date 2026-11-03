@@ -881,6 +881,24 @@ fn layout_forgery_at(chunk: &[u8]) -> Option<(usize, u32)> {
     }
 }
 
+/// Whether a chunk tail could still extend into a layout-forgery sequence.
+///
+/// A tail shorter than 3 bytes that no complete pattern matches is only
+/// safe to pass through when no pattern *starts* with it: `[E2]`,
+/// `[E2,80/81]`, `[C2 80-9F]`, `[D8]` and `[EF]/[EF,BB]` would all complete
+/// on the next push, so the escaper treats them as undecided and escapes
+/// eagerly rather than emitting bytes the next chunk could complete past
+/// every check. Anything else is definitive and handled by the normal arms.
+fn is_incomplete_prefix(tail: &[u8]) -> bool {
+    match tail {
+        [lead] => matches!(lead, 0xE2 | 0xD8 | 0xEF | 0xC2),
+        [0xE2, cont] => matches!(cont, 0x80 | 0x81),
+        [0xEF, 0xBB] => true,
+        [0xC2, cont] => (0x80..=0x9F).contains(cont),
+        _ => false,
+    }
+}
+
 /// Emit a code point as `\uXXXX`, lowercase hex like the trap renderer so
 /// every surface reads the same.
 fn push_u_escape<S: EscapeSink>(sink: &mut S, page: u32) {
@@ -941,6 +959,38 @@ impl Escaper {
                 push_u_escape(sink, page);
                 self.since_break = self.since_break.saturating_add(6);
                 i = i.saturating_add(len);
+            } else if bytes.len().saturating_sub(i) < 3
+                && bytes.get(i..).is_some_and(is_incomplete_prefix)
+            {
+                // Only the tail can be undecided: with 3+ bytes present a
+                // non-match is definitive (every pattern is at most 3 bytes),
+                // so only a short tail can still extend into a forgery on the
+                // next push. Escape it eagerly as `\xNN`: the sequence can
+                // never reassemble downstream, while a benign split renders visibly escaped rather than silently dropped.
+                // Stateless by design: holding bytes across pushes would need
+                // a flush path through quota and the lane send, while this
+                // keeps every push self-contained and the probe/write
+                // agreement exact.
+                // Stack-assembled like the C0 arm: no heap allocation on
+                // the hot path. Nibbles are 0..16 by construction.
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                if let Some(rest) = bytes.get(i..) {
+                    for b in rest {
+                        #[expect(
+                            clippy::indexing_slicing,
+                            reason = "shifted/masked nibble is 0..16"
+                        )]
+                        let escaped = [
+                            b'\\',
+                            b'x',
+                            HEX[usize::from(b >> 4)],
+                            HEX[usize::from(b & 0x0f)],
+                        ];
+                        sink.push(&escaped);
+                        self.since_break = self.since_break.saturating_add(4);
+                    }
+                }
+                i = bytes.len();
             } else {
                 match byte {
                     // A real line break, and the prefix is re-armed for the next line.
@@ -1844,12 +1894,45 @@ mod tests {
         // FEFF's three bytes plus the C1 NEL the byte arms must catch.
         for bytes in [&[0xEFu8, 0xBB, 0xBF][..], &[0xC2, 0x85][..]] {
             assert!(
-                layout_forgery_at(&bytes).is_some(),
+                layout_forgery_at(bytes).is_some(),
                 "table must match {bytes:?}"
             );
             checked += 1;
         }
-        assert!(checked > 20, "the sweep must exercise table arms: {checked}");
+        assert!(
+            checked > 20,
+            "the sweep must exercise table arms: {checked}"
+        );
+    }
+
+    /// A forgery split across pushes still cannot reassemble: an incomplete
+    /// trailing prefix is escaped eagerly as `\xNN` rather than passed
+    /// through raw, so no chunk boundary lets a sequence dodge the table.
+    /// Stateless by design -- the escaper never holds bytes, so there is no
+    /// flush path to forget and the probe/write agreement stays exact.
+    #[test]
+    fn split_forgery_cannot_reassemble_across_pushes() {
+        let mut escaper = Escaper::new(STDOUT_PREFIX);
+        let mut out = Vec::new();
+        escaper.push(&[0xE2], &mut out);
+        escaper.push(&[0x80, 0xA8], &mut out);
+        assert!(
+            !out.windows(3).any(|w| w == [0xE2, 0x80, 0xA8]),
+            "the split sequence must never appear raw: {out:02X?}"
+        );
+        assert!(
+            out.windows(4).any(|w| w == *b"\\xe2"),
+            "the split lead byte must escape visibly: {out:02X?}"
+        );
+        // A C1 split behaves the same way through the 2-byte arm.
+        let mut escaper = Escaper::new(STDOUT_PREFIX);
+        let mut out = Vec::new();
+        escaper.push(&[0xC2], &mut out);
+        escaper.push(&[0x85], &mut out);
+        assert!(
+            out.windows(2).any(|w| w == *b"\\x"),
+            "the split C1 lead must escape, not pass through: {out:02X?}"
+        );
     }
 
     /// **F-21: dropping a guard after poison must not panic.**

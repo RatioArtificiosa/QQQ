@@ -1108,6 +1108,13 @@ mod tests {
             "no line-breaking characters survive Display: {out:?}"
         );
         assert!(out.contains("denied\u{fffd}[31mred"), "{out}");
+        // A bidi override travels the same path and must not survive either.
+        let sneaky = format!("x{}y", char::from_u32(0x202E).expect("bidi override"));
+        let out = format!("{}", Error::new(ErrorCode::CapabilityDenied, sneaky));
+        assert!(
+            !out.chars().any(crate::text::is_layout_forgery),
+            "bidi overrides must not survive Display: {out:?}"
+        );
     }
 
     #[test]

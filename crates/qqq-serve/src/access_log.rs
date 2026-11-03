@@ -1182,6 +1182,22 @@ mod tests {
         assert!(line.contains("request completed"), "{line}");
     }
 
+    /// Bidi overrides and separators are folded to U+FFFD like controls:
+    /// the shared predicate covers what `is_control` misses.
+    #[test]
+    fn one_line_neutralises_invisible_layout() {
+        assert_eq!(one_line("ok"), "ok");
+        let hostile = format!("a{}b{}c", '\u{2028}', '\u{202E}');
+        let clean = one_line(&hostile);
+        assert!(
+            !clean
+                .chars()
+                .any(|c| c.is_control() || qqq_host::is_layout_forgery(c)),
+            "no invisible layout survives: {clean:?}"
+        );
+        assert_eq!(clean.chars().filter(|c| *c == '\u{FFFD}').count(), 2);
+    }
+
     /// **The two encodings carry the same fields.**
     ///
     /// # Why this test exists

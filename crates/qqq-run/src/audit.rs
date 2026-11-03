@@ -1509,6 +1509,7 @@ mod tests {
         assert_eq!(json_escape("a\\b"), "a\\\\b");
         assert_eq!(json_escape("a\u{2028}b"), "a\\u2028b");
         assert_eq!(json_escape("a\u{2029}b"), "a\\u2029b");
+        assert_eq!(json_escape("a\u{202e}b"), "a\\u202eb");
         let doc = format!(
             "{{\"text\":\"{}\"}}",
             json_escape("he said \"hi\"\nthen left")

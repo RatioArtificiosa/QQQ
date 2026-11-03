@@ -1245,6 +1245,17 @@ mod tests {
         // proving the exposition stays parseable even then.
         m.record_request(Method::Get, 200, 1, "evil\" tenant", 5, 0);
         m.record_request(Method::Get, 200, 1, "evil\u{2028}tenant", 5, 0);
+        m.record_request(
+            Method::Get,
+            200,
+            1,
+            &format!(
+                "evil{}tenant",
+                char::from_u32(0x202E).expect("bidi override")
+            ),
+            5,
+            0,
+        );
         let text = m.render_prometheus();
         assert!(
             !text.contains("tenant=\"evil\" tenant\""),
@@ -1257,6 +1268,10 @@ mod tests {
         assert!(
             text.contains("evil\u{2028}tenant"),
             "the separator passes through for machine parsing: {text}"
+        );
+        assert!(
+            text.matches("tenant=").count() >= 3,
+            "all tenants including the bidi one must render: {text}"
         );
         // And every metric line must still have exactly one label list.
         for line in text.lines().filter(|l| !l.starts_with('#')) {

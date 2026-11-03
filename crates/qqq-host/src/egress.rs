@@ -1937,8 +1937,9 @@ fn strip_credentials(headers: &mut Vec<(String, String)>) {
 }
 
 /// Well-known secret names (exact match) and credential token
-/// fragments (hyphen-separated match). Shared by `is_secret_header` and
-/// `is_secret_token`; one list so the two tiers cannot disagree on a word.
+/// fragments (hyphen-separated match). Read together by `is_secret_header`
+/// and `is_secret_token`, so the exact tier and the token tier cannot
+/// disagree on a word.
 const SECRET_NAMES: &[&str] = &[
     "authorization",
     "proxy-authorization",
@@ -2058,7 +2059,7 @@ fn is_secret_header(name: &str) -> bool {
     // `client-id` is the only hyphenated secret name with no secret half
     // (`client` and `id` are innocent alone, so neither is a token): affixed
     // hyphen shapes (`x-my-client-id`, `x-client-id-box`, `x-client-ids`,
-    // `x-client-id2`, `x-client-2-id`, `x-client2-id`) would otherwise split
+    // `x-client-id2`, `x-client-2-id`, `x-client2-id`, `x-client12id`) would otherwise split
     // into innocent tokens and travel. Comparing letters only catches the
     // joined spelling through any separators or interior digits; no tracked
     // innocent header spells `clientid` that way (`x-client-identity`-shaped

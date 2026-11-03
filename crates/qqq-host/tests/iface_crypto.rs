@@ -135,6 +135,11 @@ fn call_probe(grants: &GrantSet) -> Option<String> {
 /// A granted guest computes, verifies, encrypts, decrypts, signs, and
 /// verifies through the real canonical ABI, and tells unlisted algorithms
 /// apart from ungranted calls by name.
+///
+/// `random` and `hashing` are covered here too: they serve WIT `result`
+/// shapes like every other interface, so a guest compiled from the WIT
+/// must instantiate — a bare-`list<u8>` host shape would fail linkage,
+/// not the call.
 #[test]
 fn granted_guest_drives_hmac_aead_signing() {
     let manifest = manifest();
@@ -143,6 +148,11 @@ fn granted_guest_drives_hmac_aead_signing() {
         return;
     };
     for expected in [
+        "random-16=ok",
+        "random-too-long=err:too-long",
+        "digest-sha256=ok",
+        "digest-blake3-unlisted=err:algorithm-not-allowed",
+        "digest-many=ok",
         "hmac-sha256=ok",
         "hmac-sha512=ok",
         "hmac-blake3-unlisted=err:algorithm-not-allowed",
@@ -188,17 +198,21 @@ fn ungranted_guest_fails_closed_by_name() {
     .expect_err("no grant means no instance");
     let text = format!("{err:?}");
     assert!(
-        text.contains("qqq:crypto/hmac")
+        text.contains("qqq:crypto/random")
+            || text.contains("qqq:crypto/hashing")
+            || text.contains("qqq:crypto/hmac")
             || text.contains("qqq:crypto/aead")
             || text.contains("qqq:crypto/signing"),
         "the refusal must name the interface: {text}"
     );
 }
 
-/// A guest granted only hashing cannot reach hmac: the missing grant fails
-/// closed at instantiation, naming the hmac interface.
+/// A guest granted everything but hmac cannot reach hmac: the missing grant
+/// fails closed at instantiation, naming the hmac interface. (`random` and
+/// `hash` are granted so the refusal names `hmac` specifically — the first
+/// missing import wins, and the point here is hmac's gate, not the order.)
 #[test]
-fn hash_only_grant_cannot_reach_hmac() {
+fn partial_grant_cannot_reach_hmac() {
     let Some(bytes) = probe_component() else {
         return;
     };
@@ -206,7 +220,7 @@ fn hash_only_grant_cannot_reach_hmac() {
     let prepared = PreparedComponent::compile(&engine, &bytes).expect("probe component compiles");
     let manifest = Manifest::parse(
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\
-         [capabilities.crypto]\nhash = [\"sha256\"]\n",
+         [capabilities.crypto]\nrandom = true\nhash = [\"sha256\"]\n",
     )
     .expect("probe manifest parses");
     let grants = GrantSet::from_manifest(&manifest);

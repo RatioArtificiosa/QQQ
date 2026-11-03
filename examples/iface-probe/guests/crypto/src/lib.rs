@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Crypto probe guest: exercises `qqq:crypto/hmac`, `qqq:crypto/aead` and
-//! `qqq:crypto/signing` and encodes every outcome in a summary string the
-//! host asserts on.
+//! Crypto probe guest: exercises `qqq:crypto/random`, `qqq:crypto/hashing`,
+//! `qqq:crypto/hmac`, `qqq:crypto/aead` and `qqq:crypto/signing` and encodes
+//! every outcome in a summary string the host asserts on.
 
 wit_bindgen::generate!({
     world: "probe",
@@ -13,7 +13,9 @@ wit_bindgen::generate!({
 use exports::qqq::http::incoming_handler::{Guest as HttpGuest, HttpError, Request, Response};
 use exports::qqq::iface_probe_crypto::probe_api::Guest as ProbeGuest;
 use qqq::crypto::aead::{decrypt, encrypt, key_length, nonce_length, AeadError, Construction};
+use qqq::crypto::hashing::{digest, digest_many, Algorithm as HashAlgorithm, HashError};
 use qqq::crypto::hmac::{compute, verify, Algorithm as HmacAlgorithm, HmacError};
+use qqq::crypto::random::{get as random_get, RandomError};
 use qqq::crypto::signing::{
     self as signing, public_key, Algorithm as SignAlgorithm, SignatureError,
 };
@@ -49,6 +51,47 @@ fn hex(bytes: &[u8]) -> String {
 
 fn run_scenario() -> String {
     let mut parts: Vec<String> = Vec::new();
+
+    // `random.get` returns a WIT `result`: the host serves errors, not
+    // traps, and the guest matches on them like every other interface.
+    match random_get(16) {
+        Ok(bytes) if bytes.len() == 16 => parts.push("random-16=ok".to_string()),
+        Ok(bytes) => parts.push(format!("random-16=unexpected-len:{}", bytes.len())),
+        Err(e) => parts.push(format!("random-16=err:{}", random_err_name(&e))),
+    }
+    match random_get(1024 * 1024 + 1) {
+        Ok(_) => parts.push("random-too-long=unexpected-ok".to_string()),
+        Err(e) => parts.push(format!("random-too-long=err:{}", random_err_name(&e))),
+    }
+    match digest(HashAlgorithm::Sha256, b"abc") {
+        Ok(sum)
+            if hex(&sum) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" =>
+        {
+            parts.push("digest-sha256=ok".to_string())
+        }
+        Ok(sum) => parts.push(format!("digest-sha256=unexpected:{}", hex(&sum))),
+        Err(e) => parts.push(format!("digest-sha256=err:{}", hash_err_name(&e))),
+    }
+    // Blake3 is deliberately ungranted in this probe's manifest: the call
+    // must fail closed naming the allowlist, not compute.
+    match digest(HashAlgorithm::Blake3, b"abc") {
+        Ok(_) => parts.push("digest-blake3-unlisted=unexpected-ok".to_string()),
+        Err(e) => parts.push(format!("digest-blake3-unlisted=err:{}", hash_err_name(&e))),
+    }
+    // The batch agrees with the singles: `digest-many` is one call, not a
+    // different algorithm, so its outputs equal the one-shot digests.
+    let solo_a = digest(HashAlgorithm::Sha256, b"a");
+    let solo_bc = digest(HashAlgorithm::Sha256, b"bc");
+    match (
+        solo_a,
+        solo_bc,
+        digest_many(HashAlgorithm::Sha256, &[b"a".to_vec(), b"bc".to_vec()]),
+    ) {
+        (Ok(a), Ok(bc), Ok(many)) if many.len() == 2 && many[0] == a && many[1] == bc => {
+            parts.push("digest-many=ok".to_string())
+        }
+        other => parts.push(format!("digest-many=unexpected:{other:?}")),
+    }
 
     match compute(HmacAlgorithm::Sha256, &[0x0b; 20], b"Hi There") {
         Ok(tag)
@@ -195,6 +238,21 @@ fn hmac_err_name(e: &HmacError) -> &'static str {
     match e {
         HmacError::AlgorithmNotAllowed => "algorithm-not-allowed",
         HmacError::InvalidKey => "invalid-key",
+    }
+}
+
+fn random_err_name(e: &RandomError) -> &'static str {
+    match e {
+        RandomError::NotGranted => "not-granted",
+        RandomError::TooLong => "too-long",
+        RandomError::SourceFailed => "source-failed",
+    }
+}
+
+fn hash_err_name(e: &HashError) -> &'static str {
+    match e {
+        HashError::AlgorithmNotAllowed => "algorithm-not-allowed",
+        HashError::InputTooLong => "input-too-long",
     }
 }
 

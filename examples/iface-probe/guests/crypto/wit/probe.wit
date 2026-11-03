@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Probe world: crypto hmac/aead/signing, so the component instantiates as
-// soon as the host binds `qqq:crypto`.
+// Probe world: crypto random/hashing/hmac/aead/signing, so the component
+// instantiates as soon as the host binds `qqq:crypto`.
 package qqq:iface-probe-crypto@1.0.0;
 
 /// One scenario per interface, returning a summary the host asserts on.
@@ -10,6 +10,8 @@ interface probe-api {
 }
 
 world probe {
+  import qqq:crypto/random@1.0.0;
+  import qqq:crypto/hashing@1.0.0;
   import qqq:crypto/hmac@1.0.0;
   import qqq:crypto/aead@1.0.0;
   import qqq:crypto/signing@1.0.0;

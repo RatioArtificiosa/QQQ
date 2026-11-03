@@ -233,6 +233,15 @@ const MAX_TEST_MARKS: usize = 256;
 /// failed. Past the cap the report is refused loudly instead.
 const MAX_TEST_FAILURES: usize = 128;
 
+/// The most entries one `assert-caps-only` `allowed` list may name.
+///
+/// Same shape as the marks cap: the list arrives whole from the guest, so
+/// an unbounded list is host work priced at the guest's chosen size. There
+/// are dozens of capabilities, not thousands — 64 names every real set
+/// with headroom, while a million-entry list is refused loudly instead of
+/// resolved one by one.
+const MAX_ALLOWED_CAPABILITIES: usize = 64;
+
 /// Register the interface.
 ///
 /// # Why there is no capability gate
@@ -472,7 +481,16 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 // No `with_capacity(allowed.len())`: the list arrives whole
                 // from the guest, so the host must not pre-allocate for its
                 // unvalidated length. Pushing validated entries grows the
-                // same vector pay-as-you-go instead.
+                // same vector pay-as-you-go instead. And no unbounded walk:
+                // past `MAX_ALLOWED_CAPABILITIES` the assertion is refused
+                // before resolving anything.
+                        std::eprintln!("DEBUG len={}", allowed.len());
+                if allowed.len() > MAX_ALLOWED_CAPABILITIES {
+                                return Ok((Err(AssertionError::NotAssertable(format!(
+                        "allowed list has {} entries, past the {MAX_ALLOWED_CAPABILITIES}-entry bound",
+                        allowed.len()
+                    ))),));
+                }
                 let mut wanted = Vec::new();
                 for name in &allowed {
                     match capability_named(name) {
@@ -887,6 +905,137 @@ mod tests {
             opts.test.expect("attached").failures(),
             vec!["recorded before the instance existed".to_owned()],
             "the options must share the caller's state"
+        );
+    }
+
+    /// An `allowed` list past `MAX_ALLOWED_CAPABILITIES` is refused before
+    /// resolving anything: the list arrives whole from the guest, so an
+    /// unbounded walk prices host CPU at the guest's chosen size. Proven
+    /// through a real component — but observed through the host, not the
+    /// guest's reading of the result: the guest builds a 65-entry list of
+    /// the same valid name, calls twice (65 entries, then 1), and ignores
+    /// both results. The host's audit stream holds a row outside the
+    /// allowed set, so a call that *reaches* the assertion logic records
+    /// a failure — while a call the bound refuses records nothing.
+    ///
+    /// Exactly one recorded failure means the oversize call never reached
+    /// the resolver and the single-name call did. Zero means the guest
+    /// never called (or names stopped resolving); two means the bound
+    /// did not fire. Either deviation fails loudly rather than passing
+    /// vacuously.
+    #[test]
+    fn an_oversize_allowed_list_is_refused_up_front() {
+        use wasmtime::Store;
+        use wasmtime::component::{Component, Linker};
+        const GUEST: &str = r#"(component
+  (type $t (instance
+    (type $e (variant (case "no-fuel-baseline") (case "unknown-capability" string) (case "not-assertable" string)))
+    (export "assertion-error" (type (eq $e)))
+    (type $r (result (error 1)))
+    (type $f (func (param "allowed" (list string)) (result $r)))
+    (export "assert-caps-only" (func (type $f)))
+  ))
+  (import "qqq:test/assertions@1.0.0" (instance $ti (type $t)))
+  (alias export $ti "assert-caps-only" (func $ac))
+  (core module $memmod
+    (memory (export "memory") 1)
+    (global $heap (mut i32) (i32.const 2048))
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32)
+      (local $p i32)
+      (local.set $p (global.get $heap))
+      (global.set $heap (i32.and (i32.add (global.get $heap) (i32.add (local.get 3) (i32.const 7))) (i32.const -8)))
+      (local.get $p))
+  )
+  (core instance $meminst (instantiate $memmod))
+  (alias core export $meminst "memory" (core memory $mem))
+  (alias core export $meminst "realloc" (core func $realloc))
+  (core func $assert (canon lower (func $ac) (memory $mem) (realloc $realloc)))
+  (core module $m
+    (import "" "mem" (memory 1))
+    (import "" "assert" (func $assert (param i32 i32 i32)))
+    (data (i32.const 0) "clock.monotonic")
+    (func (export "run") (param i32)
+      (local $i i32)
+      (loop $l
+        (i32.store (i32.add (i32.const 64) (i32.mul (local.get $i) (i32.const 8))) (i32.const 0))
+        (i32.store offset=4 (i32.add (i32.const 64) (i32.mul (local.get $i) (i32.const 8))) (i32.const 15))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br_if $l (i32.lt_u (local.get $i) (local.get 0)))
+      )
+      (call $assert (i32.const 64) (local.get 0) (i32.const 1024)))
+  )
+  (core instance $i (instantiate $m
+    (with "" (instance
+      (export "mem" (memory $mem))
+      (export "assert" (func $assert))
+    ))
+  ))
+  (type $run-t (func (param "count" u32)))
+  (func (export "run") (type $run-t) (canon lift (core func $i "run")))
+)"#;
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        config.consume_fuel(true);
+        let engine = wasmtime::Engine::new(&config).expect("engine builds");
+        let component = Component::new(&engine, GUEST).expect("guest compiles");
+        let mut linker = Linker::<crate::linker::StoreData>::new(&engine);
+        register(&mut linker).expect("register");
+        let mut data = crate::linker::StoreData::new(qqq_cap::resolve::GrantSet::empty());
+        data.test = Some(TestState::default());
+        // An audit row outside the allowed set: a call that reaches the
+        // assertion logic must record it, and a call the bound refuses
+        // must not. Written straight to the stream (not through the
+        // handle's `record`, whose allowlist names real host functions):
+        // the function tag is irrelevant here — `recorded_outside` only
+        // reads the capability — and stamping test-arranged rows with a
+        // real host function name would lie about what ran.
+        let stream = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::audit::AuditStream::with_default_capacity(),
+        ));
+        let component_digest =
+            crate::tenant::ComponentDigest::new("0011223344556677").expect("digest");
+        let grant_digest = crate::tenant::GrantDigest::new("aabbccdd").expect("digest");
+        let mut stream_guard = stream.lock().expect("stream locks");
+        stream_guard.record(
+            None,
+            &component_digest,
+            &grant_digest,
+            qqq_cap::capability::Capability::ClockWall,
+            "test_probe",
+            crate::audit::Outcome::Granted,
+        );
+        drop(stream_guard);
+        data.audit = Some(crate::audit::AuditHandle::new(
+            stream,
+            component_digest,
+            grant_digest,
+            None,
+        ));
+        // Fuel for the assertion's own accounting: without it the refusal
+        // would be `NoFuelBaseline` instead of the bound being tested.
+        let mut store = Store::new(&engine, data);
+        store.set_fuel(1_000_000).expect("fuel sets");
+        let instance = linker
+            .instantiate(&mut store, &component)
+            .expect("test interface binds");
+        let run = instance
+            .get_typed_func::<(u32,), ()>(&mut store, "run")
+            .expect("run exports");
+        // Sixty-five valid names: refused by the bound before resolving,
+        // so nothing is recorded.
+        run.call(&mut store, (65,)).expect("the guest runs");
+        // One valid name: resolves, finds the outside row, records once.
+        run.call(&mut store, (1,)).expect("the guest runs");
+        let failures = store
+            .data()
+            .test
+            .clone()
+            .expect("test state attached")
+            .failures();
+        assert_eq!(
+            failures.len(),
+            1,
+            "exactly the in-bounds call may record: {failures:?}"
         );
     }
 }

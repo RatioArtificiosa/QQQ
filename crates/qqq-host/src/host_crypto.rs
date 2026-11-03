@@ -26,17 +26,19 @@
 //! at runtime, and instantiation is when a developer can still do something
 //! about it.
 //!
-//! # Why some bindings are hand-written and some are generated
+//! # Why all five bindings are generated
 //!
-//! `random` and `hashing` predate the `wit/` wiring and keep their
-//! hand-written `func_wrap` signatures, pinned by tests that read the
-//! `.wit` file (see `host_clock.rs` for the same reasoning). `hmac`,
-//! `aead` and `signing` use `wasmtime::component::bindgen!` against
-//! `../../wit/qqq-crypto.wit`, like `host_sql` and `host_http` do: their
-//! signatures carry `result<_, error>` variants a `func_wrap` closure
-//! cannot express. Both styles are pinned — hand-written ones by
-//! WIT-reading tests, generated ones by the guest-compiled probe in
-//! `crates/qqq-host/tests/iface_crypto.rs`.
+//! Every interface in this module binds through `wasmtime::component::bindgen!`
+//! against `../../wit/qqq-crypto.wit`, like `host_sql` and `host_http` do:
+//! generated signatures carry the `result<_, error>` variants a `func_wrap`
+//! closure cannot express, and the macro reads the same file the guest
+//! toolchain consumes, so host and guest cannot disagree about a shape.
+//! `random` and `hashing` used to be hand-written `func_wrap`s predating the
+//! `wit/` wiring; they served bare lists while the WIT declared results, and
+//! a WIT-conformant guest failed to *instantiate* — the probe below pins
+//! that the shapes bind, and the WIT-reading tests pin the variant orders.
+//! Hand-written host bodies remain (the trait implementations), but no
+//! hand-written *signatures* do.
 //!
 //! # The two parameters that matter most
 //!
@@ -48,20 +50,29 @@
 //!   never falls back to a weaker generator. Predictable "randomness" is worse
 //!   than an error, because the guest would not know to stop.
 //!
-//! # Error discipline: trap versus WIT `Err` (review finding HOST-037/3)
+//! # Error discipline: WIT `Err` on every interface
 //!
-//! The two generations of this module fail differently, and that split is
-//! deliberate rather than drift. `random` and `hashing` predate `result`
-//! returns in their WIT and report misuse by trapping the call through
-//! `wasmtime::Error` (denied, over-long, or unlisted inputs never return to
-//! the guest). `hmac`, `aead` and `signing` were authored with
-//! `result<_, error>` returns, so the same conditions surface as catchable
-//! WIT `Err` values (`algorithm-not-allowed`, `invalid-key`, and friends).
-//! A guest therefore handles `algorithm-not-allowed` for HMAC but traps for
-//! an unlisted hash. Changing the older pair to `result` returns would be a
-//! WIT change on a frozen surface (`wit/qqq-crypto.wit`, §5.2); until an
-//! owner ADR ratifies it, the contract stays: hand-written interfaces trap,
-//! `bindgen!` interfaces return.
+//! All five interfaces report misuse as catchable WIT `Err` values, because
+//! every one of them declares `result<_, _>` in `wit/qqq-crypto.wit`.
+//! `random.get` returns `random-error`, `digest`/`digest-many` return
+//! `hash-error`, and the `bindgen!` trio returns its own variants — so a
+//! guest handles `algorithm-not-allowed`, `too-long` and `source-failed`
+//! with `match`, never with a trap.
+//!
+//! That uniformity was *restored*, not original: `random` and `hashing`
+//! used to trap (denied, over-long, or unlisted inputs never returned to
+//! the guest) while the WIT already declared results. The host was behind
+//! its own interface — a WIT-conformant guest failed to *instantiate*,
+//! which the `iface_crypto` probe proves by importing all five interfaces
+//! (a bare-shape host fails linkage, not the call). The only traps left
+//! are version mismatches (an out-of-range `algorithm` discriminant that
+//! passed the boundary means guest and host disagree about the enum),
+//! which trap exactly as `bindgen!`-generated code would.
+//!
+//! The `iface_crypto` probe imports `random` and `hashing` from the real
+//! WIT and matches on their `Err` cases, so a host that served bare lists
+//! would fail at instantiation — the contract is proven by linkage, not
+//! prose.
 //!
 //! # Input sizes (review finding HOST-037/4)
 //!
@@ -77,13 +88,12 @@
 //! keys 32. Variable-length payloads remain bounded by the instance's
 //! memory, fuel, and per-call allocation limits.
 
-use wasmtime::StoreContextMut;
 use wasmtime::component::{Linker, ResourceAny};
 
 use qqq_cap::capability::Capability;
 use qqq_cap::resolve::GrantSet;
 
-use crate::ambient::{HostCallError, hash_data};
+use crate::ambient::hash_data;
 use crate::linker::StoreData;
 
 /// The WIT package this module implements.
@@ -271,45 +281,6 @@ impl SignAlgorithm {
     }
 }
 
-/// Why a randomness request failed, mirroring the WIT `random-error` variant.
-///
-/// **The order is the WIT declaration order.** A `variant` is an indexed type,
-/// so `not-granted` is case 0. Reordering would make a guest read a denial as a
-/// source failure and plausibly retry forever — a silent miscommunication.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RandomError {
-    /// `crypto.random` was not granted.
-    NotGranted = 0,
-    /// The requested length exceeds the host's per-call maximum.
-    TooLong = 1,
-    /// The host entropy source failed.
-    SourceFailed = 2,
-}
-
-impl RandomError {
-    /// The variant index, as the component ABI lowers it.
-    ///
-    /// ```
-    /// use qqq_host::host_crypto::RandomError;
-    /// assert_eq!(RandomError::NotGranted.as_index(), 0);
-    /// assert_eq!(RandomError::TooLong.as_index(), 1);
-    /// assert_eq!(RandomError::SourceFailed.as_index(), 2);
-    /// ```
-    #[must_use]
-    pub const fn as_index(self) -> u32 {
-        self as u32
-    }
-}
-
-/// Why a hashing operation failed, mirroring the WIT `hash-error` variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HashError {
-    /// The algorithm is not in the manifest's allowlist.
-    AlgorithmNotAllowed = 0,
-    /// The input exceeds the host's per-call maximum.
-    InputTooLong = 1,
-}
-
 /// Which crypto algorithms the guest may use, and for what.
 ///
 /// Resolved once at deploy from the manifest's `[capabilities.crypto]`
@@ -429,41 +400,6 @@ impl CryptoView {
         Self { config }
     }
 }
-
-impl HashError {
-    /// The variant index, as the component ABI lowers it.
-    ///
-    /// ```
-    /// use qqq_host::host_crypto::HashError;
-    /// assert_eq!(HashError::AlgorithmNotAllowed.as_index(), 0);
-    /// assert_eq!(HashError::InputTooLong.as_index(), 1);
-    /// ```
-    #[must_use]
-    pub const fn as_index(self) -> u32 {
-        self as u32
-    }
-}
-
-impl From<HostCallError> for HashError {
-    fn from(e: HostCallError) -> Self {
-        match e {
-            // A guest reaching `NotGranted` was not granted the capability. The
-            // WIT's `hash-error` has no `not-granted` case, so it maps to the
-            // closest honest case. The real protection is that `digest` is not
-            // registered without the grant, so this arm is unreachable in
-            // practice and exists only so the mapping is total.
-            //
-            // `TooLong` and `SourceFailed` are randomness concerns that
-            // `hash_data` cannot produce; mapping them to `InputTooLong` keeps
-            // the function total without inventing a case the WIT lacks.
-            HostCallError::NotGranted(_)
-            | HostCallError::AlgorithmNotAllowed(_)
-            | HostCallError::TooLong
-            | HostCallError::SourceFailed => Self::AlgorithmNotAllowed,
-        }
-    }
-}
-
 /// The maximum input length the host will hash in one call.
 ///
 /// A bound rather than an unbounded allocation: a guest passing a huge buffer
@@ -501,11 +437,18 @@ pub const MAX_HASH_INPUT: usize = 64 * 1024 * 1024;
 /// qqq_host::host_crypto::register(&mut linker, &grants).expect("register");
 /// ```
 pub fn register(linker: &mut Linker<StoreData>, grants: &GrantSet) -> wasmtime::Result<()> {
+    use wasmtime::component::HasSelf;
     if grants.grants(Capability::CryptoRandom) {
-        register_random(linker)?;
+        bindings::qqq::crypto::random::add_to_linker::<StoreData, HasSelf<StoreData>>(
+            linker,
+            |state| state,
+        )?;
     }
     if grants.grants(Capability::CryptoHash) {
-        register_hashing(linker)?;
+        bindings::qqq::crypto::hashing::add_to_linker::<StoreData, HasSelf<StoreData>>(
+            linker,
+            |state| state,
+        )?;
     }
     if grants.grants(Capability::CryptoHmac) {
         register_hmac(linker)?;
@@ -519,79 +462,6 @@ pub fn register(linker: &mut Linker<StoreData>, grants: &GrantSet) -> wasmtime::
     Ok(())
 }
 
-/// The `random` interface.
-fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
-    let mut inst = linker.instance(RANDOM)?;
-
-    // `get: func(length: u32) -> result<list<u8>, random-error>`
-    //
-    // Every return is a one-element **tuple**. `ComponentNamedList` — the trait
-    // a host function's parameter and return lists must satisfy — is
-    // implemented for tuples, not for bare types, so `Vec<u8>` alone does not
-    // compile while `(Vec<u8>,)` does. That is a property of the Component
-    // Model's flat-parameter representation, not a style choice.
-    inst.func_wrap(
-        "get",
-        |store: StoreContextMut<'_, StoreData>,
-         (length,): (u32,)|
-         -> wasmtime::Result<(Vec<u8>,)> {
-            // `HOST-011`: contained, like every host body — see `host_clock.rs`
-            // for why a panic here would otherwise unwind through the engine.
-            crate::guard::guard("qqq:crypto@1.0.0/random.get", || {
-                // Defence in depth: the function is only registered when granted,
-                // but re-checking at call time means a future change that registers
-                // it unconditionally still cannot hand out entropy.
-                if !store.data().grants.grants(Capability::CryptoRandom) {
-                    return Err(denied(Capability::CryptoRandom));
-                }
-                // **`SEC-011`: the boundary check, before any host work.**
-                //
-                // Charged ahead of the allocation, not after: `random_bytes`
-                // allocates `length` bytes on the guest's instruction, so a check
-                // that ran afterwards would have already paid the cost it exists
-                // to prevent. The ceiling is read from the state, so the boundary
-                // and the allocation cannot disagree. `ambient` enforces it too,
-                // and that redundancy is deliberate: this is the boundary's own
-                // statement of its contract, and `ambient` may be reached from
-                // callers that have no boundary.
-                random_length_verdict(length, &store.data().ambient)
-                    .into_result("length")
-                    .map_err(|e| wasmtime::Error::msg(e.render()))?;
-                store
-                    .data()
-                    .ambient
-                    .read_random(length)
-                    .map(|b| (b,))
-                    .map_err(|e| {
-                        // A source failure must fail closed. Surfacing it as a host
-                        // error rather than fabricating bytes is the whole point:
-                        // predictable "randomness" is worse than a failure.
-                        wasmtime::Error::msg(match e {
-                            crate::ambient::RandomFailure::TooLong => {
-                                format!(
-                                    "random request of {length} bytes exceeds the per-call maximum"
-                                )
-                            }
-                            crate::ambient::RandomFailure::SourceFailed => {
-                                "the host entropy source failed; refusing to substitute a weaker source"
-                                    .to_owned()
-                            }
-                            // **`DET-008`'s failure, and it is not the same finding as a source
-                            // failure.** A truncated replay log and a broken OS entropy source send
-                            // a reader to different files, and the replay's own message already
-                            // names which record diverged.
-                            crate::ambient::RandomFailure::Replay(err) => {
-                                format!("the replay log could not supply these bytes: {err}")
-                            }
-                        })
-                    })
-            })
-        },
-    )?;
-
-    Ok(())
-}
-
 /// The generated bindings carry no doc comments of their own, and re-exporting
 /// them would fail `missing_docs` on the WIT's definition rather than on any
 /// prose this crate wrote. The allow is scoped to the generated module so
@@ -600,7 +470,7 @@ fn register_random(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
 mod bindings {
     wasmtime::component::bindgen!({
         path: "../../wit/qqq-crypto.wit",
-        interfaces: "import qqq:crypto/hmac@1.0.0; import qqq:crypto/aead@1.0.0; import qqq:crypto/signing@1.0.0;",
+        interfaces: "import qqq:crypto/random@1.0.0; import qqq:crypto/hashing@1.0.0; import qqq:crypto/hmac@1.0.0; import qqq:crypto/aead@1.0.0; import qqq:crypto/signing@1.0.0;",
     });
 }
 
@@ -617,6 +487,140 @@ pub use bindings::qqq::crypto::signing::SignatureError as WitSignatureError;
 use bindings::qqq::crypto::aead::Construction as WitConstruction;
 use bindings::qqq::crypto::hmac::Algorithm as WitHmacAlgorithm;
 use bindings::qqq::crypto::signing::Algorithm as WitSignAlgorithm;
+
+/// The host implementation of `qqq:crypto/random`.
+///
+/// Grant first (an ungranted call fails before its length is judged), then
+/// the `SEC-011` boundary, then the read. Both are the call-time re-checks
+/// `ARCH-012` demands of a grant-gated registration: a mis-built linker
+/// that bound the interface unconditionally still cannot hand out entropy.
+impl bindings::qqq::crypto::random::Host for crate::linker::StoreData {
+    fn get(
+        &mut self,
+        length: u32,
+    ) -> std::result::Result<Vec<u8>, bindings::qqq::crypto::random::RandomError> {
+        use bindings::qqq::crypto::random::RandomError;
+        // Defence in depth: the function is only registered when granted,
+        // but re-checking at call time means a future change that registers
+        // it unconditionally still cannot hand out entropy. The refusal
+        // is a WIT `Err`, not a trap: the interface declares
+        // `result<list<u8>, random-error>`.
+        //
+        // No `guard::guard` wrapper: the body contains no panic primitive
+        // (the H1 checker enforces that), and the return channel is the
+        // WIT `result` — a host fault would have nowhere to go but a case
+        // the WIT does not define.
+        if !self.grants.grants(Capability::CryptoRandom) {
+            return Err(RandomError::NotGranted);
+        }
+        // **`SEC-011`: the boundary check, before any host work.**
+        //
+        // Charged ahead of the allocation, not after: `random_bytes`
+        // allocates `length` bytes on the guest's instruction, so a check
+        // that ran afterwards would have already paid the cost it exists
+        // to prevent. The ceiling is read from the state, so the boundary
+        // and the allocation cannot disagree. `ambient` enforces it too,
+        // and that redundancy is deliberate: this is the boundary's own
+        // statement of its contract, and `ambient` may be reached from
+        // callers that have no boundary.
+        if random_length_verdict(length, &self.ambient).is_reject() {
+            return Err(RandomError::TooLong);
+        }
+        match self.ambient.read_random(length) {
+            Ok(bytes) => Ok(bytes),
+            // A source failure fails closed as a WIT error, not a trap:
+            // predictable "randomness" is worse than a failure, and the
+            // guest was promised a `result`. A replay log that cannot
+            // supply the bytes reports `source-failed` too — the WIT has
+            // no replay case, and the bytes are unavailable either way.
+            Err(_) => Err(RandomError::SourceFailed),
+        }
+    }
+}
+
+/// The host implementation of `qqq:crypto/hashing`.
+///
+/// The grant and the allowlist are enforced by [`hash_data`](crate::ambient::hash_data),
+/// which every path calls: the `ARCH-012` `ViaHelper` shape — one shared
+/// helper performing the check, rather than a check inlined per function.
+/// The boundary sizes are enforced here, before the helper runs.
+impl bindings::qqq::crypto::hashing::Host for crate::linker::StoreData {
+    fn digest(
+        &mut self,
+        algorithm: bindings::qqq::crypto::hashing::Algorithm,
+        data: Vec<u8>,
+    ) -> std::result::Result<Vec<u8>, bindings::qqq::crypto::hashing::HashError> {
+        use bindings::qqq::crypto::hashing::{Algorithm, HashError};
+        let name = match algorithm {
+            Algorithm::Sha256 => "sha256",
+            Algorithm::Sha512 => "sha512",
+            Algorithm::Blake3 => "blake3",
+        };
+        // Size, through the boundary layer.
+        if crate::boundary::size("data", data.len(), MAX_HASH_INPUT)
+            .into_result("data")
+            .is_err()
+        {
+            return Err(HashError::InputTooLong);
+        }
+        match hash_data(self, name, &data) {
+            Ok(digested) => Ok(digested),
+            // `hash_data` reports `NotGranted` (no grant) and
+            // `AlgorithmNotAllowed` (unlisted); the WIT `hash-error`
+            // has only the latter, and the registration is already
+            // grant-gated, so an ungranted call reaching here is the
+            // mis-built linker the allowlist names.
+            Err(_) => Err(HashError::AlgorithmNotAllowed),
+        }
+    }
+
+    fn digest_many(
+        &mut self,
+        algorithm: bindings::qqq::crypto::hashing::Algorithm,
+        inputs: Vec<Vec<u8>>,
+    ) -> std::result::Result<Vec<Vec<u8>>, bindings::qqq::crypto::hashing::HashError> {
+        use bindings::qqq::crypto::hashing::{Algorithm, HashError};
+        // **`SEC-011`: the list boundary, on BOTH axes.**
+        //
+        // This is the case the two-axis check exists for. The earlier
+        // version only bounded each element's length, so a guest passing a
+        // hundred million *empty* lists allocated a `Vec<Vec<u8>>` of
+        // headers — zero payload bytes, gigabytes of metadata. Neither axis
+        // alone catches it, which is why `list_size` states both.
+        let total_bytes: usize = inputs.iter().map(Vec::len).sum();
+        if crate::boundary::list_size("inputs", inputs.len(), total_bytes)
+            .into_result("inputs")
+            .is_err()
+        {
+            return Err(HashError::InputTooLong);
+        }
+        let name = match algorithm {
+            Algorithm::Sha256 => "sha256",
+            Algorithm::Sha512 => "sha512",
+            Algorithm::Blake3 => "blake3",
+        };
+        // After the `list_size` gate above, so the capacity is bounded
+        // by the checked count — never by the raw guest length.
+        let mut out = Vec::with_capacity(inputs.len());
+        for (i, input) in inputs.iter().enumerate() {
+            // The per-element limit is still separate from the list
+            // limits: a single 1 GiB input is one element and within
+            // neither of them.
+            if crate::boundary::size("inputs", input.len(), MAX_HASH_INPUT)
+                .with_field("inputs")
+                .into_result(&format!("inputs[{i}]"))
+                .is_err()
+            {
+                return Err(HashError::InputTooLong);
+            }
+            match hash_data(self, name, input) {
+                Ok(digested) => out.push(digested),
+                Err(_) => return Err(HashError::AlgorithmNotAllowed),
+            }
+        }
+        Ok(out)
+    }
+}
 
 /// The `hmac` interface.
 fn register_hmac(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
@@ -1103,111 +1107,17 @@ impl bindings::qqq::crypto::signing::Host for crate::linker::StoreData {
     }
 }
 
-/// The `hashing` interface.
-fn register_hashing(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
-    let mut inst = linker.instance(HASHING)?;
-
-    // `digest: func(algorithm: algorithm, data: list<u8>) -> result<list<u8>, hash-error>`
-    //
-    // `algorithm` is an `enum`, which the ABI lowers to a `u32` discriminant in
-    // WIT declaration order: sha256=0, sha512=1, blake3=2.
-    inst.func_wrap(
-        "digest",
-        |store: StoreContextMut<'_, StoreData>,
-         (algorithm, data): (u32, Vec<u8>)|
-         -> wasmtime::Result<(Vec<u8>,)> {
-            crate::guard::guard("qqq:crypto@1.0.0/hashing.digest", || {
-                // **`SEC-011`: the discriminant is validated through the shared
-                // boundary layer**, so the check is the same one the registry
-                // declares and the same one `digest-many` applies. `algorithm_name`
-                // still performs its own match — the two are not redundant in the
-                // way a duplicated check normally is: `algorithm_name` maps a
-                // validated index to a name, and the boundary states the contract
-                // "this index is a member of the set the host defined" *before*
-                // any work happens.
-                crate::boundary::discriminant(
-                    "algorithm",
-                    algorithm,
-                    crate::ambient::HASH_ALGORITHM_COUNT,
-                )
-                .into_result("algorithm")
-                .map_err(|e| wasmtime::Error::msg(e.render()))?;
-                let name = algorithm_name(algorithm)?;
-                // Size, through the boundary layer.
-                crate::boundary::size("data", data.len(), MAX_HASH_INPUT)
-                    .into_result("data")
-                    .map_err(|e| wasmtime::Error::msg(e.render()))?;
-                hash_data(store.data(), name, &data)
-                    .map(|d| (d,))
-                    .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))
-            })
-        },
-    )?;
-
-    // `digest-many: func(algorithm, inputs: list<list<u8>>) -> result<list<list<u8>>, hash-error>`
-    //
-    // The batch-first shape (Proposal §4.5, `CON-012`). A guest hashing a list
-    // in a loop pays the ABI crossing once per value; this pays it once.
-    inst.func_wrap(
-        "digest-many",
-        |store: StoreContextMut<'_, StoreData>,
-         (algorithm, inputs): (u32, Vec<Vec<u8>>)|
-         -> wasmtime::Result<(Vec<Vec<u8>>,)> {
-            crate::guard::guard("qqq:crypto@1.0.0/hashing.digest-many", || {
-                // **`SEC-011`: the list boundary, on BOTH axes.**
-                //
-                // This is the case the two-axis check exists for. The earlier
-                // version only bounded each element's length, so a guest passing a
-                // hundred million *empty* lists allocated a `Vec<Vec<u8>>` of
-                // headers — zero payload bytes, gigabytes of metadata. Neither axis
-                // alone catches it, which is why `list_size` states both.
-                let total_bytes: usize = inputs.iter().map(Vec::len).sum();
-                crate::boundary::discriminant(
-                    "algorithm",
-                    algorithm,
-                    crate::ambient::HASH_ALGORITHM_COUNT,
-                )
-                .into_result("algorithm")
-                .map_err(|e| wasmtime::Error::msg(e.render()))?;
-                crate::boundary::list_size("inputs", inputs.len(), total_bytes)
-                    .into_result("inputs")
-                    .map_err(|e| wasmtime::Error::msg(e.render()))?;
-
-                let name = algorithm_name(algorithm)?;
-                // After the `list_size` gate above, so the capacity is bounded
-                // by the checked count — never by the raw guest length.
-                let mut out = Vec::with_capacity(inputs.len());
-                for (i, input) in inputs.iter().enumerate() {
-                    // The per-element limit is still separate from the list
-                    // limits: a single 1 GiB input is one element and within
-                    // neither of them.
-                    crate::boundary::size("inputs", input.len(), MAX_HASH_INPUT)
-                        .with_field("inputs")
-                        .into_result(&format!("inputs[{i}]"))
-                        .map_err(|e| wasmtime::Error::msg(e.render()))?;
-                    out.push(
-                        hash_data(store.data(), name, input)
-                            .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))?,
-                    );
-                }
-                Ok((out,))
-            })
-        },
-    )?;
-
-    Ok(())
-}
-
 /// The `SEC-011` boundary verdict for a `random.get` length.
 ///
 /// # Why this is a named function rather than an inline expression
 ///
-/// Because an inline check inside a `func_wrap` closure **cannot be tested** —
-/// reaching it needs a compiled component importing `qqq:crypto/random`, and
-/// hand-written WAT against that interface is a trap this project has fallen into
-/// four times (the lowered `result<list<u8>, random-error>` needs a return-area
-/// pointer and a fully-declared error variant, and each attempt failed to
-/// instantiate *whether or not* the capability was granted, making the ungranted
+/// Because an inline check inside the host body **could not be tested** when
+/// the body was a `func_wrap` closure — reaching it needed a compiled
+/// component importing `qqq:crypto/random`, and hand-written WAT against
+/// that interface failed to instantiate four times (the lowered
+/// `result<list<u8>, random-error>` needs a return-area pointer and a
+/// fully-declared error variant, and each attempt failed to instantiate
+/// *whether or not* the capability was granted, making the ungranted
 /// case pass for the wrong reason — see `tests/hostile_guests.rs`).
 ///
 /// That untestability has a measurable cost, found by injection rather than by
@@ -1216,17 +1126,17 @@ fn register_hashing(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
 /// `the_random_length_boundary_accepts_to_the_ceiling_and_refuses_past_it` now
 /// fails when the *helper* is wrong.
 ///
-/// # The second gap, and why `the_call_site_applies_the_boundary_check` exists
+/// # The second gap, and how it closed
 ///
 /// Extracting the helper closes only half the hole. A **second** injection —
 /// neutering the call site while leaving the helper correct — also left every
 /// test green, because a test that calls the helper directly proves the helper
-/// works and proves nothing about whether the host function uses it. Probing the
-/// function's *result* is what remains untestable without a real component, so
-/// the call site is asserted **structurally** instead: the registration body must
-/// reference `random_length_verdict` and must propagate its rejection with `?`.
-/// That is weaker than an execution test and strictly stronger than nothing, and
-/// the test says so rather than implying otherwise.
+/// works and proves nothing about whether the host function uses it. That gap
+/// closed two ways: the `bindgen!` trait methods are directly callable, so
+/// `random_get_refuses_by_name` and `hashing_refuses_by_name` execute the
+/// call site for each refusal case; and the `iface_crypto` probe covers the
+/// same paths end to end through a real component. No structural source
+/// assertion remains because nothing structural is left unproven.
 fn random_length_verdict(
     length: u32,
     ambient: &crate::ambient::AmbientState,
@@ -1240,34 +1150,6 @@ fn random_length_verdict(
         ambient.max_random_bytes() as usize,
     )
 }
-
-/// Map the WIT `algorithm` enum discriminant to its name.
-///
-/// # Errors
-///
-/// A host error for an out-of-range discriminant. That indicates the guest and
-/// host disagree about the enum — a version mismatch — and producing a hash
-/// with a guessed algorithm would be worse than failing.
-fn algorithm_name(index: u32) -> wasmtime::Result<&'static str> {
-    match index {
-        0 => Ok("sha256"),
-        1 => Ok("sha512"),
-        2 => Ok("blake3"),
-        other => Err(wasmtime::Error::msg(format!(
-            "unknown hash algorithm discriminant {other}; the guest and host \
-             disagree about the `algorithm` enum, which means a version mismatch"
-        ))),
-    }
-}
-
-/// The error a call-time re-check produces.
-fn denied(cap: Capability) -> wasmtime::Error {
-    wasmtime::Error::msg(format!(
-        "capability `{cap}` was re-checked at call time and is not granted; \
-         this means the linker was built incorrectly, which is a QQQ bug"
-    ))
-}
-
 /// Unused import guard: `ResourceAny` is not needed yet but keeps the import
 /// list stable when resource-returning interfaces (`fs`, `http`) land.
 const _: Option<ResourceAny> = None;
@@ -1276,15 +1158,15 @@ const _: Option<ResourceAny> = None;
 mod tests {
     use super::*;
     use qqq_cap::manifest::Manifest;
-    use wasmtime::Engine;
+    use wasmtime::{Engine, StoreContextMut};
 
-    /// **The anti-drift test.** The hand-written bindings can drift from
-    /// `wit/qqq-crypto.wit`, so this test reads the WIT and asserts every
-    /// function of the two hand-written interfaces is registered here. The
-    /// `bindgen!` interfaces (`hmac`, `aead`, `signing`) cannot drift this
-    /// way — the macro reads the same file — so their coverage is
-    /// behavioural instead: `new_interfaces_are_grant_gated` links every
-    /// function below against a real linker.
+    /// **The anti-drift test.** Every function the WIT declares for these
+    /// interfaces must be implemented here: `bindgen!` generates the trait,
+    /// but a missing method is a compile error, not a silent gap — so this
+    /// test asserts the WIT-declared names against the implemented methods
+    /// rather than the registration mechanism. The guest-compiled probe
+    /// (`iface_crypto`) proves the other direction: the host's shapes bind
+    /// a real component.
     #[test]
     fn every_implemented_wit_function_is_registered() {
         let wit = include_str!("../../../wit/qqq-crypto.wit");
@@ -1293,19 +1175,20 @@ mod tests {
         // `random.get`
         assert!(wit.contains("get: func(length: u32)"), "random.get renamed");
         assert!(
-            this_file.contains("\"get\""),
-            "random.get is declared in the WIT but not registered"
+            this_file.contains("fn get("),
+            "random.get is declared in the WIT but not implemented"
         );
 
         // `hashing.digest` and `hashing.digest-many`
-        for name in ["digest", "digest-many"] {
+        for name in ["digest", "digest_many"] {
             assert!(
-                wit.contains(&format!("\n  {name}: func(")),
+                wit.contains(&format!("\n  {name}: func("))
+                    || wit.contains(&format!("\n  {}: func(", name.replace('_', "-"))),
                 "`{name}` is not declared in qqq-crypto.wit"
             );
             assert!(
-                this_file.contains(&format!("\"{name}\"")),
-                "`{name}` is declared in the WIT but not registered here"
+                this_file.contains(&format!("fn {name}(")),
+                "`{name}` is declared in the WIT but not implemented here"
             );
         }
 
@@ -1330,31 +1213,9 @@ mod tests {
         }
     }
 
-    /// Whether `source` contains `func_wrap("name"`, ignoring whitespace.
-    ///
-    /// # Why whitespace is normalised rather than matched literally
-    ///
-    /// An earlier version of these tests matched the exact string
-    /// `func_wrap(\n        "digest"` — eight spaces, one newline. That made the
-    /// test depend on **formatting**, and it failed on the Windows CI runner
-    /// while passing everywhere else: `rustfmt` lays the call out differently
-    /// there, and `include_str!` reads whatever layout the repository holds.
-    ///
-    /// A test whose result depends on where a line breaks is not testing the
-    /// property it names. Stripping whitespace asks the question that was meant
-    /// — "is this function registered?" — independently of how the source is
-    /// laid out. If `rustfmt` reflows the call again, this keeps working.
-    fn registers(source: &str, name: &str) -> bool {
-        let squeezed: String = source.chars().filter(|c| !c.is_whitespace()).collect();
-        squeezed.contains(&format!("func_wrap(\"{name}\""))
-    }
-
-    /// The new interfaces are grant-gated like the old ones: granted, the
-    /// functions link; ungranted, the import is absent and instantiation
-    /// names it. This replaces the old "unimplemented must not be
-    /// registered" test now that hmac/aead/signing *are* implemented —
-    /// keeping the old test would assert the opposite of the flag the
-    /// registry pins.
+    /// The grant-gating test below links every function of every interface
+    /// against a real linker, so registration is proven by binding — no
+    /// source-text detector needed.
     #[test]
     fn new_interfaces_are_grant_gated() {
         let engine = test_engine();
@@ -1368,6 +1229,8 @@ mod tests {
         let mut linker = Linker::<StoreData>::new(&engine);
         register(&mut linker, &full).expect("register");
         for (interface, names) in [
+            (RANDOM, vec!["get"]),
+            (HASHING, vec!["digest", "digest-many"]),
             (HMAC_IFACE, vec!["compute", "verify"]),
             (
                 AEAD_IFACE,
@@ -1387,6 +1250,8 @@ mod tests {
         let mut bare = Linker::<StoreData>::new(&engine);
         register(&mut bare, &GrantSet::empty()).expect("register");
         for (interface, name) in [
+            (RANDOM, "get"),
+            (HASHING, "digest"),
             (HMAC_IFACE, "compute"),
             (AEAD_IFACE, "encrypt"),
             (SIGNING_IFACE, "sign"),
@@ -1415,44 +1280,6 @@ mod tests {
         assert!(!has_func(&mut hmac_only, SIGNING_IFACE, "sign"));
     }
 
-    /// The positive control for the test above: `digest` *is* registered, so the
-    /// same detection must find it. Without this, a check that never matched
-    /// anything would look like proof.
-    #[test]
-    fn the_unregistered_check_can_find_a_registered_name() {
-        let this_file = include_str!("host_crypto.rs");
-        for name in ["get", "digest", "digest-many"] {
-            assert!(
-                registers(this_file, name),
-                "the detection used by the test above cannot find `{name}`, which \
-                 certainly is registered, so its assertions prove nothing"
-            );
-        }
-        // And it must not report a name that is genuinely absent.
-        assert!(!registers(this_file, "definitely-not-registered"));
-    }
-
-    /// The detection itself must be formatting-independent. This pins the fix
-    /// for the Windows CI failure: the same call laid out three ways must be
-    /// recognised every time.
-    #[test]
-    fn the_registration_detection_ignores_layout() {
-        for layout in [
-            "inst.func_wrap(\"digest\", |s, p| Ok((vec![],)))",
-            "inst.func_wrap(\n    \"digest\",\n    |s, p| Ok((vec![],)),\n)",
-            "inst\n    .func_wrap(\n        \"digest\",\n        |s, p| Ok((vec![],)),\n    )",
-        ] {
-            assert!(
-                registers(layout, "digest"),
-                "the detection missed a registration written as:\n{layout}"
-            );
-        }
-        assert!(!registers(
-            "inst.func_wrap(\"other\", |s, p| Ok(()))",
-            "digest"
-        ));
-    }
-
     #[test]
     fn the_package_name_matches_the_wit() {
         let wit = include_str!("../../../wit/qqq-crypto.wit");
@@ -1462,15 +1289,15 @@ mod tests {
         );
     }
 
-    /// **The anti-drift test for `SEC-011`'s range boundary.**
+    /// **The anti-drift test for the algorithm set.**
     ///
-    /// `HASH_ALGORITHM_COUNT` is the number the boundary check validates a raw
-    /// guest-supplied discriminant against. It is a property of the WIT
-    /// declaration order — an ABI — so a member added to the WIT without updating
-    /// the constant would make the host **refuse a valid algorithm**, and a member
-    /// removed without updating it would let the host accept one that no longer
-    /// exists. Both are silent in every other test, because `algorithm_name`
-    /// matches the same three names and would agree with a stale constant.
+    /// `HASH_ALGORITHM_COUNT` records how many algorithms the WIT declares.
+    /// `bindgen!` owns the discriminant mapping (an out-of-range value traps
+    /// at the ABI boundary) and the host's `match` arms are exhaustive (a new
+    /// WIT member fails to compile until handled), so the constant is no
+    /// longer load-bearing for correctness — but it remains the explicit
+    /// record of the set's size, and this test fails if the WIT set changes
+    /// without a conscious update here.
     ///
     /// The check counts the members of the WIT `enum algorithm` block rather than
     /// asserting a literal, so the test follows the WIT instead of restating it.
@@ -1500,10 +1327,7 @@ mod tests {
             members.len(),
             crate::ambient::HASH_ALGORITHM_COUNT as usize,
             "the WIT declares {} algorithm member(s) {members:?} but \
-             HASH_ALGORITHM_COUNT is {}. The boundary check would refuse a valid \
-             algorithm (if the constant is low) or accept a non-existent one (if \
-             high), and `algorithm_name` would agree with the stale constant, so \
-             nothing else would catch this.",
+             HASH_ALGORITHM_COUNT is {}. Update the constant with the WIT.",
             members.len(),
             crate::ambient::HASH_ALGORITHM_COUNT
         );
@@ -1527,52 +1351,51 @@ mod tests {
     }
 
     /// The error variant indices are an ABI and must follow the WIT order.
+    /// The `bindgen!` types carry the order, so this pins the generated
+    /// discriminants against the WIT text rather than trusting the macro.
     #[test]
     fn the_error_variant_orders_match_the_wit() {
+        use super::bindings::qqq::crypto::hashing::HashError as GenHashError;
+        use super::bindings::qqq::crypto::random::RandomError as GenRandomError;
         let wit = include_str!("../../../wit/qqq-crypto.wit");
 
         let ng = wit.find("not-granted").expect("declared");
         let tl = wit.find("too-long").expect("declared");
         let sf = wit.find("source-failed").expect("declared");
         assert!(ng < tl && tl < sf, "random-error order changed");
-        assert_eq!(RandomError::NotGranted.as_index(), 0);
-        assert_eq!(RandomError::TooLong.as_index(), 1);
-        assert_eq!(RandomError::SourceFailed.as_index(), 2);
+        assert_eq!(GenRandomError::NotGranted as u32, 0);
+        assert_eq!(GenRandomError::TooLong as u32, 1);
+        assert_eq!(GenRandomError::SourceFailed as u32, 2);
 
         let ana = wit.find("algorithm-not-allowed").expect("declared");
         let itl = wit.find("input-too-long").expect("declared");
         assert!(ana < itl, "hash-error order changed");
-        assert_eq!(HashError::AlgorithmNotAllowed.as_index(), 0);
-        assert_eq!(HashError::InputTooLong.as_index(), 1);
+        assert_eq!(GenHashError::AlgorithmNotAllowed as u32, 0);
+        assert_eq!(GenHashError::InputTooLong as u32, 1);
     }
 
-    /// The `algorithm` enum order is an ABI too. `sha256` is declared first.
+    /// The `algorithm` enum order is an ABI too. `sha256` is declared first,
+    /// and the host's `match` arms follow that order — a non-exhaustive
+    /// match would fail to compile if the WIT gained a member, so the
+    /// ordering pin is the only runtime half left to assert. (An
+    /// out-of-range discriminant can no longer reach host code: `bindgen!`
+    /// lifts the enum at the ABI boundary and traps there, exactly as for
+    /// every other generated interface.)
     #[test]
     fn the_algorithm_enum_order_matches_the_wit() {
+        use super::bindings::qqq::crypto::hashing::Algorithm as GenAlgorithm;
         let wit = include_str!("../../../wit/qqq-crypto.wit");
         let sha256 = wit.find("sha256,").expect("declared");
         let sha512 = wit.find("sha512,").expect("declared");
         let blake3 = wit.find("blake3,").expect("declared");
         assert!(
             sha256 < sha512 && sha512 < blake3,
-            "the algorithm enum order changed; algorithm_name must change too"
+            "the algorithm enum order changed"
         );
-        // And the mapping must agree with that order.
-        assert_eq!(algorithm_name(0).unwrap(), "sha256");
-        assert_eq!(algorithm_name(1).unwrap(), "sha512");
-        assert_eq!(algorithm_name(2).unwrap(), "blake3");
-    }
-
-    /// An out-of-range discriminant must fail rather than guess. Producing a
-    /// hash with the wrong algorithm silently would break every stored digest.
-    #[test]
-    fn an_unknown_algorithm_discriminant_is_refused() {
-        let e = algorithm_name(3).unwrap_err();
-        assert!(
-            e.to_string().contains("version mismatch"),
-            "the error must explain the cause: {e}"
-        );
-        assert!(algorithm_name(u32::MAX).is_err());
+        // And the generated discriminants must agree with that order.
+        assert_eq!(GenAlgorithm::Sha256 as u32, 0);
+        assert_eq!(GenAlgorithm::Sha512 as u32, 1);
+        assert_eq!(GenAlgorithm::Blake3 as u32, 2);
     }
 
     /// The known-answer tests: these are the published digests of `"abc"`.
@@ -2403,83 +2226,52 @@ mod tests {
         assert!(random_length_verdict(32, &ambient).is_accept());
     }
 
-    /// **The call-site check, asserted structurally — `SEC-011`.**
+    /// **The call-site checks, asserted by execution — `SEC-011`.**
     ///
-    /// # Why this is structural rather than behavioural, stated plainly
-    ///
-    /// The property is "the registered `random.get` host function applies
-    /// `random_length_verdict` and propagates its rejection." Proving that by
-    /// execution needs a guest that imports `qqq:crypto/random` and calls `get`
-    /// with an oversized length — and hand-written WAT against that interface has
-    /// failed to instantiate four times in this project (see the note in
-    /// `tests/hostile_guests.rs`), each failure making the case pass for the wrong
-    /// reason.
-    ///
-    /// So this asserts the call site in source. It is **weaker** than an
-    /// execution test: it cannot prove the check runs before the allocation, and
-    /// a sufficiently determined refactor could satisfy it while breaking the
-    /// property. It is **stronger than nothing**, which is what the previous
-    /// state was — demonstrated, not assumed: neutering the call site left all 16
-    /// tests in this module green.
-    ///
-    /// The honest description of the coverage is therefore: the helper is proven
-    /// by execution, the wiring is proven by source inspection, and the
-    /// end-to-end path is unproven until a generated fixture exists. That
-    /// limitation is recorded here rather than left for a reader to discover.
+    /// The `bindgen!` trait methods are directly callable, so these tests
+    /// prove the property the old structural test could only approximate:
+    /// the boundary verdict is applied at the call site and its rejection
+    /// reaches the guest as the WIT error. The guest-compiled probe covers
+    /// the same paths end to end; these pin each refusal case by name.
     #[test]
-    fn the_call_site_applies_the_boundary_check() {
-        let source = include_str!("host_crypto.rs");
+    fn random_get_refuses_by_name() {
+        use super::bindings::qqq::crypto::random::{Host as _, RandomError};
+        // No grant: refused before the length is judged.
+        let mut ungranted = StoreData::new(GrantSet::empty());
+        assert!(matches!(ungranted.get(16), Err(RandomError::NotGranted)));
+        // Granted but over the ceiling: refused before any allocation.
+        let mut granted = StoreData::new(grants_with("[capabilities.crypto]\nrandom = true\n"));
+        assert!(matches!(
+            granted.get(granted.ambient.max_random_bytes() + 1),
+            Err(RandomError::TooLong)
+        ));
+        // At the ceiling: served.
+        assert!(granted.get(16).is_ok());
+    }
 
-        // Locate the `random.get` registration body. The registration is
-        // `func_wrap("get", …)`, and the body runs until the closing `)?;`.
-        let squeezed: String = source.chars().filter(|c| !c.is_whitespace()).collect();
-        let at = squeezed
-            .find("func_wrap(\"get\"")
-            .expect("`random.get` must be registered");
-        let body_end = squeezed[at..]
-            .find(")?;")
-            .map(|o| at + o)
-            .expect("the registration must be closed");
-        let body = &squeezed[at..body_end];
-
-        assert!(
-            body.contains("random_length_verdict("),
-            "the `random.get` registration body does not call `random_length_verdict`; \
-             the boundary check is defined but NOT APPLIED, so an oversized length \
-             reaches the allocation unchecked. SEC-011 requires validation at the \
-             crossing, not merely a function that could perform it."
-        );
-
-        // And the rejection must be PROPAGATED. A body that computed the verdict
-        // and ignored it would satisfy the assertion above while doing nothing —
-        // which is exactly the injection (`let _check = …;`) that went undetected
-        // before this test existed.
-        //
-        // The propagation is `?` on the `into_result(...).map_err(...)` chain. The
-        // slice above ends at the `)` of `)?;`, so the `?` itself is the next
-        // character after the slice — which is why this asserts on the *chain*
-        // rather than reaching for a `?` that the delimiter already consumed. The
-        // first version of this test asserted `?;` inside the slice and failed
-        // against a body that was, in fact, correct.
-        assert!(
-            body.contains("into_result(\"length\")") && body.contains("map_err("),
-            "the `random.get` body computes the boundary verdict but does not \
-             convert and propagate the rejection; a check whose result is discarded \
-             is not a check. Body tail: …{}",
-            &body[body.len().saturating_sub(80)..]
-        );
-
-        // The `?` is the character immediately following the slice, because the
-        // slice stops at the `)` of `)?;`. Asserting that placement — rather than
-        // merely that a `?` exists somewhere later in the file — is what ties the
-        // propagation to THIS chain.
-        assert!(
-            squeezed[body_end..].starts_with(")?;"),
-            "the boundary check's rejection must be propagated with `?` immediately \
-             after the chain, so the host function returns before performing the \
-             allocation the check exists to prevent. Found: {:?}",
-            &squeezed[body_end..(body_end + 8).min(squeezed.len())]
-        );
+    /// `digest`/`digest-many` refuse by name: unlisted algorithms and
+    /// oversize inputs fail as WIT `Err`s, never as traps.
+    #[test]
+    fn hashing_refuses_by_name() {
+        use super::bindings::qqq::crypto::hashing::{Algorithm, HashError, Host as _};
+        let mut data = crypto_store(&["sha256"], &[], &[]);
+        // Unlisted algorithm: refused by name.
+        assert!(matches!(
+            data.digest(Algorithm::Blake3, b"abc".to_vec()),
+            Err(HashError::AlgorithmNotAllowed)
+        ));
+        // Oversize input: refused before hashing.
+        assert!(matches!(
+            data.digest(Algorithm::Sha256, vec![0u8; MAX_HASH_INPUT + 1]),
+            Err(HashError::InputTooLong)
+        ));
+        // Batch over the list bound: refused whole.
+        assert!(matches!(
+            data.digest_many(Algorithm::Sha256, vec![vec![0u8; MAX_HASH_INPUT + 1]]),
+            Err(HashError::InputTooLong)
+        ));
+        // Listed algorithm, bounded input: computes.
+        assert!(data.digest(Algorithm::Sha256, b"abc".to_vec()).is_ok());
     }
 
     /// And the converse: `hashing` must not appear without its grant.

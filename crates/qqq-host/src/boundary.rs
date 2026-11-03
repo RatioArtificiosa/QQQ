@@ -515,7 +515,8 @@ pub fn all(verdicts: &[Verdict]) -> Verdict {
 /// check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Boundary {
-    /// The registered function name, as passed to `func_wrap`.
+    /// The registered function name: as passed to `func_wrap`, or the
+    /// trait-method name for `bindgen!` interfaces.
     pub function: &'static str,
     /// The interface it belongs to.
     pub interface: &'static str,
@@ -611,7 +612,9 @@ pub const BOUNDARIES: &[Boundary] = &[
     Boundary {
         function: "digest",
         interface: "qqq:crypto@1.0.0/hashing",
-        // Range for the `algorithm` discriminant, Size for the input length.
+        // Size for the input length; the `algorithm` discriminant is Range,
+        // enforced by `bindgen!` at the ABI lift (an out-of-range value traps
+        // before host code runs) rather than by a host boundary check.
         checks: &[CheckClass::Range, CheckClass::Size],
         guest_controls: "`algorithm` (a discriminant) and `data` (up to MAX_HASH_INPUT bytes)",
     },
@@ -620,6 +623,73 @@ pub const BOUNDARIES: &[Boundary] = &[
         interface: "qqq:crypto@1.0.0/hashing",
         checks: &[CheckClass::Range, CheckClass::Size],
         guest_controls: "`algorithm` and `inputs`, a **list** — so both list axes apply",
+    },
+    Boundary {
+        function: "compute",
+        interface: "qqq:crypto@1.0.0/hmac",
+        // Range for the `algorithm` allowlist (bindgen lifts only declared
+        // variants), Shape for the non-empty key. No byte ceiling: HMAC
+        // processes its inputs linearly, so guest memory plus fuel prices
+        // the work — the module docs record why a ceiling would be a second
+        // bound on the same cost rather than a new one.
+        checks: &[CheckClass::Range, CheckClass::Shape],
+        guest_controls: "`algorithm`, `key` (non-empty, any length), `data`",
+    },
+    Boundary {
+        function: "verify",
+        interface: "qqq:crypto@1.0.0/hmac",
+        // Range for the allowlist, Shape for the non-empty key and the
+        // tag length (a tag of the wrong length can never match).
+        checks: &[CheckClass::Range, CheckClass::Shape],
+        guest_controls: "`algorithm`, `key`, `data`, `tag`",
+    },
+    Boundary {
+        function: "nonce-length",
+        interface: "qqq:crypto@1.0.0/aead",
+        checks: &[],
+        guest_controls: "nothing: a public construction parameter, not guest-influenced state",
+    },
+    Boundary {
+        function: "key-length",
+        interface: "qqq:crypto@1.0.0/aead",
+        checks: &[],
+        guest_controls: "nothing: a public construction parameter, like `nonce-length`",
+    },
+    Boundary {
+        function: "encrypt",
+        interface: "qqq:crypto@1.0.0/aead",
+        // Range for the construction allowlist, Shape for the fixed key
+        // (32) and nonce (12) lengths. No payload ceiling: same linear
+        // rationale as `hmac.compute`.
+        checks: &[CheckClass::Range, CheckClass::Shape],
+        guest_controls: "`construction`, `key`, `nonce`, `associated-data`, `plaintext`",
+    },
+    Boundary {
+        function: "decrypt",
+        interface: "qqq:crypto@1.0.0/aead",
+        checks: &[CheckClass::Range, CheckClass::Shape],
+        guest_controls: "`construction`, `key`, `nonce`, `associated-data`, `ciphertext`",
+    },
+    Boundary {
+        function: "sign",
+        interface: "qqq:crypto@1.0.0/signing",
+        // Range for the algorithm allowlist, Shape for the 32-byte seed.
+        checks: &[CheckClass::Range, CheckClass::Shape],
+        guest_controls: "`algorithm`, `key` (a 32-byte seed), `message`",
+    },
+    Boundary {
+        function: "verify",
+        interface: "qqq:crypto@1.0.0/signing",
+        // Range for the allowlist, Shape for the 32-byte key and the
+        // signature length (a malformed key is an error, not a `false`).
+        checks: &[CheckClass::Range, CheckClass::Shape],
+        guest_controls: "`algorithm`, `public-key`, `message`, `signature`",
+    },
+    Boundary {
+        function: "public-key",
+        interface: "qqq:crypto@1.0.0/signing",
+        checks: &[CheckClass::Range, CheckClass::Shape],
+        guest_controls: "`algorithm`, `key` (a 32-byte seed)",
     },
 ];
 
@@ -638,7 +708,8 @@ pub fn boundaries_checking(class: CheckClass) -> Vec<&'static Boundary> {
     BOUNDARIES.iter().filter(|b| b.applies(class)).collect()
 }
 
-/// Extract every function name registered with `func_wrap("…")` from Rust source.
+/// Extract every guest-callable host function name from Rust source:
+/// `func_wrap("…")` registrations and `bindgen!` trait-method definitions.
 ///
 /// # Why this strips comments and string literals first
 ///
@@ -698,6 +769,42 @@ pub fn registered_names(source: &str) -> Vec<String> {
             None => break,
         }
         rest = &after[after.find('"').unwrap_or(after.len())..];
+    }
+
+    // `bindgen!` trait methods are registrations too: `add_to_linker` binds
+    // the whole interface, and the per-function grant and boundary checks
+    // live in the trait-method bodies (`random.get`, `hashing.digest`).
+    // The scanner finds them by shape — a method definition at method
+    // indent inside an `impl bindings::…Host for …` block — rather than by
+    // parsing Rust, for the same reason as above: a lexical shape the
+    // formatter guarantees (`rustfmt` indents method bodies four spaces)
+    // answers the question without a dependency.
+    //
+    // The block cut is the first column-zero `}` after the `impl` line:
+    // top-level items start at column zero, so a column-zero brace closes
+    // the block. Method bodies are indented, so their braces never end the
+    // slice early; a method definition is exactly four spaces plus `fn`.
+    for (number, line) in code.lines().enumerate() {
+        if line.starts_with("impl bindings::") {
+            let block: String = code
+                .lines()
+                .skip(number + 1)
+                .take_while(|l| !l.starts_with('}'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for method in block.lines().filter_map(|l| {
+                l.strip_prefix("    fn ")
+                    .and_then(|r| r.find('(').map(|e| r[..e].to_owned()))
+            }) {
+                // `fn` items the block does not define as methods (helpers
+                // at other indents, test scaffolding) never match: only
+                // method-position definitions are collected. Rust spells the
+                // method `nonce_length` where the WIT spells the function
+                // `nonce-length`, so underscores become hyphens — the table
+                // names the guest-visible form.
+                out.push(method.replace('_', "-"));
+            }
+        }
     }
     out.sort_unstable();
     out.dedup();
@@ -1094,9 +1201,11 @@ mod tests {
 
     /// **`SEC-011`'s central check: the inventory is complete.**
     ///
-    /// Every `func_wrap("name", …)` call site in the crate's host modules must
-    /// appear in [`BOUNDARIES`]. Without this, the table is a document; with it,
-    /// adding a boundary and forgetting to declare it fails the build.
+    /// Every guest-callable host function in the crate's host modules —
+    /// `func_wrap("name", …)` call sites and `bindgen!` trait-method
+    /// definitions alike — must appear in [`BOUNDARIES`]. Without this, the
+    /// table is a document; with it, adding a boundary and forgetting to
+    /// declare it fails the build.
     #[test]
     fn every_registered_host_function_is_declared_in_the_boundary_table() {
         // The host modules that register guest-callable functions.
@@ -1222,6 +1331,44 @@ inst.func_wrap("real", |s, p| Ok(()));
     fn the_detector_deduplicates_repeated_names() {
         let source = "a.func_wrap(\"now\", f); b.func_wrap(\"now\", g);";
         assert_eq!(registered_names(source), vec!["now".to_owned()]);
+    }
+
+    /// The detector sees `bindgen!` trait methods as registrations: a
+    /// `bindgen!` interface has no `func_wrap`, so without this the table
+    /// could drop the method and no test would say so.
+    #[test]
+    fn the_detector_finds_trait_method_registrations() {
+        let source = r"
+impl bindings::qqq::crypto::hashing::Host for crate::linker::StoreData {
+    fn digest(
+        &mut self,
+        algorithm: bindings::qqq::crypto::hashing::Algorithm,
+        data: Vec<u8>,
+    ) -> std::result::Result<Vec<u8>, bindings::qqq::crypto::hashing::HashError> {
+        Ok(vec![])
+    }
+
+    fn digest_many(
+        &mut self,
+        algorithm: bindings::qqq::crypto::hashing::Algorithm,
+        inputs: Vec<Vec<u8>>,
+    ) -> std::result::Result<Vec<Vec<u8>>, bindings::qqq::crypto::hashing::HashError> {
+        Ok(vec![])
+    }
+}
+";
+        assert_eq!(
+            registered_names(source),
+            vec!["digest".to_owned(), "digest-many".to_owned()],
+            "trait methods are registrations: {source:?}"
+        );
+        // And a free function at column zero is not a method, even with a
+        // matching name shape.
+        let free = "fn digest(data: &[u8]) -> Vec<u8> { vec![] }";
+        assert!(
+            !registered_names(free).contains(&"digest".to_owned()),
+            "a free function is not a registration"
+        );
     }
 
     /// The table itself must be internally consistent.

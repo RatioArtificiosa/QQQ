@@ -285,7 +285,10 @@ fn valid_name(name: &str) -> bool {
         return false;
     }
     if !name.contains('.') {
-        return true;
+        // A dotless name is a single label: the 63-octet label limit
+        // applies to it, or a 200-octet "name" would pass shape and reach
+        // the resolver.
+        return name.len() <= 63;
     }
     // No empty labels (`a..b`), no leading or trailing dot, no overlong
     // label: those never appear in the allowlist, which stores bare names.
@@ -667,6 +670,7 @@ mod tests {
             "a@b.com",
             "éxample.com",
             "münchen",
+            &"a".repeat(64),
         ] {
             assert!(
                 !valid_name(hostile),

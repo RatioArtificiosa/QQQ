@@ -273,6 +273,20 @@ impl HostSpan for crate::linker::StoreData {
         parent: Resource<Span>,
         name: String,
     ) -> std::result::Result<Resource<Span>, WitTraceError> {
+        // Grant first, like every sibling: an ungranted call with a bad
+        // handle must fail for the missing grant, not for the handle —
+        // otherwise the error kind leaks handle validity without the grant
+        // (`ARCH-012`), and the failure writes no audit row while a granted
+        // failure would. Through the audit seam so the attempt is recorded.
+        if crate::ambient::require(
+            self,
+            qqq_cap::capability::Capability::TraceWrite,
+            "trace_child",
+        )
+        .is_err()
+        {
+            return Err(WitTraceError::NotGranted);
+        }
         let parent_id = rep_index(&parent);
         match self.trace.spans.get(&parent_id) {
             Some(_) => start_span_impl(self, &name, Some(parent_id)),
@@ -551,6 +565,13 @@ fn rep_from_index(index: u32) -> Resource<Span> {
 /// dropped it — or any ancestor up to the root. A child whose parent was
 /// dropped is severed even though the child itself is still present, which is
 /// exactly the case the parentage check exists for.
+///
+/// The grant check here is defense in depth, not the audit seam: every
+/// caller (`event`, `set-attributes`, `set-error`) records through
+/// `ambient::require` before reaching this function, so the row is already
+/// written and the ordering (grant before liveness) already decided. This
+/// check keeps a future caller that forgot the seam from silently serving —
+/// it fails closed the same way, it just does not double-record.
 fn with_span<T>(
     data: &mut crate::linker::StoreData,
     handle: &Resource<Span>,
@@ -956,7 +977,7 @@ mod tests {
     /// seam writes the `Granted`/`Denied` row `assert-caps-only` reads, so
     /// an inline grant check would answer identically while leaving a
     /// tracing guest looking capability-clean. Counted, not `contains`:
-    /// one seam call in one body must not vouch for the other five.
+    /// one seam call in one body must not vouch for the other six.
     #[test]
     fn every_trace_body_records_through_the_audit_seam() {
         let production = include_str!("host_trace.rs")
@@ -965,8 +986,8 @@ mod tests {
             .unwrap_or_default();
         let seams = production.matches("ambient::require(").count();
         assert_eq!(
-            seams, 6,
-            "every trace body (start_span, current_traceparent, event, \
+            seams, 7,
+            "every trace body (child, start_span, current_traceparent, event, \
              set_attributes, set_error, drop) must consult the audit seam; \
              found {seams} seam call(s)"
         );
@@ -1065,6 +1086,21 @@ mod tests {
         assert!(data.trace.spans.is_empty());
         assert_eq!(data.trace.next, 0, "an empty table restarts at zero");
         let _again = start_span_impl(&mut data, "again", None).expect("minting resumes");
+    }
+
+    /// `child` judges the grant before liveness, like every sibling: an
+    /// ungranted call with a bad handle reports `not-granted`, not
+    /// `span-closed` — otherwise the error kind leaks handle validity
+    /// without the grant, and the `span-closed` path writes no audit row.
+    #[test]
+    fn child_without_grant_is_not_granted_even_for_a_bad_handle() {
+        let mut data = ungranted_store();
+        let err = <StoreData as HostSpan>::child(&mut data, rep_from_index(0), "kid".to_owned())
+            .expect_err("no grant");
+        assert!(
+            matches!(err, WitTraceError::NotGranted),
+            "grant first, like every sibling: {err:?}"
+        );
     }
 
     /// A secret value in an event or error is mirrored redacted: the mirror

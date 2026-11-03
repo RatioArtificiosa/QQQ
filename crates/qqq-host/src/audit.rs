@@ -854,7 +854,7 @@ impl AppendCounters {
 ///
 /// Adding a host function that records means adding its name here, and the test
 /// `every_recorded_function_round_trips` fails until it is.
-pub(crate) const RECORDED_FUNCTIONS: [&str; 30] = [
+pub(crate) const RECORDED_FUNCTIONS: [&str; 31] = [
     "handle_request",
     "hash_data",
     "hmac_compute",
@@ -880,6 +880,7 @@ pub(crate) const RECORDED_FUNCTIONS: [&str; 30] = [
     "env_get_or",
     "env_allowed_names",
     "trace_start_span",
+    "trace_child",
     "trace_current_traceparent",
     "trace_event",
     "trace_set_attributes",

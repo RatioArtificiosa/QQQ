@@ -132,7 +132,7 @@ pub const HOST_MODULES: [&str; 14] = [
 /// The number is not a transcription: [`registered_from_sources`] derives it from
 /// the source with the standard library available, and `arch012`'s
 /// both-directions scan independently confirms `AUDITED` matches the tree.
-pub const EXPECTED_REGISTRATIONS: usize = 29;
+pub const EXPECTED_REGISTRATIONS: usize = 26;
 
 /// Why a WIT-definition check could not be completed.
 ///
@@ -448,9 +448,13 @@ mod tests {
             found.iter().any(|r| r.name == "now"),
             "the clock interface's `now` must be among the registrations: {found:?}"
         );
+        // `random` and `hashing` bind through `bindgen!`, not `func_wrap`,
+        // so they contribute no registrations — the wasi shim's
+        // `get-random-bytes` stands in as the entropy-interface anchor
+        // instead, proving the scan sees past the crypto module.
         assert!(
-            found.iter().any(|r| r.name == "digest"),
-            "the hashing interface's `digest` must be among them: {found:?}"
+            found.iter().any(|r| r.name == "get-random-bytes"),
+            "the wasi random shim must be among the registrations: {found:?}"
         );
     }
 

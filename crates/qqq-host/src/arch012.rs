@@ -42,7 +42,7 @@
 //! | Mechanism | Where | What it catches |
 //! |---|---|---|
 //! | **Conditional registration** | `host_clock::register`, `host_crypto::register` | An interface whose capability is absent is never bound, so its functions are not merely refused — they are **absent** |
-//! | **Per-function re-check** | `wall-clock.now`, `monotonic-clock.now`, `random.get`, and every path through [`crate::ambient::require`] | A mis-built linker that bound the interface anyway |
+//! | **Per-function re-check** | `wall-clock.now`, `monotonic-clock.now`, every path through [`crate::ambient::require`], and every `bindgen!` trait-method body (`random.get`, `hashing.digest`, `hmac.compute`, …) | A mis-built linker that bound the interface anyway |
 //! | **Source-level totality** | [`AUDITED`], checked by [`audit`] | A **new** `func_wrap` added outside a gated registration path |
 //!
 //! The third is the addition. The first two are properties of the code as
@@ -174,7 +174,7 @@ impl Enforcement {
 /// disagree in either direction, so a `func_wrap` added without a row here is a
 /// test failure rather than an unexamined call path. That is the property that
 /// makes the table a check rather than documentation.
-pub const AUDITED: [AuditedCall; 29] = [
+pub const AUDITED: [AuditedCall; 26] = [
     AuditedCall {
         file: "host_clock.rs",
         function: "now",
@@ -218,27 +218,6 @@ pub const AUDITED: [AuditedCall; 29] = [
         // a reading, but the body re-checks the grant anyway, so a mis-built
         // linker still denies.
         enforced_by: Enforcement::PerFunction,
-    },
-    AuditedCall {
-        file: "host_crypto.rs",
-        function: "get",
-        interface: "qqq:crypto/random@1.0.0",
-        capability: Some(Capability::CryptoRandom),
-        enforced_by: Enforcement::PerFunction,
-    },
-    AuditedCall {
-        file: "host_crypto.rs",
-        function: "digest",
-        interface: "qqq:crypto/hashing@1.0.0",
-        capability: Some(Capability::CryptoHash),
-        enforced_by: Enforcement::ViaHelper,
-    },
-    AuditedCall {
-        file: "host_crypto.rs",
-        function: "digest-many",
-        interface: "qqq:crypto/hashing@1.0.0",
-        capability: Some(Capability::CryptoHash),
-        enforced_by: Enforcement::ViaHelper,
     },
     AuditedCall {
         file: "host_test.rs",
@@ -441,27 +420,38 @@ pub const AUDITED: [AuditedCall; 29] = [
     },
 ];
 
-/// Why the table has eight rows and lists no `hmac` interface.
+/// Why the table lists no `hmac`, `hashing`, or `qqq:crypto/random` rows.
 ///
-/// # The three rows that were wrong, and how they were caught
+/// # The rows that moved, and why the table did not follow
 ///
 /// The first version of [`AUDITED`] listed eleven calls, including
 /// `hmac-algorithm.name` and `hmac.get`, taken from the WIT's `hmac` interface
-/// without checking whether the host implements it. `host_crypto.rs` registers
-/// **three** functions — `random.get`, `hashing.digest`, `hashing.digest-many` —
-/// and it has a test asserting that the unimplemented interfaces are *not*
-/// registered, because registering a stub would replace a clear instantiation
-/// failure with a runtime mystery.
+/// without checking whether the host implements it. Later `random.get`,
+/// `hashing.digest` and `hashing.digest-many` were rows backed by
+/// hand-written `func_wrap` bodies — until the WIT-conformance fix moved the
+/// `qqq:crypto` interfaces to `bindgen!` trait implementations (a bare-shape
+/// host failed to *instantiate* a WIT-conformant guest, which no table row
+/// could express because the scanner only sees `func_wrap`).
 ///
-/// So three rows described code that does not exist, and [`audit`] reported them
-/// as [`AuditFinding::Stale`]. That is the table working as designed: a claim of
-/// coverage is checked against the source, and a table that can never disagree
-/// with the code is documentation rather than a check.
+/// `bindgen!` trait methods are not `func_wrap` registrations, so the
+/// table's machinery — which matches scanned registrations against rows —
+/// cannot see them. (`CryptoRandom` stays covered through the wasi random
+/// shims, which are `func_wrap` with seam checks.) Their grant re-checks
+/// are proven instead by direct execution tests on the trait
+/// (`random_get_refuses_by_name`, `hashing_refuses_by_name`,
+/// `hmac_grants_and_allowlist_are_checked`) and by the guest-compiled
+/// `iface_crypto` probe, exactly as for `hmac`/`aead`/`signing` before
+/// them. A row claiming source-text coverage of a `bindgen!` method would
+/// be documentation rather than a check, and the table refuses to be that:
+/// the scanner's `Unlisted`/`Stale` findings only fire on `func_wrap`, so
+/// a row with no `func_wrap` to match is a claim no test can falsify
+/// through this module.
 ///
-/// `CryptoHmac` therefore appears in no row, and
-/// `the_table_covers_every_capability_the_host_can_bind` does **not** require
-/// it — the capability is grantable and unimplemented, which `describe_gap`
-/// reports at instantiation.
+/// `CryptoHmac`, `CryptoHash`, `CryptoAead` and `CryptoSign` therefore appear
+/// in no row, and `the_table_covers_every_capability_the_host_can_bind`
+/// does **not** require them — the capabilities are grantable and
+/// implemented, which the direct tests and the probe prove, and which
+/// `describe_gap` reports at instantiation when ungranted.
 ///
 /// A disagreement between [`AUDITED`] and the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1305,40 +1295,64 @@ mod tests {
         // `filter_map` drops the `None` rows, which is right: **a row requiring no capability
         // covers none**, so an ungated row must not enter the set this assertion is about.
         let covered: BTreeSet<Capability> = AUDITED.iter().filter_map(|a| a.capability).collect();
-        for expected in [
-            Capability::ClockWall,
-            Capability::ClockMonotonic,
-            Capability::CryptoRandom,
-            Capability::CryptoHash,
-        ] {
+        for expected in [Capability::ClockWall, Capability::ClockMonotonic] {
             assert!(
                 covered.contains(&expected),
                 "`{expected}` is bindable but has no audited call"
             );
         }
-        // `CryptoHmac` is deliberately absent: it is grantable and
-        // **unimplemented**, so it has no host call to audit. Asserting its
-        // absence pins that, so the day an hmac function is registered the table
-        // must gain a row -- and `the_table_and_the_real_sources_agree` will say
-        // so, because the new `func_wrap` will be unlisted.
-        assert!(
-            !covered.contains(&Capability::CryptoHmac),
-            "an hmac call now exists; add it to AUDITED"
-        );
+        // `CryptoHash`, `CryptoHmac`, `CryptoAead` and `CryptoSign` are
+        // deliberately absent: their interfaces bind through `bindgen!`
+        // trait implementations, which the `func_wrap` scanner cannot see
+        // (`CryptoRandom` stays covered through the wasi random shims, which
+        // are `func_wrap`). Their per-call re-checks are proven instead by
+        // direct execution tests (`random_get_refuses_by_name`,
+        // `hashing_refuses_by_name`, `hmac_grants_and_allowlist_are_checked`)
+        // and the guest-compiled `iface_crypto` probe. Asserting their absence
+        // pins that, so the day a `func_wrap` reappears for one the table
+        // must gain a row — and `the_table_and_the_real_sources_agree` will
+        // say so, because the new `func_wrap` will be unlisted.
+        for absent in [
+            Capability::CryptoHash,
+            Capability::CryptoHmac,
+            Capability::CryptoAead,
+            Capability::CryptoSign,
+        ] {
+            assert!(
+                !covered.contains(&absent),
+                "a {absent:?} row now exists; it must be backed by a func_wrap the scanner sees"
+            );
+        }
     }
 
-    /// **The capability this item is really about: `CryptoHash` must be reached
+    /// **The capability this item used to pin: `CryptoHash` must be reached
     /// through a check.** `digest` is the function a guest actually calls, and a
-    /// guest without the grant must not reach `hash_data`'s work.
+    /// guest without the grant must not reach `hash_data`'s work. That property
+    /// is now proven by execution (`hashing_refuses_by_name` calls the trait
+    /// method directly for every refusal case, and the `iface_crypto` probe
+    /// covers it through a real component), which subsumes the source-text
+    /// assertion this test used to make — so the test asserts the coverage
+    /// exists and names where, rather than re-asserting the table.
     #[test]
-    fn the_hashing_functions_are_at_least_helper_checked() {
-        for row in AUDITED
-            .iter()
-            .filter(|a| a.capability == Some(Capability::CryptoHash))
-        {
+    fn the_hashing_functions_are_checked_by_execution() {
+        // The trait methods consult the grant on every call: the allowlist
+        // helper (`hash_data`) requires `CryptoHash`, and the boundary
+        // sizes are enforced before it runs. This test pins the wiring
+        // points rather than the behavior (behavior belongs to the
+        // execution tests above): `digest` and `digest_many` must both
+        // route through `hash_data`, so a future refactor that bypasses
+        // the helper fails here even if every refusal case still passes.
+        let source = include_str!("host_crypto.rs");
+        for method in ["fn digest(", "fn digest_many("] {
+            let at = source
+                .find(method)
+                .unwrap_or_else(|| panic!("the hashing trait method `{method}` must exist"));
+            let body = &source[at..];
+            let end = body.find("\n    }\n").expect("the method must be closed");
             assert!(
-                row.enforced_by.rechecks_each_call(),
-                "{row:?} is a hashing entry that does not consult the grant"
+                body[..end].contains("hash_data("),
+                "`{method}` must route through the allowlist helper `hash_data`; \
+                 a path that computes without it consults no grant"
             );
         }
     }

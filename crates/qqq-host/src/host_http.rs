@@ -199,6 +199,12 @@ impl bindings::qqq::http::http::Host for StoreData {
             // mis-built linker), and an operator who cannot see it cannot
             // distinguish probing from quiet. The row names the attempted
             // target parsed — never vetted — with zero bytes moved.
+            //
+            // The row is budget-bound like every other audit row: charging
+            // before pushing keeps an ungranted probe loop from growing
+            // `egress_audit` without spending (attempts, not successes —
+            // the same rule the mapping refusals follow).
+            let _ = self.subrequests.charge();
             let (host, port) = parse_attempted_authority(&req.url);
             self.egress_audit.push(crate::egress::AuditRow {
                 host,
@@ -1324,6 +1330,27 @@ mod tests {
         assert_eq!(row.host, "api.example.com");
         assert_eq!(row.port, 443);
         assert!(matches!(row.outcome, Outcome::Refused { .. }));
+    }
+
+    /// An ungranted `send` spends the subrequest budget: the audit row is
+    /// bounded by the same budget as every other row, so an ungranted
+    /// probe loop cannot grow `egress_audit` for free.
+    #[test]
+    fn an_ungranted_send_spends_the_subrequest_budget() {
+        let mut data = StoreData::new(grants_from(SERVER));
+        data.subrequests = crate::quota::SubrequestBudget::new(10);
+        let result = data.send(get("https://api.example.com/thing"));
+        assert_eq!(outcome(&result), "host-not-allowed");
+        assert_eq!(
+            data.subrequests.spent(),
+            1,
+            "the audit row is budget-bound, granted or not"
+        );
+        assert_eq!(
+            data.take_egress_audit().len(),
+            1,
+            "the attempt is still recorded"
+        );
     }
 
     #[test]

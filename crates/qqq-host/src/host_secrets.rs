@@ -1004,11 +1004,9 @@ fn register_apply(
                     }
                 };
                 // The two-input rule: exactly one carrier.
-                let effective: Vec<u8> = match (payload.is_empty(), input.is_empty()) {
-                    (true, true) => Vec::new(),
-                    (false, true) => payload,
-                    (true, false) => input,
-                    (false, false) => return Ok((Err(WitSecretError::OperationNotPermitted),)),
+                let effective = match split_effective_input(payload, &input) {
+                    Ok(bytes) => bytes,
+                    Err(e) => return Ok((Err(e),)),
                 };
                 if effective.len() > MAX_SECRET_INPUT {
                     return Ok((Err(WitSecretError::InputTooLong),));
@@ -1033,6 +1031,23 @@ fn register_apply(
     )?;
 
     Ok(())
+}
+
+/// The two-input rule: the operation payload and the trailing `input`
+/// carry the same bytes through different ABI slots, so exactly one of
+/// them may be non-empty. Both empty means "no input"; both non-empty
+/// means the guest disagrees with itself, which fails closed as
+/// `operation-not-permitted` rather than guessing which half to trust.
+fn split_effective_input(
+    payload: Vec<u8>,
+    input: &[u8],
+) -> std::result::Result<Vec<u8>, WitSecretError> {
+    match (payload.is_empty(), input.is_empty()) {
+        (true, true) => Ok(Vec::new()),
+        (false, true) => Ok(payload),
+        (true, false) => Ok(input.to_vec()),
+        (false, false) => Err(WitSecretError::OperationNotPermitted),
+    }
 }
 
 /// The `verify` half of `apply`: the record is already split by the caller.
@@ -1578,6 +1593,33 @@ mod tests {
                 op.as_str()
             );
         }
+    }
+
+    /// A bare `verify` through `apply` is refused rather than guessed at.
+    #[test]
+    fn the_two_input_rule_picks_exactly_one_carrier() {
+        // Both empty: no input.
+        assert_eq!(
+            split_effective_input(Vec::new(), b"").expect("empty+empty is empty"),
+            Vec::<u8>::new()
+        );
+        // Payload only.
+        assert_eq!(
+            split_effective_input(b"from-op".to_vec(), b"").expect("payload wins when alone"),
+            b"from-op".to_vec()
+        );
+        // Trailing input only.
+        assert_eq!(
+            split_effective_input(Vec::new(), b"from-input").expect("input wins when alone"),
+            b"from-input".to_vec()
+        );
+        // Both set: fail closed, never guess.
+        assert!(
+            std::mem::discriminant(
+                &split_effective_input(b"a".to_vec(), b"b").expect_err("both carriers refuse")
+            ) == std::mem::discriminant(&WitSecretError::OperationNotPermitted),
+            "two carriers must refuse as operation-not-permitted"
+        );
     }
 
     /// A bare `verify` through `apply` is refused rather than guessed at.

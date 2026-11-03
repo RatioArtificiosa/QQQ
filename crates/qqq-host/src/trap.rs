@@ -314,6 +314,28 @@ fn frame_from(info: &wasmtime::FrameInfo) -> WasmFrame {
     }
 }
 
+/// The most engine detail one trap keeps, in bytes.
+///
+/// Backtrace frames carry guest-controlled module and function names, so an
+/// unbounded `detail` is an unbounded host allocation priced at one guest
+/// identifier. Only what is *stored* (and rendered, and exported) is cut —
+/// classification reads the full text, and triage keeps the head, where the
+/// engine puts the cause.
+pub const MAX_TRAP_DETAIL_BYTES: usize = 4 * 1024;
+
+fn truncate_detail(detail: &str) -> String {
+    if detail.len() <= MAX_TRAP_DETAIL_BYTES {
+        return detail.to_owned();
+    }
+    // Cut on a character boundary and mark it: a silent cut would read as a
+    // complete record.
+    let mut end = MAX_TRAP_DETAIL_BYTES;
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[truncated]", &detail[..end])
+}
+
 impl Trap {
     /// Build a trap from a raw engine error.
     #[must_use]
@@ -322,7 +344,10 @@ impl Trap {
         Self {
             code,
             message: human_message(code).to_owned(),
-            detail: detail.to_owned(),
+            // Classified whole, stored cut: frame names are
+            // guest-controlled, so the stored (rendered, exported) text is
+            // bounded while the classifier still sees everything.
+            detail: truncate_detail(detail),
             backtrace: Vec::new(),
             memory_peak_bytes: None,
             fuel_consumed: None,
@@ -591,6 +616,32 @@ mod tests {
     /// These strings are pinned deliberately. They are the compatibility
     /// surface with Wasmtime: if an upgrade changes them, CI fails here rather
     /// than silently misclassifying a trap in production.
+    #[test]
+    fn an_oversize_detail_is_stored_truncated_not_dropped() {
+        // Classification still sees the whole text: the signal sits past
+        // the cut, and the code must not change because storage did.
+        let signal = "Caused by:\n    all fuel consumed by WebAssembly";
+        let big = format!("{}{}", "f".repeat(8 * 1024), signal);
+        let trap = Trap::from_engine_error(&big);
+        assert_eq!(
+            trap.code,
+            ErrorCode::FuelExhausted,
+            "classification reads the full text, not the stored prefix"
+        );
+        assert!(
+            trap.detail.len() < big.len(),
+            "the stored detail is bounded"
+        );
+        assert!(
+            trap.detail.ends_with("[truncated]"),
+            "a cut is marked, never silent"
+        );
+        // Short details pass through untouched.
+        let short = Trap::from_engine_error("all fuel consumed by WebAssembly");
+        assert_eq!(short.detail, "all fuel consumed by WebAssembly");
+        assert_eq!(short.code, ErrorCode::FuelExhausted);
+    }
+
     #[test]
     fn wasmtime_fuel_message_classifies_as_fuel() {
         let detail = "error while executing at wasm backtrace:\n\

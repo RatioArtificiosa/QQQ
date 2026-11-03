@@ -232,6 +232,16 @@ impl LogHost for crate::linker::StoreData {
         if records.len() > MAX_LOG_RECORDS {
             return Err(WitLogError::RecordTooLarge);
         }
+        // Quota before validation: the loop below clones and redacts every
+        // record (host CPU per guest byte), so an over-quota batch would
+        // burn that work before being refused. The count is known up front
+        // and needs no validation — a batch that cannot fit is refused the
+        // same way either way, only earlier.
+        let open = u32::try_from(self.logs.len()).unwrap_or(u32::MAX);
+        let more = u32::try_from(records.len()).unwrap_or(u32::MAX);
+        self.handles
+            .try_open_batch(open, more)
+            .map_err(|_| WitLogError::RecordTooLarge)?;
         let mut validated = Vec::with_capacity(records.len());
         let mut levels = Vec::with_capacity(records.len());
         for (level, message, attributes) in &records {
@@ -241,11 +251,6 @@ impl LogHost for crate::linker::StoreData {
         let additional: usize = validated.iter().map(|v| v.size).sum();
         // The batch is atomic and the quota binds on the would-be total, so a
         // batch that overflows is refused whole rather than half-applied.
-        let open = u32::try_from(self.logs.len()).unwrap_or(u32::MAX);
-        let more = u32::try_from(validated.len()).unwrap_or(u32::MAX);
-        self.handles
-            .try_open_batch(open, more)
-            .map_err(|_| WitLogError::RecordTooLarge)?;
         if self.logs.len() + validated.len() > MAX_LOG_RECORDS
             || buffered_bytes(&self.logs) + additional > MAX_LOG_TOTAL_BYTES
         {
@@ -444,10 +449,17 @@ pub(crate) fn record_bytes(message: &str, attributes: &[(String, AttributeValue)
     let mut total = message.len();
     for (name, value) in attributes {
         total += name.len();
-        match value {
-            AttributeValue::Text(text) => total += text.len(),
-            _ => total += 8,
-        }
+        // Worst-case rendered widths, not averages: `i64::MIN` is 20
+        // characters and the longest shortest-repr `f64` 24. Counting the
+        // typical small number instead would let a buffer of extremes
+        // overshoot the 4 MiB bound by megabytes per thousand records —
+        // the estimate must stay above the rendering it bounds.
+        total += match value {
+            AttributeValue::Text(text) => text.len(),
+            AttributeValue::Integer(_) => 20,
+            AttributeValue::Float(_) => 24,
+            AttributeValue::Boolean(_) => 5,
+        };
     }
     total
 }
@@ -558,14 +570,24 @@ fn emit_record(
     message: &str,
     attributes: &[Attribute],
 ) -> std::result::Result<(), WitLogError> {
-    let validated = validate_record(data, message, attributes)?;
-    // The manifest quota binds before the absolute caps: one record against
-    // the current buffer length. Both report `RecordTooLarge` — the WIT type
-    // has no quota case — while the quota's counter records the exhaustion.
+    // Grant first, like every sibling: an ungranted call fails for the
+    // missing grant before its size or quota is judged — otherwise the
+    // error tells an ungranted guest how big a record may be. (`validate_record`
+    // repeats the check; the second one always passes here and stays as
+    // defense in depth.)
+    if !data.grants.grants(LogWrite) {
+        return Err(WitLogError::NotGranted);
+    }
+    // The manifest quota binds before the absolute caps — and before
+    // validation: one record against the current buffer length, judged
+    // before the host clones and redacts anything. Both report
+    // `RecordTooLarge` — the WIT type has no quota case — while the quota's
+    // counter records the exhaustion.
     let open = u32::try_from(data.logs.len()).unwrap_or(u32::MAX);
     data.handles
         .try_open(open)
         .map_err(|_| WitLogError::RecordTooLarge)?;
+    let validated = validate_record(data, message, attributes)?;
     if data.logs.len() >= MAX_LOG_RECORDS
         || buffered_bytes(&data.logs) + validated.size > MAX_LOG_TOTAL_BYTES
     {
@@ -850,6 +872,23 @@ mod tests {
         assert!(
             buffered_bytes(&data.logs) <= MAX_LOG_TOTAL_BYTES,
             "the buffer never exceeds its byte bound"
+        );
+    }
+
+    /// The byte estimate counts worst-case renderings, not averages: an
+    /// `i64::MIN` renders 20 characters and the longest shortest-repr
+    /// `f64` 24, so the estimate for scalar-heavy records must clear both.
+    #[test]
+    fn record_bytes_counts_worst_case_scalar_widths() {
+        let attrs = vec![
+            ("i".to_owned(), AttributeValue::Integer(i64::MIN)),
+            ("f".to_owned(), AttributeValue::Float(f64::MAX)),
+            ("b".to_owned(), AttributeValue::Boolean(true)),
+        ];
+        assert_eq!(
+            record_bytes("msg", &attrs),
+            3 + (1 + 20) + (1 + 24) + (1 + 5),
+            "message plus per-attribute name and worst-case value widths"
         );
     }
 

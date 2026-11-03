@@ -318,6 +318,56 @@ mod tests {
         );
     }
 
+    /// A sync-shaped `wait-until` import binds the stub and fails LOUDLY at
+    /// call time: the stub names engine async support instead of succeeding
+    /// silently or trapping generically. (True `async`-shaped imports cannot
+    /// be expressed by any supported toolchain, so link-time behavior for
+    /// them is untestable here; the WIT-text test above pins which names
+    /// are async, and no-async-tooling is why the stubs exist at all.)
+    #[test]
+    fn sync_shaped_wait_until_binds_and_fails_loudly() {
+        use wasmtime::Store;
+        use wasmtime::component::{Component, Linker};
+        const GUEST: &str = r#"(component
+  (import "wasi:clocks/monotonic-clock@0.3.2" (instance $c
+    (export "wait-until" (func (param "when" u64)))
+  ))
+  (alias export $c "wait-until" (func $wu))
+  (core func $wu (canon lower (func $wu)))
+  (core module $m
+    (import "" "wait-until" (func $wu (param i64)))
+    (func (export "run") (call $wu (i64.const 0)))
+  )
+  (core instance $i (instantiate $m
+    (with "" (instance (export "wait-until" (func $wu))))
+  ))
+  (func (export "run") (canon lift (core func $i "run")))
+)"#;
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        let engine = wasmtime::Engine::new(&config).expect("engine builds");
+        let component = Component::new(&engine, GUEST).expect("guest compiles");
+        let manifest = qqq_cap::manifest::Manifest::parse(
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n[capabilities.clock]\nmonotonic = true\n",
+        )
+        .expect("manifest parses");
+        let grants = qqq_cap::resolve::GrantSet::from_manifest(&manifest);
+        let mut linker = Linker::<crate::linker::StoreData>::new(&engine);
+        register(&mut linker, &grants).expect("register");
+        let mut store = Store::new(&engine, crate::linker::StoreData::new(grants));
+        let instance = linker
+            .instantiate(&mut store, &component)
+            .expect("the sync shape binds the stub");
+        let run = instance
+            .get_typed_func::<(), ()>(&mut store, "run")
+            .expect("run export");
+        let err = run.call(&mut store, ()).expect_err("the stub must trap");
+        assert!(
+            format!("{err:?}").contains("async"),
+            "the trap must name engine async support: {err:?}"
+        );
+    }
+
     /// **HOST-026** — the served 0.3 surface needs no 0.3.1 WIT features.
     ///
     /// WASI 0.3.1 added `implements` and `map<K,V>` to WIT, and its release

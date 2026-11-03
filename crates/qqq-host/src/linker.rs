@@ -2462,13 +2462,16 @@ mod tests {
         // Every file that registers host functions through `func_wrap`.
         // `include_str!` reads the repository's own source, so the check runs
         // against what is committed. Bindgen-based modules (http, sql, kv,
-        // queue, dns, log, trace, wasi) do not appear here: their host calls
-        // are trait-method implementations on generated bindings, not
+        // queue, dns, log, trace, wasi, crypto) do not appear here: their host
+        // calls are trait-method implementations on generated bindings, not
         // `func_wrap` closures, and their panic audit belongs to the host-b
-        // review of each module rather than to this counter.
-        let sources: [(&str, &str); 7] = [
+        // review of each module rather than to this counter. (`crypto` joined
+        // that list when `random`/`hashing` moved to `bindgen!`: the trait
+        // bodies carry no `guard::guard`, so the H1 checker
+        // (`tools/check_no_panic_in_host_impls.py`) plus the absence of panic
+        // primitives is the enforcement there, as for `hmac`/`aead`/`signing`.)
+        let sources: [(&str, &str); 6] = [
             ("host_clock.rs", include_str!("host_clock.rs")),
-            ("host_crypto.rs", include_str!("host_crypto.rs")),
             ("host_env.rs", include_str!("host_env.rs")),
             ("host_secrets.rs", include_str!("host_secrets.rs")),
             ("host_test.rs", include_str!("host_test.rs")),

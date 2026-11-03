@@ -445,6 +445,19 @@ fn map_request(
     if req.body.as_ref().map_or(0, Vec::len) as u64 > limits.max_request_bytes {
         return Err(HttpError::RequestTooLarge);
     }
+    // Bound each variable-length string before materializing it: the count
+    // cap bounds the `Vec`, but a single 100 MB URL or header value would
+    // otherwise allocate before the connector's total-bytes check fires.
+    // 8 KiB names a URL no proxy will forward; 16 KiB per header field
+    // keeps 100 headers within a small multiple of the 1 MiB total.
+    if req.url.len() > 8 * 1024 {
+        return Err(HttpError::RequestTooLarge);
+    }
+    for header in &req.headers {
+        if header.name.len() > 16 * 1024 || header.value.len() > 16 * 1024 {
+            return Err(HttpError::RequestTooLarge);
+        }
+    }
     let mut headers = Vec::with_capacity(req.headers.len());
     for header in req.headers {
         // Non-UTF-8 is a shape error, not a size error: same least-wrong
@@ -646,6 +659,37 @@ mod tests {
         // chosen. If it drifted, registration would bind nothing and instantiation would
         // fail with Wasmtime's generic "unknown import".
         assert_eq!(INTERFACE, "qqq:http/http@1.0.0");
+    }
+
+    /// Oversize URLs and header fields are refused before allocation: the
+    /// count cap bounds the `Vec`, but a single huge string would otherwise
+    /// allocate before the connector's total-bytes check fires.
+    #[test]
+    fn oversize_url_and_headers_are_refused() {
+        let limits = crate::egress::Limits::default();
+        let big_url = get(&format!("https://example.com/{}", "x".repeat(9 * 1024)));
+        assert!(matches!(
+            map_request(big_url, &limits),
+            Err(HttpError::RequestTooLarge)
+        ));
+        let mut big_header = get("https://example.com/");
+        big_header.headers = vec![Header {
+            name: "x".to_owned(),
+            value: vec![b'y'; 17 * 1024],
+        }];
+        assert!(matches!(
+            map_request(big_header, &limits),
+            Err(HttpError::RequestTooLarge)
+        ));
+        let mut big_name = get("https://example.com/");
+        big_name.headers = vec![Header {
+            name: "x".repeat(17 * 1024),
+            value: vec![b'y'],
+        }];
+        assert!(matches!(
+            map_request(big_name, &limits),
+            Err(HttpError::RequestTooLarge)
+        ));
     }
 
     #[test]

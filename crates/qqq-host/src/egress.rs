@@ -2065,55 +2065,64 @@ fn is_secret_header(name: &str) -> bool {
 /// mangled), then leading digits strip (`x-2token` -> `token`); the author
 /// family (`author`/`authors`) is refused here, before any affix rule can
 /// re-catch it. Then a fixed-point loop strips trailing digits and one
-/// trailing `s` (`token2s` -> `token`), and finally a proper affix match
-/// catches concatenated names on either side (`x-mysecret`,
-/// `x-secretbox`): the head or tail names the secret. Each pass shortens
+/// trailing `s` (`token2s` -> `token`), and finally a proper substring
+/// match catches concatenated names on any side (`x-mysecret`,
+/// `x-secretbox`): any known credential word inside the token strips. Each pass shortens
 /// the token or stops, so the loop always terminates; an all-digit token
 /// strips to empty and matches nothing. Affixes must be proper (strictly
-/// shorter than the word) so exact matches stay exact. Fail-closed on
-/// collisions: `x-keyboard`/`x-tokenizer`-shaped names strip because they
-/// start with a secret word, while `x-authors` travels because the author
-/// family is carved out above.
+/// shorter than the word) so exact matches stay exact; a proper substring
+/// anywhere in the word strips, so padded, prefixed, suffixed, and infix
+/// forms (`x-mysecret`, `x-secretbox`, `x-ztokenz`) are all caught.
+/// Fail-closed on collisions: `x-keyboard`/`x-tokenizer`-shaped names strip
+/// because they contain a secret word, while `x-authors` travels because
+/// the author family is carved out above. Interior leet (`x-t0ken`,
+/// `x-s3cret`) travels: digit folding would mangle real words and site
+/// secrets do not spell themselves that way; documented residual.
 fn is_secret_token(token: &str) -> bool {
-    // Exact hit first: protects digit-led names like `2fa` from mangling,
-    // and short-circuits the common `pass`/`token`-family names.
+    // Exact hit first: protects digit-led names like `2fa` from mangling.
     if SECRET_TOKENS.contains(&token) {
         return true;
     }
-    let mut word = token.trim_start_matches(|c: char| c.is_ascii_digit());
-    loop {
-        word = word.trim_end_matches(|c: char| c.is_ascii_digit());
-        // The author family travels, in either number: `x-author` and
-        // `x-authors` (and digit-decorated forms) are ordinary headers, not
-        // credentials. Checked after digit canonicalization so affixed
-        // forms land here too.
-        if word == "author" || word == "authors" {
-            return false;
-        }
-        if SECRET_TOKENS.contains(&word) {
-            return true;
-        }
-        // Affixed secrets: a known token as a proper prefix or suffix.
-        // Proper (strictly shorter) so exact matches stay exact and the
-        // author carve-out above cannot be re-caught here.
-        if SECRET_TOKENS
-            .iter()
-            .any(|k| word.len() > k.len() && (word.starts_with(k) || word.ends_with(k)))
-        {
-            return true;
-        }
-        // Singularize once per round; a token with no trailing `s` and no
-        // leading digits to strip is fully canonicalized and unmatched.
-        if let Some(stem) = word.strip_suffix('s') {
-            word = stem;
-        } else {
-            let stripped = word.trim_start_matches(|c: char| c.is_ascii_digit());
-            if stripped == word {
-                return false;
+    // Canonicalization closure: every form reachable by stripping affix
+    // digits and one trailing `s`, repeatedly. Each step strictly shortens
+    // the word, so the set is finite and the loop below always ends.
+    let mut forms = vec![token];
+    let mut i = 0;
+    while let Some(&w) = forms.get(i) {
+        i += 1;
+        for s in [
+            w.trim_end_matches(|c: char| c.is_ascii_digit()),
+            w.trim_start_matches(|c: char| c.is_ascii_digit()),
+        ] {
+            if s.len() < w.len() && !forms.contains(&s) {
+                forms.push(s);
             }
-            word = stripped;
+        }
+        if let Some(stem) = w.strip_suffix('s')
+            && !forms.contains(&stem)
+        {
+            forms.push(stem);
         }
     }
+    // The author family travels, in either number and however decorated:
+    // `x-author`, `x-authors`, `x-author2` are ordinary headers, not
+    // credentials. Checked before any affix rule so the family can never
+    // be re-caught below.
+    if forms.iter().any(|w| *w == "author" || *w == "authors") {
+        return false;
+    }
+    // Any remaining form that is, or contains, a known credential word.
+    // A proper substring (`word.len() > t.len()`) keeps exact matches
+    // exact while catching padded, prefixed, suffixed, and infix forms
+    // (`x-mysecretbox`, `x-secret2`). Fail-closed: an innocent word
+    // containing a secret token (e.g. `x-keyboard`, `x-passport`)
+    // strips rather than travels; the documented exceptions are the
+    // author family above and the `api`-style non-tokens below.
+    forms.iter().any(|&word| {
+        SECRET_TOKENS
+            .iter()
+            .any(|&t| word == t || (word.len() > t.len() && word.contains(t)))
+    })
 }
 
 fn safe_host(url: &str) -> String {
@@ -3952,8 +3961,18 @@ mod redirect_tests {
     /// are secrets by convention; an innocent `author` is not one.
     /// The hostile header set: every secret spelling the stripper must catch,
     /// plus ordinary headers that must travel. Factored out so the test
-    /// reads as arrange/act/assert rather than a 60-line literal.
+    /// reads as arrange/act/assert rather than a 100-line literal; split
+    /// into secret rows (must strip) and ordinary rows (must travel) so
+    /// each stays under the line-count lint.
     fn hostile_request_headers() -> Vec<(String, String)> {
+        let mut headers = hostile_secret_headers();
+        headers.extend(hostile_affix_headers());
+        headers.extend(ordinary_travel_headers());
+        headers
+    }
+
+    /// Secret spellings: every one must strip at the cross-origin boundary.
+    fn hostile_secret_headers() -> Vec<(String, String)> {
         vec![
             ("authorization".to_owned(), "Bearer secret".to_owned()),
             ("x-api-key".to_owned(), "key-secret".to_owned()),
@@ -4021,15 +4040,67 @@ mod redirect_tests {
                 "abbreviated numbered secret".to_owned(),
             ),
             ("x-pswd".to_owned(), "abbreviated secret".to_owned()),
-            ("x-2token".to_owned(), "leading-number secret".to_owned()),
             (
                 "x-apitoken2".to_owned(),
                 "concatenated numbered secret".to_owned(),
             ),
             ("x-passport".to_owned(), "prefixed secret".to_owned()),
+            ("x-keyboard".to_owned(), "prefixed secret".to_owned()),
+        ]
+    }
+
+    /// Digit-led, infix-padded, prefixed, and punctuation-folded secrets:
+    /// every one must strip at the cross-origin boundary.
+    fn hostile_affix_headers() -> Vec<(String, String)> {
+        vec![
+            ("x-2token".to_owned(), "leading-number secret".to_owned()),
+            ("x-2fa2".to_owned(), "digit-led numbered secret".to_owned()),
+            ("x-2fas".to_owned(), "digit-led plural secret".to_owned()),
+            (
+                "x-02fa".to_owned(),
+                "zero-padded digit-led secret".to_owned(),
+            ),
+            ("x-12fa".to_owned(), "padded digit-led secret".to_owned()),
+            ("x-ztokenz".to_owned(), "infix padded secret".to_owned()),
+            ("x-mytokenmy".to_owned(), "infix padded secret".to_owned()),
+            ("x-zsecretz".to_owned(), "infix padded secret".to_owned()),
+            ("x-atokenb".to_owned(), "infix padded secret".to_owned()),
+            (
+                "x-myauthtokenmy".to_owned(),
+                "infix padded secret".to_owned(),
+            ),
+            ("x-secretbox".to_owned(), "prefixed secret".to_owned()),
+            ("x-tokenid".to_owned(), "prefixed secret".to_owned()),
+            ("x-keyid".to_owned(), "prefixed secret".to_owned()),
+            ("x-secretid".to_owned(), "prefixed secret".to_owned()),
+            ("x-passwordreset".to_owned(), "prefixed secret".to_owned()),
+            ("x-tokenbox".to_owned(), "prefixed secret".to_owned()),
+            ("x-keystore".to_owned(), "prefixed secret".to_owned()),
+            ("x-mysecretbox".to_owned(), "affixed secret".to_owned()),
+            ("x-tokenizer".to_owned(), "prefixed secret".to_owned()),
+            ("x-api!key".to_owned(), "punctuation secret".to_owned()),
+            ("x-secret*token".to_owned(), "punctuation secret".to_owned()),
+        ]
+    }
+
+    /// Ordinary headers: every one must travel untouched.
+    fn ordinary_travel_headers() -> Vec<(String, String)> {
+        vec![
             (
                 "x-authors".to_owned(),
                 "the author family travels".to_owned(),
+            ),
+            (
+                "x-author".to_owned(),
+                "the author family travels".to_owned(),
+            ),
+            (
+                "x-author2".to_owned(),
+                "digit-decorated author travels".to_owned(),
+            ),
+            (
+                "x-2authors2s".to_owned(),
+                "digit-decorated author travels".to_owned(),
             ),
             ("x-keyboard".to_owned(), "prefixed secret".to_owned()),
             ("author".to_owned(), "not a credential".to_owned()),
@@ -4086,8 +4157,17 @@ mod redirect_tests {
                 names,
                 // No `content-length`: the redirected hop is a GET with an empty
                 // body, and `exchange` writes the length only when a body travels.
-                // The three `x-*` negatives travel: they name no credential.
-                ["author", "connection", "host", "x-authors", "x-keep",],
+                // The five `x-*` negatives travel: they name no credential.
+                [
+                    "author",
+                    "connection",
+                    "host",
+                    "x-2authors2s",
+                    "x-author",
+                    "x-author2",
+                    "x-authors",
+                    "x-keep",
+                ],
                 "only connector-owned and ordinary headers reach {host}: {seen:?}"
             );
             assert!(

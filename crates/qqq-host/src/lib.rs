@@ -137,6 +137,8 @@ pub mod quota;
 pub mod replay;
 pub mod sink_lane;
 pub mod tenant;
+#[cfg(test)]
+pub(crate) mod test_scan;
 pub mod trap;
 
 pub use admission::{Admitted, HostCapacity, Refusal, admit};

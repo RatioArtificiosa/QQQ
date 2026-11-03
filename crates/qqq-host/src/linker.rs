@@ -189,8 +189,8 @@ pub struct StoreData {
     /// Exactly one row per `send` call (success, refusal, or failure —
     /// the connector audits every path). Drained with
     /// [`StoreData::take_egress_audit`]: rows are bounded by the
-    /// subrequest budget per lifecycle, and a debug assertion fires
-    /// if a reconfigured store still holds rows from a prior one.
+    /// subrequest budget per lifecycle, and `set_limits` asserts when a
+    /// reconfigured store still holds rows from a prior one.
     /// Durable routing (serve drains per request into the audit
     /// worker path) is scheduled serve-integration work alongside the
     /// `GuestApp` manifest threading — today the buffer is the emission
@@ -1001,12 +1001,15 @@ impl StoreData {
         self.subrequests = crate::quota::SubrequestBudget::new(limits.max_subrequests);
         self.handles = crate::quota::HandleQuota::new(limits.max_open_handles);
         self.limits = Some(limits);
-        // A lifecycle boundary, so undrained egress rows fail loudly here
-        // rather than accumulating silently across reuses: rows belong to
-        // the lifecycle that emitted them, and the consumer drains per
-        // lifecycle with `take_egress_audit`. `assert!`, not `debug_assert!`:
-        // in release the alternative is cross-request misattribution, not a
-        // blank report -- rows must never quietly change owners.
+        // A reconfiguration guard, not a hot-path lifecycle boundary:
+        // `Instance::create` builds a fresh `StoreData` per request, so in
+        // production this only fires on programmer error (setting limits
+        // twice without draining, or a future pooled reuse that outlives
+        // its rows). Undrained rows belong to the lifecycle that emitted
+        // them and are drained per lifecycle with `take_egress_audit`;
+        // `assert!`, not `debug_assert!`, because in release the alternative
+        // is rows quietly changing owners across requests -- misattribution,
+        // not a blank report.
         assert!(
             self.egress_audit.is_empty(),
             "egress audit rows outlived their lifecycle: drain with take_egress_audit"

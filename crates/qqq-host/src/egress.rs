@@ -1939,11 +1939,12 @@ fn strip_credentials(headers: &mut Vec<(String, String)>) {
 /// Whether a header name carries a credential by convention.
 ///
 /// Two-tier: well-known full names (including the `x-` spellings operators
-/// actually use) match whole, and hyphen-separated tokens match credential
-/// words -- so a site-specific `x-acme-secret` is caught by `secret` while
-/// an innocent `author` is not `auth`. Matched case-insensitively because
-/// header names are. Ordinary headers (tracing IDs, content negotiation)
-/// match neither tier and travel untouched.
+/// actually use, and the concatenated spellings attackers use) match whole,
+/// and separator-normalized tokens match credential words -- so a
+/// site-specific `x-acme-secret` is caught by `secret` while an innocent
+/// `author` is not `auth`. Matched case-insensitively because header names
+/// are. Ordinary headers (tracing IDs, content negotiation) match neither
+/// tier and travel untouched.
 ///
 /// (`session-id` needs no entry: the split never yields it, and the
 /// `session` token already catches the header. A denylist cannot name
@@ -1975,6 +1976,14 @@ fn is_secret_header(name: &str) -> bool {
         "authenticate",
         "authentication",
         "authn",
+        "apikey",
+        "x-apikey",
+        "authtoken",
+        "accesstoken",
+        "authkey",
+        "secretkey",
+        "sessionkey",
+        "accesskey",
         "token",
         "bearer",
         "secret",
@@ -1990,7 +1999,15 @@ fn is_secret_header(name: &str) -> bool {
         "key",
     ];
     let lower = name.to_ascii_lowercase();
-    if SECRET_NAMES.contains(&lower.as_str()) {
+    // One separator: `x_apikey`, `x.apikey`, and `x-apikey` are the same
+    // evasion with different punctuation. Normalizing before the exact-name
+    // tier keeps one denylist instead of three punctuations times every
+    // entry; tokens split on `-` below (dots and underscores already folded).
+    let norm: String = lower
+        .chars()
+        .map(|c| if c == '_' || c == '.' { '-' } else { c })
+        .collect();
+    if SECRET_NAMES.contains(&norm.as_str()) {
         return true;
     }
     // Plurals travel too (`x-api-keys`, `x-tokens`): a secret word with one
@@ -2003,7 +2020,7 @@ fn is_secret_header(name: &str) -> bool {
     // separator (dots are legal token characters, so the shape reaches
     // here). A bare `api` still travels -- only exact names and secret
     // tokens strip, so version/tracing headers are untouched.
-    lower.split(['-', '_', '.']).any(|token| {
+    norm.split('-').any(|token| {
         SECRET_TOKENS.contains(&token)
             || token
                 .strip_suffix('s')
@@ -3868,6 +3885,13 @@ mod redirect_tests {
                 ("x-api-keys".to_owned(), "plural smuggling".to_owned()),
                 ("x-tokens".to_owned(), "plural smuggling".to_owned()),
                 ("x-cookies".to_owned(), "plural smuggling".to_owned()),
+                ("x_apikey".to_owned(), "underscore smuggling".to_owned()),
+                ("x.apikey".to_owned(), "dot smuggling".to_owned()),
+                (
+                    "x-authtokens".to_owned(),
+                    "plural-concat smuggling".to_owned(),
+                ),
+                ("x_secretkey".to_owned(), "underscore smuggling".to_owned()),
                 ("author".to_owned(), "not a credential".to_owned()),
                 ("x-keep".to_owned(), "yes".to_owned()),
             ],

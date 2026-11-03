@@ -1164,6 +1164,10 @@ mod tests {
     /// the name literal is allowlisted, so a typo fails CI in any profile,
     /// not just in debug.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "allowlist scanner: two call-shape loops plus contract docs read as one unit"
+    )]
     fn every_audit_seam_name_is_a_recorded_function() {
         /// The argument list of the call whose `(` sits at `open`,
         /// paren-depth aware so receivers like `store.data()` parse.
@@ -1219,15 +1223,27 @@ mod tests {
             include_str!("host_wasi03.rs"),
         ];
         for source in MODULES {
-            // Tests call the seam with fixture names; the contract covers
-            // shipping code only.
-            let production = source.split("#[cfg(test)]").next().unwrap_or_default();
-            for (at, _) in production.match_indices("require(") {
-                // The definition, not a call.
-                if production[..at].ends_with("pub fn ") {
+            // The whole file, minus `#[cfg(test)]` items: production code
+            // after inline test helpers must scan too (a split at the first
+            // test gate hid every seam below it). Test items are stripped,
+            // not scanned: fixtures name real functions and prove nothing.
+            // Matching and paren parsing run on the projection (blanked
+            // comments and strings cannot fake a call or unbalance the
+            // parse); literals are read from the text at the same offsets
+            // (blanking preserves positions but erases spellings).
+            let (text, code) = crate::test_scan::strip_test_items(source);
+            let mut at = 0;
+            while let Some(found) = code[at..].find("require") {
+                let name_at = at + found;
+                at = name_at + 1;
+                // Free-function calls only (`require(`, `ambient::require(`):
+                // definitions, longer identifiers, and anything not followed
+                // by a call paren (after whitespace/comments) are not calls.
+                let Some(open) = crate::test_scan::is_free_call(&code, name_at, "require") else {
                     continue;
-                }
-                let args = call_args(production, at + "require(".len() - 1);
+                };
+                let args_code = call_args(&code, open);
+                let args = &text[open + 1..open + 1 + args_code.len()];
                 let mut parts = args.split(',');
                 let (Some(_receiver), Some(_capability), Some(name)) =
                     (parts.next(), parts.next(), parts.next())
@@ -1250,9 +1266,9 @@ mod tests {
                     // one helper that forwards a caller-supplied name, and
                     // its call sites are parsed below. Anything else is a
                     // seam whose name cannot be checked statically.
-                    let enclosing = production[..at]
+                    let enclosing = code[..at]
                         .rfind("\nfn ")
-                        .map(|i| production[i + 1..].lines().next().unwrap_or_default())
+                        .map(|i| code[i + 1..].lines().next().unwrap_or_default())
                         .unwrap_or_default();
                     assert!(
                         enclosing.starts_with("fn require_random("),
@@ -1264,11 +1280,16 @@ mod tests {
             // `require_random` forwards its caller's name literal to the
             // seam, so the call sites carry the checkable names. The helper
             // definition itself is skipped, like the seam definition above.
-            for (at, _) in production.match_indices("require_random(") {
-                if production[..at].ends_with("fn ") {
+            let mut rat = 0;
+            while let Some(found) = code[rat..].find("require_random") {
+                let name_at = rat + found;
+                rat = name_at + 1;
+                let Some(open) = crate::test_scan::is_free_call(&code, name_at, "require_random")
+                else {
                     continue;
-                }
-                let args = call_args(production, at + "require_random(".len() - 1);
+                };
+                let args_code = call_args(&code, open);
+                let args = &text[open + 1..open + 1 + args_code.len()];
                 let mut parts = args.split(',');
                 let (Some(_data), Some(name)) = (parts.next(), parts.next()) else {
                     panic!("require_random call shape changed; update this test: {args:?}");
@@ -1296,60 +1317,68 @@ mod tests {
     /// is not a call site, and counting it would bless nothing.
     #[test]
     fn every_replay_name_is_a_recorded_function() {
-        let source = include_str!("ambient.rs");
-        let production: Vec<&str> = source
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim_start();
-                !(trimmed.starts_with("///") || trimmed.starts_with("//"))
-            })
-            .collect();
-        let production = production.join("\n");
-        for needle in ["record(\"", "next_replayed(\"", ".note(\""] {
-            for (at, _) in production.match_indices(needle) {
-                let rest = &production[at + needle.len()..];
-                let end = rest.find('"').expect("a literal must terminate");
-                let name = &rest[..end];
-                assert!(
-                    crate::replay::REPLAY_FUNCTIONS.contains(&name),
-                    "`{name}` is recorded but not allowlisted; add it to REPLAY_FUNCTIONS"
-                );
-            }
+        use crate::test_scan::is_method_call;
+        // The enclosing `fn` of the call at `at`, by walking lines:
+        // newlines survive blanking, so the walk stays in production code.
+        fn enclosing_fn(code: &str, at: usize) -> &str {
+            code[..at]
+                .lines()
+                .rev()
+                .find_map(|line| {
+                    let t = line.trim_start();
+                    let t = t.strip_prefix("async fn ").unwrap_or(t);
+                    t.strip_prefix("fn ")
+                        .map(|rest| rest.split(['(', '<', ' ']).next().unwrap_or_default())
+                })
+                .unwrap_or_default()
         }
-        // `note` forwards its name into the log, so a non-literal argument
-        // would bypass the scan above while reaching the file: pin the
-        // literal-only shape, not just the names found.
-        for (at, _) in production.match_indices(".note(") {
-            let rest = &production[at + ".note(".len()..];
-            assert!(
-                rest.trim_start().starts_with('"'),
-                "a `.note(` call passes a non-literal function name, which the \
-                 allowlist scan above cannot see: {rest:?}"
-            );
-        }
-        // The same literal-only rule for the other two recorders: only
-        // `note`'s internal `log.record(function, value)` forwarder may pass
-        // a parameter through (its inputs are the literals pinned above),
-        // so any other non-literal call is an unchecked name.
-        for needle in [".record(", ".next_replayed("] {
-            for (at, _) in production.match_indices(needle) {
-                let rest = &production[at + needle.len()..];
-                if rest.trim_start().starts_with('"') {
+        // The whole file, minus `#[cfg(test)]` items: production code after
+        // inline test helpers must scan too (a split at the first test gate
+        // hid the `clock.monotonic`, `crypto.random`, and require-forwarding
+        // seams below it). Test items are stripped, not scanned.
+        // The whole file, minus `#[cfg(test)]` items: production code after
+        // inline test helpers must scan too (a split at the first test gate
+        // hid the `clock.monotonic`, `crypto.random`, and require-forwarding
+        // seams below it). Test items are stripped, not scanned: fixtures
+        // name real functions and prove nothing. Matching runs on the
+        // projection (blanked comments cannot fake a call); literals are
+        // read from the text at the same offsets.
+        let (text, code) = crate::test_scan::strip_test_items(include_str!("ambient.rs"));
+        for needle in ["record", "next_replayed", "note"] {
+            let mut at = 0;
+            while let Some(found) = code[at..].find(needle) {
+                let start = at + found;
+                at = start + 1;
+                // Method or path calls only (`.log.record(..)`,
+                // `ReplayLog::record(..)`); this also skips `fn` definitions
+                // and prose, and `find_call_open` skips whitespace and
+                // blanked comments to the paren.
+                let Some(open) = is_method_call(&code, start, needle) else {
+                    continue;
+                };
+                let rest = &text[open + 1..];
+                if let Some(after_quote) = rest.trim_start().strip_prefix('"') {
+                    let end = after_quote.find('"').expect("a literal must terminate");
+                    let name = &after_quote[..end];
+                    assert!(
+                        crate::replay::REPLAY_FUNCTIONS.contains(&name),
+                        "`{name}` is recorded but not allowlisted; add it to REPLAY_FUNCTIONS"
+                    );
                     continue;
                 }
-                // The one legitimate forwarder: `note`'s
-                // `log.record(function, value)`, whose inputs are the
-                // literals pinned above. Anything else passing an
-                // identifier is an unchecked name.
-                let tail = rest.trim_start();
-                let is_forwarder = tail
-                    .strip_prefix("function")
-                    .is_some_and(|t| t.trim_start().starts_with([',', ')']));
+                // A non-literal argument reaches the file without ever
+                // appearing in the literal scan above. Two forwarders are
+                // legitimate, each pinned elsewhere: `note`'s
+                // `log.record(function, value)` (inputs are the literals
+                // pinned above) and the audit seam's
+                // `audit.record(c, function, outcome)` (its callers are
+                // pinned by `every_audit_seam_name_is_a_recorded_function`).
+                // Anything else is an unchecked name.
+                if crate::test_scan::receiver_of(&code, start) == "audit" {
+                    continue;
+                }
                 assert!(
-                    is_forwarder,
+                    needle == "record" && enclosing_fn(&code, start) == "note",
                     "a `{needle}` call passes a non-literal function name outside \
                      the `note` forwarder, which the allowlist scan cannot \
                      see: {rest:?}"

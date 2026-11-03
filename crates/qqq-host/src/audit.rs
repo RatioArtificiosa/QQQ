@@ -647,8 +647,19 @@ impl AuditRecord {
 
         let previous = json_string_field(json, "previous")
             .ok_or_else(|| "an audit record must carry its `previous` digest".to_owned())?;
+        // Chain links are 64 lowercase hex, no more and no less: an 8 MiB
+        // `previous` would otherwise parse, store, and bloat every `load`
+        // with bytes `verify_chain` never asked for. The writer only ever
+        // emits `genesis_digest` and SHA-256 hex, so anything else is a
+        // hostile or corrupt row, refused before it costs memory.
+        if !is_chain_digest(&previous) {
+            return Err("`previous` must be a 64-character lowercase hex digest".to_owned());
+        }
         let chain = json_string_field(json, "chain")
             .ok_or_else(|| "an audit record must carry its `chain` digest".to_owned())?;
+        if !is_chain_digest(&chain) {
+            return Err("`chain` must be a 64-character lowercase hex digest".to_owned());
+        }
 
         // The version dispatch: absent `v` is a v1 record, which also lacks
         // `timestamp_unix_ms` and reads it as zero. A present `v` must be a
@@ -694,6 +705,19 @@ impl AuditRecord {
             v: u8::try_from(v).map_err(|_| "record version out of range".to_owned())?,
         })
     }
+}
+
+/// Whether a chain link has the writer's shape: exactly 64 lowercase hex.
+///
+/// The writer only emits `genesis_digest()` and SHA-256 hex digests. Anything
+/// else in `previous`/`chain` is hostile or corrupt input, and refusing it at
+/// parse keeps an 8 MiB line of `previous` from becoming an 8 MiB allocation
+/// `load` never needed.
+fn is_chain_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Hash one field with a length prefix, so the encoding is injective.
@@ -2080,7 +2104,7 @@ mod tests {
         );
     }
 
-    /// Check one file's audit `.record(` call sites; returns the call count.
+    /// Check one file's audit `.record` call sites; returns the call count.
     ///
     /// The `require(` seam forwards names too, but those are pinned by the
     /// dedicated `every_audit_seam_name_is_a_recorded_function` test in
@@ -2091,11 +2115,12 @@ mod tests {
     /// this scan or the seam test already checked (and the runtime `assert!`
     /// in `record` is the backstop for all three).
     ///
-    /// The scan runs on a code-only projection (string contents and comments
-    /// blanked): prose and doc examples mentioning `.record(` are not calls,
-    /// and -- crucially -- this test's own scanner source contains the
-    /// needle text, which must not match itself.
+    /// The scan runs on a code-only projection (see `crate::test_scan`):
+    /// prose and doc examples mentioning `record` are blanked and cannot
+    /// match, and -- crucially -- this test's own scanner source contains
+    /// the needle text, which must not match itself.
     fn check_record_calls(path: &std::path::Path) -> usize {
+        use crate::test_scan::code_projection;
         let text = std::fs::read_to_string(path).expect("source must read");
         // Positions in the projection match the original byte-for-byte
         // (blanking preserves length), so spans found in code-only space
@@ -2108,27 +2133,34 @@ mod tests {
             text.len(),
             "{path:?}: projection changed the byte length; spans would misread"
         );
-        check_needle(&code, &text, ".record(")
+        check_needle(&code, &text)
     }
 
-    /// Check one needle's call spans. Spans without `Outcome` or `Capability`
-    /// are a different `record` (the secrets op log, the replay log without
-    /// its value type in view): only the audit shape carries both a function
-    /// name and an outcome, so only it is checked here.
-    fn check_needle(code: &str, text: &str, needle: &str) -> usize {
+    /// Check one file's `record` call spans. The needle is the bare name (a
+    /// method dot or path separator must precede it, so `fn record`
+    /// definitions, locals, and prose never match), and `find_call_open`
+    /// skips whitespace and blanked comments to the paren -- so
+    /// `a.record /**/ (` and UFCS `AuditHandle::record(h, ..)` scan like
+    /// `a.record(`. A name not followed by `(` is not a call.
+    fn check_needle(code: &str, text: &str) -> usize {
+        use crate::test_scan::{is_method_call, top_level_commas};
         let mut count = 0;
         let mut at = 0;
-        while let Some(found) = code[at..].find(needle) {
+        while let Some(found) = code[at..].find("record") {
             let start = at + found;
+            at = start + 1;
+            let Some(open) = is_method_call(code, start, "record") else {
+                continue;
+            };
             let mut depth = 0usize;
             let mut end = None;
-            for (i, c) in code[start..].char_indices() {
+            for (i, c) in code[open..].char_indices() {
                 match c {
                     '(' => depth += 1,
                     ')' => {
                         depth -= 1;
                         if depth == 0 {
-                            end = Some(start + i);
+                            end = Some(open + i);
                             break;
                         }
                     }
@@ -2136,7 +2168,6 @@ mod tests {
                 }
             }
             let Some(stop) = end else {
-                at = start + needle.len();
                 continue;
             };
             // The projection for the kind checks: a `ReplayValue` smuggled
@@ -2145,37 +2176,34 @@ mod tests {
             let projected = &code[start..stop];
             let span = &text[start..stop];
             at = stop;
-            // A different `record`: the replay log's, keyed by its value type.
+            // A different `record`: the replay log's, keyed by its value
+            // type. (Arity alone would also exclude most of them, but the
+            // value-type check names the reason.)
             if projected.contains("ReplayValue") {
                 continue;
             }
-            // Only the audit shape: a function name beside an outcome or a
-            // capability, spelled as a path (`Outcome::`, `Capability::`) or
-            // carried in a variable (the export helper's `outcome` /
-            // `capability` parameters). This keeps `self.record("sign", key)`
-            // (the secrets op log) and any other same-named method out of
-            // the audit allowlist: their spans name neither.
-            {
-                let lowered = projected.to_ascii_lowercase();
-                if !lowered.contains("outcome") && !lowered.contains("capability") {
-                    continue;
-                }
+            // Arity, not names: an audit `.record` takes at least the
+            // triple the seam forwards (the two-argument
+            // `self.record("sign", key)` op log and any other same-named
+            // method fall below the bar whatever their identifiers are).
+            if top_level_commas(projected) < 2 {
+                continue;
             }
             count += 1;
-            check_record_span(span);
+            check_record_span(span, projected);
         }
         count
     }
 
     /// The `.record(` rule: the function argument is the literal immediately
-    /// before the outcome argument (`"name", Outcome::X` or `"name",
-    /// outcome`); other literals in the span (tenant fixtures via
-    /// `tenant(..)`) are not function names and are not checked here.
-    /// A span with no outcome-adjacent literal must forward the `function`
-    /// parameter itself (the `require` seam's `audit.record(c, function,
-    /// outcome)` and `commit`'s `row.function`): any other identifier in
-    /// that position is an unchecked name and fails loudly.
-    fn check_record_span(span: &str) {
+    /// before the outcome argument (`"name", Outcome::X`, a qualified
+    /// `crate::audit::Outcome::X`, or `"name", outcome`); other literals in
+    /// the span (tenant fixtures via `tenant(..)`) are not function names
+    /// and are not checked here. A span with no outcome-adjacent literal
+    /// must forward the `function` parameter itself (see
+    /// `test_scan::is_forwarded_call`): any other identifier in that
+    /// position is an unchecked name and fails loudly.
+    fn check_record_span(span: &str, projected: &str) {
         let mut found_outcome_literal = false;
         let mut arg = span;
         while let Some(q) = arg.find('"') {
@@ -2191,9 +2219,9 @@ mod tests {
                 .unwrap_or("")
                 .trim_start_matches([' ', '\t', '\n', '\r']);
             let is_outcome = tail.starts_with("Outcome::")
-                    // A qualified path (`crate::audit::Outcome::Granted`)
-                    // names the same variant; some call sites qualify.
-                    || tail.contains("::Outcome::")
+                // A qualified path (`crate::audit::Outcome::Granted`)
+                // names the same variant; some call sites qualify.
+                || tail.contains("::Outcome::")
                 || tail.split([',', ')']).next().is_some_and(|w| {
                     !w.trim().is_empty()
                         && w.trim().chars().all(|c| c.is_ascii_lowercase() || c == '_')
@@ -2210,166 +2238,12 @@ mod tests {
         }
         if !found_outcome_literal {
             assert!(
-                span.contains("function"),
-                "an audit `record` passes an identifier that is not the forwarded `function` parameter"
+                crate::test_scan::is_forwarded_call(projected),
+                "an audit `record` passes an identifier that is not the forwarded \
+                 `function` parameter: only literals and the seam/commit \
+                 forwarders are checkable: {span:?}"
             );
         }
-    }
-
-    /// Blanks string-literal contents and comments, preserving byte length
-    /// so spans cut from the projection index the original exactly (each
-    /// source byte becomes one output byte; newlines stay newlines so line
-    /// structure survives). Quotes stay; contents become spaces, so no needle
-    /// can match inside prose.
-    ///
-    /// A single quote opens a char literal only in char shape (one char, an
-    /// escape, or a unicode escape, each closed by a quote); a lone quote is
-    /// a lifetime and is left alone. Raw and byte strings blank through
-    /// their closing delimiter, so a comment opener inside one cannot cut
-    /// the line and hide a registration.
-    // One function, not five: the projection is a single state machine over
-    // the source, and splitting it across items would scatter the
-    // string/comment/char/raw states it exists to keep consistent.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "test-only structural scanner; one state machine reads clearer split apart"
-    )]
-    fn code_projection(text: &str) -> String {
-        fn blanks(out: &mut String, byte_len: usize) {
-            for _ in 0..byte_len {
-                out.push(' ');
-            }
-        }
-        // Blank a segment, preserving newlines: one space per byte otherwise.
-        fn push_blanked(out: &mut String, s: &str) {
-            for part in s.split_inclusive('\n') {
-                if let Some(body) = part.strip_suffix('\n') {
-                    blanks(out, body.len());
-                    out.push('\n');
-                } else {
-                    blanks(out, part.len());
-                }
-            }
-        }
-        // Blank a raw-string body through its closing delimiter.
-        fn blank_raw_body<'a>(
-            out: &mut String,
-            mut rest: &'a str,
-            closer: &str,
-            hashes: usize,
-        ) -> &'a str {
-            loop {
-                if rest.is_empty() {
-                    break;
-                }
-                if rest.starts_with(closer) {
-                    out.push('"');
-                    blanks(out, hashes);
-                    rest = &rest[1 + hashes..];
-                    break;
-                }
-                let c = rest.chars().next().expect("non-empty");
-                push_blanked(out, &rest[..c.len_utf8()]);
-                rest = &rest[c.len_utf8()..];
-            }
-            rest
-        }
-        // Raw or byte string at this position. Code context, so max-munch
-        // already decided these lex as strings, not identifiers. Returns
-        // the hash count and the text after the opening quote.
-        fn raw_open(rest: &str) -> Option<(usize, &str)> {
-            // `b` only starts a raw string as `br`: a bare `b"..."` is a
-            // *cooked* byte string whose escapes stay live, and treating it
-            // as raw mis-closes at an escaped quote and desyncs the rest of
-            // the file.
-            let s = match rest.strip_prefix('b') {
-                Some(tail) if tail.starts_with('r') => tail,
-                _ => rest,
-            };
-            let s = s.strip_prefix('r').unwrap_or(s);
-            let hashes = s.chars().take_while(|c| *c == '#').count();
-            s[hashes..].strip_prefix('"').map(|body| (hashes, body))
-        }
-        // Byte length of the char literal at the start of `rest` (which
-        // starts with a quote), or `None` for a lifetime.
-        fn char_len(rest: &str) -> Option<usize> {
-            let tail = &rest[1..];
-            if let Some(body) = tail.strip_prefix('\\') {
-                if let Some(after_u) = body.strip_prefix("u{") {
-                    let i = after_u.find('}')?;
-                    if !after_u[i + 1..].starts_with('\'') {
-                        return None;
-                    }
-                    return Some(1 + 1 + 2 + i + 2);
-                }
-                if body.len() >= 2 && body[1..].starts_with('\'') {
-                    return Some(4);
-                }
-                return None;
-            }
-            let c = tail.chars().next()?;
-            if tail[c.len_utf8()..].starts_with('\'') {
-                Some(1 + c.len_utf8() + 1)
-            } else {
-                None
-            }
-        }
-        let mut out = String::with_capacity(text.len());
-        let mut rest = text;
-        while !rest.is_empty() {
-            if rest.starts_with('"') {
-                out.push('"');
-                rest = &rest[1..];
-                while !rest.is_empty() {
-                    if rest.starts_with('\\') {
-                        blanks(&mut out, 2);
-                        rest = &rest[2..];
-                    } else if rest.starts_with('"') {
-                        out.push('"');
-                        rest = &rest[1..];
-                        break;
-                    } else {
-                        let c = rest.chars().next().expect("non-empty");
-                        push_blanked(&mut out, &rest[..c.len_utf8()]);
-                        rest = &rest[c.len_utf8()..];
-                    }
-                }
-            } else if rest.starts_with("//") {
-                let end = rest.find('\n').unwrap_or(rest.len());
-                blanks(&mut out, end);
-                rest = &rest[end..];
-            } else if rest.starts_with("/*") {
-                let end = rest.find("*/").map_or(rest.len(), |i| i + 2);
-                let (comment, tail) = rest.split_at(end);
-                push_blanked(&mut out, comment);
-                rest = tail;
-            } else if let Some((hashes, body)) = raw_open(rest) {
-                // `body` is a suffix of `rest`, so the opening length is
-                // the difference; the quote itself is kept as the anchor.
-                let open_len = rest.len() - body.len();
-                blanks(&mut out, open_len - 1);
-                out.push('"');
-                rest = body;
-                let closer: String = std::iter::once('"')
-                    .chain(std::iter::repeat_n('#', hashes))
-                    .collect();
-                rest = blank_raw_body(&mut out, rest, &closer, hashes);
-            } else if rest.starts_with('\'') {
-                if let Some(len) = char_len(rest) {
-                    let len = len.min(rest.len());
-                    blanks(&mut out, len);
-                    rest = &rest[len..];
-                } else {
-                    out.push('\'');
-                    rest = &rest[1..];
-                }
-            } else {
-                let c = rest.chars().next().expect("non-empty");
-                out.push(c);
-                rest = &rest[c.len_utf8()..];
-            }
-        }
-        out
     }
 
     fn stream(capacity: usize) -> AuditStream {
@@ -3302,6 +3176,39 @@ mod tests {
             AuditStream::resume(vec![parsed], 8).is_err(),
             "an edited timestamp must break the chain"
         );
+    }
+
+    /// **Chain links are 64 hex characters, no more and no less.**
+    ///
+    /// An 8 MiB `previous` would otherwise parse, store, and bloat every
+    /// `load` with bytes `verify_chain` never asked for. The writer only
+    /// emits `genesis_digest` and SHA-256 hex, so anything else is refused
+    /// at parse, before it costs memory.
+    #[test]
+    fn oversized_and_misshapen_chain_links_are_refused_at_parse() {
+        let mut stream = AuditStream::with_default_capacity();
+        let _ = stream.record(
+            None,
+            &component(),
+            &grants(),
+            Capability::FsRead,
+            "handle_request",
+            Outcome::Granted,
+        );
+        let row = stream.records()[0].to_json();
+        for hostile in ["0".repeat(8 << 20), "xyz".to_owned(), "ABCDEF".repeat(11)] {
+            for key in ["previous", "chain"] {
+                let start =
+                    row.find(&format!("\"{key}\":\"")).expect("key present") + key.len() + 4;
+                let end = row[start..].find('"').expect("value terminates") + start;
+                let tampered = format!("{}{hostile}{}", &row[..start], &row[end..]);
+                assert!(
+                    AuditRecord::from_json(&tampered).is_err(),
+                    "a {key} of {} chars must not parse",
+                    hostile.len()
+                );
+            }
+        }
     }
 
     /// **F-09: HMAC-SHA-256 matches the RFC 4231 vectors.**

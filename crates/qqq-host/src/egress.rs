@@ -2104,24 +2104,31 @@ fn is_secret_token(token: &str) -> bool {
             forms.push(stem);
         }
     }
-    // The author family travels, in either number and however decorated:
+    // The author family travels in bare and digit/plural-decorated forms:
     // `x-author`, `x-authors`, `x-author2` are ordinary headers, not
-    // credentials. Checked before any affix rule so the family can never
-    // be re-caught below.
+    // credentials. Checked before any affix rule so those forms can never
+    // be re-caught below; affixed forms (`x-authorsbox`, `x-myauthor`)
+    // still strip fail-closed via the credential word they contain.
     if forms.iter().any(|w| *w == "author" || *w == "authors") {
         return false;
     }
     // Any remaining form that is, or contains, a known credential word.
-    // A proper substring (`word.len() > t.len()`) keeps exact matches
-    // exact while catching padded, prefixed, suffixed, and infix forms
-    // (`x-mysecretbox`, `x-secret2`). Fail-closed: an innocent word
-    // containing a secret token (e.g. `x-keyboard`, `x-passport`)
-    // strips rather than travels; the documented exceptions are the
-    // author family above and the `api`-style non-tokens below.
+    // Three tiers: exact hits; proper prefix/suffix affixes (any length, so
+    // `x-mysecret` and `x-2fa`-suffixed shapes strip); and proper substring
+    // matches restricted to credential words of length 4 or more, so short
+    // tokens (`pw`, `sid`, `sig`, `tok`, `key`) strip exact and affixed
+    // (`x-mypw`) but no longer swallow innocent infix words (`x-design`,
+    // `x-upward`, `x-consider`, `x-assign`). Fail-closed otherwise: an innocent word
+    // containing a long secret token (e.g. `x-keyboard`, `x-passport`,
+    // `x-myauthor` via `auth`) strips rather than travels; the documented
+    // exceptions are the author family above and the `api`-style non-tokens
+    // below.
     forms.iter().any(|&word| {
-        SECRET_TOKENS
-            .iter()
-            .any(|&t| word == t || (word.len() > t.len() && word.contains(t)))
+        SECRET_TOKENS.iter().any(|&t| {
+            word == t
+                || (word.len() > t.len() && (word.starts_with(t) || word.ends_with(t)))
+                || (t.len() >= 4 && word.len() > t.len() && word.contains(t))
+        })
     })
 }
 
@@ -4078,6 +4085,15 @@ mod redirect_tests {
             ("x-keystore".to_owned(), "prefixed secret".to_owned()),
             ("x-mysecretbox".to_owned(), "affixed secret".to_owned()),
             ("x-tokenizer".to_owned(), "prefixed secret".to_owned()),
+            ("x-myauthor".to_owned(), "auth-infix secret".to_owned()),
+            (
+                "x-authorsbox".to_owned(),
+                "affixed author secret".to_owned(),
+            ),
+            (
+                "x-author-secret".to_owned(),
+                "author plus secret".to_owned(),
+            ),
             ("x-api!key".to_owned(), "punctuation secret".to_owned()),
             ("x-secret*token".to_owned(), "punctuation secret".to_owned()),
         ]
@@ -4102,7 +4118,11 @@ mod redirect_tests {
                 "x-2authors2s".to_owned(),
                 "digit-decorated author travels".to_owned(),
             ),
-            ("x-keyboard".to_owned(), "prefixed secret".to_owned()),
+            ("x-t0ken".to_owned(), "leet spelling travels".to_owned()),
+            ("x-design".to_owned(), "innocent infix travels".to_owned()),
+            ("x-upward".to_owned(), "innocent infix travels".to_owned()),
+            ("x-assign".to_owned(), "innocent infix travels".to_owned()),
+            ("x-consider".to_owned(), "innocent infix travels".to_owned()),
             ("author".to_owned(), "not a credential".to_owned()),
             ("x-keep".to_owned(), "yes".to_owned()),
         ]
@@ -4140,7 +4160,7 @@ mod redirect_tests {
             let seen = String::from_utf8_lossy(&seen).into_owned();
             // Exact header set, not substring absence: a secret that travels
             // under a renamed spelling fails here rather than hiding behind
-            // the three spelled-out names.
+            // the ordinary travel rows.
             let mut names: Vec<String> = seen
                 .split("\r\n")
                 .skip(1)
@@ -4163,10 +4183,15 @@ mod redirect_tests {
                     "connection",
                     "host",
                     "x-2authors2s",
+                    "x-assign",
                     "x-author",
                     "x-author2",
                     "x-authors",
+                    "x-consider",
+                    "x-design",
                     "x-keep",
+                    "x-t0ken",
+                    "x-upward",
                 ],
                 "only connector-owned and ordinary headers reach {host}: {seen:?}"
             );

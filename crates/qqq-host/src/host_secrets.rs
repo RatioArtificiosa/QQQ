@@ -949,6 +949,15 @@ fn map_secret_error(error: &qqq_core::Error) -> WitSecretError {
 }
 
 /// `apply(name, op, input) -> result<list<u8>, secret-error>`.
+// One registration whose closure walks every operation arm, each with its
+// audit seam and grant checks inline so the refusal names the exact fault.
+// Splitting it would scatter one interface across helpers that each need
+// the same closure captures; the length is the interface's, not the
+// author's.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one registration, one closure, every arm inline"
+)]
 fn register_apply(
     inst: &mut wasmtime::component::LinkerInstance<'_, crate::linker::StoreData>,
 ) -> wasmtime::Result<()> {
@@ -1016,6 +1025,11 @@ fn register_apply(
                             return Ok((Err(WitSecretError::OperationNotPermitted),));
                         }
                         if !data.grants.grants(crypto_grant_for(PermittedOp::PublicKey)) {
+                            let _ = crate::ambient::require(
+                                data,
+                                crypto_grant_for(PermittedOp::PublicKey),
+                                "secret_apply",
+                            );
                             return Ok((Err(WitSecretError::OperationNotPermitted),));
                         }
                         if !store_ref.material_permits(&name, PermittedOp::PublicKey) {
@@ -1041,6 +1055,9 @@ fn register_apply(
                     return Ok((Err(WitSecretError::InputTooLong),));
                 }
                 if !data.grants.grants(needs) {
+                    // The entry seam recorded `SecretUse`; the missing crypto
+                    // grant is recorded too, so the refusal is attributable.
+                    let _ = crate::ambient::require(data, needs, "secret_apply");
                     return Ok((Err(WitSecretError::OperationNotPermitted),));
                 }
                 if !store_ref.material_permits(&name, permitting) {
@@ -1939,9 +1956,10 @@ mod tests {
             .unwrap_or_default();
         let seams = production.matches("ambient::require(").count();
         assert_eq!(
-            seams, 3,
+            seams, 5,
             "every secrets body (exists, permitted-operations, apply) must consult \
-             the audit seam; found {seams} seam call(s)"
+             the audit seam, plus the missing crypto-grant records on operation refusals; \
+             found {seams} seam call(s)"
         );
     }
 }

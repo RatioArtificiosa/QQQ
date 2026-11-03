@@ -1038,8 +1038,9 @@ mod tests {
         // An audit row outside the allowed set: a call that reaches the
         // assertion logic must record it, and a call the bound refuses
         // must not. Written straight to the stream (not through the
-        // handle's `record`, whose allowlist names real host functions):
-        // the function tag is irrelevant here — `recorded_outside` only
+        // handle's `record`, which is the bypass under test); the name
+        // itself stays allowlisted so the row remains loadable.
+        // The function tag is irrelevant here — `recorded_outside` only
         // reads the capability — and stamping test-arranged rows with a
         // real host function name would lie about what ran.
         let stream = std::sync::Arc::new(std::sync::Mutex::new(
@@ -1054,7 +1055,7 @@ mod tests {
             &component_digest,
             &grant_digest,
             qqq_cap::capability::Capability::ClockWall,
-            "test_probe",
+            "handle_request",
             crate::audit::Outcome::Granted,
         );
         drop(stream_guard);

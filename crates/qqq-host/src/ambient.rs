@@ -985,9 +985,11 @@ pub fn require(
     let granted = data.grants.grants(c);
     if let Some(audit) = &data.audit {
         // The outcome is the *grant decision*, not the call's eventual success. A later failure
-        // inside the host function is `Outcome::Failed`, which is a different row written by the
-        // caller -- the two answer different questions and collapsing them would lose the
-        // distinction `Outcome`'s own docs spend a paragraph on.
+        // inside the host function (quota, validation, execution) surfaces through the returned
+        // error, not a second row: no caller writes `Outcome::Failed` rows today, and the
+        // taxonomy keeps the variant for a future writer rather than a present one. The two
+        // answer different questions and collapsing them would lose the distinction `Outcome`'s
+        // own docs spend a paragraph on -- but the distinction is only real once both rows exist.
         let outcome = if granted {
             Outcome::Granted
         } else {
@@ -1278,6 +1280,42 @@ mod tests {
                 assert!(
                     crate::audit::RECORDED_FUNCTIONS.contains(&name),
                     "`{name}` is recorded but not allowlisted; add it to RECORDED_FUNCTIONS"
+                );
+            }
+        }
+    }
+
+    /// **Every replay name in this file is a `REPLAY_FUNCTIONS` entry.**
+    ///
+    /// The replay writer has the audit writer's gap: `record`/`next_record`
+    /// accept any `&'static str` in any build, and the loader refuses unknown
+    /// names at read time. This test parses every replay call in production
+    /// code and asserts the literal is allowlisted, so a typo fails CI in
+    /// any profile. Doc examples use the same literals and stay covered --
+    /// they are stripped before scanning because a doc that names a function
+    /// is not a call site, and counting it would bless nothing.
+    #[test]
+    fn every_replay_name_is_a_recorded_function() {
+        let source = include_str!("ambient.rs");
+        let production: Vec<&str> = source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !(trimmed.starts_with("///") || trimmed.starts_with("//"))
+            })
+            .collect();
+        let production = production.join("\n");
+        for needle in ["record(\"", "next_replayed(\"", ".note(\""] {
+            for (at, _) in production.match_indices(needle) {
+                let rest = &production[at + needle.len()..];
+                let end = rest.find('"').expect("a literal must terminate");
+                let name = &rest[..end];
+                assert!(
+                    crate::replay::REPLAY_FUNCTIONS.contains(&name),
+                    "`{name}` is recorded but not allowlisted; add it to REPLAY_FUNCTIONS"
                 );
             }
         }

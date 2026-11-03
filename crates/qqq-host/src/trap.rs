@@ -261,6 +261,9 @@ pub struct Trap {
     /// the detail carries guest-controlled frame names.
     pub detail: String,
     /// Wasm frames, outermost first, when the engine supplied them.
+    /// At most 64, each field capped at construction -- the whole backtrace
+    /// serializes to well under 96 KiB (pinned by test), so a deep recursion
+    /// cannot turn one trap record into unbounded host memory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub backtrace: Vec<WasmFrame>,
     /// Peak memory observed for this instance, when known.
@@ -1266,6 +1269,35 @@ mod tests {
             line: None,
         };
         assert_eq!(bare.to_string(), "f");
+    }
+
+    /// The backtrace's total serialized size is bounded by construction, not
+    /// by hope: 64 frames max, each field capped at construction
+    /// (module/function 256 B, file 512 B). A widened cap or a lifted frame
+    /// count must move this number deliberately, not drift it.
+    #[test]
+    fn a_maxed_out_backtrace_stays_within_its_byte_budget() {
+        let frame = WasmFrame {
+            module: Some("m".repeat(256)),
+            func: "f".repeat(256),
+            offset: Some(u64::MAX),
+            file: Some("p".repeat(512)),
+            line: Some(u32::MAX),
+        };
+        let trap = Trap {
+            code: ErrorCode::GuestTrap,
+            message: "the guest trapped".to_owned(),
+            detail: "d".repeat(MAX_TRAP_DETAIL_BYTES),
+            backtrace: vec![frame; 64],
+            memory_peak_bytes: Some(u64::MAX),
+            fuel_consumed: Some(u64::MAX),
+        };
+        let json = serde_json::to_string(&trap).expect("serializes");
+        assert!(
+            json.len() < 96 * 1024,
+            "64 capped frames plus a capped detail must stay well under 96 KiB, got {}",
+            json.len()
+        );
     }
 
     /// The module qualifies the function when the engine resolved one, so a

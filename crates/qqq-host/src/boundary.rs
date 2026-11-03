@@ -1237,16 +1237,30 @@ pub fn registered_names(source: &str) -> Vec<String> {
         if trimmed.starts_with("//") {
             continue;
         }
-        // A trailing `//` comment: keep the code before it. This is approximate —
-        // a `//` inside a string literal would truncate early — but truncating
-        // loses only *code*, which can make this detector miss a registration and
-        // therefore fail safe (the other direction's test catches a table that
-        // declares a name nothing registers).
-        let body = match line.find("//") {
-            Some(at) => &line[..at],
-            None => line,
-        };
-        code.push_str(body);
+        // A trailing `//` comment: keep the code before it, unless the `//`
+        // sits inside a string literal (escape-aware: `\"` does not end the
+        // literal). Cutting inside a literal would truncate code and make
+        // the detector miss a registration it should have found; char
+        // literals cannot hold an unescaped `//` pair, so tracking `"` is
+        // sufficient.
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut cut = line.len();
+        for (i, c) in line.char_indices() {
+            if in_string {
+                if c == '"' && !escaped {
+                    in_string = false;
+                }
+                escaped = c == '\\' && !escaped;
+            } else if c == '"' {
+                in_string = true;
+                escaped = false;
+            } else if c == '/' && line[i..].starts_with("//") {
+                cut = i;
+                break;
+            }
+        }
+        code.push_str(&line[..cut]);
         code.push('\n');
     }
 
@@ -1895,6 +1909,25 @@ impl bindings::qqq::crypto::hashing::Host for crate::linker::StoreData {
         assert!(
             !registered_names(free).contains(&"digest".to_owned()),
             "a free function is not a registration"
+        );
+    }
+
+    /// A `//` inside a string literal is data, not a comment: cutting there
+    /// would truncate the line and hide a registration the detector must
+    /// find. A real trailing comment still cuts.
+    #[test]
+    fn the_detector_does_not_cut_inside_string_literals() {
+        let source = "inst.func_wrap(\"https://x.test/y\", f); // trailing comment\n";
+        assert_eq!(
+            registered_names(source),
+            vec!["https://x.test/y".to_owned()],
+            "a // inside the name literal must not truncate: {source:?}"
+        );
+        let commented = "inst.func_wrap(\"real\", f); // func_wrap(\"phantom\", g);";
+        assert_eq!(
+            registered_names(commented),
+            vec!["real".to_owned()],
+            "a trailing comment is still not code: {commented:?}"
         );
     }
 

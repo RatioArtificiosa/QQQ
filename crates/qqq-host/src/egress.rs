@@ -1461,6 +1461,25 @@ async fn exchange_hop<T: Transport>(
 /// });
 /// ```
 ///
+/// The byte budget the incremental head builder starts from: the URL plus
+/// the body must already fit, or no rendering of this request can. Extracted
+/// so `exchange` stays under the function-length lint without losing the
+/// pre-format check.
+///
+/// # Errors
+///
+/// [`CallError::RequestTooLarge`] when even the URL and body alone exceed the
+/// connector's total-bytes limit.
+fn head_budget(url: &str, body_len: u64, max_request_bytes: u64) -> Result<u64, CallError> {
+    let used = u64::try_from(url.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(body_len);
+    if used > max_request_bytes {
+        return Err(CallError::RequestTooLarge);
+    }
+    Ok(used)
+}
+
 /// # Errors
 ///
 /// [`CallError::RequestTooLarge`], [`CallError::ResponseHeadTooLarge`],
@@ -1484,12 +1503,25 @@ where
     if !request.body.is_empty() && !matches!(request.method, Method::Post) {
         return Err(CallError::RequestTooLarge);
     }
+    // Bound the head incrementally: the URL, every header name, and every
+    // value are guest-controlled, and building the whole head before the
+    // size check would turn one huge value into a huge host allocation that
+    // is refused only after it exists. The budget is the connector's own
+    // total-bytes limit; each append checks before allocating.
+    let body_len = u64::try_from(request.body.len()).unwrap_or(u64::MAX);
+    head_budget(&request.url, body_len, limits.max_request_bytes)?;
     let mut head = format!(
         "{} {} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\n",
         request.method.as_str(),
         request_path(&request.url).ok_or(CallError::RequestTooLarge)?,
         host_header(vetted),
     );
+    let mut head_len = u64::try_from(head.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(body_len);
+    if head_len > limits.max_request_bytes {
+        return Err(CallError::RequestTooLarge);
+    }
     for (name, value) in &request.headers {
         // Names are RFC 9110 tokens, full stop: anything else (spaces,
         // CTLs, CR/LF) is an injection attempt, not a header. Values stay
@@ -1509,6 +1541,15 @@ where
         if is_hop_by_hop(&lower) {
             continue;
         }
+        // Count before appending: the running total, not the final string,
+        // is what the budget binds.
+        head_len = head_len
+            .saturating_add(u64::try_from(name.len()).unwrap_or(u64::MAX))
+            .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX))
+            .saturating_add(4);
+        if head_len > limits.max_request_bytes {
+            return Err(CallError::RequestTooLarge);
+        }
         head.push_str(name);
         head.push_str(": ");
         head.push_str(value);
@@ -1516,10 +1557,20 @@ where
     }
     if matches!(request.method, Method::Post) {
         use std::fmt::Write as _;
+        // Bounded before writing: the line is the fixed prefix plus at most
+        // 20 digits plus CRLF.
+        head_len = head_len.saturating_add(38);
+        if head_len > limits.max_request_bytes {
+            return Err(CallError::RequestTooLarge);
+        }
         head.write_fmt(format_args!("content-length: {}\r\n", request.body.len()))
             .map_err(|_| CallError::RequestTooLarge)?;
     }
     head.push_str("\r\n");
+    head_len = head_len.saturating_add(2);
+    if head_len > limits.max_request_bytes {
+        return Err(CallError::RequestTooLarge);
+    }
     let head_bytes = head.into_bytes();
     let request_len = u64::try_from(head_bytes.len())
         .unwrap_or(u64::MAX)
@@ -1871,21 +1922,59 @@ fn is_cross_origin(current_url: &str, next_url: &str) -> bool {
         || current.port_or_known_default() != next.port_or_known_default()
 }
 
-/// Strip credential headers before a cross-origin hop.
+/// Strip secret headers before a cross-origin hop.
 ///
-/// Forward-only: nothing restores a credential once it leaves its
-/// origin, and same-origin hops keep theirs. The set is the
-/// request-side secrets a redirect must never carry elsewhere —
-/// `authorization`, `proxy-authorization`, `cookie` — matched
+/// Forward-only: nothing restores a secret once it leaves its
+/// origin, and same-origin hops keep theirs. The set is not an
+/// enumeration of three names: any header whose hyphen-separated
+/// name tokens include a credential word (`authorization`, `cookie`,
+/// `api-key`, `token`, `secret`, `session`, ...) is a secret by
+/// convention, and conventions are what attackers read. Matched
 /// case-insensitively because header names are. Ordinary headers
 /// (tracing IDs, content negotiation) travel untouched.
 fn strip_credentials(headers: &mut Vec<(String, String)>) {
-    headers.retain(|(name, _)| {
-        !matches!(
-            name.to_ascii_lowercase().as_str(),
-            "authorization" | "proxy-authorization" | "cookie"
-        )
-    });
+    headers.retain(|(name, _)| !is_secret_header(name));
+}
+
+/// Whether a header name carries a credential by convention.
+///
+/// Two-tier: well-known full names (including the `x-` spellings operators
+/// actually use) match whole, and hyphen-separated tokens match credential
+/// words -- so a site-specific `x-acme-secret` is caught by `secret` while
+/// an innocent `author` is not `auth`. Matched case-insensitively because
+/// header names are. Ordinary headers (tracing IDs, content negotiation)
+/// match neither tier and travel untouched.
+fn is_secret_header(name: &str) -> bool {
+    const SECRET_NAMES: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "api-key",
+        "x-auth-token",
+        "auth-token",
+    ];
+    const SECRET_TOKENS: &[&str] = &[
+        "auth",
+        "authentication",
+        "token",
+        "secret",
+        "credentials",
+        "credential",
+        "session",
+        "sessionid",
+        "session-id",
+        "passwd",
+        "password",
+    ];
+    let lower = name.to_ascii_lowercase();
+    if SECRET_NAMES.contains(&lower.as_str()) {
+        return true;
+    }
+    lower
+        .split(['-', '_'])
+        .any(|token| SECRET_TOKENS.contains(&token))
 }
 
 fn safe_host(url: &str) -> String {
@@ -2626,6 +2715,33 @@ mod io_tests {
         let err = exchange(&vetted, &request, &limits, &mut client, &counts)
             .await
             .expect_err("header count refuses");
+        assert_eq!(err, CallError::RequestTooLarge);
+        drop(client);
+        let mut wire = Vec::new();
+        server
+            .read_to_end(&mut wire)
+            .await
+            .expect("the server half ends");
+        assert!(wire.is_empty(), "refusal precedes the first byte: {wire:?}");
+    }
+
+    /// An oversized head refuses before it is built, not after: the running
+    /// total, not the finished string, is what the byte budget binds, so one
+    /// huge value cannot turn into a huge host allocation first.
+    #[tokio::test]
+    async fn an_oversized_head_refuses_before_it_is_built() {
+        use tokio::io::AsyncReadExt as _;
+        let (mut client, mut server) = tokio::io::duplex(1 << 16);
+        let vetted = vet(&policy(), "https://example.com/", &FakeResolver)
+            .await
+            .expect("vets");
+        let limits = Limits::default();
+        let mut request = get("https://example.com/");
+        request.headers = vec![("x-pad".to_owned(), "p".repeat(2 * 1024 * 1024))];
+        let counts = std::sync::Mutex::new(IoCount::default());
+        let err = exchange(&vetted, &request, &limits, &mut client, &counts)
+            .await
+            .expect_err("a 2 MiB value against a 1 MiB budget refuses");
         assert_eq!(err, CallError::RequestTooLarge);
         drop(client);
         let mut wire = Vec::new();
@@ -3693,6 +3809,8 @@ mod redirect_tests {
     /// second hop, while ordinary headers travel — and stay stripped
     /// on the third. Stripping moves forward only: nothing restores
     /// a credential once it leaves its origin.
+    /// Custom secret headers (`x-api-key`, site-specific `x-acme-secret`)
+    /// are secrets by convention; an innocent `author` is not one.
     #[tokio::test]
     async fn sensitive_headers_stripped_cross_origin() {
         let transport = RouteTransport::new(&[
@@ -3706,6 +3824,9 @@ mod redirect_tests {
             url: "https://a.test/start".to_owned(),
             headers: vec![
                 ("authorization".to_owned(), "Bearer secret".to_owned()),
+                ("x-api-key".to_owned(), "key-secret".to_owned()),
+                ("x-acme-secret".to_owned(), "site-secret".to_owned()),
+                ("author".to_owned(), "not a credential".to_owned()),
                 ("x-keep".to_owned(), "yes".to_owned()),
             ],
             body: b"data".to_vec(),
@@ -3726,13 +3847,20 @@ mod redirect_tests {
         for host in ["b.test", "c.test"] {
             let seen = transport.seen_for(host);
             let seen = String::from_utf8_lossy(&seen).into_owned();
-            assert!(
-                !seen.to_ascii_lowercase().contains("authorization"),
-                "credential stripped before {host}: {seen:?}"
-            );
+            let lowered = seen.to_ascii_lowercase();
+            for secret in ["authorization", "x-api-key", "x-acme-secret"] {
+                assert!(
+                    !lowered.contains(secret),
+                    "{secret} stripped before {host}: {seen:?}"
+                );
+            }
             assert!(
                 seen.contains("x-keep: yes"),
                 "ordinary headers travel to {host}: {seen:?}"
+            );
+            assert!(
+                seen.contains("author: not a credential"),
+                "`author` is not a secret and must travel: {seen:?}"
             );
         }
         assert_eq!(rows.len(), 3, "one row per hop");

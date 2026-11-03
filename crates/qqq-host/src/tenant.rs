@@ -644,6 +644,11 @@ pub const DEFAULT_IPV6_PREFIX_BITS: u8 = 64;
 /// IPv4 addresses are always exact: prefix masking applies to IPv6 only, and a
 /// /64 of IPv4 space is not a unit any operator means.
 ///
+/// A prefix of `0` masks everything away, collapsing the whole IPv6 internet
+/// into one tenant -- never configure it. The only caller in the workspace
+/// uses the default; narrower values exist for deployments under
+/// prefix-rotation attack, and no legitimate narrowing reaches zero.
+///
 /// ```
 /// use qqq_host::tenant::{tenant_key_with_prefix, TenantKey};
 ///

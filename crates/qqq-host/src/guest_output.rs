@@ -356,7 +356,10 @@ impl OutputBudget {
     /// itself, in the same call.
     fn unreserve(&self, bytes: usize) {
         let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-        self.used.fetch_sub(bytes, Ordering::Relaxed);
+        // Saturating, like every other gauge here: the only caller refunds
+        // exactly what the local CAS added, so an underflow would mean a
+        // bookkeeping bug -- and a wrapped gauge would report 2^64-1 used.
+        sub_saturating(&self.used, bytes);
     }
 
     /// Attach the operator-visible refusal meter, if this budget is a tenant ceiling.
@@ -567,6 +570,12 @@ impl TenantOutputBudgets {
     /// for a tenant evicts the entry, which is the reset boundary — a tenant
     /// with no live request starts its next request at zero, and a tenant
     /// that never returns cannot accumulate state here.
+    ///
+    /// The guard must live as long as the outputs linked to its budget
+    /// (both live in [`StoreData`](crate::linker::StoreData), which drops
+    /// them together): an output reserving against an evicted budget while
+    /// a new acquire mints a fresh one would split one tenant across two
+    /// ceilings. Nothing may drop or replace the guard early.
     ///
     /// ```
     /// use qqq_host::guest_output::TenantOutputBudgets;
@@ -833,11 +842,59 @@ impl EscapeSink for Vec<u8> {
 /// destination before it can be exercised. The rule needs none of those. Extracting it
 /// means the escaping is tested directly on the bytes it produces, and the writer below
 /// is a thin adapter that cannot contain a second, different rule.
+///
+/// # Why multi-byte sequences match by bytes, not by decoding
+///
+/// Decoding UTF-8 to find layout-forgers would allocate or walk twice on the
+/// hot path; the forgery sequences are fixed byte strings, and UTF-8 is
+/// self-synchronising, so a byte-pattern match is exact without decoding.
+/// The set mirrors [`crate::boundary::is_layout_forgery`]; the escaper keeps
+/// its own byte table because it works on bytes, and both sides pin every
+/// member in tests so the two cannot drift.
 #[derive(Debug, Clone)]
 pub struct Escaper {
     prefix: &'static str,
     at_line_start: bool,
     since_break: usize,
+}
+
+/// Match a layout-forging multi-byte sequence at a buffer position.
+///
+/// Returns the bytes consumed and the code point, or `None`. UTF-8 is
+/// self-synchronising, so these fixed patterns match exactly the named
+/// characters -- never a fragment of a longer sequence. Members mirror
+/// [`crate::boundary::is_layout_forgery`]; `U+0085` (NEL) is included
+/// because the single-byte arms cannot see it (both its bytes are
+/// high-bit) while `char::is_control` covers it on the decoded path.
+fn layout_forgery_at(chunk: &[u8]) -> Option<(usize, u32)> {
+    match chunk {
+        [0xE2, 0x80, 0xA8, ..] => Some((3, 0x2028)),
+        [0xE2, 0x80, 0xA9, ..] => Some((3, 0x2029)),
+        [0xE2, 0x80, 0x8E, ..] => Some((3, 0x200E)),
+        [0xE2, 0x80, 0x8F, ..] => Some((3, 0x200F)),
+        [0xE2, 0x80, b @ 0xAA..=0xAE, ..] => Some((3, 0x202A + u32::from(b.saturating_sub(0xAA)))),
+        [0xE2, 0x81, b @ 0xA6..=0xA9, ..] => Some((3, 0x2066 + u32::from(b.saturating_sub(0xA6)))),
+        [0xDC, 0x9C, ..] => Some((2, 0x061C)),
+        [0xEF, 0xBB, 0xBF, ..] => Some((3, 0xFEFF)),
+        [0xC2, 0x85, ..] => Some((2, 0x0085)),
+        _ => None,
+    }
+}
+
+/// Emit a code point as `\uXXXX`, lowercase hex like the trap renderer so
+/// every surface reads the same.
+fn push_u_escape<S: EscapeSink>(sink: &mut S, page: u32) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    // Nibbles shifted and masked out of a u32 are always 0..16.
+    let n = |shift: u32| {
+        let d = usize::try_from((page >> shift) & 0xf).unwrap_or(0);
+        // `#[expect]` with a reason, as in the C0 arm below: a masked
+        // nibble is 0..16 by construction.
+        #[expect(clippy::indexing_slicing, reason = "masked nibble is 0..16")]
+        let h = HEX[d];
+        h
+    };
+    sink.push(&[b'\\', b'u', n(12), n(8), n(4), n(0)]);
 }
 
 impl Escaper {
@@ -867,71 +924,89 @@ impl Escaper {
     /// same loop over the same state, so a reservation computed from the probe
     /// always covers the write that follows it.
     fn run<S: EscapeSink>(&mut self, bytes: &[u8], sink: &mut S) -> usize {
-        for &byte in bytes {
+        let mut i = 0;
+        while let Some(&byte) = bytes.get(i) {
             if self.at_line_start {
                 sink.push(self.prefix.as_bytes());
                 self.at_line_start = false;
             }
-            match byte {
-                // A real line break, and the prefix is re-armed for the next line.
-                //
-                // # Why this is the one byte that is *not* escaped
-                //
-                // The property being defended is "no guest byte begins a physical
-                // line", and re-arming the prefix achieves that on its own: the guest's
-                // newline ends a line that already carries the marker, and the line
-                // after it gets a fresh one. Escaping it as well would emit `\\n`
-                // **and** a break, doubling the line count and mangling the app's
-                // output for no security gain — the forged record still appears, just
-                // as `qqq-guest stdout | {"ts":...}` instead of on a line by itself.
-                b'\n' => self.break_line(sink),
-                // Everything else in C0, plus DEL, is escaped. `\r` because it is a line
-                // terminator to some readers; `\x1b` because an escape sequence can
-                // rewrite what a terminal shows for the host's own records; the rest
-                // because a total rule is auditable and a list of dangerous bytes is a
-                // claim that goes stale.
-                //
-                // The run bound counts OUTPUT bytes (the arm's emission), so the
-                // longest physical line the sink can see is bounded no matter how
-                // expansively one input byte encodes. The fixed prefix is excluded:
-                // it is host-chosen and constant, not guest-controlled.
-                b'\r' => {
-                    sink.push(b"\\r");
-                    self.since_break = self.since_break.saturating_add(2);
+            // Multi-byte layout forgery first: U+2028/29, bidi controls and
+            // their kin are multi-byte sequences no single-byte arm sees, and
+            // passing them through would let a renderer break or reorder
+            // lines past the marker. The set mirrors
+            // `crate::boundary::is_layout_forgery` (same members, same
+            // `\uXXXX` rendering); keep the two together, as both sides pin
+            // every member in tests.
+            if let Some((len, page)) = bytes.get(i..).and_then(layout_forgery_at) {
+                push_u_escape(sink, page);
+                self.since_break = self.since_break.saturating_add(6);
+                i = i.saturating_add(len);
+            } else {
+                match byte {
+                    // A real line break, and the prefix is re-armed for the next line.
+                    //
+                    // # Why this is the one byte that is *not* escaped
+                    //
+                    // The property being defended is "no guest byte begins a physical
+                    // line", and re-arming the prefix achieves that on its own: the guest's
+                    // newline ends a line that already carries the marker, and the line
+                    // after it gets a fresh one. Escaping it as well would emit `\\n`
+                    // **and** a break, doubling the line count and mangling the app's
+                    // output for no security gain — the forged record still appears, just
+                    // as `qqq-guest stdout | {"ts":...}` instead of on a line by itself.
+                    b'\n' => self.break_line(sink),
+                    // Everything else in C0, plus DEL, is escaped. `\r` because it is a line
+                    // terminator to some readers; `\x1b` because an escape sequence can
+                    // rewrite what a terminal shows for the host's own records; the rest
+                    // because a total rule is auditable and a list of dangerous bytes is a
+                    // claim that goes stale.
+                    //
+                    // The run bound counts OUTPUT bytes (the arm's emission), so the
+                    // longest physical line the sink can see is bounded no matter how
+                    // expansively one input byte encodes. The fixed prefix is excluded:
+                    // it is host-chosen and constant, not guest-controlled.
+                    b'\r' => {
+                        sink.push(b"\\r");
+                        self.since_break = self.since_break.saturating_add(2);
+                    }
+                    b'\t' => {
+                        sink.push(b"\\t");
+                        self.since_break = self.since_break.saturating_add(2);
+                    }
+                    // So a guest cannot emit a literal `\n` and have a reader mistake it for
+                    // a break the host inserted.
+                    b'\\' => {
+                        sink.push(b"\\\\");
+                        self.since_break = self.since_break.saturating_add(2);
+                    }
+                    0x00..=0x1f | 0x7f => {
+                        // Stack-assembled, never formatted: `format!` here would
+                        // heap-allocate per control byte in both the probe and the
+                        // real write — bounded scratch, but gratuitous on the path
+                        // whose whole point is allocation discipline. Lowercase hex
+                        // matches the previous `{:02x}` output byte for byte.
+                        const HEX: &[u8; 16] = b"0123456789abcdef";
+                        // `#[expect]` with a reason, as in `audit.rs`: a masked
+                        // nibble is 0..16 by construction.
+                        #[expect(
+                            clippy::indexing_slicing,
+                            reason = "shifted/masked nibble is 0..16"
+                        )]
+                        let escaped = [
+                            b'\\',
+                            b'x',
+                            HEX[usize::from(byte >> 4)],
+                            HEX[usize::from(byte & 0x0f)],
+                        ];
+                        sink.push(&escaped);
+                        self.since_break = self.since_break.saturating_add(4);
+                    }
+                    _ => {
+                        sink.push(&[byte]);
+                        self.since_break = self.since_break.saturating_add(1);
+                    }
                 }
-                b'\t' => {
-                    sink.push(b"\\t");
-                    self.since_break = self.since_break.saturating_add(2);
-                }
-                // So a guest cannot emit a literal `\n` and have a reader mistake it for
-                // a break the host inserted.
-                b'\\' => {
-                    sink.push(b"\\\\");
-                    self.since_break = self.since_break.saturating_add(2);
-                }
-                0x00..=0x1f | 0x7f => {
-                    // Stack-assembled, never formatted: `format!` here would
-                    // heap-allocate per control byte in both the probe and the
-                    // real write — bounded scratch, but gratuitous on the path
-                    // whose whole point is allocation discipline. Lowercase hex
-                    // matches the previous `{:02x}` output byte for byte.
-                    const HEX: &[u8; 16] = b"0123456789abcdef";
-                    // `#[expect]` with a reason, as in `audit.rs`: a masked
-                    // nibble is 0..16 by construction.
-                    #[expect(clippy::indexing_slicing, reason = "shifted/masked nibble is 0..16")]
-                    let escaped = [
-                        b'\\',
-                        b'x',
-                        HEX[usize::from(byte >> 4)],
-                        HEX[usize::from(byte & 0x0f)],
-                    ];
-                    sink.push(&escaped);
-                    self.since_break = self.since_break.saturating_add(4);
-                }
-                _ => {
-                    sink.push(&[byte]);
-                    self.since_break = self.since_break.saturating_add(1);
-                }
+                i = i.saturating_add(1);
             }
             if self.since_break >= MAX_ESCAPED_RUN {
                 self.break_line(sink);
@@ -1637,6 +1712,51 @@ mod tests {
 
     /// A line that would be a host access record, byte for byte.
     const FORGED_RECORD: &str = r#"{"ts":"2026-01-01T00:00:00Z","method":"DELETE","path":"/admin","status":200,"tenant":"other"}"#;
+
+    /// An over-release saturates rather than wraps: `unreserve` only ever
+    /// refunds what `reserve` added, so bytes past `used` mean a
+    /// bookkeeping bug -- and a wrapped gauge would report 2^64-1 bytes
+    /// used for a rounding error. Like every other gauge in the workspace,
+    /// the failure mode is a loud zero, never a silent enormous number.
+    #[test]
+    fn an_over_release_saturates_rather_than_wrapping() {
+        let budget = OutputBudget::new(1024);
+        budget.reserve(10).expect("fits");
+        assert_eq!(budget.used(), 10);
+        budget.unreserve(10);
+        assert_eq!(budget.used(), 0);
+        budget.unreserve(1_000_000);
+        assert_eq!(
+            budget.used(),
+            0,
+            "an over-release must clamp, not wrap to u64::MAX"
+        );
+    }
+
+    /// Unicode layout forgery escapes like ASCII controls: `U+2028` breaks
+    /// lines in renderers that honor it, and bidi overrides reorder the
+    /// visible text. The byte loop matches the exact multi-byte sequences
+    /// (same set as `boundary::is_layout_forgery`, same `\uXXXX` form), so
+    /// legitimate non-ASCII text passes through byte-identical.
+    #[test]
+    fn layout_forgery_escapes_while_cjk_passes_through() {
+        // Explicit escapes: no invisible literals in source.
+        let hostile = "ok\u{2028}\u{202E}done".to_owned();
+        let rendered = escape(STDOUT_PREFIX, hostile.as_bytes());
+        assert!(
+            !rendered.contains('\u{2028}') && !rendered.contains('\u{202E}'),
+            "layout controls must not pass through: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\u2028") && rendered.contains("\\u202e"),
+            "each control escapes visibly: {rendered:?}"
+        );
+        assert_eq!(
+            escape(STDOUT_PREFIX, "中際".as_bytes()),
+            format!("{STDOUT_PREFIX}中際"),
+            "legitimate text passes through byte-identical"
+        );
+    }
 
     /// **F-21: dropping a guard after poison must not panic.**
     ///

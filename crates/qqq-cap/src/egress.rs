@@ -100,6 +100,20 @@ impl TenantId {
                     .to_owned(),
             );
         }
+        // No JSON-significant characters: tenant names travel inside JSON
+        // audit records, Prometheus labels, and log lines, and the audit
+        // parser matches `"tenant":null` as a substring. A quote or
+        // backslash in a name would let the name desynchronise that scan --
+        // the row would then fail chain verification and refuse the whole
+        // file on restart. Refusing the name at construction keeps every
+        // downstream renderer honest, and no legitimate tenant -- DNS names,
+        // peer labels, mapped identities -- needs either character.
+        if name.chars().any(|c| c == '"' || c == '\\') {
+            return Err(format!(
+                "a tenant id must not contain quotes or backslashes: {name:?}. \
+                 They would desynchronise the audit record parser"
+            ));
+        }
         Ok(Self(name.to_owned()))
     }
 
@@ -1161,6 +1175,29 @@ mod tests {
         assert!(TenantId::new("acme\x00").is_err());
         assert!(TenantId::new("acme").is_ok());
         assert!(TenantId::new("acme-corp.eu").is_ok());
+    }
+
+    /// Quotes and backslashes never name a tenant: they would desynchronise
+    /// the hand-written audit JSON parser, turning the tenant's own rows
+    /// unverifiable on restart. DNS names, peer labels, and mapped
+    /// identities never need either character.
+    #[test]
+    fn a_tenant_id_rejects_json_significant_characters() {
+        for hostile in [
+            "acme\"tenant\":null",
+            "acme\\corp",
+            "a\"b",
+            "a\\b",
+            "\"",
+            "\\",
+        ] {
+            assert!(
+                TenantId::new(hostile).is_err(),
+                "{hostile:?} must not be a tenant id"
+            );
+        }
+        assert!(TenantId::new("acme-corp.eu").is_ok());
+        assert!(TenantId::new("2001:db8::1").is_ok());
     }
 
     // -- Policy bookkeeping --------------------------------------------------

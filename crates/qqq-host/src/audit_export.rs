@@ -48,7 +48,7 @@
 //! let mut stream = AuditStream::with_default_capacity();
 //! let component = ComponentDigest::new("0011223344556677").expect("digest");
 //! let grants = GrantDigest::new("aabbccdd").expect("digest");
-//! let _ = stream.record(None, &component, &grants, Capability::FsRead, "read", Outcome::Granted);
+//! let _ = stream.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
 //!
 //! assert!(to_sarif(&stream).is_ok());
 //! assert!(to_compliance_report(&stream).is_ok());
@@ -153,7 +153,7 @@ const fn sarif_rule(outcome: Outcome) -> &'static str {
 /// let mut stream = AuditStream::with_default_capacity();
 /// let component = ComponentDigest::new("0011223344556677").expect("digest");
 /// let grants = GrantDigest::new("aabbccdd").expect("digest");
-/// let _ = stream.record(None, &component, &grants, Capability::FsWrite, "read", Outcome::Denied);
+/// let _ = stream.record(None, &component, &grants, Capability::FsWrite, "handle_request", Outcome::Denied);
 ///
 /// let sarif = to_sarif(&stream).expect("an intact chain renders");
 /// assert!(sarif.contains("qqq/capability-denied"));
@@ -300,7 +300,7 @@ pub fn to_sarif(stream: &AuditStream) -> Result<String, LedgerError> {
 /// let mut stream = AuditStream::with_default_capacity();
 /// let component = ComponentDigest::new("0011223344556677").expect("digest");
 /// let grants = GrantDigest::new("aabbccdd").expect("digest");
-/// let _ = stream.record(None, &component, &grants, Capability::FsRead, "read", Outcome::Granted);
+/// let _ = stream.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
 ///
 /// let report = to_compliance_report(&stream).expect("an intact chain renders");
 /// assert!(report.contains(stream.head()), "the head is printed verbatim");
@@ -476,7 +476,14 @@ mod tests {
     ) {
         let component = ComponentDigest::new("0011223344556677").expect("digest");
         let grants = GrantDigest::new("aabbccdd").expect("digest");
-        let _ = stream.record(None, &component, &grants, capability, "read", outcome);
+        let _ = stream.record(
+            None,
+            &component,
+            &grants,
+            capability,
+            "handle_request",
+            outcome,
+        );
     }
 
     fn stream_with(outcomes: &[(Outcome, qqq_cap::capability::Capability)]) -> AuditStream {

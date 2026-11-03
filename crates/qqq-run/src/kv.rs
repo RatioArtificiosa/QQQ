@@ -81,6 +81,17 @@ pub fn resolve_kv_config(manifest: &Manifest) -> KvConfig {
 /// assert!(view.config.allows("s"));
 /// assert!(view.config.write);
 /// ```
+///
+/// # Deployment scope, not tenant scope
+///
+/// The shared backend is keyed by `(store, key)` with no tenant partition:
+/// every request a `serve` deployment handles reads and writes the same
+/// entries, whatever connection-derived tenant label the row carries.
+/// Connection-derived tenants are rate-limit and audit buckets (see
+/// `qqq-serve`'s `tenant_of`); per-tenant *data* isolation needs the
+/// authenticated identity V1 does not have (`ARCH-017`), so a deployment
+/// that serves mutually untrusting tenants must scope them to separate
+/// deployments (separate manifests, separate backends) today.
 #[must_use]
 pub fn view_for_manifest(manifest: &Manifest) -> KvView {
     KvView::new(

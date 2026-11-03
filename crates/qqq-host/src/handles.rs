@@ -266,50 +266,56 @@ impl<T> HandleTable<T> {
         // but would need its own allocation and its own correctness argument for
         // the generation handoff. At this bound the scan is cheaper than the
         // structure, and the bound is a manifest field so the tradeoff is
-        // visible rather than hidden.
-        for i in 0..self.slots.len() {
-            // Read through `.get()`: the loop bound makes `None`
-            // unreachable, and copying the generation out here (rather than
-            // matching on the subscript) ends the borrow before the write
-            // below — the shape that also satisfies the borrow checker.
-            let next_generation = match self.slots.get(i) {
-                Some(Slot::Free { next_generation }) => Some(*next_generation),
-                _ => None,
-            };
-            if let Some(next_generation) = next_generation {
-                // A generation of `u32::MAX` cannot be incremented, so the slot is
-                // retired rather than reused. Refusing is the safe direction: a
-                // wrapped generation would make an old handle valid again, which
-                // is exactly the recycling attack the generation exists to stop.
-                // No counting here: the retirement was counted once in `remove`,
-                // and every refused insert re-scans the same retired slots.
-                if next_generation == u32::MAX {
-                    continue;
+        // visible rather than hidden. The short-circuit below keeps the dense
+        // case O(1) without any second structure to keep in step: every slot
+        // is either live or free, so `live == slots.len()` proves no free
+        // slot exists and the scan would find nothing.
+        if self.live < self.slots.len() {
+            for i in 0..self.slots.len() {
+                // Read through `.get()`: the loop bound makes `None`
+                // unreachable, and copying the generation out here (rather than
+                // matching on the subscript) ends the borrow before the write
+                // below — the shape that also satisfies the borrow checker.
+                let next_generation = match self.slots.get(i) {
+                    Some(Slot::Free { next_generation }) => Some(*next_generation),
+                    _ => None,
+                };
+                if let Some(next_generation) = next_generation {
+                    // A generation of `u32::MAX` cannot be incremented, so the slot is
+                    // retired rather than reused. Refusing is the safe direction: a
+                    // wrapped generation would make an old handle valid again, which
+                    // is exactly the recycling attack the generation exists to stop.
+                    // No counting here: the retirement was counted once in `remove`,
+                    // and every refused insert re-scans the same retired slots.
+                    if next_generation == u32::MAX {
+                        continue;
+                    }
+                    let generation = next_generation;
+                    // `#[expect]` with a reason: `i` ranges over the live table,
+                    // so the subscript cannot fail — and an invariant violation
+                    // here must panic loudly (fail-stop) rather than skip a write
+                    // and corrupt the table silently.
+                    #[expect(clippy::indexing_slicing, reason = "i ranges over the live table")]
+                    {
+                        self.slots[i] = Slot::Live { value, generation };
+                    }
+                    self.live += 1;
+                    self.stats.opened += 1;
+                    // As above: `i < slots.len() <= limit` and `limit` is a `u32`.
+                    let slot = u32::try_from(i).map_err(|_| {
+                        Error::new(
+                            ErrorCode::InternalInvariantViolated,
+                            "the handle table exceeded its representable slot count",
+                        )
+                        .with_remediation("this is a QQQ bug; please report it")
+                    })?;
+                    return Ok(Handle::pack(slot, generation));
                 }
-                let generation = next_generation;
-                // `#[expect]` with a reason: `i` ranges over the live table,
-                // so the subscript cannot fail — and an invariant violation
-                // here must panic loudly (fail-stop) rather than skip a write
-                // and corrupt the table silently.
-                #[expect(clippy::indexing_slicing, reason = "i ranges over the live table")]
-                {
-                    self.slots[i] = Slot::Live { value, generation };
-                }
-                self.live += 1;
-                self.stats.opened += 1;
-                // As above: `i < slots.len() <= limit` and `limit` is a `u32`.
-                let slot = u32::try_from(i).map_err(|_| {
-                    Error::new(
-                        ErrorCode::InternalInvariantViolated,
-                        "the handle table exceeded its representable slot count",
-                    )
-                    .with_remediation("this is a QQQ bug; please report it")
-                })?;
-                return Ok(Handle::pack(slot, generation));
             }
         }
 
-        // No free slot was reusable: either every slot is live, or the only
+        // No free slot was reusable: either every slot is live (in which case
+        // the short-circuit above already skipped the scan), or the only
         // free slots were retired at `u32::MAX` and must never hand out a
         // wrapped generation. Appending is still fine while the table has
         // room under the limit; at capacity it would grow past the limit
@@ -440,10 +446,15 @@ impl<T> HandleTable<T> {
         let placeholder = Slot::Free {
             next_generation: generation.saturating_add(1),
         };
-        let old = match self.slots.get_mut(index) {
-            Some(slot) => std::mem::replace(slot, placeholder),
-            None => return Err(Self::invalid_handle_message(handle)),
+        // Unreachable: the match above established `Some(Live)`, and no
+        // mutation can intervene on `&mut self`. Counted anyway, so every
+        // error return from `remove` feeds the probe counter and a future
+        // edit that makes this reachable cannot silently undercount.
+        let Some(slot) = self.slots.get_mut(index) else {
+            self.stats.invalid += 1;
+            return Err(Self::invalid_handle_message(handle));
         };
+        let old = std::mem::replace(slot, placeholder);
         self.live -= 1;
         self.stats.closed += 1;
 

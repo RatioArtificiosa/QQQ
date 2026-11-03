@@ -534,10 +534,17 @@ fn dispatch_audit_log(
         return ExitCode::from(exit::USAGE);
     };
 
-    // Read and verify. A broken chain refuses here rather than being rendered -- the exporters
-    // enforce it too, but a refusal that names the file is more useful than one that names a
-    // record. `resume_or_start` returns the stream it verified, so there is no second resume.
-    let (stream, loaded) = match qqq_host::audit_sink::resume_or_start(
+    // Read and verify, without touching the file. A broken chain refuses here
+    // rather than being rendered -- the exporters enforce it too, but a refusal
+    // that names the file is more useful than one that names a record. This is
+    // the reporting path, so it loads read-only: quarantining or truncating a
+    // torn tail would be the reader mutating the evidence.
+    //
+    // Ring-windowed, not refusing on size: the file grows a line per request with no rotation yet
+    // (retention is Fabric-tier), so a long-lived log legitimately holds more rows than the
+    // in-memory window. The report covers the retained window, and says so below, rather than
+    // refusing to report on a healthy log that simply outgrew the window.
+    let (stream, loaded) = match qqq_host::audit_sink::load_for_report(
         std::path::Path::new(&path),
         qqq_host::audit::DEFAULT_CAPACITY,
     ) {
@@ -562,9 +569,31 @@ fn dispatch_audit_log(
              wrote it did not shut down cleanly."
         );
     }
+    if loaded.records.len() > stream.len() {
+        eprintln!(
+            "note: {path} holds {} records; this report covers the most recent {} \
+             (the in-memory window). Rotate the log for full-history reports.",
+            loaded.records.len(),
+            stream.len()
+        );
+    }
 
+    emit_audit_report(name, out, sarif, &stream)
+}
+
+/// Render the verified window as SARIF or the compliance report.
+///
+/// Split from `dispatch_audit_log` so each half stays readable: parsing and
+/// loading above, rendering here. The branches share the failure mapping --
+/// an export error is a host fault in rendering, not a usage error.
+fn emit_audit_report(
+    name: CommandName,
+    out: &mut Output<std::io::Stdout>,
+    sarif: bool,
+    stream: &qqq_host::audit::AuditStream,
+) -> ExitCode {
     if sarif {
-        match qqq_host::audit_export::to_sarif(&stream) {
+        match qqq_host::audit_export::to_sarif(stream) {
             Ok(document) => {
                 // SARIF goes out as its own document, not wrapped in an envelope: a consumer
                 // parsing the output as SARIF must receive SARIF and nothing else. The same rule
@@ -582,7 +611,7 @@ fn dispatch_audit_log(
             }
         }
     } else {
-        match qqq_host::audit_export::to_compliance_report(&stream) {
+        match qqq_host::audit_export::to_compliance_report(stream) {
             Ok(report) => {
                 let _ = out.write_document(&report);
                 ExitCode::SUCCESS

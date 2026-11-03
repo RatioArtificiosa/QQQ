@@ -72,9 +72,13 @@ pub struct PreloadItem {
     ///
     /// Taken as a field rather than computed here so a caller who has already
     /// digested the artifact -- `qqq-pkg` does, for content addressing -- does not
-    /// pay for it twice. The digest must be the hex-encoded SHA-256 **of
-    /// `bytes`**; [`preload`] verifies this and fails the item on a mismatch,
-    /// so a swapped pair can never produce a cache entry under the wrong key.
+    /// pay for it twice. The digest must be the lowercase hex-encoded SHA-256
+    /// **of `bytes`** (exactly 64 `[0-9a-f]` characters); [`preload`]
+    /// checks the shape before hashing and fails the item on a mismatch, so
+    /// a swapped pair can never produce a cache entry under the wrong key.
+    /// [`cache_key_for`] must only be called with items `preload` accepted:
+    /// it keys on the digest without re-verifying, so keying a store from an
+    /// unverified item would reintroduce the poisoning `preload` refuses.
     pub digest: String,
 }
 
@@ -230,26 +234,11 @@ pub fn preload(
         // different artifact. A mismatch is a caller bug -- two artifacts
         // swapped in the deploy pipeline -- and failing the item is what
         // keeps it from becoming a poisoned cache entry at serve time.
-        let actual = content_digest(&item.bytes);
-        if actual != item.digest {
+        if let Err(error) = check_item_digest(item) {
             outcomes.push((
                 item.name.clone(),
                 PreloadOutcome::Failed {
-                    error: Box::new(
-                        Error::new(
-                            ErrorCode::ComponentDigestMismatch,
-                            format!(
-                                "`{}` digest `{}` does not match its bytes",
-                                item.name, item.digest
-                            ),
-                        )
-                        .with_cause(format!("sha256 of the bytes is `{actual}`"))
-                        .with_context("digest", item.digest.clone())
-                        .with_remediation(
-                            "recompute the digest from the artifact bytes; do not \
-                             relabel the bytes to fit the digest",
-                        ),
-                    ),
+                    error: Box::new(error),
                 },
             ));
             continue;
@@ -335,6 +324,71 @@ fn content_digest(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+/// Whether a claimed digest even has the digest shape: exactly 64 lowercase
+/// hex characters.
+///
+/// Checked before hashing so a malformed claim fails fast instead of pricing
+/// a full SHA-256 over the bytes first. Uppercase is not canonical: the
+/// pipeline compares digests as strings, and two spellings of one digest
+/// would compare unequal.
+fn digest_shape_valid(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A digest safe to echo into an error: the real thing passes through, and
+/// anything longer is cut to a prefix plus its length, so a megabyte of
+/// caller-supplied text cannot become a megabyte of log line.
+fn capped_digest(digest: &str) -> std::borrow::Cow<'_, str> {
+    if digest.len() <= 64 {
+        return std::borrow::Cow::Borrowed(digest);
+    }
+    let prefix: String = digest.chars().take(32).collect();
+    std::borrow::Cow::Owned(format!("{prefix}…[{} chars]", digest.len()))
+}
+
+/// Verify an item's claimed digest: shape first, then the hash.
+///
+/// Shape before substance: a malformed claim fails without pricing a hash
+/// over the bytes, and the echo is capped so a huge claim does not become
+/// a huge error. Returns the `Failed` error, so the loop stays flat.
+fn check_item_digest(item: &PreloadItem) -> std::result::Result<(), Error> {
+    if !digest_shape_valid(&item.digest) {
+        return Err(Error::new(
+            ErrorCode::ComponentDigestMismatch,
+            format!(
+                "`{}` digest `{}` is not a digest",
+                item.name,
+                capped_digest(&item.digest)
+            ),
+        )
+        .with_context("digest", capped_digest(&item.digest).into_owned())
+        .with_remediation(
+            "pass the lowercase hex-encoded SHA-256 of the artifact bytes; \
+             recompute it from the bytes rather than relabelling them",
+        ));
+    }
+    let actual = content_digest(&item.bytes);
+    if actual != item.digest {
+        return Err(Error::new(
+            ErrorCode::ComponentDigestMismatch,
+            format!(
+                "`{}` digest `{}` does not match its bytes",
+                item.name, item.digest
+            ),
+        )
+        .with_cause(format!("sha256 of the bytes is `{actual}`"))
+        .with_context("digest", item.digest.clone())
+        .with_remediation(
+            "recompute the digest from the artifact bytes; do not \
+             relabel the bytes to fit the digest",
+        ));
+    }
+    Ok(())
 }
 
 /// The cache key an item's AOT artifact should be stored under.
@@ -670,5 +724,40 @@ mod tests {
             "the claimed digest must be in the context: {error}"
         );
         assert!(error.remediation.is_some(), "a failure needs a remediation");
+    }
+
+    /// A malformed digest fails on shape, before any hashing: a gigabyte of
+    /// bytes with a garbage claim must not pay a SHA-256 first. The echo is
+    /// capped, so a huge claim cannot become a huge error.
+    #[test]
+    fn a_malformed_digest_fails_on_shape_with_a_capped_echo() {
+        let mut bad = item("swapped", TINY);
+        bad.digest = "x".repeat(10_000);
+        let report = preload(&[bad], &limits(), &EngineConfig::default(), &roomy())
+            .expect("the call itself succeeds; the item fails");
+        assert_eq!(report.failures(), 1);
+        let (_, outcome) = &report.outcomes[0];
+        let PreloadOutcome::Failed { error } = outcome else {
+            panic!("a shapeless digest must not compile: {outcome:?}");
+        };
+        assert_eq!(error.code, ErrorCode::ComponentDigestMismatch);
+        let text = format!("{error:#}");
+        assert!(
+            !text.contains(&"x".repeat(1000)),
+            "the echo must be capped, not the whole claim: {text:.200}"
+        );
+        assert!(
+            text.contains("10000"),
+            "the cap must still say how long the claim was: {text:.200}"
+        );
+    }
+
+    /// Digests are lowercase by convention: an uppercase spelling of the
+    /// right hash still fails, because two spellings of one digest would
+    /// compare unequal downstream.
+    #[test]
+    fn an_uppercase_digest_is_not_canonical() {
+        assert!(!digest_shape_valid(&content_digest(TINY).to_uppercase()));
+        assert!(digest_shape_valid(&content_digest(TINY)));
     }
 }

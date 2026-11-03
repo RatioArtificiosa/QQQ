@@ -122,7 +122,62 @@ fn the_report_is_rendered_from_a_real_record() {
     );
 }
 
-/// **`--sarif` emits SARIF and nothing else.**
+/// **A log that outgrew the window still reports -- its newest window.**
+///
+/// The file grows a line per request with no rotation yet, so a long-lived
+/// log legitimately holds more rows than the in-memory window. Refusing it
+/// would make `audit-log` useless exactly when the history is longest;
+/// instead the report covers the retained window and says so.
+#[test]
+fn an_oversized_log_reports_its_window_instead_of_refusing() {
+    use qqq_host::audit::AuditStream;
+    let scratch = Scratch::new("oversize");
+    let path = scratch.file();
+    // More rows than the window the CLI resumes into.
+    let total = (qqq_host::audit::DEFAULT_CAPACITY + 100) as u64;
+    let component = ComponentDigest::new("0011223344556677").expect("digest");
+    let grants = GrantDigest::new("aabbccdd").expect("digest");
+    // A ring stream keeps memory bounded while the chain stays continuous:
+    // every row lands in the file exactly once, in sequence order.
+    let mut stream = AuditStream::new_ring(1024).expect("ring builds");
+    let mut sink = AuditFile::open(&path, 0).expect("open");
+    let mut flushed = 0u64;
+    for _ in 0..total {
+        let _ = stream.record(
+            None,
+            &component,
+            &grants,
+            Capability::FsRead,
+            "handle_request",
+            Outcome::Granted,
+        );
+        for record in stream.records() {
+            if record.sequence > flushed {
+                sink.append(record).expect("append");
+                flushed = record.sequence;
+            }
+        }
+    }
+    drop(sink);
+    assert_eq!(flushed, total, "every row must reach the file once");
+
+    let (stdout, stderr, code) = run(&["audit-log", path.to_str().expect("utf8")]);
+    assert_eq!(
+        code, 0,
+        "an oversized but healthy log must report; stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("QQQ capability-audit compliance report"),
+        "the report must reach stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "holds {total} records; this report covers the most recent {}",
+            qqq_host::audit::DEFAULT_CAPACITY
+        )),
+        "the report must say it is a window, not the whole history: {stderr}"
+    );
+}
 ///
 /// A consumer parsing the output as SARIF must receive SARIF — the same rule `qqqai audit --sarif`
 /// states, and the reason the document is not wrapped in this CLI's usual envelope.

@@ -350,6 +350,14 @@ fn bounded_read_line<R: BufRead>(
     Ok((line, read))
 }
 
+/// Read the whole log file into memory: restart cost is O(file size).
+///
+/// Each line is bounded by [`MAX_AUDIT_LINE_BYTES`], so one hostile line
+/// cannot balloon the read, but a long-lived log with no rotation still
+/// costs a full scan on every restart. Rotation and retention are the real
+/// fix and stay operator-managed (deferred to the Fabric-side retention
+/// design); this loader deliberately implements no retention of its own so
+/// a reporter can never silently discard evidence.
 pub(crate) fn load(path: &Path) -> Result<Loaded, SinkError> {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -813,7 +821,7 @@ impl AuditFile {
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
-    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
     /// let report = file.append_batch(stream.records(), Durability::FlushPerRecord).expect("batch");
     /// assert_eq!((report.records, report.flushes), (1, 1));
     /// assert_eq!(file.records(), 1);
@@ -905,7 +913,7 @@ impl AuditFile {
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
-    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
     /// let report = file.append_batch(stream.records(), Durability::Buffered).expect("batch");
     /// assert_eq!(report.records, 1);
     /// assert!(std::fs::read_to_string(&path).expect("read").is_empty());
@@ -951,7 +959,7 @@ impl AuditFile {
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
-    /// let _ = stream.record(None, &component, &grants, Capability::HttpServer, "f", Outcome::Granted);
+    /// let _ = stream.record(None, &component, &grants, Capability::HttpServer, "handle_request", Outcome::Granted);
     ///
     /// for record in stream.records().iter().skip(file.records()) {
     ///     file.append(record).expect("append");
@@ -1083,6 +1091,31 @@ pub fn resume_or_start_ring(
     Ok((stream, loaded))
 }
 
+/// Load a file for *reporting* without touching it.
+///
+/// `resume_or_start` quarantines and truncates a torn tail, which is correct
+/// when the caller is about to append -- the next record would otherwise
+/// land on the fragment. A reporter never appends, so mutating the evidence
+/// it reads would be evidence tampering by the reader: a torn tail stays in
+/// the file (and `Loaded::dropped_partial_line` still says so), quarantine
+/// files are not created, and a read-only file or directory reports just as
+/// well as a writable one.
+///
+/// # Errors
+///
+/// [`SinkError`] from an unreadable file or a broken chain over the
+/// retained window. A torn tail is *not* an error here: it is reported
+/// through [`Loaded::dropped_partial_line`] while the whole rows load.
+pub fn load_for_report(
+    path: &Path,
+    ring_capacity: usize,
+) -> Result<(AuditStream, Loaded), SinkError> {
+    let loaded = load(path)?;
+    let stream = AuditStream::resume_ring_with_key(loaded.records.clone(), ring_capacity, None)
+        .map_err(|reason| SinkError::NotAStream { reason })?;
+    Ok((stream, loaded))
+}
+
 /// Quarantine a torn tail and truncate the file past it, when [`load`]
 /// found one. Shared by both resume paths so the two cannot disagree
 /// about what "restore" means.
@@ -1097,11 +1130,7 @@ fn quarantine_and_truncate(path: &Path, loaded: &mut Loaded) -> Result<(), SinkE
         return Ok(());
     }
     let tail = read_tail(path, loaded.complete_bytes)?;
-    let quarantine = quarantine_path(path);
-    write_quarantine(&quarantine, &tail).map_err(|e| SinkError::Io {
-        path: quarantine.clone(),
-        reason: format!("the torn tail could not be quarantined: {e}"),
-    })?;
+    let quarantine = quarantine_unique(path, &tail)?;
     loaded.quarantined_to = Some(quarantine);
     let file = OpenOptions::new()
         .write(true)
@@ -1119,7 +1148,15 @@ fn quarantine_and_truncate(path: &Path, loaded: &mut Loaded) -> Result<(), SinkE
 }
 
 /// The quarantine path for a torn tail: the log path with a millisecond
-/// timestamp suffix, so two crashes never collide on one name.
+/// timestamp suffix, plus a counter on collision. Two crashes in the same
+/// millisecond -- or on a coarse clock -- would otherwise name the same
+/// file, and `create_new` would refuse the second one, and the resume with
+/// it: a crash loop must never make the log unrestorable.
+///
+/// Quarantine files accumulate: each is crash evidence (a torn tail that
+/// would otherwise be lost), so they are never deleted automatically --
+/// like core dumps, they are the operator's to archive. Each holds at most
+/// one line, bounded by [`MAX_AUDIT_LINE_BYTES`].
 fn quarantine_path(path: &Path) -> PathBuf {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1127,6 +1164,61 @@ fn quarantine_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(format!(".partial-{ms}"));
     PathBuf::from(name)
+}
+
+/// Quarantine a torn tail, retrying past name collisions.
+///
+/// `create_new` refuses an existing file rather than overwriting evidence,
+/// so a collision (same-millisecond crash, coarse clock, or a leftover
+/// from an uncleaned crash) retries with a counter suffix instead of
+/// failing the resume. The counter is unbounded in principle and tiny in
+/// practice: collisions need identical milliseconds *and* an uncleaned
+/// predecessor.
+/// Quarantine a torn tail, retrying past name collisions.
+///
+/// `create_new` refuses an existing file rather than overwriting evidence,
+/// so a collision (same-millisecond crash, coarse clock, or a leftover
+/// from an uncleaned crash) retries with a counter suffix instead of
+/// failing the resume. Collisions need an identical millisecond *and* an
+/// uncleaned predecessor, so the counter stays small in practice; the loop
+/// itself is unbounded because refusing to quarantine would refuse to
+/// restart, which is the worse failure.
+/// The quarantine name for a collision-retry attempt: attempt 0 is the
+/// base millisecond name, later attempts append a counter suffix.
+///
+/// Pure in `base` and `attempt`: no clock read, so unit tests pin the
+/// naming without timing races.
+fn quarantine_candidate(base: &Path, attempt: u32) -> PathBuf {
+    if attempt == 0 {
+        base.to_path_buf()
+    } else {
+        let mut name = base.as_os_str().to_owned();
+        name.push(format!("-{attempt}"));
+        PathBuf::from(name)
+    }
+}
+
+fn quarantine_unique_at(base: &Path, tail: &[u8]) -> Result<PathBuf, SinkError> {
+    let mut attempt: u32 = 0;
+    loop {
+        let candidate = quarantine_candidate(base, attempt);
+        match write_quarantine(&candidate, tail) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                attempt = attempt.saturating_add(1);
+            }
+            Err(e) => {
+                return Err(SinkError::Io {
+                    path: candidate,
+                    reason: format!("the torn tail could not be quarantined: {e}"),
+                });
+            }
+        }
+    }
+}
+
+fn quarantine_unique(path: &Path, tail: &[u8]) -> Result<PathBuf, SinkError> {
+    quarantine_unique_at(&quarantine_path(path), tail)
 }
 
 /// Read every byte from `offset` to end-of-file.
@@ -1321,6 +1413,54 @@ enum Work {
     },
 }
 
+/// How long a handoff poll waits before re-checking a full queue.
+///
+/// Short enough that expiry tracks the deadline within a millisecond;
+/// long enough that a wedged worker costs one timed sleep per check
+/// rather than a hot spin. The handoff loop only runs hot while the
+/// queue is full, which is exactly when the host wants producers
+/// waiting rather than burning CPU.
+const HANDOFF_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Hand one unit of work to the worker, giving up at the deadline.
+///
+/// `sync_channel::send` blocks past a full queue by design (backpressure),
+/// but [`AuditAppender::persist`] promises its caller a bounded wait, and a
+/// wedged worker that stops draining would otherwise hold a producer here
+/// forever, past the tripwire that used to cover only the ack wait.
+/// Polling `try_send` keeps the handoff inside the same budget; expiry maps
+/// to [`AppendError::WorkerTimeout`] like a late ack, because in both cases
+/// the caller must not assume persistence. `through` names the horizon the
+/// caller asked about -- covered by a barrier, or requested but never
+/// installed when the handoff itself expires.
+fn send_before(
+    tx: Option<&std::sync::mpsc::SyncSender<Work>>,
+    work: Work,
+    timeout: std::time::Duration,
+    through: u64,
+) -> Result<(), AppendError> {
+    let Some(tx) = tx else {
+        return Err(AppendError::WorkerGone);
+    };
+    let start = std::time::Instant::now();
+    let mut work = work;
+    loop {
+        match tx.try_send(work) {
+            Ok(()) => return Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(w)) => {
+                work = w;
+                if start.elapsed() >= timeout {
+                    return Err(AppendError::WorkerTimeout { through });
+                }
+                std::thread::sleep(HANDOFF_POLL_INTERVAL);
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                return Err(AppendError::WorkerGone);
+            }
+        }
+    }
+}
+
 /// What the worker reports across a barrier.
 ///
 /// ```
@@ -1340,6 +1480,12 @@ pub struct BarrierAck {
 /// Atomics, because producers read them without holding the worker's locks —
 /// and because a metric that needed the lock it measures would serialize the
 /// path it observes.
+///
+/// Per-process by design: a restart zeroes every counter, so a loss that
+/// happened before the restart is visible in the *file* (a sequence gap or
+/// a torn tail), not here. Carrying counters across restarts would need a
+/// persisted format change; until such a format exists, operators correlate
+/// across restarts by file contents, not by these counters.
 ///
 /// ```
 /// use qqq_host::audit_sink::AppenderStats;
@@ -1476,7 +1622,9 @@ pub enum AppendError {
     /// queue drains in bounded time, so this means the worker is dead or the
     /// disk is wedged — either way the caller must not assume persistence.
     WorkerTimeout {
-        /// The highest sequence the barrier covered.
+        /// The highest sequence the barrier covered -- or, when the handoff
+        /// itself expired, the horizon the caller asked about that was never
+        /// installed. Either way the rows past it are not known durable.
         through: u64,
     },
 }
@@ -1514,10 +1662,11 @@ impl std::error::Error for AppendError {}
 pub struct ShutdownReport {
     /// The final counters.
     pub stats: AppenderSnapshot,
-    /// True when every submitted record reached the file with no failure.
-    /// False means the report's `failed_batches` or
-    /// `unpersisted_after_failure` is nonzero — the caller must say so, not
-    /// round it to success.
+    /// True when every submitted record reached the file with no failure
+    /// and no loss: `failed_batches` and `unpersisted_after_failure` are
+    /// zero, nothing arrived after the frontier skipped past it
+    /// (`late_after_skip`), and the persisted count matches submitted.
+    /// False means the caller must say so, not round it to success.
     pub drained_cleanly: bool,
 }
 
@@ -1624,7 +1773,7 @@ impl AuditAppender {
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
-    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
     /// appender.append(&stream.records()[0]).expect("append");
     /// let report = appender.shutdown();
     /// assert!(report.drained_cleanly);
@@ -1700,7 +1849,7 @@ impl AuditAppender {
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
-    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
     /// appender.append(&stream.records()[0]).expect("append");
     /// let report = appender.shutdown();
     /// assert!(report.drained_cleanly);
@@ -1730,11 +1879,18 @@ impl AuditAppender {
     /// evidence on disk — while the shared worker still batches concurrent
     /// requests into fewer disk passes than one flush per request each.
     ///
+    /// The `timeout` bounds the whole call, handoff included: the queue is
+    /// bounded, so a wedged worker that stops draining would otherwise hold
+    /// a producer in `send` forever, past a tripwire that only covered the
+    /// ack wait. Handoff sends poll `try_send` against the remaining budget
+    /// and expire to [`AppendError::WorkerTimeout`] like a late ack.
+    ///
     /// # Errors
     ///
     /// [`AppendError`] when the worker is gone or failed, or when `timeout`
-    /// expires first — a bounded queue drains in bounded time, so tens of
-    /// seconds without progress means the worker is dead, not slow.
+    /// expires first — on the handoff or on the ack. A bounded queue drains
+    /// in bounded time, so tens of seconds without progress means the worker
+    /// is dead, not slow.
     ///
     /// ```
     /// use qqq_host::audit_sink::{AppenderConfig, AuditAppender, AuditFile};
@@ -1750,7 +1906,7 @@ impl AuditAppender {
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
-    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
     /// let ack = appender.persist(stream.records(), Duration::from_secs(30)).expect("persist");
     /// assert_eq!(ack.persisted, 1);
     /// let report = appender.shutdown();
@@ -1762,10 +1918,9 @@ impl AuditAppender {
         records: &[AuditRecord],
         timeout: std::time::Duration,
     ) -> Result<BarrierAck, AppendError> {
+        let start = std::time::Instant::now();
+        let remaining = || timeout.saturating_sub(start.elapsed());
         let through = records.iter().map(|record| record.sequence).max();
-        for record in records {
-            self.append(record)?;
-        }
         let Some(through) = through else {
             return Ok(BarrierAck {
                 persisted: self
@@ -1774,18 +1929,30 @@ impl AuditAppender {
                     .load(std::sync::atomic::Ordering::Relaxed),
             });
         };
-        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-        match &self.tx {
-            Some(tx) => tx
-                .send(Work::Barrier {
-                    through,
-                    ack: ack_tx,
-                })
-                .map_err(|_| AppendError::WorkerGone)?,
-            None => return Err(AppendError::WorkerGone),
+        // Handoff under the same deadline as the ack wait: `append` blocks
+        // on a full queue by design (backpressure, documented on the type),
+        // but `persist` promises a bounded wait, and a wedged worker would
+        // otherwise hold a producer here past every tripwire.
+        for record in records {
+            send_before(
+                self.tx.as_ref(),
+                Work::Record(record.clone()),
+                remaining(),
+                through,
+            )?;
         }
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        send_before(
+            self.tx.as_ref(),
+            Work::Barrier {
+                through,
+                ack: ack_tx,
+            },
+            remaining(),
+            through,
+        )?;
         ack_rx
-            .recv_timeout(timeout)
+            .recv_timeout(remaining())
             .map_err(|_| AppendError::WorkerTimeout { through })
     }
 
@@ -1875,12 +2042,24 @@ impl AuditAppender {
         }
         let stats = self.stats.snapshot();
         ShutdownReport {
-            drained_cleanly: stats.failed_batches == 0
-                && stats.unpersisted_after_failure == 0
-                && stats.persisted == stats.submitted,
+            drained_cleanly: drained_cleanly(&stats),
             stats,
         }
     }
+}
+
+/// Whether a shutdown left no hole in the evidence.
+///
+/// Every counter that names a loss participates: a failed batch, a row the
+/// dead worker never wrote, a row that arrived after the frontier skipped
+/// past it, and a persisted/submitted mismatch. `late_after_skip` in
+/// particular is easy to forget -- the rows existed, arrived late, and fit
+/// nowhere -- so a report that ignored it would call a loss clean.
+fn drained_cleanly(stats: &AppenderSnapshot) -> bool {
+    stats.failed_batches == 0
+        && stats.unpersisted_after_failure == 0
+        && stats.late_after_skip == 0
+        && stats.persisted == stats.submitted
 }
 
 impl Drop for AuditAppender {
@@ -1903,7 +2082,7 @@ impl Drop for AuditAppender {
     /// let mut stream = AuditStream::with_default_capacity();
     /// let component = ComponentDigest::new("0011223344556677").expect("digest");
     /// let grants = GrantDigest::new("aabbccdd").expect("digest");
-    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "f", Outcome::Granted);
+    /// let _ = stream.record(None, &component, &grants, Capability::FsRead, "handle_request", Outcome::Granted);
     /// appender.append(&stream.records()[0]).expect("append");
     /// drop(appender);
     /// assert_eq!(std::fs::read_to_string(&path).expect("read").lines().count(), 1);
@@ -2468,6 +2647,33 @@ mod tests {
         );
     }
 
+    /// A late row is a lost row: arriving after the frontier skipped past
+    /// means fitting nowhere, and a shutdown report that ignored it would
+    /// call a loss clean.
+    #[test]
+    fn a_late_row_is_not_a_clean_drain() {
+        let mut stats = crate::audit_sink::AppenderSnapshot {
+            submitted: 5,
+            persisted: 5,
+            batches: 1,
+            flushes: 1,
+            fsyncs: 1,
+            failed_batches: 0,
+            unpersisted_after_failure: 0,
+            late_after_skip: 1,
+            resent_skipped: 0,
+        };
+        assert!(
+            !super::drained_cleanly(&stats),
+            "a skipped-past row is a hole: {stats:?}"
+        );
+        stats.late_after_skip = 0;
+        assert!(
+            super::drained_cleanly(&stats),
+            "a clean run stays clean: {stats:?}"
+        );
+    }
+
     /// Build `count` chain-linked records across tenants round-robin, the way
     /// concurrent requests would record them into one shared stream.
     fn chained_records(count: usize, tenants: &[&str]) -> Vec<crate::audit::AuditRecord> {
@@ -2629,6 +2835,93 @@ mod tests {
         let report = appender.shutdown();
         assert!(report.drained_cleanly, "{:?}", report.stats);
         assert_eq!(file_sequences(&path).len(), COUNT);
+    }
+
+    /// A wedged handoff times out instead of blocking past every tripwire.
+    ///
+    /// A rendezvous channel with a receiver that never receives is a worker
+    /// that stopped draining: `try_send` always reports full. `persist`
+    /// promises a bounded wait, so the handoff must expire to
+    /// `WorkerTimeout` naming the requested horizon -- not hang in `send`.
+    #[test]
+    fn a_wedged_handoff_times_out_instead_of_blocking() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+        let (tx, _rx) = sync_channel::<Work>(0);
+        let record = chained_records(1, &["acme"])
+            .into_iter()
+            .next()
+            .expect("one row");
+        let through = record.sequence;
+        let start = std::time::Instant::now();
+        let err = send_before(
+            Some(&tx),
+            Work::Record(record),
+            Duration::from_millis(50),
+            through,
+        )
+        .expect_err("a worker that never drains must trip the deadline");
+        assert!(
+            matches!(err, AppendError::WorkerTimeout { through: t } if t == through),
+            "the timeout names the requested horizon: {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the handoff must expire near its deadline, not hang"
+        );
+    }
+
+    /// A zero budget fails fast: no sleep, no hang, same verdict.
+    #[test]
+    fn a_zero_handoff_budget_fails_fast() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+        let (tx, _rx) = sync_channel::<Work>(0);
+        let record = chained_records(1, &["acme"])
+            .into_iter()
+            .next()
+            .expect("one row");
+        let err = send_before(Some(&tx), Work::Record(record), Duration::ZERO, 9)
+            .expect_err("no budget means no wait");
+        assert!(matches!(err, AppendError::WorkerTimeout { through: 9 }));
+    }
+
+    /// Room in the queue delivers, and a dead worker reports gone rather
+    /// than timing out: absence of a worker is a different fact from a
+    /// slow one, and the caller handles them differently.
+    #[test]
+    fn a_live_handoff_delivers_and_a_dead_worker_reports_gone() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+        let (tx, rx) = sync_channel::<Work>(1);
+        let tx = Some(tx);
+        let record = chained_records(1, &["acme"])
+            .into_iter()
+            .next()
+            .expect("one row");
+        let through = record.sequence;
+        send_before(
+            tx.as_ref(),
+            Work::Record(record),
+            Duration::from_secs(5),
+            through,
+        )
+        .expect("room must deliver");
+        let got = rx.recv().expect("the row must arrive");
+        assert!(matches!(got, Work::Record(_)));
+        drop(rx);
+        let record = chained_records(1, &["acme"])
+            .into_iter()
+            .next()
+            .expect("one row");
+        let err = send_before(
+            tx.as_ref(),
+            Work::Record(record),
+            Duration::from_secs(5),
+            through,
+        )
+        .expect_err("no receiver means no worker");
+        assert!(matches!(err, AppendError::WorkerGone));
     }
 
     /// **Every durability mode persists identical content, with its own flush profile.**
@@ -3038,6 +3331,185 @@ mod tests {
         assert!(
             second.verify_chain().is_ok(),
             "the whole history, written by two processes, must verify as one chain"
+        );
+    }
+
+    /// **A log that outgrew the window still restarts and still reports.**
+    ///
+    /// The file grows a line per request with no rotation yet, so a
+    /// long-lived log legitimately holds more rows than the in-memory
+    /// window. Non-ring `resume` refuses that file, which would brick every
+    /// restart after ~65k requests; the ring window keeps the newest rows,
+    /// and the chain verifies over the retained window.
+    #[test]
+    fn an_oversized_log_resumes_its_window_instead_of_refusing() {
+        let scratch = Scratch::new("oversize-ring");
+        let path = scratch.file();
+        let mut stream = AuditStream::with_default_capacity();
+        for _ in 0..10 {
+            append(&mut stream, Outcome::Granted);
+        }
+        {
+            let mut sink = AuditFile::open(&path, 0).expect("open");
+            for record in stream.records() {
+                sink.append(record).expect("append");
+            }
+        }
+        // Non-ring refuses: ten rows do not fit a capacity of four.
+        assert!(resume_or_start(&path, 4).is_err());
+        // Ring keeps the newest four, chain intact.
+        let (windowed, loaded) =
+            resume_or_start_ring(&path, 4, None).expect("the window must resume");
+        assert_eq!(loaded.records.len(), 10, "the file is read whole");
+        assert_eq!(windowed.len(), 4, "the stream keeps the window");
+        let seqs: Vec<u64> = windowed.records().iter().map(|r| r.sequence).collect();
+        assert_eq!(seqs, vec![7, 8, 9, 10], "the newest rows survive");
+        assert!(
+            windowed.verify_chain().is_ok(),
+            "the retained window must verify as one chain"
+        );
+    }
+
+    /// Reporting never mutates the evidence: a torn tail is quarantined and
+    /// truncated only on the write path (`resume_or_start`), where the next
+    /// append needs a clean end. The read-only reporting load leaves the
+    /// file byte-identical and creates no quarantine files -- the reader is
+    /// not a writer.
+    #[test]
+    fn reporting_leaves_a_torn_file_untouched() {
+        use std::io::Write as _;
+        let scratch = Scratch::new("report-readonly");
+        let path = scratch.file();
+        let mut stream = AuditStream::with_default_capacity();
+        for _ in 0..3 {
+            append(&mut stream, Outcome::Granted);
+        }
+        {
+            let mut sink = AuditFile::open(&path, 0).expect("open");
+            for record in stream.records() {
+                sink.append(record).expect("append");
+            }
+            drop(sink);
+            // Simulate a kill mid-write: a partial line with no closing brace.
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("reopen");
+            f.write_all(b"{\"sequence\":4").expect("the crash fragment");
+        }
+        let before = std::fs::read(&path).expect("read");
+        assert!(before.ends_with(b"{\"sequence\":4"), "the tail is torn");
+        let (reported, loaded) = load_for_report(&path, 1024).expect("reporting reads");
+        assert_eq!(reported.len(), 3, "the three whole rows report");
+        assert!(loaded.dropped_partial_line, "the tear is still reported");
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            before,
+            "reporting must not truncate the file"
+        );
+        assert!(
+            std::fs::read_dir(scratch.0.as_path())
+                .expect("list")
+                .count()
+                == 1,
+            "reporting must not create quarantine files"
+        );
+    }
+
+    #[test]
+    fn quarantine_candidate_names_attempts_without_a_clock() {
+        use std::path::PathBuf;
+        let base = PathBuf::from("audit.log.partial-1700000000000");
+        assert_eq!(quarantine_candidate(&base, 0), base);
+        assert_eq!(
+            quarantine_candidate(&base, 1),
+            PathBuf::from("audit.log.partial-1700000000000-1")
+        );
+        assert_eq!(
+            quarantine_candidate(&base, 42),
+            PathBuf::from("audit.log.partial-1700000000000-42")
+        );
+    }
+
+    /// A colliding quarantine name retries instead of refusing to start: two
+    /// crashes in the same millisecond (or on a coarse clock) must not brick
+    /// the resume, and losing the second torn tail to a failed `create_new`
+    /// would be evidence destroyed by the crash after the crash.
+    ///
+    /// Deterministic by construction: the retry loop is driven directly
+    /// through [`quarantine_unique_at`] with a pre-occupied base, so no
+    /// clock read and no planted millisecond window can flake it.
+    #[test]
+    fn a_colliding_quarantine_name_retries_rather_than_refusing() {
+        let scratch = Scratch::new("quarantine-collision");
+        let mut base = scratch.file();
+        base.set_file_name("audit.log.partial-1700000000000");
+        std::fs::write(&base, b"older crash").expect("occupy the base name");
+        let second =
+            quarantine_unique_at(&base, b"{\"sequence\":3").expect("the retry must succeed");
+        assert_eq!(
+            second,
+            quarantine_candidate(&base, 1),
+            "the retry takes the first counter-suffixed name"
+        );
+        assert_eq!(
+            std::fs::read(&second).expect("read quarantine"),
+            b"{\"sequence\":3",
+            "the quarantined bytes are the new torn tail, not the older crash's"
+        );
+        assert_eq!(
+            std::fs::read(&base).expect("read base"),
+            b"older crash",
+            "the pre-existing evidence is never overwritten"
+        );
+    }
+
+    /// `create_new` is the collision signal: [`write_quarantine`] must
+    /// surface `AlreadyExists` (not a generic I/O error) so the retry loop
+    /// retries on collisions and fails loudly on anything else.
+    #[test]
+    fn write_quarantine_reports_collisions_as_already_exists() {
+        let scratch = Scratch::new("quarantine-kind");
+        let target = scratch.file();
+        std::fs::write(&target, b"first").expect("occupy the target");
+        let err = write_quarantine(&target, b"second").expect_err("create_new refuses");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    /// A torn tail quarantines through the real resume path: whole rows
+    /// resume, the tear is reported, and the fragment bytes are preserved.
+    /// No name planting: this pins the resume contract, while the retry
+    /// itself is pinned clock-free above.
+    #[test]
+    fn a_torn_tail_resumes_through_quarantine_unique() {
+        use std::io::Write as _;
+        let scratch = Scratch::new("quarantine-resume");
+        let path = scratch.file();
+        let mut stream = AuditStream::with_default_capacity();
+        for _ in 0..2 {
+            append(&mut stream, Outcome::Granted);
+        }
+        {
+            let mut sink = AuditFile::open(&path, 0).expect("open");
+            for record in stream.records() {
+                sink.append(record).expect("append");
+            }
+            drop(sink);
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("reopen");
+            f.write_all(b"{\"sequence\":3").expect("the crash fragment");
+        }
+        let (resumed, loaded) = resume_or_start(&path, 1024).expect("resume retries");
+        assert_eq!(resumed.len(), 2, "the whole rows resume");
+        assert!(loaded.dropped_partial_line, "the tear is still reported");
+        let quarantined = loaded.quarantined_to.expect("a quarantine path");
+        assert!(quarantined.exists(), "the torn tail must be preserved");
+        assert_eq!(
+            std::fs::read(&quarantined).expect("read quarantine"),
+            b"{\"sequence\":3",
+            "the quarantined bytes are the torn tail"
         );
     }
 

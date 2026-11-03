@@ -1561,6 +1561,10 @@ impl AuditStream {
         function: &'static str,
         outcome: Outcome,
     ) -> Append {
+        debug_assert!(
+            RECORDED_FUNCTIONS.contains(&function),
+            "`{function}` is not in RECORDED_FUNCTIONS; record through the audit seam instead"
+        );
         if self.records.len() >= self.capacity {
             if self.ring {
                 let evicted = self.records.remove(0);
@@ -2066,7 +2070,7 @@ mod tests {
             &component(),
             &grants(),
             Capability::FsRead,
-            "read",
+            "handle_request",
             outcome,
         )
     }
@@ -2356,7 +2360,7 @@ mod tests {
         let variants = [
             fields(
                 Capability::FsWrite,
-                "read",
+                "handle_request",
                 Outcome::Granted,
                 &genesis_digest(),
             ),
@@ -2368,25 +2372,25 @@ mod tests {
             ),
             fields(
                 Capability::FsRead,
-                "read",
+                "handle_request",
                 Outcome::Denied,
                 &genesis_digest(),
             ),
             fields(
                 Capability::FsRead,
-                "read",
+                "handle_request",
                 Outcome::Attempted,
                 &genesis_digest(),
             ),
             fields(
                 Capability::FsRead,
-                "read",
+                "handle_request",
                 Outcome::Failed,
                 &genesis_digest(),
             ),
             fields(
                 Capability::FsRead,
-                "read",
+                "handle_request",
                 Outcome::Granted,
                 "0000000000000000000000000000000000000000000000000000000000000000",
             ),
@@ -2491,7 +2495,7 @@ mod tests {
             &component(),
             &grants(),
             Capability::FsRead,
-            "read",
+            "handle_request",
             Outcome::Granted,
         );
         s.record(
@@ -2499,7 +2503,7 @@ mod tests {
             &component(),
             &grants(),
             Capability::FsRead,
-            "read",
+            "handle_request",
             Outcome::Denied,
         );
         s.record(
@@ -2507,7 +2511,7 @@ mod tests {
             &component(),
             &grants(),
             Capability::HttpClient,
-            "get",
+            "http_send",
             Outcome::Granted,
         );
         s.record(
@@ -2515,7 +2519,7 @@ mod tests {
             &component(),
             &grants(),
             Capability::FsRead,
-            "read",
+            "handle_request",
             Outcome::Attempted,
         );
 
@@ -2548,7 +2552,7 @@ mod tests {
                 &component(),
                 &grants(),
                 Capability::FsRead,
-                "read",
+                "handle_request",
                 Outcome::Granted,
             );
         }
@@ -2583,7 +2587,7 @@ mod tests {
             &component(),
             &grants(),
             Capability::FsRead,
-            "read",
+            "handle_request",
             Outcome::Granted,
         );
         let text = s.ledger().render();
@@ -2623,7 +2627,11 @@ mod tests {
             "{}",
             lines[0]
         );
-        assert!(lines[0].contains("\"function\":\"read\""), "{}", lines[0]);
+        assert!(
+            lines[0].contains("\"function\":\"handle_request\""),
+            "{}",
+            lines[0]
+        );
     }
 
     /// **The export must refuse a corrupted stream.** Emitting a corrupted
@@ -2656,7 +2664,7 @@ mod tests {
             &component(),
             &grants(),
             Capability::FsRead,
-            "read",
+            "handle_request",
             Outcome::Granted,
         );
         let jsonl = s.to_jsonl().expect("intact");
@@ -2754,7 +2762,7 @@ mod tests {
             &component(),
             &grants(),
             Capability::FsRead,
-            "read",
+            "handle_request",
             Outcome::Granted,
         );
         assert!(

@@ -656,7 +656,16 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
             KvRead
         };
         crate::ambient::require(self, cap, "kv_set").map_err(|_| WitKvError::NotGranted)?;
-        check_write(self, &store)?;
+        // The entry seam recorded the direction held; a direction refusal
+        // below must not leave that `Granted` row standing alone. Recording
+        // the missing direction keeps the refusal attributable: the auditor
+        // sees which authority was actually absent.
+        if let Err(e) = check_write(self, &store) {
+            if matches!(e, WitKvError::ReadOnly) {
+                let _ = crate::ambient::require(self, KvWrite, "kv_set");
+            }
+            return Err(e);
+        }
         let now = now_or_fail(self)?;
         let expires_at = if ttl_seconds.is_some() {
             // Saturating: a TTL past the clock's range pins the key rather
@@ -679,7 +688,14 @@ impl bindings::qqq::kv::store::Host for crate::linker::StoreData {
             KvRead
         };
         crate::ambient::require(self, cap, "kv_delete").map_err(|_| WitKvError::NotGranted)?;
-        check_write(self, &store)?;
+        // Same direction-refusal accounting as `set`: the held direction is
+        // already recorded, so a `ReadOnly` names the missing one too.
+        if let Err(e) = check_write(self, &store) {
+            if matches!(e, WitKvError::ReadOnly) {
+                let _ = crate::ambient::require(self, KvWrite, "kv_delete");
+            }
+            return Err(e);
+        }
         check_key(&key)?;
         lock_backend(self).delete(&store, &key);
         Ok(())
@@ -1004,9 +1020,10 @@ mod tests {
             .unwrap_or_default();
         let seams = production.matches("ambient::require(").count();
         assert_eq!(
-            seams, 7,
+            seams, 9,
             "every kv body (get, set, delete, exists, keys, get_many, stores) must consult \
-             the audit seam; found {seams} seam call(s)"
+             the audit seam, plus the missing-direction records on direction refusals; \
+             found {seams} seam call(s)"
         );
     }
 
@@ -1092,6 +1109,78 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].function, "kv_set");
         assert_eq!(records[0].outcome, crate::audit::Outcome::Denied);
+    }
+
+    /// A direction refusal records the missing direction: a read-only
+    /// manifest writing records `Granted` for the held read grant, then
+    /// `Denied` for the absent write grant -- never a lone `Granted` on a
+    /// refused call.
+    #[test]
+    fn a_read_only_write_records_both_directions() {
+        // Read-only: the store is listed, so membership passes and the
+        // direction is what refuses.
+        let (mut data, stream) = audited_store(false);
+        let err = bindings::qqq::kv::store::Host::set(
+            &mut data,
+            "s".to_owned(),
+            "k".to_owned(),
+            b"v".to_vec(),
+            None,
+        )
+        .expect_err("read-only");
+        assert!(matches!(err, WitKvError::ReadOnly));
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 2, "held then missing, in order");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            (
+                records[0].capability,
+                records[0].function,
+                records[0].outcome
+            ),
+            (
+                qqq_cap::capability::Capability::KvRead,
+                "kv_set",
+                crate::audit::Outcome::Granted
+            )
+        );
+        assert_eq!(
+            (
+                records[1].capability,
+                records[1].function,
+                records[1].outcome
+            ),
+            (
+                qqq_cap::capability::Capability::KvWrite,
+                "kv_set",
+                crate::audit::Outcome::Denied
+            )
+        );
+    }
+
+    /// Same direction accounting for `delete`: the held read grant records
+    /// `Granted`, the absent write grant records `Denied`.
+    #[test]
+    fn a_read_only_delete_records_both_directions() {
+        let (mut data, stream) = audited_store(false);
+        let err = bindings::qqq::kv::store::Host::delete(&mut data, "s".to_owned(), "k".to_owned())
+            .expect_err("read-only");
+        assert!(matches!(err, WitKvError::ReadOnly));
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 2, "held then missing, in order");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].function, "kv_delete");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Granted);
+        assert_eq!(records[1].function, "kv_delete");
+        assert_eq!(records[1].outcome, crate::audit::Outcome::Denied);
+        assert_eq!(
+            records[1].capability,
+            qqq_cap::capability::Capability::KvWrite
+        );
     }
 
     /// Unlisted stores are unconfigured, even for reads: the allowlist is

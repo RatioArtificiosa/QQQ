@@ -625,9 +625,13 @@ pub fn aot_cache_key(component_digest: &str, target: &str, cfg: &EngineConfig) -
     // actually produced the artifact.
     h.update(ENGINE_VERSION.as_bytes());
     h.update(b"\x00");
-    // Configuration that affects codegen.
+    // Configuration that affects codegen. Pooling is one: a pooled
+    // instance addresses static memories while an on-demand one addresses
+    // dynamic ones, so the same artifact compiles differently -- and a key
+    // that ignored it could load pooled code into an on-demand engine.
     h.update([u8::from(cfg.deterministic)]);
     h.update([u8::from(cfg.debug_info)]);
+    h.update([u8::from(cfg.pooling)]);
     let out = h.finalize();
     let mut s = String::with_capacity(64);
     for b in out {
@@ -1196,6 +1200,19 @@ mod tests {
                 }
             ),
             "debug info must affect the key"
+        );
+        assert_ne!(
+            base,
+            aot_cache_key(
+                "digest-a",
+                "target-a",
+                &EngineConfig {
+                    pooling: false,
+                    ..EngineConfig::default()
+                }
+            ),
+            "the allocation strategy must affect the key: pooled and on-demand \
+             instances address memory differently"
         );
     }
 

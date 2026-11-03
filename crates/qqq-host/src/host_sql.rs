@@ -964,12 +964,17 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
             prepare_on(connection, &sql)?
         };
         // Direction follows the statement, not the call: a read prepares
-        // under the query grant, a write under the execute grant.
+        // under the query grant, a write under the execute grant. The entry
+        // seam recorded the direction held; a refusal below records the
+        // missing one too, so a `Granted` row never stands alone on a
+        // refused call.
         if read_only {
             if !self.grants.grants(SqlQuery) {
+                let _ = crate::ambient::require(self, SqlQuery, "sql_prepare");
                 return Err(WitSqlError::NotGranted);
             }
         } else if !self.grants.grants(SqlExecute) {
+            let _ = crate::ambient::require(self, SqlExecute, "sql_prepare");
             return Err(WitSqlError::ReadOnlyConnection);
         }
         let id = mint_id(self)?;
@@ -1048,6 +1053,19 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         check_arity(&statement, &bound)?;
         if statement.readonly() {
             if !can_read {
+                // The entry seam recorded the held direction; record the
+                // missing query grant so the refusal is attributable. The
+                // borrows end here first: `require` takes `&self`, and the
+                // prepared statement borrows it. Moving the borrows out
+                // ends them; nothing is freed, which is what the lint
+                // below observes -- the move is the point, not the drop.
+                {
+                    #[allow(dropping_references, reason = "move ends the borrow")]
+                    drop(statement);
+                    #[allow(dropping_references, reason = "move ends the borrow")]
+                    drop(connection);
+                }
+                let _ = crate::ambient::require(self, SqlQuery, "sql_query_once");
                 return Err(WitSqlError::NotGranted);
             }
             let rows = statement
@@ -1064,6 +1082,15 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
             require_autocommit(connection)?;
             Ok(Vec::new())
         } else {
+            // Same direction-pair accounting as above, after ending the
+            // borrows the success path needs (moves end them; see above).
+            {
+                #[allow(dropping_references, reason = "move ends the borrow")]
+                drop(statement);
+                #[allow(dropping_references, reason = "move ends the borrow")]
+                drop(connection);
+            }
+            let _ = crate::ambient::require(self, SqlExecute, "sql_query_once");
             Err(WitSqlError::ReadOnlyConnection)
         }
     }
@@ -1157,8 +1184,14 @@ impl bindings::qqq::sql::database::HostStatement for crate::linker::StoreData {
         let (database, sql, _) = lookup_statement(self, &handle)?;
         // Membership and direction: neither grant was refused above, so
         // this names an unlisted database or a read-only one — never a
-        // missing grant.
-        check_write(self, &database)?;
+        // missing grant. A direction refusal records the missing write
+        // side, so the entry `Granted` row does not stand alone.
+        if let Err(e) = check_write(self, &database) {
+            if matches!(e, WitSqlError::ReadOnlyConnection) {
+                let _ = crate::ambient::require(self, SqlExecute, "sql_statement_execute");
+            }
+            return Err(e);
+        }
         let Some(db) = self.sql.config.find(&database).cloned() else {
             return Err(WitSqlError::DatabaseNotConfigured);
         };
@@ -1346,15 +1379,19 @@ impl bindings::qqq::sql::transaction::Host for crate::linker::StoreData {
         };
         // Transaction control is an execution, not bookkeeping: `BEGIN`
         // takes the lock (immediate for writers) and touches the journal,
-        // so it spends the unit like every other statement. Charging after
-        // the config lookup keeps a typo'd database name from spending.
+        // so it spends the unit like every other statement. Cap before
+        // charge, like every other minting path: a full table refuses
+        // without spending, so a doomed call costs no budget. Charging
+        // after the config lookup keeps a typo'd database name from
+        // spending, for the same reason.
+        // Cap before charge, like every other minting path.
+        check_handles(self)?;
         charge_one_subrequest(self)?;
         // Writers take the lock up front; readers defer it, so a read-only
         // transaction never starves writers. Read before borrowing.
         let immediate = self.grants.grants(SqlExecute) && !db.read_only();
         // Cap before begin: minting nothing after `BEGIN` would strand a
         // SQLite transaction with no handle to resolve it.
-        check_handles(self)?;
         begin_on(connection_for(self, &db)?, immediate)?;
         let id = mint_id(self)?;
         self.sql_state.transactions.insert(id, db.name);
@@ -1403,12 +1440,16 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         // `database::prepare`: a read prepares under the query grant, a write
         // under the execute grant. Without this, a read-only guest could
         // prepare and hold write statements it can never execute, squatting
-        // handle-table slots its own legitimate statements need.
+        // handle-table slots its own legitimate statements need. The entry
+        // seam recorded the held direction; a refusal below records the
+        // missing one too.
         if read_only {
             if !self.grants.grants(SqlQuery) {
+                let _ = crate::ambient::require(self, SqlQuery, "sql_txn_prepare");
                 return Err(WitSqlError::NotGranted);
             }
         } else if !self.grants.grants(SqlExecute) {
+            let _ = crate::ambient::require(self, SqlExecute, "sql_txn_prepare");
             return Err(WitSqlError::ReadOnlyConnection);
         }
         // `sqlite3_stmt_readonly` reports most `PRAGMA` as reads, but several
@@ -1525,8 +1566,11 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         // mid-transaction must not leave a partial write committed. The
         // rollback's own failure is swallowed — the WIT `drop` is
         // infallible, and the cleanup (invalidating the handle and its
-        // statements) happens regardless. No audit seam: cleanup consults
-        // no capability (see the `close` note on statements).
+        // statements) happens regardless. No audit seam and no charge: a
+        // drop consults no capability (nothing to record) and must not fail
+        // (nothing to charge), even though the best-effort `rollback_open`
+        // performs real I/O. Cleanup that cannot fail is not a capability
+        // use; it is the host keeping its own record truthful.
         let id = rep.rep();
         rollback_open(self, id);
         close_transaction(self, id);
@@ -1602,7 +1646,14 @@ impl bindings::qqq::sql::transaction::HostTxnStatement for crate::linker::StoreD
                 "transaction is closed".to_owned(),
             ));
         }
-        check_write(self, &database)?;
+        // A direction refusal records the missing write side, so the entry
+        // `Granted` row does not stand alone.
+        if let Err(e) = check_write(self, &database) {
+            if matches!(e, WitSqlError::ReadOnlyConnection) {
+                let _ = crate::ambient::require(self, SqlExecute, "sql_txn_statement_execute");
+            }
+            return Err(e);
+        }
         let Some(db) = self.sql.config.find(&database).cloned() else {
             return Err(WitSqlError::DatabaseNotConfigured);
         };
@@ -1632,6 +1683,8 @@ impl bindings::qqq::sql::transaction::HostTxnStatement for crate::linker::StoreD
         &mut self,
         rep: wasmtime::component::Resource<bindings::qqq::sql::transaction::TxnStatement>,
     ) -> wasmtime::Result<()> {
+        // No audit seam: dropping a statement handle consults no capability
+        // (see the `close` note on plain statements) -- cleanup, not use.
         self.sql_state.txn_statements.remove(&rep.rep());
         Ok(())
     }
@@ -1743,10 +1796,11 @@ mod tests {
             .unwrap_or_default();
         let seams = production.matches("ambient::require(").count();
         assert_eq!(
-            seams, 11,
+            seams, 19,
             "every sql body (prepare, query_once, databases, statement query/execute, \
              begin, txn prepare/commit/rollback, txn-statement query/execute) must consult \
-             the audit seam; found {seams} seam call(s)"
+             the audit seam, plus the missing-direction records on direction refusals; \
+             found {seams} seam call(s)"
         );
     }
 
@@ -1789,6 +1843,113 @@ mod tests {
         );
         assert_eq!(records[0].function, "sql_databases");
         assert_eq!(records[0].outcome, crate::audit::Outcome::Granted);
+    }
+
+    /// A refused write records a `Denied` row even though it fails -- a
+    /// refusal is the row an auditor most wants. The entry seam recorded the
+    /// held query grant; the direction refusal records the missing execute
+    /// grant, so no lone `Granted` stands on a refused call.
+    #[test]
+    fn a_write_prepare_without_the_execute_grant_records_both_directions() {
+        use super::bindings::qqq::sql::database::Host as _;
+        // The table must exist for `prepare_on` to learn the statement is a
+        // write; a writer store on the same file creates it first.
+        let path = test_path("audit-direction-prepare");
+        let mut writer = store_for(&path, true, true);
+        query_once(
+            &mut writer,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("create runs");
+        drop(writer);
+        let mut data = store_for(&path, true, false);
+        let stream = attach_audit(&mut data);
+        let err = data
+            .prepare("orders".to_owned(), "INSERT INTO t VALUES (1)".to_owned())
+            .expect_err("a write without the execute grant must not prepare");
+        assert!(
+            matches!(err, WitSqlError::ReadOnlyConnection),
+            "the refusal still names the direction: {err:?}"
+        );
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 2, "held then missing, in order");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            (
+                records[0].capability,
+                records[0].function,
+                records[0].outcome
+            ),
+            (
+                qqq_cap::capability::Capability::SqlQuery,
+                "sql_prepare",
+                crate::audit::Outcome::Granted
+            )
+        );
+        assert_eq!(
+            (
+                records[1].capability,
+                records[1].function,
+                records[1].outcome
+            ),
+            (
+                qqq_cap::capability::Capability::SqlExecute,
+                "sql_prepare",
+                crate::audit::Outcome::Denied
+            )
+        );
+    }
+
+    /// The one-shot path refuses a write without the execute grant the
+    /// same way `prepare` does, and records the missing direction too.
+    #[test]
+    fn a_write_query_once_without_the_execute_grant_records_both_directions() {
+        let path = test_path("audit-direction-query-once");
+        let mut writer = store_for(&path, true, true);
+        query_once(
+            &mut writer,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("create runs");
+        drop(writer);
+        let mut data = store_for(&path, true, false);
+        let stream = attach_audit(&mut data);
+        let err = query_once(
+            &mut data,
+            "orders".to_owned(),
+            "INSERT INTO t VALUES (1)".to_owned(),
+            vec![],
+        )
+        .expect_err("a write without the execute grant must not run");
+        assert!(
+            matches!(err, WitSqlError::ReadOnlyConnection),
+            "the refusal still names the direction: {err:?}"
+        );
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(committed.len(), 2, "held then missing, in order");
+        let stream = stream.lock().expect("lock");
+        let records = stream.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].function, "sql_query_once");
+        assert_eq!(records[0].outcome, crate::audit::Outcome::Granted);
+        assert_eq!(
+            (
+                records[1].capability,
+                records[1].function,
+                records[1].outcome
+            ),
+            (
+                qqq_cap::capability::Capability::SqlExecute,
+                "sql_query_once",
+                crate::audit::Outcome::Denied
+            )
+        );
     }
 
     /// A refused call records a `Denied` row even though it fails -- a
@@ -2160,6 +2321,112 @@ mod tests {
         assert!(matches!(err, WitSqlError::ExecutionFailed(_)));
     }
 
+    /// Executing a read statement as a write is refused by direction, and
+    /// the missing write grant is recorded: the entry seam saw only the
+    /// held query grant.
+    #[test]
+    fn executing_a_read_statement_as_a_write_records_the_missing_direction() {
+        use super::bindings::qqq::sql::database::{Host as _, HostStatement as _};
+        let path = test_path("audit-direction-stmt-execute");
+        let mut writer = store_for(&path, true, true);
+        query_once(
+            &mut writer,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("create runs");
+        drop(writer);
+        let mut data = store_for(&path, true, false);
+        let stream = attach_audit(&mut data);
+        let select = data
+            .prepare("orders".to_owned(), "SELECT 1".to_owned())
+            .expect("a read prepares under the query grant");
+        let err = data
+            .execute(select, vec![])
+            .expect_err("executing a read as a write must not run");
+        assert!(
+            matches!(err, WitSqlError::ReadOnlyConnection),
+            "the refusal still names the direction: {err:?}"
+        );
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(
+            committed.len(),
+            3,
+            "prepare, execute, then the missing direction"
+        );
+        let stream = stream.lock().expect("lock");
+        let denied: Vec<_> = stream
+            .records()
+            .iter()
+            .filter(|r| r.outcome == crate::audit::Outcome::Denied)
+            .collect();
+        assert_eq!(
+            denied.len(),
+            1,
+            "exactly the missing execute grant: {denied:?}"
+        );
+        assert_eq!(denied[0].function, "sql_statement_execute");
+        assert_eq!(
+            denied[0].capability,
+            qqq_cap::capability::Capability::SqlExecute
+        );
+    }
+
+    /// Same direction accounting inside a transaction: executing a read
+    /// statement as a write records the missing execute grant.
+    #[test]
+    fn executing_a_txn_read_statement_as_a_write_records_the_missing_direction() {
+        use super::bindings::qqq::sql::transaction::{
+            Host as _, HostTxn as _, HostTxnStatement as _,
+        };
+        let path = test_path("audit-direction-txn-stmt-execute");
+        let mut writer = store_for(&path, true, true);
+        query_once(
+            &mut writer,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("create runs");
+        drop(writer);
+        let mut data = store_for(&path, true, false);
+        let stream = attach_audit(&mut data);
+        let txn = data.begin("orders".to_owned()).expect("begin runs");
+        let select = data
+            .prepare(txn, "SELECT 1".to_owned())
+            .expect("a read prepares under the query grant");
+        let err = data
+            .execute(select, vec![])
+            .expect_err("executing a read as a write must not run");
+        assert!(
+            matches!(err, WitSqlError::ReadOnlyConnection),
+            "the refusal still names the direction: {err:?}"
+        );
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(
+            committed.len(),
+            4,
+            "begin, prepare, execute, then the missing direction"
+        );
+        let stream = stream.lock().expect("lock");
+        let denied: Vec<_> = stream
+            .records()
+            .iter()
+            .filter(|r| r.outcome == crate::audit::Outcome::Denied)
+            .collect();
+        assert_eq!(
+            denied.len(),
+            1,
+            "exactly the missing execute grant: {denied:?}"
+        );
+        assert_eq!(denied[0].function, "sql_txn_statement_execute");
+        assert_eq!(
+            denied[0].capability,
+            qqq_cap::capability::Capability::SqlExecute
+        );
+    }
+
     /// Commit persists: rows written inside the transaction survive it.
     #[test]
     fn committed_rows_survive() {
@@ -2249,6 +2516,7 @@ mod tests {
         .expect("create runs");
         drop(writer);
         let mut data = store_for(&path, true, false);
+        let stream = attach_audit(&mut data);
         let txn = data.begin("orders".to_owned()).expect("begin runs");
         let minted_before = data.sql_state.txn_statements.len();
         let err = data
@@ -2262,6 +2530,30 @@ mod tests {
             data.sql_state.txn_statements.len(),
             minted_before,
             "the refused prepare must hold no handle-table slot"
+        );
+        // Begin and prepare record the held query grant; the direction
+        // refusal records the missing execute grant.
+        let committed = data.audit.as_ref().expect("handle").commit();
+        assert_eq!(
+            committed.len(),
+            3,
+            "begin, prepare, then the missing direction"
+        );
+        let stream = stream.lock().expect("lock");
+        let denied: Vec<_> = stream
+            .records()
+            .iter()
+            .filter(|r| r.outcome == crate::audit::Outcome::Denied)
+            .collect();
+        assert_eq!(
+            denied.len(),
+            1,
+            "exactly the missing execute grant: {denied:?}"
+        );
+        assert_eq!(denied[0].function, "sql_txn_prepare");
+        assert_eq!(
+            denied[0].capability,
+            qqq_cap::capability::Capability::SqlExecute
         );
     }
 
@@ -2908,6 +3200,35 @@ mod tests {
             .expect_err("a full table refuses");
         assert!(matches!(err, WitSqlError::PoolExhausted));
         assert!(!path.exists(), "a refused call creates nothing");
+    }
+
+    /// Cap before charge, on every minting path: a `begin` against a full
+    /// handle table must refuse `pool-exhausted` without spending a
+    /// subrequest unit. Charging first would tax a doomed call -- the
+    /// budget is for effects, not for attempts the cap already refuses.
+    #[test]
+    fn begin_checks_the_cap_before_charging_the_budget() {
+        use super::bindings::qqq::sql::transaction::Host as _;
+        let path = test_path("cap-charge-order");
+        let mut data = store_for(&path, true, true);
+        for id in 0..u32::try_from(MAX_SQL_HANDLES).unwrap_or(u32::MAX) {
+            data.sql_state
+                .statements
+                .insert(id, ("orders".to_owned(), "SELECT 1".to_owned(), true));
+        }
+        let spent_before = data.subrequests.spent();
+        let err = data
+            .begin("orders".to_owned())
+            .expect_err("a full table refuses");
+        assert!(
+            matches!(err, WitSqlError::PoolExhausted),
+            "a cap refusal, not a budget refusal: {err:?}"
+        );
+        assert_eq!(
+            data.subrequests.spent(),
+            spent_before,
+            "the refused begin must not spend budget"
+        );
     }
 
     /// Arity is the host's answer, not SQLite's: binding the wrong number

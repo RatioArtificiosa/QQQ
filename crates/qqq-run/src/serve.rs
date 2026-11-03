@@ -672,13 +672,23 @@ pub fn prepare(loaded: &LoadedManifest, opts: &ServeOptions) -> Result<Prepared>
     // comment records this exact failure and this exact remedy; `CodeRabbit` finding #18 is the second
     // instance of it, found by reading the first one's comment.
     //
-    // The load here is a **read** (and, since `§O-382`, the removal of a half-written final record), so
-    // it is idempotent with the attach that `build_dispatch` performs when there IS an artifact: this
-    // either proves the file usable or refuses the run, and attaches nothing either way.
+    // The load here validates the file this process is about to append to --
+    // quarantining and truncating a torn tail is preparation, not reporting,
+    // because the next append would otherwise land on the fragment (see the
+    // `load_for_report` used by `audit-log`, which must not mutate what it
+    // only reads). It is idempotent with the attach that `build_dispatch`
+    // performs when there IS an artifact: this either proves the file usable
+    // or refuses the run, and attaches nothing either way.
+    //
+    // Ring-windowed, not refusing on size: the file grows a line per request with no rotation yet
+    // (retention is Fabric-tier, `OBS-015`), so a long-lived log legitimately holds more rows than
+    // the in-memory window. Refusing past the window would brick every restart after ~65k requests;
+    // the windowed chain still verifies, which is what "usable" means here.
     if let Some(path) = &opts.audit_log {
-        qqq_host::audit_sink::resume_or_start(
+        qqq_host::audit_sink::resume_or_start_ring(
             std::path::Path::new(path),
             qqq_host::audit::DEFAULT_CAPACITY,
+            None,
         )
         .map_err(|e| {
             Error::new(

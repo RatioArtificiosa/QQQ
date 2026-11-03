@@ -863,8 +863,8 @@ pub struct Escaper {
 /// Returns the bytes consumed and the code point, or `None`. UTF-8 is
 /// self-synchronising, so these fixed patterns match exactly the named
 /// characters -- never a fragment of a longer sequence. Members mirror
-/// [`crate::boundary::is_layout_forgery`]; `U+0085` (NEL) is included
-/// because the single-byte arms cannot see it (both its bytes are
+/// [`crate::boundary::is_layout_forgery`]; the C1 range is matched whole
+/// because the single-byte arms cannot see any of it (both bytes are
 /// high-bit) while `char::is_control` covers it on the decoded path.
 fn layout_forgery_at(chunk: &[u8]) -> Option<(usize, u32)> {
     match chunk {
@@ -876,7 +876,7 @@ fn layout_forgery_at(chunk: &[u8]) -> Option<(usize, u32)> {
         [0xE2, 0x81, b @ 0xA6..=0xA9, ..] => Some((3, 0x2066 + u32::from(b.saturating_sub(0xA6)))),
         [0xD8, 0x9C, ..] => Some((2, 0x061C)),
         [0xEF, 0xBB, 0xBF, ..] => Some((3, 0xFEFF)),
-        [0xC2, 0x85, ..] => Some((2, 0x0085)),
+        [0xC2, b @ 0x80..=0x9F, ..] => Some((2, 0x80 + u32::from(b.saturating_sub(0x80)))),
         _ => None,
     }
 }
@@ -1772,15 +1772,16 @@ mod tests {
             .filter(|c| crate::boundary::is_layout_forgery(*c))
             .collect();
         members.insert('\u{FEFF}');
-        assert!(
-            members.len() > 10,
-            "the predicate must name real members: {members:?}"
+        assert_eq!(
+            members.len(),
+            15,
+            "the predicate names exactly 15 members: {members:?}"
         );
         for c in &members {
             let mut buf = [0u8; 4];
             let bytes = c.encode_utf8(&mut buf).as_bytes();
             let (len, page) = layout_forgery_at(bytes)
-                .unwrap_or_else(|| panic!("member {c:?} must match: {bytes:02X?}"));
+                .unwrap_or_else(|| panic!("member {c:?} must match: {bytes:?}"));
             assert_eq!(
                 len,
                 bytes.len(),
@@ -1795,8 +1796,60 @@ mod tests {
         let bytes = '\u{071C}'.encode_utf8(&mut buf);
         assert!(
             layout_forgery_at(bytes.as_bytes()).is_none(),
-            "U+071C must pass through: {bytes:02X?}"
+            "U+071C must pass through: {bytes:?}"
         );
+    }
+
+    /// The table agrees with the char-level rule in the other direction too:
+    /// every byte pattern the table matches must decode to a character the
+    /// char-level rule (`is_control` or the shared layout predicate) would
+    /// also refuse, so a stale arm cannot launder a non-member. U+0085 rides
+    /// the C1 arm — a control, but multibyte, so the byte table is the only
+    /// place that sees it.
+    #[test]
+    fn table_matches_imply_predicate_members() {
+        // All two-byte C2/D8 sequences plus every three-byte E2 80/81 window the
+        // table arms cover, and the FEFF header.
+        let mut checked = 0u32;
+        for b1 in [0xC2u8, 0xD8, 0xE2, 0xEF] {
+            for b2 in 0x80u8..=0xBF {
+                let mut chunk = vec![b1, b2];
+                if b1 == 0xE2 {
+                    for b3 in [0x80u8, 0x81] {
+                        chunk.push(b3);
+                        for b4 in 0x80u8..=0xBF {
+                            let mut full = chunk.clone();
+                            full.push(b4);
+                            if let Some((_, page)) = layout_forgery_at(&full) {
+                                let c = char::from_u32(page).expect("page is a char");
+                                assert!(
+                                    c.is_control() || crate::boundary::is_layout_forgery(c),
+                                    "table maps {full:02X?} but the char rule accepts U+{page:04X}"
+                                );
+                                checked += 1;
+                            }
+                        }
+                        chunk.pop();
+                    }
+                } else if let Some((_, page)) = layout_forgery_at(&chunk) {
+                    let c = char::from_u32(page).expect("page is a char");
+                    assert!(
+                        c.is_control() || crate::boundary::is_layout_forgery(c),
+                        "table maps {chunk:02X?} but the char rule accepts U+{page:04X}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // FEFF's three bytes plus the C1 NEL the byte arms must catch.
+        for bytes in [&[0xEFu8, 0xBB, 0xBF][..], &[0xC2, 0x85][..]] {
+            assert!(
+                layout_forgery_at(&bytes).is_some(),
+                "table must match {bytes:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 20, "the sweep must exercise table arms: {checked}");
     }
 
     /// **F-21: dropping a guard after poison must not panic.**

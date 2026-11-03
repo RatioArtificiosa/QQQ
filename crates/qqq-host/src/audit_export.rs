@@ -57,12 +57,13 @@
 use std::fmt::Write as _;
 
 use crate::audit::{AuditStream, LedgerError, Outcome};
+use qqq_core::text::is_layout_forgery;
 
 /// Escape a string for embedding in a JSON string literal.
 ///
-/// Duplicated from `qqq-run`'s own helper rather than shared, because `qqq-host` is the lower
-/// crate and a `pub` escape function here would be part of its API for one call site. The rule
-/// both implement is the same and is asserted by each crate's own tests.
+/// Shares the rule with `qqq-run`'s own helper through the shared
+/// `is_layout_forgery` predicate rather than a parallel list: DEL, C1, and
+/// the Unicode separators all escape, and the two encoders cannot drift.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -72,7 +73,7 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
+            c if c.is_control() || is_layout_forgery(c) => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c => out.push(c),
@@ -115,6 +116,13 @@ const fn sarif_level(outcome: Outcome) -> Option<&'static str> {
 /// A rule id per refusal class, so a consumer can filter rather than parse prose.
 ///
 /// Private for the same reason as [`sarif_level`].
+///
+/// The `Granted` arm is unreachable by construction: `to_sarif` skips granted
+/// rows at the `sarif_level` filter before any rule id is read, so no
+/// document ever declares `qqq/capability-granted`. The arm exists because
+/// the match must be exhaustive, not because the id is emitted — and the
+/// `granted rows never become results` test below would fail the moment that
+/// changed.
 const fn sarif_rule(outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::Denied => "qqq/capability-denied",

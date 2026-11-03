@@ -521,14 +521,21 @@ pub(crate) fn buffered_bytes(logs: &[LogRecord]) -> usize {
 /// and DEL, which whitespace matching misses) are refused for the same
 /// reason: the renderer escapes them as defense in depth, but the boundary
 /// refuses rather than repairs — a guest that meant a different name must
-/// learn it failed.
+/// learn it failed. The check is char-level, not byte-level: Unicode
+/// whitespace, C1 controls, and invisible layout-forgers would otherwise
+/// ride multibyte UTF-8 past an ASCII scan.
 ///
 /// Crate-visible: the trace mirror enforces the same rule on span
 /// attributes, so both `qqq:` surfaces refuse the same names.
 pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
-        && !name.bytes().any(|b| {
-            b.is_ascii_whitespace() || b.is_ascii_control() || b == b'"' || b == b'=' || b == b'\\'
+        && !name.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || c == '"'
+                || c == '='
+                || c == '\\'
+                || crate::boundary::is_layout_forgery(c)
         })
 }
 

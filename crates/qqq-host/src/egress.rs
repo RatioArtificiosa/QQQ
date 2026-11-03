@@ -1963,12 +1963,21 @@ const SECRET_TOKENS: &[&str] = &[
     "authentication",
     "authn",
     "apikey",
+    "authz",
     "authorization",
     "secrettoken",
     "sessiontoken",
     "apitoken",
     "authtoken",
     "bearertoken",
+    "sess",
+    "sessid",
+    "tok",
+    "tkn",
+    "otp",
+    "mfa",
+    "2fa",
+    "pswd",
     "passkey",
     "passphrase",
     "passes",
@@ -2017,13 +2026,14 @@ const SECRET_TOKENS: &[&str] = &[
 /// header, is the trust boundary.)
 fn is_secret_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    // One separator: `x_apikey`, `x.apikey`, and `x-apikey` are the same
-    // evasion with different punctuation. Normalizing before the exact-name
-    // tier keeps one denylist instead of three punctuations times every
-    // entry; tokens split on `-` below (dots and underscores already folded).
+    // One separator: `x_apikey`, `x.api.key`, and `x-api-key` are the same
+    // evasion with different punctuation, and `tchar` allows more of them
+    // (`!#$%&'*+-.^_\`|~`). Folding every non-alphanumeric to `-` before
+    // the exact-name tier keeps one denylist instead of N punctuations
+    // times every entry; tokens split on `-` below.
     let norm: String = lower
         .chars()
-        .map(|c| if c == '_' || c == '.' { '-' } else { c })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     if SECRET_NAMES.contains(&norm.as_str()) {
         return true;
@@ -2034,32 +2044,45 @@ fn is_secret_header(name: &str) -> bool {
     // `pas` matches nothing -- the check below is harmless but explicit).
     // `cookie` rides the token tier so `x-cookies` is caught by the same
     // rule; the exact `cookie`/`set-cookie` names stay for the bare forms.
-    // Dots split too: `x.api.key` is the same evasion with a different
-    // separator (dots are legal token characters, so the shape reaches
-    // here). A bare `api` still travels: only exact names and secret
-    // tokens strip, so version/tracing headers are untouched.
-    // Numbers do not launder a name either: `x-token2` strips trailing
-    // digits back to `token` before the other checks run.
+    // A bare `api` still travels: only exact names and secret tokens strip,
+    // so version/tracing headers are untouched.
+    // Numbers do not launder a name either: `x-token2` strips back to
+    // `token`, and affixed digits (`x-2token`, `x-token2s`) canonicalize
+    // the same way. See `is_secret_token` for the exact loop.
     norm.split('-').any(is_secret_token)
 }
 
-/// Whether one hyphen-separated token names a secret, after stripping the
-/// disguises a trailing digit run or a plural `s` provides: `token2`,
-/// `tokens`, and `token2s` all land on `token`, and an exact hit
-/// short-circuits before any stripping (so `pass` and `passes` both
-/// match). Each pass shortens the token or stops, so the loop always
-/// terminates. An all-digit token strips to empty and matches nothing.
+/// Whether one hyphen-separated token names a secret, after stripping
+/// the disguises a digit run or a plural `s` provides: an exact hit
+/// short-circuits first (so digit-led `2fa` matches itself and is never
+/// mangled), then leading digits strip (`x-2token` -> `token`), then a
+/// fixed-point loop strips trailing digits and one trailing `s`
+/// (`token2s` -> `token`). Finally a proper-suffix match catches
+/// concatenated names (`x-mysecret`, `x-clientsecret`): the tail names
+/// the secret. Each pass shortens the token or stops, so the loop always
+/// terminates; an all-digit token strips to empty and matches nothing.
+/// A proper suffix is required (`word.len() > token.len()`), so exact
+/// matches stay exact and `keyboard`/`monkey`-shaped collisions need a
+/// real secret word at the end, not the whole word.
 fn is_secret_token(token: &str) -> bool {
-    let mut word = token.trim_end_matches(|c: char| c.is_ascii_digit());
+    if SECRET_TOKENS.contains(&token) {
+        return true;
+    }
+    let mut word = token.trim_start_matches(|c: char| c.is_ascii_digit());
     loop {
+        word = word.trim_end_matches(|c: char| c.is_ascii_digit());
         if SECRET_TOKENS.contains(&word) {
             return true;
         }
+        if SECRET_TOKENS
+            .iter()
+            .any(|t| word.len() > t.len() && word.ends_with(t))
+        {
+            return true;
+        }
         match word.strip_suffix('s') {
-            Some(stem) if stem.len() != word.len() => {
-                word = stem.trim_end_matches(|c: char| c.is_ascii_digit());
-            }
-            _ => return false,
+            Some(stem) => word = stem,
+            None => return false,
         }
     }
 }
@@ -3898,6 +3921,90 @@ mod redirect_tests {
     /// a credential once it leaves its origin.
     /// Custom secret headers (`x-api-key`, site-specific `x-acme-secret`)
     /// are secrets by convention; an innocent `author` is not one.
+    /// The hostile header set: every secret spelling the stripper must catch,
+    /// plus ordinary headers that must travel. Factored out so the test
+    /// reads as arrange/act/assert rather than a 60-line literal.
+    fn hostile_request_headers() -> Vec<(String, String)> {
+        vec![
+            ("authorization".to_owned(), "Bearer secret".to_owned()),
+            ("x-api-key".to_owned(), "key-secret".to_owned()),
+            ("x-acme-secret".to_owned(), "site-secret".to_owned()),
+            ("x-acme-api-key".to_owned(), "site key".to_owned()),
+            ("x-pass".to_owned(), "s3cr3t".to_owned()),
+            ("x-authenticate".to_owned(), "NEGOTIATE".to_owned()),
+            ("x-bearer-info".to_owned(), "tokenish".to_owned()),
+            ("x-hub-signature".to_owned(), "sha256=abc".to_owned()),
+            ("x-api-keys".to_owned(), "plural smuggling".to_owned()),
+            ("x-tokens".to_owned(), "plural smuggling".to_owned()),
+            ("x-cookies".to_owned(), "plural smuggling".to_owned()),
+            ("x_apikey".to_owned(), "underscore smuggling".to_owned()),
+            ("x.apikey".to_owned(), "dot smuggling".to_owned()),
+            (
+                "x-authtokens".to_owned(),
+                "plural-concat smuggling".to_owned(),
+            ),
+            ("x_secretkey".to_owned(), "underscore smuggling".to_owned()),
+            ("x-authorization".to_owned(), "prefixed secret".to_owned()),
+            ("x-pwd".to_owned(), "abbreviated secret".to_owned()),
+            ("x-creds".to_owned(), "abbreviated secret".to_owned()),
+            ("x-token2".to_owned(), "numbered secret".to_owned()),
+            ("x-secret2".to_owned(), "numbered secret".to_owned()),
+            ("x-secrettoken".to_owned(), "concatenated secret".to_owned()),
+            (
+                "x-sessiontoken".to_owned(),
+                "concatenated secret".to_owned(),
+            ),
+            ("x-apitoken".to_owned(), "concatenated secret".to_owned()),
+            ("x-bearertoken".to_owned(), "concatenated secret".to_owned()),
+            ("x-token2s".to_owned(), "number-then-plural".to_owned()),
+            ("x-cred".to_owned(), "abbreviated secret".to_owned()),
+            ("x-pw".to_owned(), "abbreviated secret".to_owned()),
+            ("x-jwt".to_owned(), "abbreviated secret".to_owned()),
+            ("x-sig".to_owned(), "abbreviated secret".to_owned()),
+            ("x-passes".to_owned(), "plural-es secret".to_owned()),
+            ("X-SeCret".to_owned(), "case is not camouflage".to_owned()),
+            ("x_secrettoken".to_owned(), "underscore concat".to_owned()),
+            ("x.secrettoken".to_owned(), "dot concat".to_owned()),
+            (
+                "secrettoken".to_owned(),
+                "bare concatenated secret".to_owned(),
+            ),
+            ("x-passes2".to_owned(), "plural-es numbered".to_owned()),
+            ("x-mysecret".to_owned(), "suffix-only secret".to_owned()),
+            ("x-clientsecret".to_owned(), "suffix-only secret".to_owned()),
+            ("x-refreshtoken".to_owned(), "suffix-only secret".to_owned()),
+            ("x-idtoken".to_owned(), "suffix-only secret".to_owned()),
+            ("x-appkey".to_owned(), "suffix-only secret".to_owned()),
+            ("x-masterkey".to_owned(), "suffix-only secret".to_owned()),
+            ("x-passphrase".to_owned(), "exact-only secret".to_owned()),
+            ("x-authz".to_owned(), "abbreviated secret".to_owned()),
+            ("x-otp".to_owned(), "abbreviated secret".to_owned()),
+            ("x-mfa".to_owned(), "abbreviated secret".to_owned()),
+            ("x-2fa".to_owned(), "abbreviated secret".to_owned()),
+            ("X-SESS".to_owned(), "case-insensitive secret".to_owned()),
+            ("x.sid".to_owned(), "dot abbreviated secret".to_owned()),
+            (
+                "x_tok".to_owned(),
+                "underscore abbreviated secret".to_owned(),
+            ),
+            (
+                "x-tkn2".to_owned(),
+                "abbreviated numbered secret".to_owned(),
+            ),
+            ("x-pswd".to_owned(), "abbreviated secret".to_owned()),
+            ("x-2token".to_owned(), "leading-number secret".to_owned()),
+            (
+                "x-apitoken2".to_owned(),
+                "concatenated numbered secret".to_owned(),
+            ),
+            ("x-passport".to_owned(), "not a credential".to_owned()),
+            ("x-authors".to_owned(), "not a credential".to_owned()),
+            ("x-keyboard".to_owned(), "not a credential".to_owned()),
+            ("author".to_owned(), "not a credential".to_owned()),
+            ("x-keep".to_owned(), "yes".to_owned()),
+        ]
+    }
+
     #[tokio::test]
     async fn sensitive_headers_stripped_cross_origin() {
         let transport = RouteTransport::new(&[
@@ -3909,46 +4016,7 @@ mod redirect_tests {
         let post = Request {
             method: Method::Post,
             url: "https://a.test/start".to_owned(),
-            headers: vec![
-                ("authorization".to_owned(), "Bearer secret".to_owned()),
-                ("x-api-key".to_owned(), "key-secret".to_owned()),
-                ("x-acme-secret".to_owned(), "site-secret".to_owned()),
-                ("x-acme-api-key".to_owned(), "site key".to_owned()),
-                ("x-pass".to_owned(), "s3cr3t".to_owned()),
-                ("x-authenticate".to_owned(), "NEGOTIATE".to_owned()),
-                ("x-bearer-info".to_owned(), "tokenish".to_owned()),
-                ("x-hub-signature".to_owned(), "sha256=abc".to_owned()),
-                ("x-api-keys".to_owned(), "plural smuggling".to_owned()),
-                ("x-tokens".to_owned(), "plural smuggling".to_owned()),
-                ("x-cookies".to_owned(), "plural smuggling".to_owned()),
-                ("x_apikey".to_owned(), "underscore smuggling".to_owned()),
-                ("x.apikey".to_owned(), "dot smuggling".to_owned()),
-                (
-                    "x-authtokens".to_owned(),
-                    "plural-concat smuggling".to_owned(),
-                ),
-                ("x_secretkey".to_owned(), "underscore smuggling".to_owned()),
-                ("x-authorization".to_owned(), "prefixed secret".to_owned()),
-                ("x-pwd".to_owned(), "abbreviated secret".to_owned()),
-                ("x-creds".to_owned(), "abbreviated secret".to_owned()),
-                ("x-token2".to_owned(), "numbered secret".to_owned()),
-                ("x-secret2".to_owned(), "numbered secret".to_owned()),
-                ("x-secrettoken".to_owned(), "concatenated secret".to_owned()),
-                (
-                    "x-sessiontoken".to_owned(),
-                    "concatenated secret".to_owned(),
-                ),
-                ("x-apitoken".to_owned(), "concatenated secret".to_owned()),
-                ("x-bearertoken".to_owned(), "concatenated secret".to_owned()),
-                ("x-token2s".to_owned(), "number-then-plural".to_owned()),
-                ("x-cred".to_owned(), "abbreviated secret".to_owned()),
-                ("x-pw".to_owned(), "abbreviated secret".to_owned()),
-                ("x-jwt".to_owned(), "abbreviated secret".to_owned()),
-                ("x-sig".to_owned(), "abbreviated secret".to_owned()),
-                ("x-passes".to_owned(), "plural-es secret".to_owned()),
-                ("author".to_owned(), "not a credential".to_owned()),
-                ("x-keep".to_owned(), "yes".to_owned()),
-            ],
+            headers: hostile_request_headers(),
             body: b"data".to_vec(),
         };
         let mut rows = Vec::new();
@@ -3986,7 +4054,16 @@ mod redirect_tests {
                 names,
                 // No `content-length`: the redirected hop is a GET with an empty
                 // body, and `exchange` writes the length only when a body travels.
-                ["author", "connection", "host", "x-keep"],
+                // The three `x-*` negatives travel: they name no credential.
+                [
+                    "author",
+                    "connection",
+                    "host",
+                    "x-authors",
+                    "x-keep",
+                    "x-keyboard",
+                    "x-passport",
+                ],
                 "only connector-owned and ordinary headers reach {host}: {seen:?}"
             );
             assert!(
@@ -3994,6 +4071,16 @@ mod redirect_tests {
                 "`author` is not a secret and must travel: {seen:?}"
             );
         }
+        // The first hop saw the secrets (they travelled *to* the
+        // origin that was allowed to see them); the cross-origin hops
+        // must not. Stripping at the boundary, not absence at the source,
+        // is what this test proves.
+        let first = transport.seen_for("a.test");
+        let first = String::from_utf8_lossy(&first).into_owned();
+        assert!(
+            first.contains("x-secret2: numbered secret"),
+            "the first hop carries secrets to its own origin: {first:?}"
+        );
         assert_eq!(rows.len(), 3, "one row per hop");
     }
 

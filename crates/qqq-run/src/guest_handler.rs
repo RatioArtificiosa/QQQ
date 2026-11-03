@@ -1496,7 +1496,10 @@ pub fn is_host_controlled_header(name: &str) -> bool {
 /// were expected. Tab passes through: it is legal field whitespace, and the
 /// trim already removed it from the edges. U+0085, U+2028 and U+2029 are not
 /// ASCII controls but break lines the same way, so they encode as their
-/// UTF-8 bytes rather than riding through raw. The result never contains a
+/// UTF-8 bytes rather than riding through raw. U+0085 *is* a control (C1);
+/// only the line/paragraph separators need naming beside it. Bidi overrides
+/// take the same arm through the shared predicate: they reorder display text
+/// without a newline. The result never contains a
 /// raw line-breaking byte, which is the property that matters: a value that
 /// cannot terminate its own line cannot inject the next one.
 ///
@@ -1509,10 +1512,6 @@ pub fn is_host_controlled_header(name: &str) -> bool {
 /// assert_eq!(escape_header_value("nul\x00del\x7f"), "nul%00del%7F");
 /// assert_eq!(escape_header_value("a\u{2028}b"), "a%E2%80%A8b");
 /// assert_eq!(escape_header_value("a\u{85}b"), "a%C2%85b");
-///
-/// U+0085 *is* a control (C1); only the line/paragraph separators need
-/// naming beside it. Bidi overrides take the same arm via the shared
-/// `qqq_cap::text` predicate: they reorder display text without a newline.
 /// ```
 #[must_use]
 pub fn escape_header_value(value: &str) -> String {

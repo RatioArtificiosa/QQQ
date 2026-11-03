@@ -755,20 +755,20 @@ impl Error {
 
 /// Collapse a string to one display line for terminal output.
 ///
-/// Control characters and the Unicode line separators U+2028/U+2029 become
-/// U+FFFD rather than a deletion: a visibly broken character tells the reader
-/// that something was there, while dropping the byte could make two different
-/// forged messages render identically. Mirrors the mapping in
-/// `qqq-serve`'s access-log redactor, which faces the same forgery.
+/// Control characters and invisible layout-forgers become U+FFFD rather than
+/// a deletion: a visibly broken character tells the reader that something
+/// was there, while dropping the byte could make two different forged
+/// messages render identically. Mirrors the mapping in `qqq-serve`'s
+/// access-log redactor, which faces the same forgery.
 fn one_line(s: &str) -> String {
     if s.chars()
-        .all(|c| !c.is_control() && c != '\u{2028}' && c != '\u{2029}')
+        .all(|c| !c.is_control() && !crate::text::is_layout_forgery(c))
     {
         return s.to_owned();
     }
     s.chars()
         .map(|c| {
-            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+            if c.is_control() || crate::text::is_layout_forgery(c) {
                 '\u{FFFD}'
             } else {
                 c
@@ -1080,16 +1080,18 @@ mod tests {
     fn render_neutralises_control_characters() {
         let e = Error::new(ErrorCode::CapabilityDenied, "denied\x1b[31mred")
             .with_cause("line\u{2028}break")
+            .with_context("bidi", "x\u{202e}y")
             .with_context("path", "/tmp/x")
             .with_remediation("see docs\u{2029}then retry");
         let out = e.render();
         assert!(
             !out.chars()
-                .any(|c| (c.is_control() || c == '\u{2028}' || c == '\u{2029}') && c != '\n'),
+                .any(|c| { (c.is_control() || crate::text::is_layout_forgery(c)) && c != '\n' }),
             "no line-breaking characters survive: {out:?}"
         );
         assert!(out.contains("denied\u{fffd}[31mred"), "{out}");
         assert!(out.contains("line\u{fffd}break"), "{out}");
+        assert!(out.contains("x\u{fffd}y"), "{out}");
         assert!(out.contains("see docs\u{fffd}then retry"), "{out}");
     }
 
@@ -1102,7 +1104,7 @@ mod tests {
         let out = format!("{e}");
         assert!(
             !out.chars()
-                .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}'),
+                .any(|c| c.is_control() || crate::text::is_layout_forgery(c)),
             "no line-breaking characters survive Display: {out:?}"
         );
         assert!(out.contains("denied\u{fffd}[31mred"), "{out}");

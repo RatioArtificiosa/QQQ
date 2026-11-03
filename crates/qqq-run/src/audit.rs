@@ -1606,7 +1606,7 @@ mod tests {
         assert!(
             !text
                 .chars()
-                .any(|c| (c.is_control() || c == '\u{2028}' || c == '\u{2029}') && c != '\n'),
+                .any(|c| { (c.is_control() || qqq_cap::text::is_layout_forgery(c)) && c != '\n' }),
             "rendered lines must not carry line-breaking characters: {text:?}"
         );
     }

@@ -874,7 +874,7 @@ fn layout_forgery_at(chunk: &[u8]) -> Option<(usize, u32)> {
         [0xE2, 0x80, 0x8F, ..] => Some((3, 0x200F)),
         [0xE2, 0x80, b @ 0xAA..=0xAE, ..] => Some((3, 0x202A + u32::from(b.saturating_sub(0xAA)))),
         [0xE2, 0x81, b @ 0xA6..=0xA9, ..] => Some((3, 0x2066 + u32::from(b.saturating_sub(0xA6)))),
-        [0xDC, 0x9C, ..] => Some((2, 0x061C)),
+        [0xD8, 0x9C, ..] => Some((2, 0x061C)),
         [0xEF, 0xBB, 0xBF, ..] => Some((3, 0xFEFF)),
         [0xC2, 0x85, ..] => Some((2, 0x0085)),
         _ => None,
@@ -1755,6 +1755,47 @@ mod tests {
             escape(STDOUT_PREFIX, "中際".as_bytes()),
             format!("{STDOUT_PREFIX}中際"),
             "legitimate text passes through byte-identical"
+        );
+    }
+
+    /// The byte table agrees with the char predicate on every member: UTF-8
+    /// is self-synchronising, so `encode_utf8` of a member must match exactly
+    /// its code point — and a near-miss must not. Written after `[0xDC,0x9C]`
+    /// was found standing in for U+061C (`D8 9C`): the innocent U+071C was
+    /// escaped while the real ALM passed through raw.
+    #[test]
+    fn byte_table_matches_predicate_for_every_member() {
+        use std::collections::BTreeSet;
+        // Every layout-forger up to the highest listed member, plus FEFF.
+        let mut members: BTreeSet<char> = (0u32..0x3000)
+            .filter_map(char::from_u32)
+            .filter(|c| crate::boundary::is_layout_forgery(*c))
+            .collect();
+        members.insert('\u{FEFF}');
+        assert!(
+            members.len() > 10,
+            "the predicate must name real members: {members:?}"
+        );
+        for c in &members {
+            let mut buf = [0u8; 4];
+            let bytes = c.encode_utf8(&mut buf).as_bytes();
+            let (len, page) = layout_forgery_at(bytes)
+                .unwrap_or_else(|| panic!("member {c:?} must match: {bytes:02X?}"));
+            assert_eq!(
+                len,
+                bytes.len(),
+                "member {c:?} must consume its whole encoding"
+            );
+            assert_eq!(page, u32::from(*c), "member {c:?} must map to itself");
+        }
+        // Near-misses the old table got wrong: U+071C is an innocent Syriac
+        // letter, not the ALM it was mistaken for.
+        assert!(!crate::boundary::is_layout_forgery('\u{071C}'));
+        let mut buf = [0u8; 4];
+        let bytes = '\u{071C}'.encode_utf8(&mut buf);
+        assert!(
+            layout_forgery_at(bytes.as_bytes()).is_none(),
+            "U+071C must pass through: {bytes:02X?}"
         );
     }
 

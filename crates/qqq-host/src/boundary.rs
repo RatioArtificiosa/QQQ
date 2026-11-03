@@ -128,11 +128,11 @@ pub const MAX_ECHO_BYTES: usize = 64;
 
 /// Invisible characters that forge layout without a newline.
 ///
-/// Single home: [`qqq_cap::is_layout_forgery`]. Re-exported here so the
+/// Single home: [`qqq_core::is_layout_forgery`]. Re-exported here so the
 /// trap escaper, every boundary check, and downstream crates (the serve
 /// log encoders face the same forgery) keep spelling the same path while
-/// the definition lives with the other validation primitives.
-pub use qqq_cap::is_layout_forgery;
+/// the definition lives at the bottom of the dependency graph.
+pub use qqq_core::text::is_layout_forgery;
 
 /// Render a guest value for a diagnostic, safely.
 ///

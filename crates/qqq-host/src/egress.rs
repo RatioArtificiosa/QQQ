@@ -1980,6 +1980,13 @@ const SECRET_TOKENS: &[&str] = &[
     "pswd",
     "passkey",
     "passphrase",
+    "secretbox",
+    "tokenbox",
+    "keystore",
+    "tokenid",
+    "keyid",
+    "secretid",
+    "passwordreset",
     "passes",
     "cred",
     "pw",
@@ -2053,36 +2060,58 @@ fn is_secret_header(name: &str) -> bool {
 }
 
 /// Whether one hyphen-separated token names a secret, after stripping
-/// the disguises a digit run or a plural `s` provides: an exact hit
+/// the disguises a digit run or a plural `s` provides. An exact hit
 /// short-circuits first (so digit-led `2fa` matches itself and is never
-/// mangled), then leading digits strip (`x-2token` -> `token`), then a
-/// fixed-point loop strips trailing digits and one trailing `s`
-/// (`token2s` -> `token`). Finally a proper-suffix match catches
-/// concatenated names (`x-mysecret`, `x-clientsecret`): the tail names
-/// the secret. Each pass shortens the token or stops, so the loop always
-/// terminates; an all-digit token strips to empty and matches nothing.
-/// A proper suffix is required (`word.len() > token.len()`), so exact
-/// matches stay exact and `keyboard`/`monkey`-shaped collisions need a
-/// real secret word at the end, not the whole word.
+/// mangled), then leading digits strip (`x-2token` -> `token`); the author
+/// family (`author`/`authors`) is refused here, before any affix rule can
+/// re-catch it. Then a fixed-point loop strips trailing digits and one
+/// trailing `s` (`token2s` -> `token`), and finally a proper affix match
+/// catches concatenated names on either side (`x-mysecret`,
+/// `x-secretbox`): the head or tail names the secret. Each pass shortens
+/// the token or stops, so the loop always terminates; an all-digit token
+/// strips to empty and matches nothing. Affixes must be proper (strictly
+/// shorter than the word) so exact matches stay exact. Fail-closed on
+/// collisions: `x-keyboard`/`x-tokenizer`-shaped names strip because they
+/// start with a secret word, while `x-authors` travels because the author
+/// family is carved out above.
 fn is_secret_token(token: &str) -> bool {
+    // Exact hit first: protects digit-led names like `2fa` from mangling,
+    // and short-circuits the common `pass`/`token`-family names.
     if SECRET_TOKENS.contains(&token) {
         return true;
     }
     let mut word = token.trim_start_matches(|c: char| c.is_ascii_digit());
     loop {
         word = word.trim_end_matches(|c: char| c.is_ascii_digit());
+        // The author family travels, in either number: `x-author` and
+        // `x-authors` (and digit-decorated forms) are ordinary headers, not
+        // credentials. Checked after digit canonicalization so affixed
+        // forms land here too.
+        if word == "author" || word == "authors" {
+            return false;
+        }
         if SECRET_TOKENS.contains(&word) {
             return true;
         }
+        // Affixed secrets: a known token as a proper prefix or suffix.
+        // Proper (strictly shorter) so exact matches stay exact and the
+        // author carve-out above cannot be re-caught here.
         if SECRET_TOKENS
             .iter()
-            .any(|t| word.len() > t.len() && word.ends_with(t))
+            .any(|k| word.len() > k.len() && (word.starts_with(k) || word.ends_with(k)))
         {
             return true;
         }
-        match word.strip_suffix('s') {
-            Some(stem) => word = stem,
-            None => return false,
+        // Singularize once per round; a token with no trailing `s` and no
+        // leading digits to strip is fully canonicalized and unmatched.
+        if let Some(stem) = word.strip_suffix('s') {
+            word = stem;
+        } else {
+            let stripped = word.trim_start_matches(|c: char| c.is_ascii_digit());
+            if stripped == word {
+                return false;
+            }
+            word = stripped;
         }
     }
 }
@@ -3997,9 +4026,12 @@ mod redirect_tests {
                 "x-apitoken2".to_owned(),
                 "concatenated numbered secret".to_owned(),
             ),
-            ("x-passport".to_owned(), "not a credential".to_owned()),
-            ("x-authors".to_owned(), "not a credential".to_owned()),
-            ("x-keyboard".to_owned(), "not a credential".to_owned()),
+            ("x-passport".to_owned(), "prefixed secret".to_owned()),
+            (
+                "x-authors".to_owned(),
+                "the author family travels".to_owned(),
+            ),
+            ("x-keyboard".to_owned(), "prefixed secret".to_owned()),
             ("author".to_owned(), "not a credential".to_owned()),
             ("x-keep".to_owned(), "yes".to_owned()),
         ]
@@ -4055,15 +4087,7 @@ mod redirect_tests {
                 // No `content-length`: the redirected hop is a GET with an empty
                 // body, and `exchange` writes the length only when a body travels.
                 // The three `x-*` negatives travel: they name no credential.
-                [
-                    "author",
-                    "connection",
-                    "host",
-                    "x-authors",
-                    "x-keep",
-                    "x-keyboard",
-                    "x-passport",
-                ],
+                ["author", "connection", "host", "x-authors", "x-keep",],
                 "only connector-owned and ordinary headers reach {host}: {seen:?}"
             );
             assert!(

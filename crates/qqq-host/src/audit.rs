@@ -888,6 +888,13 @@ pub(crate) const RECORDED_FUNCTIONS: [&str; 31] = [
     "trace_drop",
 ];
 
+// The pre-commit buffer bound: pending rows live in the requesting task, so an
+// unbounded guest loop would grow host memory without touching the stream's own
+// bound. Past the cap the row is dropped — the commit still owns sequencing,
+// and a gap is visible where a forged link would not be. Generous on purpose
+// (a real request records dozens, not thousands).
+const MAX_PENDING_ROWS: usize = 4096;
+
 /// A shared handle to the capability-use record, for the per-call seam — `OBS-001`.
 ///
 /// # Why this exists rather than recording at the request level
@@ -1044,6 +1051,11 @@ impl AuditHandle {
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Pre-commit bound (see `MAX_PENDING_ROWS`): past the cap the row is
+        // dropped rather than buffered.
+        if pending.len() >= MAX_PENDING_ROWS {
+            return;
+        }
         pending.push(PendingRow {
             tenant: self.tenant.clone(),
             component: self.component.clone(),
@@ -1163,6 +1175,32 @@ impl AuditHandle {
             .iter()
             .map(|row| row.capability)
             .collect()
+    }
+
+    /// The capabilities *this* request has attempted: committed rows that
+    /// match this handle's tenant/component/grants, plus this handle's own
+    /// pending rows.
+    ///
+    /// The stream is shared across concurrent requests, so reading it
+    /// unfiltered would attribute another tenant's attempts to this caller
+    /// (cross-tenant pollution, non-deterministic assertions, and a leak of
+    /// "what did another tenant attempt" across the seam the docs claim
+    /// discloses nothing). The pending buffer is already per-request, so it
+    /// needs no filter — only the shared committed rows do.
+    pub(crate) fn recorded_capabilities(&self) -> Vec<Capability> {
+        let mut out = Vec::new();
+        self.with_records(|records| {
+            for r in records {
+                if r.tenant == self.tenant
+                    && r.component == self.component
+                    && r.grants == self.grants
+                {
+                    out.push(r.capability);
+                }
+            }
+        });
+        out.extend(self.pending_capabilities());
+        out
     }
 }
 
@@ -2912,14 +2950,51 @@ mod tests {
             std::sync::Arc::new(std::sync::Mutex::new(AuditStream::with_default_capacity()));
         let handle = AuditHandle::new(std::sync::Arc::clone(&stream), component(), grants(), None);
         handle.record(Capability::FsRead, "handle_request", Outcome::Granted);
-        let mut seen = Vec::new();
-        handle.with_records(|records| {
-            seen.extend(records.iter().map(|row| row.capability));
-        });
-        seen.extend(handle.pending_capabilities());
+        let seen = handle.recorded_capabilities();
         assert!(
             seen.contains(&Capability::FsRead),
             "a buffered row must be visible pre-commit: {seen:?}"
+        );
+    }
+
+    /// Committed rows from another tenant/component are invisible to this
+    /// handle: the stream is shared, so an unfiltered read would blame one
+    /// guest for another's concurrent attempts.
+    #[test]
+    fn recorded_capabilities_are_scoped_to_this_request() {
+        let stream =
+            std::sync::Arc::new(std::sync::Mutex::new(AuditStream::with_default_capacity()));
+        let other_component = ComponentDigest::new("ffeeddccbbaa9988").expect("digest");
+        let mine = AuditHandle::new(std::sync::Arc::clone(&stream), component(), grants(), None);
+        let other = AuditHandle::new(
+            std::sync::Arc::clone(&stream),
+            other_component,
+            grants(),
+            None,
+        );
+        other.record(Capability::FsRead, "handle_request", Outcome::Granted);
+        assert_eq!(other.commit().len(), 1);
+        assert!(
+            !mine.recorded_capabilities().contains(&Capability::FsRead),
+            "another component's commit must not pollute this request"
+        );
+    }
+
+    /// The pending buffer is bounded: a guest loop cannot grow host memory
+    /// without ever touching the stream's own bound.
+    #[test]
+    fn pending_buffer_is_bounded() {
+        let stream =
+            std::sync::Arc::new(std::sync::Mutex::new(AuditStream::with_default_capacity()));
+        let handle = AuditHandle::new(std::sync::Arc::clone(&stream), component(), grants(), None);
+        for _ in 0..5000 {
+            handle.record(Capability::FsRead, "handle_request", Outcome::Granted);
+        }
+        let rows = handle.commit();
+        assert!(
+            rows.len() <= 4096,
+            "pending must be capped, got {}",
+            rows.len()
         );
     }
 

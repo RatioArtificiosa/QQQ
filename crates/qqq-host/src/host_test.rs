@@ -484,7 +484,6 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                 // same vector pay-as-you-go instead. And no unbounded walk:
                 // past `MAX_ALLOWED_CAPABILITIES` the assertion is refused
                 // before resolving anything.
-                        std::eprintln!("DEBUG len={}", allowed.len());
                 if allowed.len() > MAX_ALLOWED_CAPABILITIES {
                                 return Ok((Err(AssertionError::NotAssertable(format!(
                         "allowed list has {} entries, past the {MAX_ALLOWED_CAPABILITIES}-entry bound",
@@ -644,16 +643,10 @@ fn recorded_outside(
     allowed: &[Capability],
 ) -> Result<Vec<Capability>, AssertionError> {
     let handle = stream_of(store.data().audit.as_ref())?;
-    let mut attempted = Vec::new();
-    handle.with_records(|records| {
-        attempted.extend(records.iter().map(|r| r.capability));
-    });
-    // Plus the rows buffered but not yet committed: the assertion runs
-    // mid-request, and reading only committed rows would pass vacuously
-    // over an empty set whenever the guest asks before the commit.
-    // Unioned before the filter, so a capability in both sets is still
-    // reported once.
-    attempted.extend(handle.pending_capabilities());
+    // Scoped to this request's tenant/component/grants inside the handle:
+    // the stream is shared, so an unfiltered read would blame this guest
+    // for another tenant's concurrent attempts.
+    let attempted = handle.recorded_capabilities();
     Ok(unaccounted(allowed, &attempted))
 }
 

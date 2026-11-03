@@ -553,7 +553,7 @@ impl Boundary {
 ///
 /// `func_wrap` registers a function **within an interface instance**, so the name
 /// passed is bare (`now`) while the guest-visible path is qualified
-/// (`qqq:clock@1.0.0/wall-clock.now`). This table stores the bare name because
+/// (`qqq:clock/wall-clock@1.0.0.now`). This table stores the bare name because
 /// that is what the completeness test can match against the source, and the
 /// interface field carries the qualification. Storing the qualified form instead
 /// would make the test unable to verify the table — which it did, immediately:
@@ -570,38 +570,38 @@ impl Boundary {
 pub const BOUNDARIES: &[Boundary] = &[
     Boundary {
         function: "now",
-        interface: "qqq:clock@1.0.0/wall-clock",
+        interface: "qqq:clock/wall-clock@1.0.0",
         checks: &[],
         guest_controls: "nothing: the call takes no arguments and the return is \
                          host-computed. Listed so the table is complete.",
     },
     Boundary {
         function: "resolution",
-        interface: "qqq:clock@1.0.0/wall-clock",
+        interface: "qqq:clock/wall-clock@1.0.0",
         checks: &[],
         guest_controls: "nothing: no arguments.",
     },
     Boundary {
         function: "timezone",
-        interface: "qqq:clock@1.0.0/wall-clock",
+        interface: "qqq:clock/wall-clock@1.0.0",
         checks: &[],
         guest_controls: "nothing: no arguments; the return is the fixed string UTC.",
     },
     Boundary {
         function: "now",
-        interface: "qqq:clock@1.0.0/monotonic-clock",
+        interface: "qqq:clock/monotonic-clock@1.0.0",
         checks: &[],
         guest_controls: "nothing: no arguments.",
     },
     Boundary {
         function: "resolution",
-        interface: "qqq:clock@1.0.0/monotonic-clock",
+        interface: "qqq:clock/monotonic-clock@1.0.0",
         checks: &[],
         guest_controls: "nothing: no arguments.",
     },
     Boundary {
         function: "get",
-        interface: "qqq:crypto@1.0.0/random",
+        interface: "qqq:crypto/random@1.0.0",
         // The `length` argument decides a host allocation, so it is a Size
         // boundary. `random_bytes` enforces the per-call maximum, and this table
         // is what makes that enforcement visible as a boundary property rather
@@ -611,7 +611,7 @@ pub const BOUNDARIES: &[Boundary] = &[
     },
     Boundary {
         function: "digest",
-        interface: "qqq:crypto@1.0.0/hashing",
+        interface: "qqq:crypto/hashing@1.0.0",
         // Size for the input length; the `algorithm` discriminant is Range,
         // enforced by `bindgen!` at the ABI lift (an out-of-range value traps
         // before host code runs) rather than by a host boundary check.
@@ -620,13 +620,13 @@ pub const BOUNDARIES: &[Boundary] = &[
     },
     Boundary {
         function: "digest-many",
-        interface: "qqq:crypto@1.0.0/hashing",
+        interface: "qqq:crypto/hashing@1.0.0",
         checks: &[CheckClass::Range, CheckClass::Size],
         guest_controls: "`algorithm` and `inputs`, a **list** — so both list axes apply",
     },
     Boundary {
         function: "compute",
-        interface: "qqq:crypto@1.0.0/hmac",
+        interface: "qqq:crypto/hmac@1.0.0",
         // Range for the `algorithm` allowlist (bindgen lifts only declared
         // variants), Shape for the non-empty key. No byte ceiling: HMAC
         // processes its inputs linearly, so guest memory plus fuel prices
@@ -637,7 +637,7 @@ pub const BOUNDARIES: &[Boundary] = &[
     },
     Boundary {
         function: "verify",
-        interface: "qqq:crypto@1.0.0/hmac",
+        interface: "qqq:crypto/hmac@1.0.0",
         // Range for the allowlist, Shape for the non-empty key and the
         // tag length (a tag of the wrong length can never match).
         checks: &[CheckClass::Range, CheckClass::Shape],
@@ -645,19 +645,19 @@ pub const BOUNDARIES: &[Boundary] = &[
     },
     Boundary {
         function: "nonce-length",
-        interface: "qqq:crypto@1.0.0/aead",
+        interface: "qqq:crypto/aead@1.0.0",
         checks: &[],
         guest_controls: "nothing: a public construction parameter, not guest-influenced state",
     },
     Boundary {
         function: "key-length",
-        interface: "qqq:crypto@1.0.0/aead",
+        interface: "qqq:crypto/aead@1.0.0",
         checks: &[],
         guest_controls: "nothing: a public construction parameter, like `nonce-length`",
     },
     Boundary {
         function: "encrypt",
-        interface: "qqq:crypto@1.0.0/aead",
+        interface: "qqq:crypto/aead@1.0.0",
         // Range for the construction allowlist, Shape for the fixed key
         // (32) and nonce (12) lengths. No payload ceiling: same linear
         // rationale as `hmac.compute`.
@@ -666,20 +666,20 @@ pub const BOUNDARIES: &[Boundary] = &[
     },
     Boundary {
         function: "decrypt",
-        interface: "qqq:crypto@1.0.0/aead",
+        interface: "qqq:crypto/aead@1.0.0",
         checks: &[CheckClass::Range, CheckClass::Shape],
         guest_controls: "`construction`, `key`, `nonce`, `associated-data`, `ciphertext`",
     },
     Boundary {
         function: "sign",
-        interface: "qqq:crypto@1.0.0/signing",
+        interface: "qqq:crypto/signing@1.0.0",
         // Range for the algorithm allowlist, Shape for the 32-byte seed.
         checks: &[CheckClass::Range, CheckClass::Shape],
         guest_controls: "`algorithm`, `key` (a 32-byte seed), `message`",
     },
     Boundary {
         function: "verify",
-        interface: "qqq:crypto@1.0.0/signing",
+        interface: "qqq:crypto/signing@1.0.0",
         // Range for the allowlist, Shape for the 32-byte key and the
         // signature length (a malformed key is an error, not a `false`).
         checks: &[CheckClass::Range, CheckClass::Shape],
@@ -687,7 +687,7 @@ pub const BOUNDARIES: &[Boundary] = &[
     },
     Boundary {
         function: "public-key",
-        interface: "qqq:crypto@1.0.0/signing",
+        interface: "qqq:crypto/signing@1.0.0",
         checks: &[CheckClass::Range, CheckClass::Shape],
         guest_controls: "`algorithm`, `key` (a 32-byte seed)",
     },
@@ -1865,8 +1865,8 @@ impl bindings::qqq::crypto::hashing::Host for crate::linker::StoreData {
         );
 
         let ifaces = interfaces();
-        assert!(ifaces.contains(&"qqq:crypto@1.0.0/hashing"));
-        assert!(ifaces.contains(&"qqq:clock@1.0.0/wall-clock"));
+        assert!(ifaces.contains(&"qqq:crypto/hashing@1.0.0"));
+        assert!(ifaces.contains(&"qqq:clock/wall-clock@1.0.0"));
         // Sorted and deduplicated.
         let mut sorted = ifaces.clone();
         sorted.sort_unstable();

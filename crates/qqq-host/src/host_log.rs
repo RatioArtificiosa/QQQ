@@ -414,7 +414,7 @@ fn quote(s: &str) -> String {
                 '\r' => escaped.push_str("\\r"),
                 '\t' => escaped.push_str("\\t"),
                 c if c.is_control() => {
-                    let _ = write!(escaped, "\\u{{{:x}}}", c as u32);
+                    let _ = write!(escaped, "\\u{:04x}", c as u32);
                 }
                 c => escaped.push(c),
             }
@@ -913,6 +913,25 @@ mod tests {
 
     /// One record renders as one line even when the guest sends control
     /// characters: the renderer escapes them.
+    /// Other controls use conventional four-digit escapes, so a log
+    /// consumer never sees a bare byte it cannot parse.
+    #[test]
+    fn other_controls_use_four_digit_escapes() {
+        let record = LogRecord {
+            tenant: "t".to_owned(),
+            trace_id: None,
+            level: 2,
+            message: "a\u{1}b".to_owned(),
+            attributes: vec![],
+            redacted: false,
+        };
+        let line = format_record(&record);
+        assert!(
+            line.contains("\\u0001"),
+            "control escapes are four-digit: {line}"
+        );
+    }
+
     #[test]
     fn format_keeps_one_record_on_one_line() {
         let record = LogRecord {

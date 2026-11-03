@@ -72,6 +72,17 @@ use qqq_core::{Error, ErrorCode};
 ///   word "epoch".
 #[must_use]
 pub fn classify_trap(detail: &str) -> ErrorCode {
+    // Bound the matching work: the checks below scan the whole text several
+    // times over, and a megabyte backtrace tail carries no new signal kinds.
+    // The engine puts the cause first and `frame_message` keeps only each
+    // frame's engine-message suffix, so cutting past 64 KiB cannot hide a
+    // signal the pinned fixtures (8 KiB in) establish. Cut on a character
+    // boundary, like `truncate_detail` below.
+    let mut cap = detail.len().min(64 * 1024);
+    while !detail.is_char_boundary(cap) {
+        cap -= 1;
+    }
+    let detail = &detail[..cap];
     // Backtrace frame names are guest-controlled (module and function names),
     // so a frame contributes only its engine-message suffix to matching: a
     // guest naming a function "all fuel consumed" must not reclassify its own
@@ -292,6 +303,20 @@ impl fmt::Display for WasmFrame {
 /// So: the name section for the name, DWARF for the location. That split means a
 /// frame is *named* even in an artifact built without `debug = true`, which is
 /// the common case, and it keeps this function free of a demangler.
+/// Cap a guest-influenced string kept in a stored record.
+///
+/// Module and function names come from the guest name section and file
+/// paths from its DWARF: without a bound, one identifier prices unbounded
+/// host memory across up to 64 kept frames. Offsets and line numbers are
+/// integers, so capping names loses nothing the debugger keys on.
+fn capped_name(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        s.to_owned()
+    } else {
+        s.chars().take(max_chars).collect()
+    }
+}
+
 fn frame_from(info: &wasmtime::FrameInfo) -> WasmFrame {
     // `symbols()` is the DWARF-derived list; the first entry is the innermost
     // symbol at this instruction. It is empty when the module was compiled
@@ -301,15 +326,16 @@ fn frame_from(info: &wasmtime::FrameInfo) -> WasmFrame {
     WasmFrame {
         // The module's own name, when it has one. `Module::name()` reads the
         // name custom section and returns `None` for a stripped module.
-        module: info.module().name().map(str::to_owned),
-        func: info
-            .func_name()
-            .map_or_else(|| format!("func[{}]", info.func_index()), str::to_owned),
+        module: info.module().name().map(|n| capped_name(n, 256)),
+        func: info.func_name().map_or_else(
+            || format!("func[{}]", info.func_index()),
+            |n| capped_name(n, 256),
+        ),
         // The instruction's offset within the module. This is what
         // `qqq_debug::SourceMap` is keyed on, so a detached report can be
         // resolved without the engine.
         offset: info.module_offset().map(|o| o as u64),
-        file: symbol.and_then(|s| s.file().map(str::to_owned)),
+        file: symbol.and_then(|s| s.file().map(|f| capped_name(f, 512))),
         line: symbol.and_then(wasmtime::FrameSymbol::line),
     }
 }
@@ -319,7 +345,7 @@ fn frame_from(info: &wasmtime::FrameInfo) -> WasmFrame {
 /// Backtrace frames carry guest-controlled module and function names, so an
 /// unbounded `detail` is an unbounded host allocation priced at one guest
 /// identifier. Only what is *stored* (and rendered, and exported) is cut —
-/// classification reads the full text, and triage keeps the head, where the
+/// classification reads the 64 KiB head, and triage keeps the head, where the
 /// engine puts the cause.
 pub const MAX_TRAP_DETAIL_BYTES: usize = 4 * 1024;
 
@@ -662,6 +688,23 @@ mod tests {
         assert_eq!(trap.backtrace.len(), 64);
     }
 
+    /// Classification reads the 64 KiB head, not the whole megabyte:
+    /// a giant backtrace tail prices bounded work, and the engine puts
+    /// the cause first, so the verdict cannot change past the cut.
+    #[test]
+    fn classification_is_bounded_but_sees_past_storage() {
+        let mut detail = String::from("all fuel consumed by WebAssembly");
+        detail.push_str(&"x".repeat(1024 * 1024));
+        assert_eq!(classify_trap(&detail), ErrorCode::FuelExhausted);
+    }
+
+    /// Stored frame strings are bounded: a guest-controlled name cannot
+    /// grow host memory without limit across the 64 kept frames.
+    #[test]
+    fn frame_name_lengths_are_capped() {
+        assert_eq!(capped_name(&"m".repeat(300), 256).chars().count(), 256);
+        assert_eq!(capped_name("short", 256), "short");
+    }
     #[test]
     fn wasmtime_fuel_message_classifies_as_fuel() {
         let detail = "error while executing at wasm backtrace:\n\

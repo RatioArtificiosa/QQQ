@@ -1108,8 +1108,9 @@ pub fn audit(sources: &[(String, String)]) -> Vec<AuditFinding> {
 /// The part of an interface name that follows the version, so a table row can
 /// be matched against an interface path written in a registration.
 ///
-/// `qqq:clock@1.0.0/wall-clock` becomes `wall-clock`, which is what the
-/// registration writes as the instance name.
+/// `qqq:clock/wall-clock@1.0.0` becomes `wall-clock@1.0.0`, which a scanned
+/// registration interface ends with (registrations name the full interface
+/// from the file's own constant).
 fn interface_suffix(interface: &str) -> &str {
     interface.rsplit('/').next().unwrap_or(interface)
 }

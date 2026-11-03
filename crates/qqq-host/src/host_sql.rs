@@ -923,6 +923,11 @@ impl bindings::qqq::sql::database::Host for crate::linker::StoreData {
         // validation, cap, open, mint on every minting path.
         check_sql_size(&sql)?;
         check_handles(self)?;
+        // Preparing parses and opens: the same file I/O and SQLite work
+        // `query_once` charges for, so it spends the unit like every other
+        // execution. Charged before the `PRAGMA` gate, like the one-shot
+        // path: attempts, not successes.
+        charge_one_subrequest(self)?;
         // The `PRAGMA` gate runs before any connection opens: it needs no
         // connection, only the statement text and the grants, and a refused
         // caller must not cause opens as a side effect of being refused.
@@ -1324,6 +1329,11 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
             return Err(WitSqlError::DatabaseNotConfigured);
         };
         check_handles(self)?;
+        // Preparing parses and opens: the same file I/O and SQLite work
+        // `database::prepare` charges for, so it spends the unit like every
+        // other execution. Charged before the direction and `PRAGMA`
+        // gates: attempts, not successes.
+        charge_one_subrequest(self)?;
         let read_only = {
             let connection = connection_for(self, &db)?;
             prepare_on(connection, &sql)?
@@ -1380,6 +1390,9 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         // like any other, charged before the connection opens.
         charge_one_subrequest(self)?;
         let connection = connection_for(self, &db)?;
+        // The host table says this transaction is open; SQLite must agree.
+        // A desynced handle fails here instead of committing outside a transaction.
+        require_txn_open(connection)?;
         let outcome = connection
             .execute_batch("COMMIT")
             .map_err(|error| WitSqlError::ExecutionFailed(format!("cannot commit: {error}")));
@@ -1409,6 +1422,8 @@ impl bindings::qqq::sql::transaction::HostTxn for crate::linker::StoreData {
         // cleanup that must not fail.)
         charge_one_subrequest(self)?;
         let connection = connection_for(self, &db)?;
+        // Same agreement check as `commit`: a desynced handle fails here.
+        require_txn_open(connection)?;
         let outcome = connection
             .execute_batch("ROLLBACK")
             .map_err(|error| WitSqlError::ExecutionFailed(format!("cannot roll back: {error}")));
@@ -1670,8 +1685,24 @@ mod tests {
         assert!(data.sql_state.statements.is_empty());
     }
 
-    /// An over-long statement fails before it reaches the parser, through
-    /// both the prepared and the one-shot path.
+    /// Preparing spends the subrequest budget: `prepare` opens connections
+    /// and parses SQL, the same file I/O and SQLite work `query_once` charges
+    /// for. With no budget left the prepare fails before any open.
+    #[test]
+    fn prepare_without_budget_fails_closed() {
+        use super::bindings::qqq::sql::database::Host as _;
+        let path = test_path("prepare-no-budget");
+        let mut data = store_for(&path, true, true);
+        data.subrequests = crate::quota::SubrequestBudget::new(0);
+        let err = data
+            .prepare("orders".to_owned(), "SELECT 1".to_owned())
+            .expect_err("an unbudgeted prepare must not open");
+        assert!(
+            matches!(err, WitSqlError::ExecutionFailed(_)),
+            "exhaustion reports execution-failed with the budget named: {err:?}"
+        );
+        assert!(data.sql_state.statements.is_empty());
+    }
     #[test]
     fn oversize_statements_fail_prepare_failed() {
         use super::bindings::qqq::sql::database::Host as _;
@@ -2099,6 +2130,74 @@ mod tests {
         );
     }
 
+    /// Committing a transaction SQLite already closed fails closed: the
+    /// host table says open, SQLite says autocommit, and the entry path
+    /// checks SQLite state before touching the journal.
+    #[test]
+    fn txn_commit_on_a_closed_transaction_fails_closed() {
+        use super::bindings::qqq::sql::transaction::{Host as _, HostTxn as _};
+        let path = test_path("txn-desync-commit");
+        let mut writer = store_for(&path, true, true);
+        query_once(
+            &mut writer,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("create runs");
+        drop(writer);
+        let mut data = store_for(&path, true, true);
+        let txn = data.begin("orders".to_owned()).expect("begin runs");
+        // Simulate smuggled control that closed SQLite behind the handle's
+        // back: the host table still lists the transaction as open.
+        {
+            let db = data.sql.config.find("orders").cloned().expect("configured");
+            let connection = super::connection_for(&mut data, &db).expect("open");
+            connection.execute_batch("COMMIT").expect("desync");
+        }
+        let err = data
+            .commit(txn)
+            .expect_err("a closed transaction must not commit");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("is not active") && !msg.contains("cannot commit"),
+            "the agreement check fires before SQLite runs: {msg}"
+        );
+        assert!(
+            matches!(err, WitSqlError::ExecutionFailed(_)),
+            "the refusal names the desync: {err:?}"
+        );
+    }
+
+    /// Preparing inside a transaction spends the subrequest budget: one
+    /// unit for `begin`, one for `prepare`. With only the first unit left,
+    /// the prepare fails before any connection opens.
+    #[test]
+    fn txn_prepare_without_budget_fails_closed() {
+        use super::bindings::qqq::sql::transaction::{Host as _, HostTxn as _};
+        let path = test_path("txn-prepare-no-budget");
+        let mut writer = store_for(&path, true, true);
+        query_once(
+            &mut writer,
+            "orders".to_owned(),
+            "CREATE TABLE t (id INTEGER)".to_owned(),
+            vec![],
+        )
+        .expect("create runs");
+        drop(writer);
+        let mut data = store_for(&path, true, true);
+        data.subrequests = crate::quota::SubrequestBudget::new(1);
+        let txn = data
+            .begin("orders".to_owned())
+            .expect("begin spends the unit");
+        let err = data
+            .prepare(txn, "SELECT 1".to_owned())
+            .expect_err("an unbudgeted prepare must not open");
+        assert!(
+            matches!(err, WitSqlError::ExecutionFailed(_)),
+            "exhaustion reports execution-failed: {err:?}"
+        );
+    }
     /// A query-only guest writing through the one-shot path is refused for
     /// the direction, not the grant: `query_once` opens on either grant
     /// (mirroring `database::prepare`), so the write reaches the direction

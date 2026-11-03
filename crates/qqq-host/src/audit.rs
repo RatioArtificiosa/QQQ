@@ -854,7 +854,7 @@ impl AppendCounters {
 ///
 /// Adding a host function that records means adding its name here, and the test
 /// `every_recorded_function_round_trips` fails until it is.
-pub(crate) const RECORDED_FUNCTIONS: [&str; 36] = [
+pub(crate) const RECORDED_FUNCTIONS: [&str; 37] = [
     "handle_request",
     "hash_data",
     "random_get",
@@ -891,6 +891,7 @@ pub(crate) const RECORDED_FUNCTIONS: [&str; 36] = [
     "http_incoming_authority",
     "dns_resolve",
     "dns_resolve_many",
+    "dns_allowed_names",
 ];
 
 // The pre-commit buffer bound: pending rows live in the requesting task, so an
@@ -1057,8 +1058,18 @@ impl AuditHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Pre-commit bound (see `MAX_PENDING_ROWS`): past the cap the row is
-        // dropped rather than buffered.
+        // dropped rather than buffered. The drop is counted loudly on the
+        // shared stream: an operator reading `refused` sees the gap as a
+        // value, the same signal a full stream gives (and `has_gaps` covers
+        // both). The pending lock is released first, so the two locks
+        // never nest.
         if pending.len() >= MAX_PENDING_ROWS {
+            drop(pending);
+            self.stream
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .counters
+                .refused += 1;
             return;
         }
         pending.push(PendingRow {
@@ -3000,6 +3011,10 @@ mod tests {
             rows.len() <= 4096,
             "pending must be capped, got {}",
             rows.len()
+        );
+        assert!(
+            stream.lock().expect("stream readable").counters().refused > 0,
+            "dropped pre-commit rows must surface in the refused counter"
         );
     }
 

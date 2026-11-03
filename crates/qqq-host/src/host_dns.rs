@@ -231,6 +231,9 @@ impl DnsResolver for StaticResolver {
                 // Same order contract as the system resolver: the table's
                 // insertion order must not leak into guest-visible results.
                 sort_addrs(&mut out);
+                // Same answer cap as the system resolver: one name never
+                // materializes more than 32 addresses for one lookup.
+                out.truncate(32);
                 Ok(out)
             }
         }
@@ -532,7 +535,9 @@ impl bindings::qqq::dns::resolver::Host for crate::linker::StoreData {
         // Infallible by WIT design (the manifest set is public), so the
         // grant re-check fails closed by answering empty rather than by
         // erroring: an ungranted caller learns nothing, including membership.
-        if !self.grants.grants(DnsResolve) {
+        // Through the audit seam like every other method, so the attempt
+        // records a row instead of passing silently.
+        if crate::ambient::require(self, DnsResolve, "dns_allowed_names").is_err() {
             return Vec::new();
         }
         self.dns.config.names.clone()
@@ -599,8 +604,8 @@ mod tests {
             .unwrap_or_default();
         let seams = production.matches("ambient::require(").count();
         assert_eq!(
-            seams, 2,
-            "every dns body (resolve, resolve-many) must consult the audit seam; \
+            seams, 3,
+            "every dns body (resolve, resolve-many, allowed-names) must consult the audit seam; \
              found {seams} seam call(s)"
         );
     }

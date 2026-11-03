@@ -376,6 +376,17 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                             .to_owned(),
                     )),));
                 };
+                // Bound the mark before hashing the table with it: the
+                // `String` arrives allocated, and an unbounded mark prices
+                // host hashing (and the failure message below) at the
+                // guest's chosen size.
+                if mark.len() > crate::host_log::MAX_LOG_FIELD_BYTES {
+                    return Ok((Err(AssertionError::NotAssertable(format!(
+                        "mark name is {} bytes, past the {}-byte bound",
+                        mark.len(),
+                        crate::host_log::MAX_LOG_FIELD_BYTES
+                    ))),));
+                }
                 // `.copied()` before the `match`, because the scrutinee's temporary guard would
                 // otherwise be dropped while an arm still borrowed from it -- E0597. The same
                 // expression is written this way in `assert-fuel-below` below.
@@ -427,6 +438,15 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                             .to_owned(),
                     )),));
                 };
+                // Bound the mark before hashing the table and formatting it
+                // into the failure: same rule as `fuel-since`.
+                if mark.len() > crate::host_log::MAX_LOG_FIELD_BYTES {
+                    return Ok((Err(AssertionError::NotAssertable(format!(
+                        "mark name is {} bytes, past the {}-byte bound",
+                        mark.len(),
+                        crate::host_log::MAX_LOG_FIELD_BYTES
+                    ))),));
+                }
                 let Some(at) = state.data().marks.get(&mark).copied() else {
                     return Ok((Err(AssertionError::NoFuelBaseline),));
                 };
@@ -563,6 +583,13 @@ pub fn register(linker: &mut Linker<StoreData>) -> wasmtime::Result<()> {
                     )),));
                 };
                 let Some(c) = capability_named(&capability) else {
+                    if capability.len() > crate::host_log::MAX_LOG_FIELD_BYTES {
+                        return Ok((Err(AssertionError::NotAssertable(format!(
+                            "capability name is {} bytes, past the {}-byte bound",
+                            capability.len(),
+                            crate::host_log::MAX_LOG_FIELD_BYTES
+                        ))),));
+                    }
                     return Ok((Err(AssertionError::UnknownCapability(capability)),));
                 };
                 let outside = match recorded_outside(&store, &[]) {

@@ -209,7 +209,15 @@ impl bindings::qqq::http::http::Host for StoreData {
             // `egress_audit` without spending (attempts, not successes —
             // the same rule the mapping refusals follow).
             let _ = self.subrequests.charge();
-            let (host, port) = parse_attempted_authority(&req.url);
+            // Oversize targets are not parsed: the length refusal is the
+            // signal, and parsing a megabyte URL for a row prices the
+            // refusal at the guest-chosen size. An empty host with a
+            // `HostNotAllowed` outcome still records the attempt.
+            let (host, port) = if req.url.len() > MAX_URL_BYTES {
+                (String::new(), 0)
+            } else {
+                parse_attempted_authority(&req.url)
+            };
             self.egress_audit.push(crate::egress::AuditRow {
                 host,
                 port,
@@ -220,6 +228,13 @@ impl bindings::qqq::http::http::Host for StoreData {
                 response_bytes: 0,
             });
             return Err(HttpError::HostNotAllowed);
+        }
+
+        // Bound the URL before anything allocates or parses for it: a
+        // granted caller with a megabyte target must not reach the
+        // thread spawn, let alone the connector, before the refusal.
+        if req.url.len() > MAX_URL_BYTES {
+            return Err(HttpError::RequestTooLarge);
         }
 
         // The bridge to the async connector. `send` is sync (the `bindgen!`
@@ -345,6 +360,12 @@ impl StoreData {
         transport: &impl crate::egress::Transport,
         resolver: &impl crate::egress::Resolver,
     ) -> std::result::Result<Response, HttpError> {
+        // Same bound as `send`: `send_via` is directly callable (and
+        // tested) with fake transports, so the gate lives at both
+        // entries rather than trusting the caller.
+        if req.url.len() > MAX_URL_BYTES {
+            return Err(HttpError::RequestTooLarge);
+        }
         let limits = crate::egress::Limits {
             max_redirects: self.egress.max_redirect_hops(),
             ..crate::egress::Limits::default()
@@ -421,6 +442,15 @@ fn parse_attempted_authority(url: &str) -> (String, u16) {
 /// body. Anything the connector cannot express is refused here,
 /// before any socket opens — and before any audit row, because
 /// nothing reached the connector to audit.
+// A URL no proxy will forward; longer targets are refused before any
+// allocation or parse, both here and at the `send`/`send_via` entries
+// (a single huge URL would otherwise allocate and parse before the
+// connector's total-bytes check fires).
+pub(crate) const MAX_URL_BYTES: usize = 8 * 1024;
+// One header field well above any legitimate cookie or token; the count
+// cap bounds the `Vec`, this bounds each element.
+pub(crate) const MAX_HEADER_FIELD_BYTES: usize = 16 * 1024;
+
 fn map_request(
     req: Request,
     limits: &crate::egress::Limits,
@@ -457,11 +487,12 @@ fn map_request(
     // otherwise allocate before the connector's total-bytes check fires.
     // 8 KiB names a URL no proxy will forward; 16 KiB per header field
     // keeps 100 headers within a small multiple of the 1 MiB total.
-    if req.url.len() > 8 * 1024 {
+    if req.url.len() > MAX_URL_BYTES {
         return Err(HttpError::RequestTooLarge);
     }
     for header in &req.headers {
-        if header.name.len() > 16 * 1024 || header.value.len() > 16 * 1024 {
+        if header.name.len() > MAX_HEADER_FIELD_BYTES || header.value.len() > MAX_HEADER_FIELD_BYTES
+        {
             return Err(HttpError::RequestTooLarge);
         }
     }
@@ -1154,6 +1185,35 @@ mod tests {
         assert_eq!(outcome(&result), "invalid-url");
     }
 
+    /// An oversize URL is refused before anything allocates or parses for
+    /// it: the entry gate fires ahead of the thread spawn, the clone, and
+    /// the connector, so a megabyte target prices one length check.
+    #[test]
+    fn send_refuses_an_oversize_url_up_front() {
+        let mut data = allowing_store();
+        let transport = CannedTransport;
+        let resolver = CannedResolver::answering("api.example.com", "93.184.216.34");
+        let mut target = String::from("https://api.example.com/");
+        target.extend(std::iter::repeat_n('x', MAX_URL_BYTES + 1));
+        let request = Request {
+            method: Method::Get,
+            url: target,
+            headers: vec![],
+            body: None,
+        };
+        let result = block_on(data.send_via(request, &transport, &resolver));
+        assert_eq!(outcome(&result), "request-too-large");
+        assert_eq!(
+            data.subrequests.spent(),
+            0,
+            "the entry gate fires before any charge"
+        );
+        assert!(
+            data.take_egress_audit().is_empty(),
+            "the entry gate fires before any audit row"
+        );
+    }
+
     /// An unwired store refuses through `send()` itself — grant checked,
     /// budget charged, vet refusal recorded — without ever dialling.
     /// No-dial is proven observably, not structurally: a dial would
@@ -1421,6 +1481,24 @@ mod tests {
         );
     }
 
+    /// An oversize URL is not parsed for the audit row: an ungranted
+    /// guest still gets `host-not-allowed`, but the row names nothing
+    /// instead of pricing a megabyte parse at the guest-chosen size.
+    #[test]
+    fn oversize_ungranted_targets_are_not_parsed() {
+        let mut data = StoreData::new(grants_from(SERVER));
+        let mut target = String::from("https://api.example.com/");
+        target.extend(std::iter::repeat_n('x', MAX_URL_BYTES + 1));
+        let result = data.send(get(&target));
+        assert_eq!(outcome(&result), "host-not-allowed");
+        let rows = data.take_egress_audit();
+        assert_eq!(rows.len(), 1);
+        let row = rows.first().expect("one row recorded");
+        assert!(
+            row.host.is_empty(),
+            "oversize targets are not parsed: {row:?}"
+        );
+    }
     #[test]
     fn incoming_authority_reports_the_bound_host_and_port() {
         let mut data = StoreData::new(grants_from(SERVER));

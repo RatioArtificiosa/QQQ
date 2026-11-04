@@ -172,6 +172,14 @@ pub fn why(loaded: &LoadedManifest, capability: &str) -> Result<WhyOutput> {
     })
 }
 
+/// The whole `[capabilities.http]` table, covering both directions.
+///
+/// Shared by the namespace fallback and the run remediation for a component
+/// missing both halves: two pasted `[capabilities.http]` tables would be
+/// duplicate-table invalid TOML, so the pair case gets one table, not two
+/// stanzas.
+pub(crate) const HTTP_TABLE_STANZA: &str = "add to qqq.toml:\n\n    [capabilities.http]\n    server = true  # for http.server\n    client = [\"host:443\"]  # for http.client";
+
 /// The exact `qqq.toml` stanza that would grant a capability.
 ///
 /// # Why this is generated rather than documented
@@ -205,8 +213,11 @@ pub fn fix_stanza_for(c: Capability) -> String {
     // manifest used to suggest `server = true` **and** `client = [...]` — an
     // operator fixing a server denial would grant egress too, and the `crypto`
     // table was worse (five grants including the covert `crypto.random`).
-    // Each arm below parses to exactly the capability named in its comment,
-    // pinned by `fix_stanzas_grant_only_the_capability_named`.
+    // Each arm below parses to the capability named in its comment.
+    // `fs` modes grant fixed bundles (`read-only` is `read + watch`), so
+    // `read` and `watch` name their inherent co-grant rather than hiding it,
+    // and only `append-only` is exactly one grant.
+    // Pinned by `fix_stanzas_grant_only_the_capability_named`.
     if c == Capability::HttpServer {
         return "add to qqq.toml:\n\n    [capabilities.http]\n    server = true  # for http.server"
             .to_owned();
@@ -236,13 +247,31 @@ pub fn fix_stanza_for(c: Capability) -> String {
     if c == Capability::ClockMonotonic {
         return "add to qqq.toml:\n\n    [capabilities.clock]\n    monotonic = true  # for clock.monotonic".to_owned();
     }
+    // The `fs` modes grant fixed bundles, so the denial selects the mode, not
+    // just the table. `read-only` grants `read + watch` — suggesting it for
+    // `fs.write` leaves the component still failing, the same defect the
+    // per-capability arms above exist to prevent. `append-only` is the one
+    // mode that grants exactly `write`; `read` and `watch` have no mode that
+    // grants them alone (readable modes imply watch, CAP-024), so their
+    // stanzas name the co-grant in the comment instead of hiding it.
+    if c == Capability::FsWrite {
+        return "add to qqq.toml:\n\n    [[capabilities.fs]]\n    path = \"/var/lib/app\"\n    mode = \"append-only\"  # for fs.write: exactly write, no read, no watch".to_owned();
+    }
+    if c == Capability::FsRead {
+        return "add to qqq.toml:\n\n    [[capabilities.fs]]\n    path = \"/var/lib/app\"\n    mode = \"read-only\"  # for fs.read (also grants fs.watch: readable modes imply watch)".to_owned();
+    }
+    if c == Capability::FsWatch {
+        return "add to qqq.toml:\n\n    [[capabilities.fs]]\n    path = \"/var/lib/app\"\n    mode = \"read-only\"  # for fs.watch (also grants fs.read: watch follows readability)".to_owned();
+    }
     match c.namespace() {
         // Whole-table fallbacks, reachable only by future variants of these
         // namespaces: every capability known today returns above with an
         // exact stanza. A future variant has no per-capability pin yet, so
         // the table — with each line annotated — is the honest suggestion
         // until its pin lands.
-        "http" => "add to qqq.toml:\n\n    [capabilities.http]\n    server = true          # for http.server\n    client = [\"host:443\"]  # for http.client".to_owned(),
+        "http" => HTTP_TABLE_STANZA.to_owned(),
+        // Future-variant fallback: the three known `fs` capabilities return
+        // exact modes above.
         "fs" => "add to qqq.toml:\n\n    [[capabilities.fs]]\n    path = \"/var/lib/app\"\n    mode = \"read-only\"     # or \"append-only\" / \"read-write\"".to_owned(),
         "crypto" => "add to qqq.toml:\n\n    [capabilities.crypto]\n    random = true          # for crypto.random\n    hash = [\"sha256\"]      # for crypto.hash\n    hmac = [\"sha256\"]      # for crypto.hmac\n    aead = [\"aes-256-gcm\"] # for crypto.aead\n    sign = [\"ed25519\"]     # for crypto.sign".to_owned(),
         // Future-variant fallback like `http` above: known capabilities
@@ -1013,6 +1042,16 @@ pub fn diff_artifacts(before: &ArtifactReport, after: &ArtifactReport) -> Artifa
 
     let before_caps: BTreeSet<&str> = before.required.iter().map(|c| c.name.as_str()).collect();
     let after_caps: BTreeSet<&str> = after.required.iter().map(|c| c.name.as_str()).collect();
+    let before_unmapped: BTreeSet<&str> = before
+        .unmapped_interfaces
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let after_unmapped: BTreeSet<&str> = after
+        .unmapped_interfaces
+        .iter()
+        .map(String::as_str)
+        .collect();
 
     let describe = |name: &str| -> Option<CapabilityChange> {
         // A name that does not resolve cannot happen for a report this crate
@@ -1058,6 +1097,20 @@ pub fn diff_artifacts(before: &ArtifactReport, after: &ArtifactReport) -> Artifa
     // grant inside one band (http.server, then +sql.execute, both `Exposed`)
     // reads as "authority changed" while the CI gate stays green.
     let any_added = !added.is_empty();
+
+    // A gained unmapped import escalates for the opposite reason: nothing
+    // known was added, but the artifact reaches an interface the host cannot
+    // describe — unauditable authority. (The 0.2 baseline never appears here;
+    // `classify_import` filters it before the report is built.)
+    let added_unmapped: Vec<String> = after_unmapped
+        .difference(&before_unmapped)
+        .map(|n| (*n).to_owned())
+        .collect();
+    let removed_unmapped: Vec<String> = before_unmapped
+        .difference(&after_unmapped)
+        .map(|n| (*n).to_owned())
+        .collect();
+    let gained_unmapped = !added_unmapped.is_empty();
     ArtifactDiff {
         before: before.artifact.clone(),
         after: after.artifact.clone(),
@@ -1066,7 +1119,9 @@ pub fn diff_artifacts(before: &ArtifactReport, after: &ArtifactReport) -> Artifa
         added,
         removed,
         unchanged,
-        escalation: posture_worsened || gained_channel || any_added,
+        added_unmapped,
+        removed_unmapped,
+        escalation: posture_worsened || gained_channel || any_added || gained_unmapped,
         before_posture: before.posture.as_str().to_owned(),
         after_posture: after.posture.as_str().to_owned(),
     }
@@ -1089,6 +1144,13 @@ pub struct ArtifactDiff {
     pub removed: Vec<CapabilityChange>,
     /// Capabilities both require.
     pub unchanged: Vec<String>,
+    /// Unmapped imports the second artifact carries and the first did not.
+    ///
+    /// Unauditable authority: the host cannot describe these interfaces, so a
+    /// gain is an escalation even though no known capability was added.
+    pub added_unmapped: Vec<String>,
+    /// Unmapped imports the first artifact carried and the second does not.
+    pub removed_unmapped: Vec<String>,
     /// Whether the second artifact's authority **grew**.
     ///
     /// Denormalized so CI can branch on it in one comparison. This is the flag
@@ -1131,7 +1193,11 @@ impl CommandOutput for ArtifactDiff {
         // after a list of unchanged capabilities invites skimming past it.
         let mut out = if self.escalation {
             format!("AUTHORITY ESCALATION: {} → {}", self.before, self.after)
-        } else if self.added.is_empty() && self.removed.is_empty() {
+        } else if self.added.is_empty()
+            && self.removed.is_empty()
+            && self.added_unmapped.is_empty()
+            && self.removed_unmapped.is_empty()
+        {
             format!("no authority change: {} → {}", self.before, self.after)
         } else {
             format!("authority changed: {} → {}", self.before, self.after)
@@ -1148,6 +1214,12 @@ impl CommandOutput for ArtifactDiff {
         for c in &self.removed {
             let _ = write!(out, "\n  - {:<20} ({})", c.name, c.kind);
         }
+        for u in &self.added_unmapped {
+            let _ = write!(out, "\n  + {u} (unmapped — the host cannot describe it)");
+        }
+        for u in &self.removed_unmapped {
+            let _ = write!(out, "\n  - {u} (unmapped)");
+        }
 
         let _ = write!(
             out,
@@ -1159,6 +1231,29 @@ impl CommandOutput for ArtifactDiff {
 
     fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// Sort one imported interface into `required` or `unmapped`.
+///
+/// The 0.2 baseline links unconditionally with no grant involved, so its names
+/// are neither requirements nor findings: reporting every `wasi:cli/stdout` a
+/// `wasm32-wasip2` `std` pulls in as "unmapped" would bury a genuinely unknown
+/// import in noise the operator learns to ignore.
+fn classify_import(iface: &str, required: &mut Vec<CapabilityReport>, unmapped: &mut Vec<String>) {
+    if crate::run::is_wasi02_baseline(iface) {
+        return;
+    }
+    let caps = crate::run::capabilities_for_import(iface);
+    if caps.is_empty() {
+        unmapped.push(iface.to_owned());
+    }
+    for cap in caps {
+        required.push(CapabilityReport {
+            name: cap.name().to_owned(),
+            interface: iface.to_owned(),
+            implemented: crate::run::interface_implemented(iface),
+        });
     }
 }
 
@@ -1241,17 +1336,7 @@ pub fn inspect_artifact(path: &std::path::Path) -> Result<ArtifactReport> {
     let mut required = Vec::new();
     let mut unmapped = Vec::new();
     for iface in &imports {
-        let caps = crate::run::capabilities_for_import(iface);
-        if caps.is_empty() {
-            unmapped.push(iface.clone());
-        }
-        for cap in caps {
-            required.push(CapabilityReport {
-                name: cap.name().to_owned(),
-                interface: iface.clone(),
-                implemented: crate::run::interface_implemented(iface),
-            });
-        }
+        classify_import(iface, &mut required, &mut unmapped);
     }
     required.sort_by(|a, b| (&a.name, &a.interface).cmp(&(&b.name, &b.interface)));
     required.dedup();
@@ -2067,21 +2152,38 @@ mod tests {
     /// `why http.server` used to suggest `server = true` **and**
     /// `client = [...]`, so fixing a server denial granted egress; the
     /// `crypto` suggestion granted five capabilities including the covert
-    /// `crypto.random`. Each arm now round-trips to a grant set containing
-    /// exactly the denied capability.
+    /// `crypto.random`; and the `fs` suggestion was `read-only` for every
+    /// denial, which never grants `write`.
+    ///
+    /// `fs` modes grant fixed bundles, so `read` and `watch` name their
+    /// inherent co-grant (`read-only` is `read + watch`, CAP-024) rather than
+    /// hiding it, and only `append-only` is exactly one grant.
     #[test]
     fn fix_stanzas_grant_only_the_capability_named() {
         use qqq_cap::manifest::Manifest;
-        for cap in [
-            Capability::HttpServer,
-            Capability::HttpClient,
-            Capability::CryptoRandom,
-            Capability::CryptoHash,
-            Capability::CryptoHmac,
-            Capability::CryptoAead,
-            Capability::CryptoSign,
-            Capability::ClockWall,
-            Capability::ClockMonotonic,
+        for (cap, expected) in [
+            (Capability::HttpServer, vec![Capability::HttpServer]),
+            (Capability::HttpClient, vec![Capability::HttpClient]),
+            (Capability::CryptoRandom, vec![Capability::CryptoRandom]),
+            (Capability::CryptoHash, vec![Capability::CryptoHash]),
+            (Capability::CryptoHmac, vec![Capability::CryptoHmac]),
+            (Capability::CryptoAead, vec![Capability::CryptoAead]),
+            (Capability::CryptoSign, vec![Capability::CryptoSign]),
+            (Capability::ClockWall, vec![Capability::ClockWall]),
+            (Capability::ClockMonotonic, vec![Capability::ClockMonotonic]),
+            // `append-only` is exactly `write`: the one fs mode that grants
+            // a single capability.
+            (Capability::FsWrite, vec![Capability::FsWrite]),
+            // Readable modes imply watch (CAP-024): no mode grants `read`
+            // or `watch` alone.
+            (
+                Capability::FsRead,
+                vec![Capability::FsRead, Capability::FsWatch],
+            ),
+            (
+                Capability::FsWatch,
+                vec![Capability::FsRead, Capability::FsWatch],
+            ),
         ] {
             let fix = fix_stanza_for(cap);
             let body = stanza_body(&fix).unwrap_or_else(|| panic!("{cap} has a stanza"));
@@ -2091,8 +2193,8 @@ mod tests {
             .unwrap_or_else(|e| panic!("{cap}: the suggestion must parse: {e}"));
             assert_eq!(
                 manifest.declared_capabilities(),
-                vec![cap],
-                "{cap}: the pasted stanza must grant exactly the denied capability"
+                expected,
+                "{cap}: the pasted stanza must grant the denied capability and name any co-grant"
             );
         }
     }
@@ -2740,6 +2842,30 @@ window_seconds = 60
 
     // -- escalation --------------------------------------------------------
 
+    /// Baseline imports are neither requirements nor findings.
+    ///
+    /// Every `wasm32-wasip2` `std` pulls in `wasi:cli/stdout` and friends;
+    /// listing them as "unmapped" would bury a genuinely unknown import in
+    /// noise, while listing them as required would demand a grant the runtime
+    /// never checks.
+    #[test]
+    fn baseline_imports_are_neither_required_nor_unmapped() {
+        let mut required = Vec::new();
+        let mut unmapped = Vec::new();
+        classify_import("wasi:cli/stdout@0.2.0", &mut required, &mut unmapped);
+        assert!(required.is_empty() && unmapped.is_empty());
+        classify_import(
+            "wasi:http/incoming-handler@0.2.0",
+            &mut required,
+            &mut unmapped,
+        );
+        assert_eq!(
+            unmapped,
+            vec!["wasi:http/incoming-handler@0.2.0".to_owned()],
+            "no baseline registration: still a finding"
+        );
+    }
+
     /// A scratch manifest directory isolated by process id, so parallel test
     /// runners never share it.
     fn temp_project(tag: &str) -> std::path::PathBuf {
@@ -2836,6 +2962,21 @@ window_seconds = 60
         );
         let same = diff_artifacts(&before, &before);
         assert!(!same.escalation, "no change must not read as an escalation");
+        // A gained unmapped import escalates: the host cannot describe the
+        // interface, so the new reach is unauditable authority.
+        let plain = artifact_report(&[], Posture::Minimal);
+        let mut weird = artifact_report(&[], Posture::Minimal);
+        weird.unmapped_interfaces = vec!["qqq:weird/thing@1.0.0".to_owned()];
+        let diff = diff_artifacts(&plain, &weird);
+        assert_eq!(diff.added_unmapped.len(), 1);
+        assert!(
+            diff.escalation,
+            "a gained undescribable import is an escalation"
+        );
+        assert!(
+            diff.summary().contains("unmapped"),
+            "the new reach must be visible, not just flaggable"
+        );
     }
 
     // -- developer overlay -------------------------------------------------

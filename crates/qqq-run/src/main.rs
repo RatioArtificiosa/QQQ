@@ -675,16 +675,21 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             // The capability argument is extracted before `out` is borrowed by
             // `with_manifest`, so the missing-argument error does not conflict
             // with the later mutable borrow.
-            if let Some(cap) = first_positional_cap(args) {
-                dispatch_why(name, &mut out, args, &cap)
-            } else {
-                let err = qqq_core::Error::new(
-                    qqq_core::ErrorCode::McpArgumentInvalid,
-                    "`why` needs a capability to explain",
-                )
-                .with_remediation("for example: qqqai why crypto.hash");
-                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
-                ExitCode::from(exit::USAGE)
+            match first_positional_cap(args) {
+                Err(e) => {
+                    let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+                    ExitCode::from(exit::USAGE)
+                }
+                Ok(None) => {
+                    let err = qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        "`why` needs a capability to explain",
+                    )
+                    .with_remediation("for example: qqqai why crypto.hash");
+                    let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+                    ExitCode::from(exit::USAGE)
+                }
+                Ok(Some(cap)) => dispatch_why(name, &mut out, args, &cap),
             }
         }
         CommandName::Caps => dispatch_caps(name, &mut out, args),
@@ -918,6 +923,11 @@ fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
             diff_against = Some(v.to_owned());
         } else if TAKES_VALUE.contains(&a) {
             i += 1;
+        } else if a.starts_with("--manifest=") {
+            // Self-contained: no value to skip, and nothing here is an
+            // artifact path. Without this arm the `=` spelling fell into
+            // the refusal below while `with_manifest` (via `flag_value`)
+            // would have accepted it.
         } else if a.starts_with('-') {
             // Refused, not ignored: the global parser consumes `--json` and
             // its siblings before dispatch, so a flag-shaped argument here is
@@ -1012,15 +1022,15 @@ fn dispatch_audit(
                     return ExitCode::from(exit::USAGE);
                 }
             }
-        } else if a.starts_with("--") && a != "--manifest" {
+        } else if a.starts_with("--") && a != "--manifest" && !a.starts_with("--manifest=") {
             // **An unknown flag is refused rather than dropped.** There was no arm here, so
             // `qqqai audit --bogus` printed the human report and exited `0`: the caller got an answer
             // to a question they did not ask, with nothing to say the option had been discarded. Of
             // the three things a command can do with a flag it does not implement -- honour it, refuse
             // it, ignore it -- **only ignoring it lies**, and `dispatch_audit_log` already refuses.
             //
-            // `--manifest` is excluded because `flag_value` reads it from this same argv below. Flag
-            // VALUES cannot start with `--`, so this predicate cannot catch one.
+            // `--manifest` (both spellings) is excluded because `flag_value` reads it from this same
+            // argv below. Flag VALUES cannot start with `--`, so this predicate cannot catch one.
             //
             // `--json`, `--jsonl` and `-q` never reach here: they are **global** flags, parsed before
             // dispatch and accepted in either position. A first version of this arm special-cased
@@ -1638,8 +1648,10 @@ fn dispatch_openapi(
     let loaded = match qqq_run::LoadedManifest::discover(&cwd, manifest.as_deref()) {
         Ok(l) => l,
         Err(e) => {
-            let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
-            return ExitCode::from(exit::FAILURE);
+            // `USAGE`, like `with_manifest_at`: a bad `--manifest` path is
+            // the operator's mistake, not a command failure.
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
         }
     };
 
@@ -3466,6 +3478,28 @@ fn dispatch_caps(
     out: &mut Output<std::io::Stdout>,
     args: &[String],
 ) -> ExitCode {
+    let parsed = match caps_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    with_manifest(name, out, args, |loaded| {
+        Ok(qqq_run::commands::caps(loaded, parsed.explain))
+    })
+}
+
+/// The parsed `caps` flags: `--explain`, and nothing else.
+///
+/// A pure function so tests can pin the parsing without building an `Output`
+/// sink. `--manifest` (both spellings) is skipped with its value — owned by
+/// `with_manifest`, like every sibling command.
+struct CapsArgs {
+    explain: bool,
+}
+
+fn caps_args(args: &[String]) -> Result<CapsArgs, qqq_core::Error> {
     let mut explain = false;
     let mut i = 0usize;
     while i < args.len() {
@@ -3475,25 +3509,26 @@ fn dispatch_caps(
         match a {
             "--explain" => explain = true,
             "--manifest" => i += 1,
+            // The `=` twin is self-contained: no value to skip. Without this
+            // arm it fell into the unknown-flag refusal below, so
+            // `caps --manifest=x.toml` failed while `with_manifest`
+            // (via `flag_value`) would have accepted it.
+            a if a.starts_with("--manifest=") => {}
             other if other.starts_with('-') => {
-                let err = qqq_core::Error::new(
+                return Err(qqq_core::Error::new(
                     qqq_core::ErrorCode::McpArgumentInvalid,
                     format!("unknown flag `{other}` for `caps`"),
                 )
                 .with_remediation(
                     "`caps` takes `--explain` (show which layer decided each capability) and \
                      the global `--manifest`",
-                );
-                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
-                return ExitCode::from(exit::USAGE);
+                ));
             }
             _ => {}
         }
         i += 1;
     }
-    with_manifest(name, out, args, |loaded| {
-        Ok(qqq_run::commands::caps(loaded, explain))
-    })
+    Ok(CapsArgs { explain })
 }
 
 /// `qqqai why <capability>` with a status that reflects the decision.
@@ -3548,26 +3583,31 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 /// itself and report `CapabilitySyntaxInvalid`, while `caps` skipped the flag
 /// correctly — the same global flag parsed two ways by two sibling commands.
 /// Only `--manifest` takes a value on this command, so only it (in both
-/// spellings) is skipped along with its value; any other `-` argument is left
-/// for `why` to refuse by name rather than silently skipped here.
-fn first_positional_cap(args: &[String]) -> Option<String> {
+/// spellings) is skipped along with its value. Any other `-` argument is
+/// refused rather than skipped: silently ignoring `--bogus` would explain a
+/// capability under options the user believes are active — the same defect
+/// `caps` and `inspect` refuse.
+fn first_positional_cap(args: &[String]) -> Result<Option<String>, qqq_core::Error> {
     let mut rest: &[String] = args;
     while let Some((a, tail)) = rest.split_first() {
         if a == "--manifest" {
             rest = tail.get(1..).unwrap_or(&[]);
             continue;
         }
-        if a.starts_with("--manifest=") || a == "--json" || a == "--jsonl" || a == "--json-lines" {
+        if a.starts_with("--manifest=") {
             rest = tail;
             continue;
         }
         if a.starts_with('-') {
-            rest = tail;
-            continue;
+            return Err(qqq_core::Error::new(
+                qqq_core::ErrorCode::CliFlagUnknown,
+                format!("`why` does not accept `{a}`"),
+            )
+            .with_remediation("`why` takes a capability and the global `--manifest`"));
         }
-        return Some((*a).clone());
+        return Ok(Some(a.clone()));
     }
-    None
+    Ok(None)
 }
 
 /// Decode `qqqai build`'s own flags.
@@ -5375,24 +5415,36 @@ mod tests {
     fn why_skips_global_flags_to_find_the_capability() {
         let args = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         assert_eq!(
-            first_positional_cap(&args(&["crypto.hash"])).as_deref(),
+            first_positional_cap(&args(&["crypto.hash"]))
+                .expect("parses")
+                .as_deref(),
             Some("crypto.hash")
         );
         assert_eq!(
-            first_positional_cap(&args(&["--manifest", "qqq.toml", "crypto.hash"])).as_deref(),
+            first_positional_cap(&args(&["--manifest", "qqq.toml", "crypto.hash"]))
+                .expect("parses")
+                .as_deref(),
             Some("crypto.hash"),
             "`why --manifest <file> <cap>` must explain the cap, not the flag"
         );
         assert_eq!(
-            first_positional_cap(&args(&["--manifest=qqq.toml", "crypto.hash"])).as_deref(),
+            first_positional_cap(&args(&["--manifest=qqq.toml", "crypto.hash"]))
+                .expect("parses")
+                .as_deref(),
             Some("crypto.hash")
         );
         assert_eq!(
-            first_positional_cap(&args(&["--manifest", "qqq.toml"])),
+            first_positional_cap(&args(&["--manifest", "qqq.toml"])).expect("parses"),
             None,
             "a flag value is not a capability"
         );
-        assert_eq!(first_positional_cap(&args(&[])), None);
+        assert_eq!(first_positional_cap(&args(&[])).expect("parses"), None);
+        // An unknown flag is refused, not skipped: skipping it would explain
+        // the capability under options the user believes are active.
+        let err = first_positional_cap(&args(&["--bogus", "crypto.hash"]))
+            .expect_err("unknown flag must fail");
+        assert_eq!(err.code, qqq_core::ErrorCode::CliFlagUnknown);
+        assert!(err.message.contains("--bogus"), "{}", err.message);
     }
 
     #[test]
@@ -5408,8 +5460,7 @@ mod tests {
             "a.wasm",
             "--diff",
             "b.wasm",
-            "--manifest",
-            "q.toml",
+            "--manifest=sub/q.toml",
         ]))
         .expect("parses");
         assert_eq!(p.artifact.as_deref(), Some("a.wasm"));
@@ -5417,6 +5468,21 @@ mod tests {
         let p = inspect_args(&args(&["--diff=b.wasm"])).expect("parses");
         assert_eq!(p.diff_against.as_deref(), Some("b.wasm"));
         assert_eq!(p.artifact, None);
+    }
+
+    #[test]
+    fn caps_accepts_manifest_in_both_spellings() {
+        let args = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let p = caps_args(&args(&["--explain", "--manifest", "sub/qqq.toml"])).expect("parses");
+        assert!(p.explain);
+        // The `=` twin is self-contained: without its arm it fell into the
+        // unknown-flag refusal while `with_manifest` would have accepted it.
+        let p = caps_args(&args(&["--manifest=sub/qqq.toml"])).expect("parses");
+        assert!(!p.explain);
+        assert!(
+            caps_args(&args(&["--bogus"])).is_err(),
+            "unknown flags must still be refused"
+        );
     }
 
     #[test]

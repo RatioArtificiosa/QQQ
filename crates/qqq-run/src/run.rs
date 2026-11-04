@@ -410,7 +410,7 @@ fn is_served_03_import(interface: &str, grants: &GrantSet) -> bool {
 /// call time by wasmtime's default-deny network policy, which QQQ never
 /// opts out of (no `inherit_network` / `allow_*` call exists in `host_wasi`).
 #[must_use]
-fn is_wasi02_baseline(interface: &str) -> bool {
+pub(crate) fn is_wasi02_baseline(interface: &str) -> bool {
     const BASELINE: &[&str] = &[
         "wasi:cli",
         "wasi:clocks",
@@ -647,6 +647,15 @@ pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
 ///   the pinning test in `qqq-abi` keeps honest.
 /// * Anything else has no implementation behind it.
 ///
+/// # Granularity limit
+///
+/// The registry rows are per **package**, so this is per package too: if one
+/// interface of `qqq:clock` served and another did not, this could not say so.
+/// Today no package is split that way (every row is uniformly implemented or
+/// not, pinned by `implemented_flags_match_reality`), so the package answer
+/// is exact — but a future split package needs per-interface rows, not a
+/// wider predicate here.
+///
 /// ```
 /// assert!(qqq_run::run::interface_implemented("qqq:crypto/hashing@1.0.0"));
 /// assert!(!qqq_run::run::interface_implemented("qqq:http/http@1.0.0"));
@@ -747,15 +756,16 @@ fn import_error(check: &ImportCheck, loaded: &LoadedManifest) -> Error {
     // `inspect` had a visible wrong answer in its report, while `run` only shows
     // it in a remediation line that a reader is already primed to trust.
     //
-    // Every capability each missing interface implies, not just the strongest:
-    // naming one grant when the interface needs two leaves the component still
-    // failing after the operator pastes the fix.
+    // Every capability each missing interface implies, strongest first —
+    // the same order the gate decides by. Sorting by declaration order
+    // instead would remediate the weakest (`fs.read`) while the gate demands
+    // the strongest (`fs.write`): two answers to one question.
     let mut implicated: Vec<qqq_cap::Capability> = check
         .missing
         .iter()
         .flat_map(|i| capabilities_for_import(i))
         .collect();
-    implicated.sort();
+    implicated = strongest_first(implicated);
     implicated.dedup();
 
     let mut e = Error::new(
@@ -769,7 +779,7 @@ fn import_error(check: &ImportCheck, loaded: &LoadedManifest) -> Error {
     .with_context("granted", check.satisfied.join(", "))
     .with_context("project", loaded.name().to_owned())
     .with_remediation(match implicated.first() {
-        Some(cap) => crate::commands::fix_stanza_for(*cap),
+        Some(cap) => remediation_for(&implicated, *cap),
         None => format!(
             "run `{} caps` to see what is granted, and `{} why <capability>` to \
              understand a decision",
@@ -791,6 +801,39 @@ fn import_error(check: &ImportCheck, loaded: &LoadedManifest) -> Error {
         e = e.with_context("also_implicated", rest);
     }
     e
+}
+
+/// The remediation for a failed import check: the stanza to paste.
+///
+/// One interface can imply several capabilities, and the operator pastes once:
+/// a remediation that names one grant when the interface needs two leaves the
+/// component still failing. So the stanza covers the strongest, and any other
+/// implied capability is named in the same text (the machine-readable
+/// `also_implicated` context carries them separately).
+///
+/// The `http` pair is the exception that proves the shape: both halves live in
+/// one `[capabilities.http]` table, and two pasted tables would be
+/// duplicate-table invalid TOML — so a component missing both gets the whole
+/// table, not two stanzas to merge by hand.
+fn remediation_for(implicated: &[qqq_cap::Capability], strongest: qqq_cap::Capability) -> String {
+    use qqq_cap::Capability::{HttpClient, HttpServer};
+    if implicated.len() == 2 && implicated.contains(&HttpServer) && implicated.contains(&HttpClient)
+    {
+        return crate::commands::HTTP_TABLE_STANZA.to_owned();
+    }
+    let mut out = crate::commands::fix_stanza_for(strongest);
+    if implicated.len() > 1 {
+        let rest = implicated
+            .iter()
+            .skip(1)
+            .map(|c| c.name().to_owned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str("\n\nAlso required: ");
+        out.push_str(&rest);
+        out.push_str(" — one stanza per capability; merge same-table entries into a single table");
+    }
+    out
 }
 
 /// `1 interface` / `2 interfaces`.
@@ -1801,6 +1844,44 @@ mod tests {
         assert!(!interface_implemented("wasi:http/incoming-handler@0.3.2"));
         // Unknown names serve nothing.
         assert!(!interface_implemented("not-an-interface"));
+    }
+
+    /// A component missing both `http` halves gets one table, not two stanzas.
+    ///
+    /// Both halves live in one `[capabilities.http]` table: two pasted tables
+    /// would be duplicate-table invalid TOML, so the pair case is the one
+    /// remediation that covers more than the strongest.
+    #[test]
+    fn http_pair_remediation_is_one_table() {
+        use qqq_cap::Capability::{HttpClient, HttpServer};
+        let out = remediation_for(&[HttpServer, HttpClient], HttpServer);
+        assert!(
+            out.contains("server = true") && out.contains("client = "),
+            "both directions must be granted: {out}"
+        );
+        assert_eq!(
+            out.matches("[capabilities.http]").count(),
+            1,
+            "exactly one table — two would not parse: {out}"
+        );
+    }
+
+    /// Any other multi-capability interface names the rest alongside the stanza.
+    ///
+    /// A remediation that names one grant when the interface needs several
+    /// leaves the component still failing after the operator pastes the fix.
+    #[test]
+    fn multi_cap_remediation_names_the_rest() {
+        use qqq_cap::Capability::{FsRead, FsWatch, FsWrite};
+        let out = remediation_for(&[FsWrite, FsRead, FsWatch], FsWrite);
+        assert!(
+            out.contains("append-only"),
+            "the strongest still leads: {out}"
+        );
+        assert!(
+            out.contains("Also required:"),
+            "the other implied grants must be visible, not just in context: {out}"
+        );
     }
 
     /// A package-spelled import still resolves, through the fallback branch.

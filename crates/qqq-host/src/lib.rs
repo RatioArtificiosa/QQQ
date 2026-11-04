@@ -150,8 +150,8 @@ pub use audit::{
 pub use boundary::{
     BOUNDARIES, Boundary, CheckClass, MAX_ECHO_BYTES, MAX_IDENTIFIER_BYTES, MAX_LIST_BYTES,
     MAX_LIST_ELEMENTS, MAX_PATH_BYTES, Rejection, all, boundaries_checking, consistent_length,
-    discriminant, interfaces, is_layout_forgery, list_size, one_of, path_component, path_shape,
-    range_within, render_for_diagnostic, size, text,
+    discriminant, interfaces, is_invisible_format, is_layout_forgery, list_size, one_of,
+    path_component, path_shape, range_within, render_for_diagnostic, size, text,
 };
 pub use config::{
     EngineConfig, StoreLimits as LimitSet, aot_cache_key, build_engine, build_pooling,

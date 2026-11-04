@@ -118,6 +118,18 @@ impl TenantId {
                     .to_owned(),
             );
         }
+        // Invisible format characters are refused like controls: a zero-width
+        // space is not `is_control` and not a layout-forger (joiners build
+        // legitimate emoji, so renderers must not fold them), but no tenant
+        // — DNS names, peer labels, mapped identities — ever needs one, and
+        // `acme` vs `acme\u{200B}` would be two tenants no reader can tell
+        // apart. Refused at construction so no downstream renderer has to
+        // decide what an invisible tenant name means.
+        if name.chars().any(crate::text::is_invisible_format) {
+            return Err("a tenant id must not contain invisible format characters; \
+                 two names differing only in one would display identically"
+                .to_owned());
+        }
         // No JSON-significant characters: tenant names travel inside JSON
         // audit records, Prometheus labels, and log lines, and the audit
         // parser matches `"tenant":null` as a substring. A quote or
@@ -1203,6 +1215,36 @@ mod tests {
         assert!(TenantId::new("acme\u{2028}corp").is_err());
         assert!(TenantId::new("acme\u{2029}corp").is_err());
         assert!(TenantId::new("acme\u{85}corp").is_err());
+    }
+
+    /// Invisible format characters never name a tenant: the zero-width space
+    /// is not a control and not a layout-forger (its joiner siblings build
+    /// legitimate emoji, so renderers leave the class alone), which is exactly
+    /// why the identifier boundary must refuse it — `acme` and `acme\u{200B}`
+    /// would otherwise be two policy tenants no dashboard can tell apart.
+    /// Written first and failing first: on the old check every case below
+    /// constructed `Ok`.
+    #[test]
+    fn a_tenant_id_rejects_invisible_format_characters() {
+        for hostile in [
+            "acme\u{200B}corp",
+            "acme\u{200C}corp",
+            "acme\u{200D}corp",
+            "acme\u{2060}corp",
+            "acme\u{AD}corp",
+            "acme\u{180E}corp",
+            "acme\u{FE0F}corp",
+            "\u{200B}",
+        ] {
+            assert!(
+                TenantId::new(hostile).is_err(),
+                "{hostile:?} must not be a tenant id"
+            );
+        }
+        // Legitimate lookalikes stay valid: emoji content and C1 controls
+        // are a different class (the latter was already refused above).
+        assert!(TenantId::new("acme-corp.eu").is_ok());
+        assert!(TenantId::new("2001:db8::1").is_ok());
     }
 
     /// Quotes and backslashes never name a tenant: they would desynchronise

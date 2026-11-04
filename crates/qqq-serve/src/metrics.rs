@@ -1095,11 +1095,16 @@ fn micros_as_seconds(micros: u64) -> String {
 ///
 /// The exposition format names exactly three escapes (`\\`, `\"`, `\n`); the
 /// CR/tab arms above match the pre-existing convention of this function, not
-/// the spec. Anything else — C1 controls, U+2028/U+2029 — passes through
-/// raw: inventing `\uXXXX` here would emit text no Prometheus parser
-/// accepts, turning a display quirk into scrape-breaking corruption, while
-/// tenant names are validated clean at construction so the case cannot arise
-/// from real input anyway.
+/// the spec. Anything else a renderer could misread — C0/C1 controls,
+/// layout-forgers, invisible format characters — folds to a literal
+/// U+FFFD: inventing `\uXXXX` here would emit text no Prometheus parser
+/// accepts, but U+FFFD is an ordinary label character, so the exposition
+/// stays parseable while reading visibly broken instead of invisibly
+/// forged. Tenant names from validated construction (manifest table,
+/// peer-IP labels) never reach this arm; the mTLS client-identity path
+/// carries an attacker-chosen common name (see `tls::PeerIdentity`), so
+/// this arm is the backstop that keeps a hostile certificate out of the
+/// exposition rather than a dead branch.
 fn prometheus_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
@@ -1112,11 +1117,16 @@ fn prometheus_escape(value: &str) -> String {
             // is whitespace the parser does not expect inside a label.
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            // Anything else passes through raw — including C1 controls and
-            // U+2028/U+2029. The exposition format has no escape for them, so
-            // inventing one would emit text no parser accepts (scrape-breaking
-            // corruption for a display quirk); tenant names are validated clean
-            // at construction, so real input never reaches this arm with one.
+            // Fold, never pass through: a raw U+2028 inside a quoted label
+            // parses fine but forges lines for every human or grep that reads
+            // the exposition, and the identity path above proves hostile
+            // input reaches this arm from real certificates.
+            c if c.is_control()
+                || qqq_core::text::is_layout_forgery(c)
+                || qqq_core::text::is_invisible_format(c) =>
+            {
+                out.push('\u{FFFD}');
+            }
             c => out.push(c),
         }
     }
@@ -1224,25 +1234,29 @@ mod tests {
         assert_eq!(prometheus_escape("a\tb"), "a\\tb");
     }
 
-    /// Display-only breaks pass through raw: the exposition format names
-    /// exactly three escapes, and inventing `\\uXXXX` would emit text no
-    /// Prometheus parser accepts -- scrape-breaking corruption for a display
-    /// quirk. Tenant names are validated clean at construction, so real input
-    /// never reaches this function with one; this pins the passthrough.
+    /// Display-only breaks fold to U+FFFD rather than passing through raw:
+    /// the exposition format names exactly three escapes, and a literal
+    /// U+FFFD is an ordinary label character — parse-safe, visibly broken —
+    /// while a raw U+2028 inside a quoted label forges lines for every human
+    /// or grep that reads the exposition. This pins the fold.
     #[test]
-    fn separators_and_c1_pass_through_unescaped() {
-        assert_eq!(prometheus_escape("a\u{2028}b"), "a\u{2028}b");
-        assert_eq!(prometheus_escape("a\u{2029}b"), "a\u{2029}b");
-        assert_eq!(prometheus_escape("a\u{85}b"), "a\u{85}b");
+    fn separators_and_c1_fold_to_replacement() {
+        assert_eq!(prometheus_escape("a\u{2028}b"), "a\u{FFFD}b");
+        assert_eq!(prometheus_escape("a\u{2029}b"), "a\u{FFFD}b");
+        assert_eq!(prometheus_escape("a\u{85}b"), "a\u{FFFD}b");
+        assert_eq!(prometheus_escape("a\u{202E}b"), "a\u{FFFD}b");
+        assert_eq!(prometheus_escape("a\u{200B}b"), "a\u{FFFD}b");
+        assert_eq!(prometheus_escape("plain"), "plain");
     }
 
     #[test]
     fn tenant_label_escaping_covers_hostile_names() {
         let m = HttpMetrics::new();
-        // A name with a quote and a backslash, recorded as a real tenant would be.
-        // Plus a separator tenant: tenant names are validated clean at
-        // construction, so this shapes a hostile name the validator refuses —
-        // proving the exposition stays parseable even then.
+        // A name with a quote, recorded as a real tenant would be. Plus a
+        // separator tenant and a bidi-override tenant: the mTLS
+        // client-identity path carries an attacker-chosen common name, so
+        // these shapes arrive from real certificates — proving the exposition
+        // stays parseable AND unfolded even then.
         m.record_request(Method::Get, 200, 1, "evil\" tenant", 5, 0);
         m.record_request(Method::Get, 200, 1, "evil\u{2028}tenant", 5, 0);
         m.record_request(
@@ -1265,13 +1279,23 @@ mod tests {
             text.contains("tenant=\"evil\\\" tenant\""),
             "the quote must be escaped: {text}"
         );
-        assert!(
-            text.contains("evil\u{2028}tenant"),
-            "the separator passes through for machine parsing: {text}"
+        // Both invisible tenants fold to the same visible label: the registry
+        // still counts them as two series (attribution stays exact), while no
+        // reader sees a raw separator or bidi override. Two identical labels
+        // is why the count below is exact, not a lower bound.
+        assert_eq!(
+            text.matches("tenant=\"evil\u{FFFD}tenant\"").count(),
+            2,
+            "separator and bidi tenants must both render folded: {text}"
         );
         assert!(
-            text.matches("tenant=").count() >= 3,
-            "all tenants including the bidi one must render: {text}"
+            !text.contains('\u{2028}') && !text.contains('\u{202E}'),
+            "no invisible layout character may survive into the exposition: {text:?}"
+        );
+        assert_eq!(
+            text.matches("tenant=").count(),
+            3,
+            "exactly the three recorded tenants render, one label each: {text}"
         );
         // And every metric line must still have exactly one label list.
         for line in text.lines().filter(|l| !l.starts_with('#')) {

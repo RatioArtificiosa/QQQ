@@ -74,4 +74,4 @@ pub use policy::{
 pub use resolve::{
     CapabilityExplanation, GrantSet, Layer, NarrowMode, Overlay, Resolution, WhyNode, denial,
 };
-pub use text::is_layout_forgery;
+pub use text::{is_invisible_format, is_layout_forgery};

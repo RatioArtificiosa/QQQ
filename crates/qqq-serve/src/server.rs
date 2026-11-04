@@ -1554,6 +1554,24 @@ pub struct TenantSources<'h, 'f> {
     pub identity: Option<&'h crate::tls::PeerIdentity>,
 }
 
+/// Whether a verified client identity's common name is safe to use as a tenant label.
+///
+/// The common name is attacker-chosen in the general case (any client that can
+/// get a certificate from a configured CA picks its own CN), so a name carrying
+/// control characters, layout-forgers, or invisible format characters would
+/// flow verbatim into access records, metrics, and audit. Tenant labels are
+/// identifiers, and identifiers never legitimately contain these — unlike
+/// message content, where joiners build real emoji. Narrow by design: only the
+/// dangerous set falls back, so `John Doe` and `tenant-c` keep attributing to
+/// the name the operator recognizes.
+fn identity_label_is_safe(subject: &str) -> bool {
+    !subject.chars().any(|c| {
+        c.is_control()
+            || qqq_host::boundary::is_layout_forgery(c)
+            || qqq_core::text::is_invisible_format(c)
+    })
+}
+
 /// Resolve a request's tenant: verified identity first, then the `Host`
 /// table, then the peer-derived label.
 ///
@@ -1566,6 +1584,13 @@ pub struct TenantSources<'h, 'f> {
 /// and `shop.example.com` name the same deployment — and a table that
 /// matched only one spelling would refuse the other, which reads as an
 /// outage rather than a policy.
+///
+/// A common name that is not label-safe (controls, layout-forgers, invisible
+/// format characters) resolves to the certificate fingerprint instead: the
+/// subject is attacker-chosen, the fingerprint is stable and unique, and the
+/// unnamed-subject arm below already sets the precedent that "no usable name"
+/// means "attribute by fingerprint". The request still attributes — it just
+/// cannot wear an invisible name.
 ///
 /// # Examples
 ///
@@ -1599,6 +1624,7 @@ pub fn resolve_request_tenant<'f>(sources: TenantSources<'_, 'f>) -> TenantResol
             subject if subject == crate::tls::PeerIdentity::UNNAMED_SUBJECT => {
                 identity.fingerprint().to_owned()
             }
+            subject if !identity_label_is_safe(subject) => identity.fingerprint().to_owned(),
             subject => subject.to_owned(),
         };
         return TenantResolution::Resolved(label);
@@ -4491,6 +4517,64 @@ mod tests {
             }),
             TenantResolution::Unknown("evil.example.com".to_owned())
         );
+    }
+
+    /// A hostile common name cannot become a tenant label: the CN is
+    /// attacker-chosen (any client with a CA-issued certificate picks its
+    /// own), so controls, layout-forgers, and invisible format characters
+    /// fall back to the certificate fingerprint — stable, unique, and always
+    /// label-safe — while ordinary names keep attributing verbatim.
+    /// Written first and failing first: on the old code the bidi CN
+    /// resolved to itself.
+    #[test]
+    fn tenant_resolution_falls_back_for_hostile_common_names() {
+        for hostile_cn in ["evil\u{202E}tenant", "evil\u{200B}tenant", "evil\ntenant"] {
+            let id = peer_identity_with_hostile_cn(hostile_cn);
+            assert_eq!(
+                id.subject(),
+                hostile_cn,
+                "the walker must deliver the hostile CN or this test proves nothing"
+            );
+            assert_eq!(
+                resolve_request_tenant(TenantSources {
+                    hosts: None,
+                    host: None,
+                    fallback: "127.0.0.1",
+                    identity: Some(&id),
+                }),
+                TenantResolution::Resolved(id.fingerprint().to_owned()),
+                "{hostile_cn:?} must attribute by fingerprint, not by CN"
+            );
+        }
+        // Ordinary names are untouched by the fallback.
+        let plain = peer_identity_with_cn("tenant-c");
+        assert_eq!(
+            resolve_request_tenant(TenantSources {
+                hosts: None,
+                host: None,
+                fallback: "127.0.0.1",
+                identity: Some(&plain),
+            }),
+            TenantResolution::Resolved("tenant-c".to_owned())
+        );
+    }
+
+    /// A certificate whose common name is not SAN-safe, for hostile-identity
+    /// tests: `CertificateParams::new` puts the name in the SANs, which are
+    /// IA5String-only, so a hostile CN travels DN-only — exactly as a real
+    /// attacker certificate carries it (the walker reads the DN, not SANs).
+    fn peer_identity_with_hostile_cn(cn: &str) -> crate::tls::PeerIdentity {
+        let mut params = rcgen::CertificateParams::default();
+        params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, cn);
+            dn
+        };
+        let key = rcgen::KeyPair::generate().expect("rcgen generates a key");
+        let cert = params.self_signed(&key).expect("rcgen self-signs");
+        let der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
+        crate::tls::PeerIdentity::from_verified(Some(std::slice::from_ref(&der)))
+            .expect("a present certificate is an identity")
     }
 
     /// A real client certificate with the given common name, for identity

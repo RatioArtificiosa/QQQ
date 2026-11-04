@@ -1196,6 +1196,11 @@ mod tests {
             "no invisible layout survives: {clean:?}"
         );
         assert_eq!(clean.chars().filter(|c| *c == '\u{FFFD}').count(), 2);
+        // C1 controls and the zero-width no-break space fold the same way:
+        // U+0085 is not `is_control`, and U+FEFF is a layout-forger, so both
+        // need the shared predicate to be caught.
+        assert_eq!(one_line("a\u{85}b"), "a\u{FFFD}b");
+        assert_eq!(one_line("a\u{FEFF}b"), "a\u{FFFD}b");
     }
 
     /// **The two encodings carry the same fields.**

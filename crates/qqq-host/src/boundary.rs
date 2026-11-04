@@ -132,7 +132,7 @@ pub const MAX_ECHO_BYTES: usize = 64;
 /// trap escaper, every boundary check, and downstream crates (the serve
 /// log encoders face the same forgery) keep spelling the same path while
 /// the definition lives at the bottom of the dependency graph.
-pub use qqq_core::text::is_layout_forgery;
+pub use qqq_core::text::{is_invisible_format, is_layout_forgery};
 
 /// Render a guest value for a diagnostic, safely.
 ///

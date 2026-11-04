@@ -940,6 +940,18 @@ mod tests {
             !clean.chars().any(char::is_control),
             "control characters must not reach the terminal: {clean:?}"
         );
+        // Bidi overrides are not controls but reorder the terminal line the
+        // same way; the assertion above cannot catch them, so this pins the
+        // shared predicate too — without the evil case the test is vacuous
+        // for the threat the sanitizer exists for.
+        let bidi = qqq_core::Error::new(qqq_core::ErrorCode::CompilationFailed, "fail\u{202E}der");
+        let clean_bidi = reload_message(Some(&bidi));
+        assert!(
+            !clean_bidi
+                .chars()
+                .any(|c| c.is_control() || qqq_cap::text::is_layout_forgery(c)),
+            "bidi overrides must not reach the terminal: {clean_bidi:?}"
+        );
         assert!(clean.contains("fail"), "{clean}");
     }
 

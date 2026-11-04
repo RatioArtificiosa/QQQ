@@ -412,13 +412,20 @@ fn quote(s: &str) -> String {
     // Byte checks cannot see multibyte characters: U+0085 rides two bytes past
     // the ASCII-control test. The trigger is therefore char-level, and the
     // shared layout-forgery predicate covers the separators and bidi controls
-    // that are not controls at all.
+    // that are not controls at all. Invisible format characters trigger
+    // quoting too — but only quoting, never escaping: a joiner may be
+    // legitimate content (emoji, Persian orthography), so the value is
+    // preserved exactly and the quotes mark it as attributed, not bare.
+    // Whitespace beyond `\n\r\t` (including NBSP) likewise quotes rather
+    // than escapes: inside quotes the string cannot forge structure, and
+    // escaping every space would mangle ordinary values for no safety gain.
     if s.chars().any(|c| {
         c.is_control()
             || c.is_whitespace()
             || c == '"'
             || c == '\\'
             || crate::boundary::is_layout_forgery(c)
+            || crate::boundary::is_invisible_format(c)
     }) {
         let mut escaped = String::with_capacity(s.len() + 2);
         escaped.push('"');
@@ -525,6 +532,13 @@ pub(crate) fn buffered_bytes(logs: &[LogRecord]) -> usize {
 /// whitespace, C1 controls, and invisible layout-forgers would otherwise
 /// ride multibyte UTF-8 past an ASCII scan.
 ///
+/// Invisible format characters (zero-width spaces and joiners, the word
+/// joiner, the soft hyphen) are refused alongside the layout-forgers: they
+/// are not controls and joiners build legitimate emoji, so renderers leave
+/// them alone — which is why the name boundary must not. `ab` and
+/// `a\u{200B}b` would otherwise be two stored attributes no reader can tell
+/// apart.
+///
 /// Crate-visible: the trace mirror enforces the same rule on span
 /// attributes, so both `qqq:` surfaces refuse the same names.
 pub(crate) fn valid_name(name: &str) -> bool {
@@ -536,6 +550,7 @@ pub(crate) fn valid_name(name: &str) -> bool {
                 || c == '='
                 || c == '\\'
                 || crate::boundary::is_layout_forgery(c)
+                || crate::boundary::is_invisible_format(c)
         })
 }
 
@@ -966,6 +981,12 @@ mod tests {
             "a\u{2029}b",
             "a\u{202e}b",
             "a\u{feff}b",
+            "a\u{200b}b",
+            "a\u{200c}b",
+            "a\u{200d}b",
+            "a\u{2060}b",
+            "a\u{ad}b",
+            "a\u{fe0f}b",
         ] {
             let err = emit_record(
                 &mut data,
@@ -1088,6 +1109,21 @@ mod tests {
             "bidi overrides must escape"
         );
         assert!(quote("t").chars().all(|c| !c.is_control()));
+        // Invisible format characters trigger quoting without mangling: the
+        // joiner may be legitimate content, so the value is preserved exactly
+        // and the quotes mark it as attributed. NBSP likewise quotes rather
+        // than escapes — inside quotes it cannot forge structure.
+        for (value, why) in [
+            ("x\u{200b}y", "zero-width space"),
+            ("x\u{200d}y", "zero-width joiner"),
+            ("a\u{a0}b", "non-breaking space"),
+        ] {
+            let quoted = quote(value);
+            assert!(
+                quoted.starts_with('"') && quoted.ends_with('"') && quoted.contains(value),
+                "{why} must quote with content preserved: {quoted:?}"
+            );
+        }
     }
 
     #[test]

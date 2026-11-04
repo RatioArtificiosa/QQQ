@@ -885,16 +885,29 @@ fn layout_forgery_at(chunk: &[u8]) -> Option<(usize, u32)> {
 ///
 /// A tail shorter than 3 bytes that no complete pattern matches is only
 /// safe to pass through when no pattern *starts* with it: `[E2]`,
-/// `[E2,80/81]`, `[C2 80-9F]`, `[D8]` and `[EF]/[EF,BB]` would all complete
-/// on the next push, so the escaper treats them as undecided and escapes
-/// eagerly rather than emitting bytes the next chunk could complete past
-/// every check. Anything else is definitive and handled by the normal arms.
+/// `[E2,80/81]`, `[D8]` and `[EF]/[EF,BB]` would all complete on the next
+/// push, so the escaper treats them as undecided and escapes eagerly rather
+/// than emitting bytes the next chunk could complete past every check.
+///
+/// Two-byte C1 tails never reach here: a complete `[C2,80-9F]` always matches
+/// the table first, so there is deliberately no arm for one — and none for a
+/// lone continuation byte, which starts no pattern. Anything else is
+/// definitive and handled by the normal arms.
+///
+/// Stateless by choice, and output therefore depends on chunking: a benign
+/// multibyte character split across pushes renders with its lead escaped
+/// (`\xe2` plus the raw continuation) instead of intact. That is the
+/// documented cost of failing closed. Buffering the tail would repair it,
+/// but the escaper's load-bearing properties assume statelessness — a refused
+/// write must leave state untouched (F-07), the quota probe clones the
+/// escaper mid-stream, and the tenant registry evicts on last drop — so a
+/// buffered tail would need a flush path through all three, and a forgotten
+/// flush loses bytes silently where eager escape only mangles them visibly.
 fn is_incomplete_prefix(tail: &[u8]) -> bool {
     match tail {
         [lead] => matches!(lead, 0xE2 | 0xD8 | 0xEF | 0xC2),
         [0xE2, cont] => matches!(cont, 0x80 | 0x81),
         [0xEF, 0xBB] => true,
-        [0xC2, cont] => (0x80..=0x9F).contains(cont),
         _ => false,
     }
 }
@@ -1924,14 +1937,51 @@ mod tests {
             out.windows(4).any(|w| w == *b"\\xe2"),
             "the split lead byte must escape visibly: {out:02X?}"
         );
-        // A C1 split behaves the same way through the 2-byte arm.
+        // A C1 split: the lead escapes eagerly, and the orphaned continuation
+        // passes through raw. Exact-output pin, not just "contains `\x`":
+        // the old assertion passed as long as the first push escaped, saying
+        // nothing about the second byte. A lone 0x85 is an invalid UTF-8
+        // continuation, so conforming readers show U+FFFD — never a NEL line
+        // break — while the complete sequence always matches the table first
+        // (the single-push half below), so no split reassembles past the
+        // check. Raw here is consistent with every other lone high byte the
+        // `_` arm passes; only complete forgeries and C0 escape.
         let mut escaper = Escaper::new(STDOUT_PREFIX);
         let mut out = Vec::new();
         escaper.push(&[0xC2], &mut out);
         escaper.push(&[0x85], &mut out);
         assert!(
-            out.windows(2).any(|w| w == *b"\\x"),
-            "the split C1 lead must escape, not pass through: {out:02X?}"
+            out.ends_with(&[b'\\', b'x', b'c', b'2', 0x85]),
+            "the split C1 must be lead-escaped plus raw continuation: {out:02X?}"
+        );
+        assert!(
+            !out.windows(2).any(|w| w == [0xC2, 0x85]),
+            "the complete sequence must never appear raw across the split: {out:02X?}"
+        );
+        let mut escaper = Escaper::new(STDOUT_PREFIX);
+        let mut out = Vec::new();
+        escaper.push(&[0xC2, 0x85], &mut out);
+        assert!(
+            out.windows(6).any(|w| w == *b"\\u0085"),
+            "the whole sequence escapes through the table: {out:02X?}"
+        );
+    }
+
+    /// A benign multibyte character split across pushes renders escaped, not
+    /// intact: the stateless escaper cannot tell `[E2]`-then-`[82 AC]` (half
+    /// of `€` U+20AC) from `[E2]`-then-`[80 A8]` (half of U+2028) until the
+    /// bytes arrive, and failing closed means escaping the undecided lead.
+    /// Output therefore depends on chunking — the price of never reassembling
+    /// a forgery — pinned here so a future buffering change must confront it.
+    #[test]
+    fn split_benign_character_renders_escaped_not_dropped() {
+        let mut escaper = Escaper::new(STDOUT_PREFIX);
+        let mut out = Vec::new();
+        escaper.push(&[0xE2], &mut out);
+        escaper.push(&[0x82, 0xAC], &mut out);
+        assert!(
+            out.ends_with(&[b'\\', b'x', b'e', b'2', 0x82, 0xAC]),
+            "the undecided lead escapes, the continuation is never dropped: {out:02X?}"
         );
     }
 

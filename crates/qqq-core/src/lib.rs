@@ -56,7 +56,7 @@ pub use ids::{
     BINARY_NAME, BRAND_NAME, ComponentId, IdError, MAX_ID_LEN, PackageName, SCHEMA_VERSION,
     TenantId, VERSION, Version, VersionParseError, WASI_TARGET_VERSION, WASMTIME_LINE,
 };
-pub use text::is_layout_forgery;
+pub use text::{is_invisible_format, is_layout_forgery};
 
 #[cfg(test)]
 mod integration_tests {

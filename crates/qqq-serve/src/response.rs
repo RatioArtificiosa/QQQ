@@ -889,13 +889,19 @@ pub fn not_found() -> Response {
 /// `:protocol` header is attacker-controlled and bounded only by the header
 /// caps, so reflecting it verbatim is log injection and response
 /// amplification. U+2028/U+2029 are separators, not controls, but break lines
-/// the same way. The refusal still names the host — the fix for an unmapped
-/// host is evident — just never more than 64 clean chars of it.
+/// the same way. Invisible format characters strip too: a zero-width space is
+/// neither control nor layout-forger, but a reflected hostname nobody can see
+/// is the same spoofing primitive. The refusal still names the host — the fix
+/// for an unmapped host is evident — just never more than 64 clean chars of it.
 #[must_use]
 pub fn sanitize_reflected(value: &str) -> String {
     value
         .chars()
-        .filter(|c| !c.is_control() && !qqq_host::boundary::is_layout_forgery(*c))
+        .filter(|c| {
+            !c.is_control()
+                && !qqq_host::boundary::is_layout_forgery(*c)
+                && !qqq_host::boundary::is_invisible_format(*c)
+        })
         .take(64)
         .collect()
 }
@@ -1164,6 +1170,24 @@ mod tests {
             "the usable prefix must survive sanitizing: {body:?}"
         );
         assert_eq!(r.header("X-QQQ-Error"), Some("tenant-unknown-host"));
+        // Invisible format characters strip like controls: a zero-width space
+        // is neither, but a reflected hostname nobody can see is the same
+        // spoofing primitive — and the visible prefix still names the host.
+        let sneaky = super::misdirected("ev\u{200b}il.example.com\u{202e}");
+        let sneaky_body = String::from_utf8_lossy(&sneaky.body).into_owned();
+        assert!(
+            !sneaky_body
+                .chars()
+                .any(qqq_host::boundary::is_invisible_format)
+                && !sneaky_body
+                    .chars()
+                    .any(qqq_host::boundary::is_layout_forgery),
+            "no invisible characters may survive into the refusal: {sneaky_body:?}"
+        );
+        assert!(
+            sneaky_body.contains("evil.example.com"),
+            "stripping invisibles must leave the readable host: {sneaky_body:?}"
+        );
     }
 
     /// **The framing rule.** A response with neither `Content-Length` nor

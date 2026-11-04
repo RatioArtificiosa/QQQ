@@ -1912,9 +1912,29 @@ fn scan_crate_rs_files(
     // already found.
     {
         let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-        for root in manifest_custom_roots(dir) {
+        let (custom_roots, manifest_problem) = manifest_custom_roots(dir);
+        // L-4 r15: a present-but-unreadable manifest fails loudly — the
+        // roots it names are unknown, so the scan cannot certify them.
+        if let Some(problem) = manifest_problem {
+            violations.push(format!(
+                "{}: manifest problem, scan incomplete ({})",
+                sanitize_for_log(
+                    &dir.strip_prefix(workspace)
+                        .unwrap_or(dir)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                ),
+                sanitize_for_log(&problem),
+            ));
+        }
+        for root in custom_roots {
+            // M-2 r15: fold before the lexical fallback — an escaping
+            // `..` is invisible to a raw `strip_prefix` (it matches the
+            // joined prefix lexically) and would be silently dropped
+            // instead of flagged outside. Roots arrive folded from the
+            // parser; folding again is idempotent belt-and-braces.
             let inside = std::fs::canonicalize(&root).map_or_else(
-                |_| root.strip_prefix(workspace).is_ok(),
+                |_| fold_dot_components(&root).strip_prefix(workspace).is_ok(),
                 |c| c.strip_prefix(&ws_canon).is_ok(),
             );
             if !inside {
@@ -1936,6 +1956,7 @@ fn scan_crate_rs_files(
         }
     }
     files.sort();
+    files.dedup();
     // Canonical exception root, hoisted out of the per-file loop (L-9).
     let qsys_canon = std::fs::canonicalize(workspace.join("crates").join("qqq-sys"))
         .unwrap_or_else(|_| workspace.join("crates").join("qqq-sys"));
@@ -2180,22 +2201,36 @@ fn collect_bin_roots(
 /// `path = "…"` lines with `#` comments stripped cover every real
 /// manifest shape. Anything fancier falls back to the conventional roots
 /// (collected separately); rustc fails an unresolvable manifest loudly.
-fn manifest_custom_roots(dir: &Path) -> Vec<PathBuf> {
-    let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
-        return Vec::new();
+/// Returns the discovered roots plus a problem description when the
+/// manifest is present but unreadable (L-4 r15) — callers fail the scan
+/// loudly instead of certifying roots they never saw.
+fn manifest_custom_roots(dir: &Path) -> (Vec<PathBuf>, Option<String>) {
+    let manifest = dir.join("Cargo.toml");
+    let text = match std::fs::read_to_string(&manifest) {
+        Ok(t) => t,
+        Err(e) if manifest.exists() => {
+            return (Vec::new(), Some(format!("Cargo.toml unreadable: {e}")));
+        }
+        Err(_) => return (Vec::new(), None),
     };
     let mut out = Vec::new();
     let mut in_target_section = false;
     for raw_line in text.lines() {
         // Strip `#` comments, but never inside quotes — `#` is legal in
         // Unix/Windows filenames (M-3 r14: `path = "a#b/lib.rs"` must not
-        // truncate to `path = "a`). A `#` inside an escape is content too,
-        // but paths never contain backslashes meaningfully here.
+        // truncate to `path = "a`). A `\` escapes the next char inside
+        // quotes (L-3 r15), so an escaped quote neither closes the string
+        // nor exposes a later `#` as a comment.
         let mut cut = raw_line.len();
         let mut quote = None;
+        let mut escaped = false;
         for (i, c) in raw_line.char_indices() {
             if let Some(q) = quote {
-                if c == q {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == q {
                     quote = None;
                 }
             } else if c == '"' || c == '\'' {
@@ -2219,18 +2254,33 @@ fn manifest_custom_roots(dir: &Path) -> Vec<PathBuf> {
         if !in_target_section {
             continue;
         }
-        let Some(rest) = t.strip_prefix("path") else {
-            continue;
+        // H-1 r15: TOML keys may be quoted (`"path" = …`, `'path' = …`)
+        // — Cargo accepts them, so an unquoted-only match would miss the
+        // root entirely. Strip one matching quote pair before matching.
+        let after_key: &str = if let Some(q) = t.chars().next().filter(|&c| c == '"' || c == '\'') {
+            let inner = &t[q.len_utf8()..];
+            let Some(end) = inner.find(q) else {
+                continue;
+            };
+            if &inner[..end] != "path" {
+                continue;
+            }
+            &inner[end + q.len_utf8()..]
+        } else {
+            let Some(rest) = t.strip_prefix("path") else {
+                continue;
+            };
+            // Word boundary: `pathname` is not `path`.
+            if rest
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                continue;
+            }
+            rest
         };
-        // Word boundary: `pathname` is not `path`.
-        if rest
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
-            continue;
-        }
-        let rest = rest.trim_start();
+        let rest = after_key.trim_start();
         let Some(rest) = rest.strip_prefix('=') else {
             continue;
         };
@@ -2240,17 +2290,35 @@ fn manifest_custom_roots(dir: &Path) -> Vec<PathBuf> {
             Some('\'') => '\'',
             _ => continue,
         };
-        let Some(end) = rest[1..].find(quote).map(|i| i + 1) else {
+        // L-3 r15: the value closer is escape-aware — `\"` is content,
+        // not the end of the value.
+        let mut end = None;
+        let mut escaped = false;
+        for (i, c) in rest[1..].char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == quote {
+                end = Some(i + 1);
+                break;
+            }
+        }
+        let Some(end) = end else {
             continue;
         };
         let value = &rest[1..end];
         if !value.is_empty() {
-            out.push(dir.join(value));
+            // L-1 r15: fold `.`/`..` lexically so spellings like
+            // `sub/../lib.rs` merge with the walked path instead of
+            // double-scanning (and so the callers' lexical outside-gate
+            // sees the real shape — M-2 r15).
+            out.push(fold_dot_components(&dir.join(value)));
         }
     }
     out.sort();
     out.dedup();
-    out
+    (out, None)
 }
 
 fn check_crate_roots(
@@ -2316,7 +2384,30 @@ fn check_crate_roots(
         dir.join("src").join("main.rs"),
         dir.join("build.rs"),
     ];
-    roots.extend(manifest_custom_roots(dir));
+    // M-1 r15: manifest roots get the same outside-gate as the scan loop
+    // before they are read — `root_ok` must never open an arbitrary file
+    // (an absolute `path = "/etc/x"` or an escaping relative one). Roots
+    // arriving folded are gated canonically when they resolve, lexically
+    // otherwise; outside roots are skipped here because the scan loop
+    // already emits the outside-workspace violation for them.
+    let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let (custom_roots, manifest_problem) = manifest_custom_roots(dir);
+    if let Some(problem) = manifest_problem {
+        violations.push(format!(
+            "{}: manifest problem, scan incomplete ({})",
+            rel(),
+            sanitize_for_log(&problem)
+        ));
+    }
+    for root in custom_roots {
+        let inside = std::fs::canonicalize(&root).map_or_else(
+            |_| fold_dot_components(&root).strip_prefix(workspace).is_ok(),
+            |c| c.strip_prefix(&ws_canon).is_ok(),
+        );
+        if inside {
+            roots.push(root);
+        }
+    }
     roots.extend(collect_bin_roots(dir, &rel, violations));
     let mut unreadable = false;
     let mut missing_root = false;
@@ -2436,9 +2527,39 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
 /// carry a lone CR or an escape character — any of which would split the
 /// report or restyle a terminal reading the log (M-2 r9, M-7 r11). `?`
 /// marks the redaction visibly; everything else passes through untouched
-/// so findings stay greppable.
+/// so findings stay greppable. The alphabet covers C0/C1 controls, DEL,
+/// bidi overrides and zero-widths (L-2 r15) — anything that could restyle
+/// a terminal reading the log.
 fn sanitize_for_log(s: &str) -> String {
-    s.replace(['\n', '\r', '\u{1b}'], "?")
+    s.replace(
+        |c: char| {
+            c.is_control()
+                || matches!(
+                    c,
+                    '\u{202A}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}'
+                )
+        },
+        "?",
+    )
+}
+
+/// Fold `.`/`..` components lexically, without touching the filesystem
+/// (M-2 r10, L-1/M-2 r15). `..` folds without following links, so the
+/// result keeps working for gating and reporting when the target does not
+/// exist; when it does exist, callers canonicalize for the real decision.
+fn fold_dot_components(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            _ => out.push(c.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Decide whether a redirection `target` (joined onto its file's `base`
@@ -2458,17 +2579,7 @@ fn gate_redirect(
     // Lexical normalization first (no fs touch): `..` folds without
     // following links, so the fallback path below keeps working when the
     // target does not exist.
-    let mut joined = PathBuf::new();
-    for c in base.join(target).components() {
-        use std::path::Component;
-        match c {
-            Component::ParentDir => {
-                joined.pop();
-            }
-            Component::CurDir => {}
-            _ => joined.push(c.as_os_str()),
-        }
-    }
+    let joined = fold_dot_components(&base.join(target));
     if let Ok(canon) = std::fs::canonicalize(&joined) {
         return (joined, canon.strip_prefix(workspace_canon).is_ok());
     }
@@ -2500,7 +2611,10 @@ fn gate_redirect(
 /// by the lexical path, so a concurrent tree mutation between the two
 /// could substitute content. No concurrent-writer threat model exists for
 /// a local gate run — an adversary with write access in that window has
-/// simpler attacks — so this stays documented, not plumbed.
+/// simpler attacks — so this stays documented, not plumbed. The qqq-sys
+/// exemption (`canonicalize` then read) and the manifest-root gating share
+/// this shape (L-5 r15): gate decision and read are never one atomic step,
+/// and the same no-concurrent-writer rationale covers all three.
 fn follow_code_redirections(
     workspace: &Path,
     files: &mut Vec<PathBuf>,
@@ -4761,6 +4875,17 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_for_log_redacts_controls_and_bidi() {
+        // L-2 r15: terminal-spoofing controls beyond \n \r ESC (backspace,
+        // DEL, bidi overrides, zero-widths, BOM) must not reach the report.
+        assert_eq!(
+            sanitize_for_log("a\x08b\u{202A}c\u{200B}d\u{FEFF}e\x7Ff"),
+            "a?b?c?d?e?f"
+        );
+        assert_eq!(sanitize_for_log("plain.rs"), "plain.rs");
+    }
+
+    #[test]
     fn gate_redirect_stays_inside_without_symlinks() {
         // L-10 r11: the containment gate, pinned without symlinks so it
         // runs everywhere (the live symlink test covers the link half and
@@ -5048,7 +5173,8 @@ mod tests {
     fn manifest_custom_roots_parses_lib_and_bin_paths() {
         // M-1 r13: custom [lib]/[[bin]] path= redirections are discovered
         // for the missing-forbid backstop.
-        let dir = std::env::temp_dir().join(format!("qqq-xtask-xmanifest-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-parse-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         std::fs::write(
@@ -5056,8 +5182,9 @@ mod tests {
             "[package]\nname = \"probe\"\n\n[lib]\npath = \"custom/lib2.rs\"\n\n[[bin]]\nname = \"tool\"\npath = 'custom-bin/main.rs' # comment\n\n[dependencies]\n",
         )
         .expect("manifest");
-        let mut roots = manifest_custom_roots(&dir);
+        let (mut roots, problem) = manifest_custom_roots(&dir);
         roots.sort();
+        assert_eq!(problem, None);
         assert_eq!(
             roots,
             vec![dir.join("custom/lib2.rs"), dir.join("custom-bin/main.rs")]
@@ -5077,7 +5204,85 @@ mod tests {
             "[package]\nname = \"probe\"\n\n[ lib ]\npath = \"a#b/lib.rs\"\n",
         )
         .expect("manifest");
-        assert_eq!(manifest_custom_roots(&dir), vec![dir.join("a#b/lib.rs")]);
+        assert_eq!(manifest_custom_roots(&dir).0, vec![dir.join("a#b/lib.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_accepts_quoted_keys() {
+        // H-1 r15: TOML keys may be quoted (`"path" = …`) — Cargo accepts
+        // them, so the discovery must too or the root goes unscanned.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-qkey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\n\"path\" = \"custom/q.rs\"\n\n[[bin]]\nname = \"tool\"\n'path' = 'custom-bin/main.rs'\n",
+        )
+        .expect("manifest");
+        let (mut roots, problem) = manifest_custom_roots(&dir);
+        roots.sort();
+        assert_eq!(problem, None);
+        assert_eq!(
+            roots,
+            vec![dir.join("custom/q.rs"), dir.join("custom-bin/main.rs")]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_keeps_escaped_quotes() {
+        // L-3 r15: `\"` inside a quoted value is content, not the closer —
+        // and a `#` after an escaped quote is content, not a comment.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-qesc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"a\\\"#b.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("a\\\"#b.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_normalizes_dot_spellings() {
+        // L-1 r15: `path = "sub/../lib.rs"` names the same file the walk
+        // finds as `lib.rs` — normalize so it dedups instead of
+        // double-scanning. (`./` spellings already compare equal through
+        // component equality; `..` ones do not.)
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-dot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"sub/../lib.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("lib.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_reports_unreadable_manifest() {
+        // L-4 r15: a present-but-unreadable manifest must surface as a
+        // problem, not silently yield no roots. A directory in place of
+        // the file fails every read on all platforms.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-unread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Cargo.toml")).expect("temp dir");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "unreadable manifest surfaced no problem");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5128,6 +5333,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(!ok, "unsafe custom manifest root passed the scan:\n{out}");
         assert!(out.contains("lib.txt"), "wrong failure shape:\n{out}");
+    }
+
+    #[test]
+    fn unsafe_scan_skips_outside_manifest_root_without_reading() {
+        // M-1 r15: a manifest root outside the workspace is refused by the
+        // scan loop — the roots check must skip it too instead of reading
+        // an arbitrary file (its content would add misleading evidence
+        // next to the real outside-workspace violation).
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xmanifest-out-{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(&dir).expect("temp crate");
+        let outside = std::env::temp_dir().join(format!("qqq-xtask-xmanifest-outside-{pid}.rs"));
+        let _ = std::fs::remove_file(&outside);
+        std::fs::write(&outside, "pub unsafe fn evil() {}\n").expect("outside file");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"probe\"\n\n[lib]\npath = \"../../../qqq-xtask-xmanifest-outside-{pid}.rs\"\n"
+            ),
+        )
+        .expect("manifest");
+        std::fs::create_dir_all(dir.join("src")).expect("src dir");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+        assert!(!ok, "outside manifest root passed the scan:\n{out}");
+        assert!(
+            out.contains("outside the workspace"),
+            "wrong failure shape:\n{out}"
+        );
+        assert!(
+            !out.contains("missing forbid"),
+            "ungated read of outside root leaked into evidence:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_flags_escaping_nonexistent_manifest_root() {
+        // M-2 r15: an escaping manifest path that names no file must be
+        // flagged outside, not silently dropped by an unnormalized
+        // lexical gate.
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xmanifest-esc-{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"probe\"\n\n[lib]\npath = \"../../../../xmanifest-esc-{pid}.rs\"\n"
+            ),
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "escaping manifest root passed the scan:\n{out}");
+        assert!(
+            out.contains("outside the workspace"),
+            "wrong failure shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_no_double_scan_on_dotdot_spelling() {
+        // L-1 r15 run level: a `sub/../lib.rs` manifest spelling names
+        // the walked `lib.rs` — it must merge, not report twice.
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xmanifest-dup-{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("sub")).expect("temp crate");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"sub/../lib.rs\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub unsafe fn evil() {}\n",
+        )
+        .expect("lib");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "unsafe lib passed the scan:\n{out}");
+        let hits = out.lines().filter(|l| l.contains("lib.rs")).count();
+        assert_eq!(hits, 1, "same file reported twice:\n{out}");
     }
 
     #[test]

@@ -2139,7 +2139,18 @@ fn collect_bin_roots(
     violations: &mut Vec<String>,
 ) -> Vec<PathBuf> {
     let mut bins: Vec<PathBuf> = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir.join("src").join("bin")) else {
+    let bin_dir = dir.join("src").join("bin");
+    // M-3 r16: a symlinked `src/bin` would re-root every bin entry outside
+    // while `root_ok` reads them as crate roots (ungated arbitrary read,
+    // same class as M-1 r15). Fail closed before collecting.
+    if std::fs::symlink_metadata(&bin_dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        violations.push(format!(
+            "{}: symlinked bin dir, scan incomplete",
+            sanitize_for_log(&bin_dir.to_string_lossy())
+        ));
+        return bins;
+    }
+    let Ok(rd) = std::fs::read_dir(bin_dir) else {
         return bins;
     };
     for e in rd {
@@ -2194,6 +2205,27 @@ fn collect_bin_roots(
     bins
 }
 
+/// Strip one matching ASCII quote pair around a TOML key or section name
+/// (`"path"`, `'lib'`), returning the text unchanged when it is not
+/// quoted. H-1 r15/r16: Cargo accepts quoted keys and quoted table
+/// headers; an unquoted-only match would miss those roots entirely.
+fn strip_one_quote_pair(s: &str) -> &str {
+    let mut chars = s.chars();
+    let q = match chars.next() {
+        Some(q) if q == '"' || q == '\'' => q,
+        _ => return s,
+    };
+    let rest = &s[q.len_utf8()..];
+    let Some(end) = rest.find(q) else {
+        return s;
+    };
+    if rest[end + q.len_utf8()..].trim().is_empty() {
+        &rest[..end]
+    } else {
+        s
+    }
+}
+
 /// Custom root paths from a crate manifest (`[lib] path = …`,
 /// `[[bin]] path = …`): without this, a root living outside `src/`
 /// compiles but is never forbid-checked (M-1 r12). Line-oriented on
@@ -2208,19 +2240,26 @@ fn manifest_custom_roots(dir: &Path) -> (Vec<PathBuf>, Option<String>) {
     let manifest = dir.join("Cargo.toml");
     let text = match std::fs::read_to_string(&manifest) {
         Ok(t) => t,
-        Err(e) if manifest.exists() => {
+        // M-1 r16: `exists()` follows links — a dangling `Cargo.toml`
+        // symlink reports absent and would silently yield no roots.
+        // Presence is the link itself; readability is the read above.
+        Err(e) if std::fs::symlink_metadata(&manifest).is_ok() => {
             return (Vec::new(), Some(format!("Cargo.toml unreadable: {e}")));
         }
         Err(_) => return (Vec::new(), None),
     };
     let mut out = Vec::new();
     let mut in_target_section = false;
-    for raw_line in text.lines() {
+    // H-2 r16: a UTF-8 BOM prefixes the first line — a section header
+    // there must still match (editors add BOMs silently).
+    let body: &str = text.strip_prefix('\u{FEFF}').unwrap_or(&text);
+    for raw_line in body.lines() {
         // Strip `#` comments, but never inside quotes — `#` is legal in
         // Unix/Windows filenames (M-3 r14: `path = "a#b/lib.rs"` must not
         // truncate to `path = "a`). A `\` escapes the next char inside
-        // quotes (L-3 r15), so an escaped quote neither closes the string
-        // nor exposes a later `#` as a comment.
+        // `"…"` strings only (L-3 r15, M-4 r16): TOML `'…'` literals have
+        // no escapes, so a `\` there is content and the quote still
+        // closes — treating it as an escape would miss the real closer.
         let mut cut = raw_line.len();
         let mut quote = None;
         let mut escaped = false;
@@ -2228,7 +2267,7 @@ fn manifest_custom_roots(dir: &Path) -> (Vec<PathBuf>, Option<String>) {
             if let Some(q) = quote {
                 if escaped {
                     escaped = false;
-                } else if c == '\\' {
+                } else if c == '\\' && q == '"' {
                     escaped = true;
                 } else if c == q {
                     quote = None;
@@ -2248,7 +2287,8 @@ fn manifest_custom_roots(dir: &Path) -> (Vec<PathBuf>, Option<String>) {
             .map(str::trim)
             .map(|r| r.trim_start_matches('[').trim_end_matches(']').trim());
         if inner.is_some() {
-            in_target_section = matches!(inner, Some("lib" | "bin"));
+            // H-1 r16: quoted headers (`["lib"]`) name the same section.
+            in_target_section = matches!(inner.map(strip_one_quote_pair), Some("lib" | "bin"));
             continue;
         }
         if !in_target_section {
@@ -2256,58 +2296,50 @@ fn manifest_custom_roots(dir: &Path) -> (Vec<PathBuf>, Option<String>) {
         }
         // H-1 r15: TOML keys may be quoted (`"path" = …`, `'path' = …`)
         // — Cargo accepts them, so an unquoted-only match would miss the
-        // root entirely. Strip one matching quote pair before matching.
-        let after_key: &str = if let Some(q) = t.chars().next().filter(|&c| c == '"' || c == '\'') {
-            let inner = &t[q.len_utf8()..];
-            let Some(end) = inner.find(q) else {
-                continue;
-            };
-            if &inner[..end] != "path" {
-                continue;
-            }
-            &inner[end + q.len_utf8()..]
-        } else {
-            let Some(rest) = t.strip_prefix("path") else {
-                continue;
-            };
-            // Word boundary: `pathname` is not `path`.
-            if rest
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
-            {
-                continue;
-            }
-            rest
-        };
-        let rest = after_key.trim_start();
-        let Some(rest) = rest.strip_prefix('=') else {
+        // root entirely. Split at the first `=` (keys never contain a
+        // bare one), strip one matching quote pair, and compare.
+        let Some(eq) = t.find('=') else {
             continue;
         };
-        let rest = rest.trim_start();
-        let quote = match rest.chars().next() {
-            Some('"') => '"',
-            Some('\'') => '\'',
-            _ => continue,
+        if strip_one_quote_pair(t[..eq].trim()) != "path" {
+            continue;
+        }
+        let rest = t[eq + 1..].trim_start();
+        // L-2 r16: TOML multiline strings (`"""…"""`, `'''…'''`) are valid
+        // values — the closer is the triple mark, not the first quote.
+        let (mark, mlen): (&str, usize) = if rest.starts_with("\"\"\"") {
+            ("\"\"\"", 3)
+        } else if rest.starts_with("'''") {
+            ("'''", 3)
+        } else if rest.starts_with('"') {
+            ("\"", 1)
+        } else if rest.starts_with('\'') {
+            ("'", 1)
+        } else {
+            continue;
         };
-        // L-3 r15: the value closer is escape-aware — `\"` is content,
-        // not the end of the value.
+        // L-3 r15: the value closer is escape-aware — `\"` is content, not
+        // the end of the value. Escapes apply inside `"…"` strings only
+        // (M-4 r16): TOML `'...'` literals have none, so a `\` there must
+        // not swallow the real closer.
+        let body = &rest[mlen..];
+        let backslash_escapes = mark.starts_with('"');
         let mut end = None;
         let mut escaped = false;
-        for (i, c) in rest[1..].char_indices() {
+        for (i, c) in body.char_indices() {
             if escaped {
                 escaped = false;
-            } else if c == '\\' {
+            } else if backslash_escapes && c == '\\' {
                 escaped = true;
-            } else if c == quote {
-                end = Some(i + 1);
+            } else if body[i..].starts_with(mark) {
+                end = Some(i);
                 break;
             }
         }
         let Some(end) = end else {
             continue;
         };
-        let value = &rest[1..end];
+        let value = &body[..end];
         if !value.is_empty() {
             // L-1 r15: fold `.`/`..` lexically so spellings like
             // `sub/../lib.rs` merge with the walked path instead of
@@ -2453,7 +2485,22 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
     let mut violations = Vec::new();
     let mut missing = Vec::new();
     let mut crates: Vec<PathBuf> = Vec::new();
-    let Ok(rd) = std::fs::read_dir(workspace.join("crates")) else {
+    let crates_dir = workspace.join("crates");
+    // H-3 r16: a symlinked `crates/` dir would silently re-root the whole
+    // scan — entries resolve outside while rel paths claim the workspace.
+    // Fail closed before listing, like symlinked crate dirs (H-1 r13).
+    if std::fs::symlink_metadata(&crates_dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        violations.push(format!(
+            "{}: symlinked crates dir, scan incomplete",
+            sanitize_for_log(&crates_dir.to_string_lossy())
+        ));
+        return incomplete_report(
+            "no crates found; the scan certifies nothing",
+            &violations,
+            &missing,
+        );
+    }
+    let Ok(rd) = std::fs::read_dir(&crates_dir) else {
         return (
             false,
             "cannot read crates/; the scan certifies nothing".to_owned(),
@@ -2562,7 +2609,16 @@ fn sanitize_for_log(s: &str) -> String {
             c.is_control()
                 || matches!(
                     c,
-                    '\u{202A}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}'
+                    '\u{202A}'..='\u{206F}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{FEFF}'
+                        // L-1 r16: line/paragraph separators, Arabic letter
+                        // mark, soft hyphen, Mongolian vowel separator.
+                        | '\u{2028}'
+                        | '\u{2029}'
+                        | '\u{061C}'
+                        | '\u{00AD}'
+                        | '\u{180E}'
                 )
         },
         "?",
@@ -4930,9 +4986,15 @@ mod tests {
     fn sanitize_for_log_redacts_controls_and_bidi() {
         // L-2 r15: terminal-spoofing controls beyond \n \r ESC (backspace,
         // DEL, bidi overrides, zero-widths, BOM) must not reach the report.
+        // L-1 r16: plus line/paragraph separators, Arabic mark, soft hyphen,
+        // Mongolian vowel separator.
         assert_eq!(
             sanitize_for_log("a\x08b\u{202A}c\u{200B}d\u{FEFF}e\x7Ff"),
             "a?b?c?d?e?f"
+        );
+        assert_eq!(
+            sanitize_for_log("g\u{2028}h\u{2029}i\u{061C}j\u{00AD}k\u{180E}l"),
+            "g?h?i?j?k?l"
         );
         assert_eq!(sanitize_for_log("plain.rs"), "plain.rs");
     }
@@ -5339,6 +5401,86 @@ mod tests {
     }
 
     #[test]
+    fn manifest_custom_roots_accepts_quoted_headers() {
+        // H-1 r16: TOML table headers may quote the name (`["lib"]`) —
+        // Cargo accepts them, so the section match must unquote too.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-qhdr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[\"lib\"]\npath = \"custom/q.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/q.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_ignores_bom() {
+        // H-2 r16: a UTF-8 BOM prefixes the first line — a section header
+        // there must still match (editors add BOMs silently).
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-bom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "\u{FEFF}[lib]\npath = \"custom/q.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/q.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_backslash_is_content_in_literals() {
+        // M-4 r16: TOML `'...'` literals have no escapes — a `\` before
+        // the quote is content, and the quote still closes the value.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-lit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = 'weird\\'\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("weird\\")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_accepts_triple_quoted_values() {
+        // L-2 r16: TOML multiline strings (`"""…"""`, `'''…'''`) are valid
+        // values — the closer is the triple mark, not the first quote.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-tri-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"\"\"custom/t.rs\"\"\"\n\n[[bin]]\nname = \"tool\"\npath = '''custom-bin/u.rs'''\n",
+        )
+        .expect("manifest");
+        let (mut roots, problem) = manifest_custom_roots(&dir);
+        roots.sort();
+        assert_eq!(problem, None);
+        assert_eq!(
+            roots,
+            vec![dir.join("custom/t.rs"), dir.join("custom-bin/u.rs")]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn unsafe_scan_requires_custom_manifest_root_forbid() {
         // M-1 r13 run level: a custom [lib] path without the attribute
         // fails loudly like a conventional root.
@@ -5483,6 +5625,130 @@ mod tests {
         assert!(!ok, "unsafe lib passed the scan:\n{out}");
         let hits = out.lines().filter(|l| l.contains("lib.rs")).count();
         assert_eq!(hits, 1, "same file reported twice:\n{out}");
+    }
+
+    #[test]
+    fn unsafe_scan_symlinked_crates_dir_is_loud() {
+        // H-3 r16: a symlinked `crates/` dir would silently re-root the
+        // whole scan — entries resolve outside while rel paths claim the
+        // workspace. Fail closed. Skipped where the platform denies
+        // symlink creation (fires on CI).
+        let outside =
+            std::env::temp_dir().join(format!("qqq-xtask-xcratesout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(outside.join("probe").join("src")).expect("outside dir");
+        std::fs::write(
+            outside.join("probe").join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("outside lib");
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xcrateslink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        #[cfg(unix)]
+        let link_ok = std::os::unix::fs::symlink(&outside, root.join("crates")).is_ok();
+        #[cfg(windows)]
+        let link_ok = std::os::windows::fs::symlink_dir(&outside, root.join("crates")).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let link_ok = false;
+        if !link_ok {
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&outside);
+            eprintln!("SKIP: cannot create symlinks here");
+            return;
+        }
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        assert!(!ok, "symlinked crates dir passed the scan:\n{out}");
+        assert!(
+            out.contains("symlinked crates dir"),
+            "wrong failure shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_dangling_manifest_link_is_loud() {
+        // M-1 r16: a dangling `Cargo.toml` symlink is present-but-unreadable
+        // (`exists()` follows links, so it reports absent). The manifest
+        // roots are unknown — fail loudly. Skipped where the platform
+        // denies symlink creation (fires on CI).
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xmanifest-dangle-{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        let missing = std::env::temp_dir().join(format!("qqq-xtask-xmanifest-notthere-{pid}.toml"));
+        let _ = std::fs::remove_file(&missing);
+        #[cfg(unix)]
+        let link_ok = std::os::unix::fs::symlink(&missing, dir.join("Cargo.toml")).is_ok();
+        #[cfg(windows)]
+        let link_ok = std::os::windows::fs::symlink_file(&missing, dir.join("Cargo.toml")).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let link_ok = false;
+        if !link_ok {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("SKIP: cannot create symlinks here");
+            return;
+        }
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "dangling manifest passed the scan:\n{out}");
+        assert!(
+            out.contains("manifest problem"),
+            "wrong failure shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_symlinked_src_bin_dir_is_loud() {
+        // M-3 r16: a symlinked `src/bin` would re-root every bin entry
+        // outside while `root_ok` reads them as crate roots. Fail closed
+        // before collecting. Skipped where the platform denies symlink
+        // creation (fires on CI).
+        let pid = std::process::id();
+        let target = std::env::temp_dir().join(format!("qqq-xtask-xsrcbinout-{pid}"));
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&target).expect("outside dir");
+        std::fs::write(target.join("tool.rs"), "fn main() {}\n").expect("outside bin");
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xsrcbinlink-{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(
+            src.join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        #[cfg(unix)]
+        let link_ok = std::os::unix::fs::symlink(&target, src.join("bin")).is_ok();
+        #[cfg(windows)]
+        let link_ok = std::os::windows::fs::symlink_dir(&target, src.join("bin")).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let link_ok = false;
+        if !link_ok {
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&target);
+            eprintln!("SKIP: cannot create symlinks here");
+            return;
+        }
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&target);
+        assert!(!ok, "symlinked src/bin passed the scan:\n{out}");
+        assert!(
+            out.contains("symlinked bin dir"),
+            "wrong failure shape:\n{out}"
+        );
+        assert!(
+            !out.contains("missing forbid"),
+            "outside content read as a root:\n{out}"
+        );
     }
 
     #[test]

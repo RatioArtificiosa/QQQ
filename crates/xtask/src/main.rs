@@ -1904,6 +1904,37 @@ fn scan_crate_rs_files(
     let mut redir_problems = Vec::new();
     follow_code_redirections(workspace, &mut files, &mut redir_problems);
     violations.extend(redir_problems);
+    // H-1 r14: manifest custom roots compile as crate roots regardless
+    // of location or extension — a `path = "custom/lib.txt"` with
+    // `unsafe` would otherwise sail through GREEN. Gate like a redirect
+    // (inside the workspace only; unreadable files are reported by the
+    // scan loop when it reaches them) and skip files the normal walk
+    // already found.
+    {
+        let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        for root in manifest_custom_roots(dir) {
+            let inside = std::fs::canonicalize(&root).map_or_else(
+                |_| root.strip_prefix(workspace).is_ok(),
+                |c| c.strip_prefix(&ws_canon).is_ok(),
+            );
+            if !inside {
+                violations.push(format!(
+                    "{}: references code outside the workspace ({}), scan incomplete",
+                    sanitize_for_log(
+                        &dir.strip_prefix(workspace)
+                            .unwrap_or(dir)
+                            .to_string_lossy()
+                            .replace('\\', "/")
+                    ),
+                    sanitize_for_log(&root.to_string_lossy()),
+                ));
+                continue;
+            }
+            if root.is_file() && !files.contains(&root) {
+                files.push(root);
+            }
+        }
+    }
     files.sort();
     // Canonical exception root, hoisted out of the per-file loop (L-9).
     let qsys_canon = std::fs::canonicalize(workspace.join("crates").join("qqq-sys"))
@@ -2156,16 +2187,33 @@ fn manifest_custom_roots(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut in_target_section = false;
     for raw_line in text.lines() {
-        // Strip `#` comments (a `#` inside a quoted value would be
-        // eaten too — acceptable: real paths never contain `#`, and a
-        // missed custom path falls back to rustc failing the build).
-        let line = match raw_line.find('#') {
-            Some(i) => &raw_line[..i],
-            None => raw_line,
-        };
-        let t = line.trim();
-        if t.starts_with('[') {
-            in_target_section = t == "[lib]" || t == "[[bin]]";
+        // Strip `#` comments, but never inside quotes — `#` is legal in
+        // Unix/Windows filenames (M-3 r14: `path = "a#b/lib.rs"` must not
+        // truncate to `path = "a`). A `#` inside an escape is content too,
+        // but paths never contain backslashes meaningfully here.
+        let mut cut = raw_line.len();
+        let mut quote = None;
+        for (i, c) in raw_line.char_indices() {
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+            } else if c == '"' || c == '\'' {
+                quote = Some(c);
+            } else if c == '#' {
+                cut = i;
+                break;
+            }
+        }
+        let t = raw_line[..cut].trim();
+        // TOML-legal spacing inside brackets (`[ lib ]`, `[ [bin]]`).
+        let inner = t
+            .strip_prefix('[')
+            .and_then(|r| r.strip_suffix(']'))
+            .map(str::trim)
+            .map(|r| r.trim_start_matches('[').trim_end_matches(']').trim());
+        if inner.is_some() {
+            in_target_section = matches!(inner, Some("lib" | "bin"));
             continue;
         }
         if !in_target_section {
@@ -5018,6 +5066,22 @@ mod tests {
     }
 
     #[test]
+    fn manifest_custom_roots_tolerates_spacing_and_hash_paths() {
+        // M-1/M-3 r14: TOML-legal `[ lib ]` spacing, and `#` inside a
+        // quoted path (must not truncate as a comment).
+        let dir = std::env::temp_dir().join(format!("qqq-xtask-xmanifest2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[ lib ]\npath = \"a#b/lib.rs\"\n",
+        )
+        .expect("manifest");
+        assert_eq!(manifest_custom_roots(&dir), vec![dir.join("a#b/lib.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn unsafe_scan_requires_custom_manifest_root_forbid() {
         // M-1 r13 run level: a custom [lib] path without the attribute
         // fails loudly like a conventional root.
@@ -5038,6 +5102,32 @@ mod tests {
             out.contains("missing forbid"),
             "wrong failure shape:\n{out}"
         );
+    }
+
+    #[test]
+    fn unsafe_scan_scans_manifest_custom_root_body() {
+        // H-1 r14: a custom `path = "custom/lib.txt"` compiles regardless
+        // of location or extension — its body must be scanned, not just
+        // its forbid checked.
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifestb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("custom")).expect("temp crate");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"custom/lib.txt\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("custom").join("lib.txt"),
+            "#![forbid(unsafe_code)]\npub unsafe fn evil() {}\n",
+        )
+        .expect("lib");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "unsafe custom manifest root passed the scan:\n{out}");
+        assert!(out.contains("lib.txt"), "wrong failure shape:\n{out}");
     }
 
     #[test]

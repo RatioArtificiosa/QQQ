@@ -59,9 +59,9 @@ CODE = re.compile(r"QQQ-\d{4}")
 HEADING = re.compile(r"^#{2,3}\s+`?(QQQ-\d{4})`?")
 
 # The two STRUCTURED shapes a code can appear in, one per section. Parsing prose instead would read a
-# code that the text merely *mentions* -- `QQQ-7004` is discussed in the `cli` section precisely
-# because it is NOT a `cli` code, and a parser that took every code in the section counted it as one.
-# A guard that reads a different language than the document writes measures something else (`§O-361`).
+# code that the text merely *mentions* -- a `### ` heading is membership, a paragraph is not, and a
+# parser that took every code in the section counted the mentioned ones as members (`§O-361`).
+# A guard that reads a different language than the document writes measures something else.
 CLI_HEADING = re.compile(r"^###\s+`(QQQ-\d{4})`", re.MULTILINE)
 TABLE_ROW = re.compile(r"^\|\s*`(QQQ-\d{4})`", re.MULTILINE)
 
@@ -84,7 +84,8 @@ CLI_REPRODUCERS: dict[str, tuple[str, list[str]]] = {
     "QQQ-2001": ("break_toml", ["build"]),
     "QQQ-2002": ("add_unknown_key", ["build"]),
     "QQQ-6004": ("none", ["migrate"]),
-    "QQQ-7001": ("none", ["build", "--nonsense-flag"]),
+    "QQQ-7001": ("none", ["build", "--target"]),
+    "QQQ-7004": ("none", ["build", "--nonsense-flag"]),
 }
 
 

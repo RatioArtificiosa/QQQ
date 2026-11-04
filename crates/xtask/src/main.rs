@@ -1900,11 +1900,11 @@ fn scan_crate_rs_files(
     // M4: an unreadable directory fails the scan like an unreadable
     // file — certifying the rest GREEN would vouch for code never seen.
     violations.extend(dir_problems);
-    // H-3 r7: follow `#[path]`/`include!` redirections into non-`.rs`
-    // files — they compile as Rust regardless of extension.
-    let mut redir_problems = Vec::new();
-    follow_code_redirections(workspace, &mut files, &mut redir_problems);
-    violations.extend(redir_problems);
+    // H-2 r18: manifest custom roots join `files` BEFORE the redirection
+    // follower runs — a custom root's own `#[path]`/`include!` targets
+    // compile as Rust too, and appending roots after the follow left that
+    // whole chain unscanned (a non-`.rs` root redirecting to a hidden
+    // `unsafe` file sailed through GREEN).
     // H-1 r14: manifest custom roots compile as crate roots regardless
     // of location or extension — a `path = "custom/lib.txt"` with
     // `unsafe` would otherwise sail through GREEN. The parse below is
@@ -1963,6 +1963,14 @@ fn scan_crate_rs_files(
             }
         }
     }
+    // H-3 r7: follow `#[path]`/`include!` redirections into non-`.rs`
+    // files — they compile as Rust regardless of extension. Runs after
+    // the manifest expansion above so chains rooted at custom roots are
+    // followed transitively (H-2 r18), including a dynamic `include!`
+    // hiding inside one (fail-closed, H-1 r8).
+    let mut redir_problems = Vec::new();
+    follow_code_redirections(workspace, &mut files, &mut redir_problems);
+    violations.extend(redir_problems);
     files.sort();
     files.dedup();
     // Canonical exception root, hoisted out of the per-file loop (L-9).
@@ -2277,7 +2285,9 @@ fn find_value_close(chunk: &str, mark: &str, backslash_escapes: bool) -> Option<
 }
 
 /// Hex run inside a TOML `\u`/`\U` escape: `n` hex digits to a char.
-/// `None` on short input, non-hex digits, or a non-scalar value.
+/// Exactly `n` hex digits — TOML has no `_` separators (cargo rejects
+/// `\u12_4b` as "too few digits"), so anything else is `None`. `None`
+/// also on short input, non-hex digits, or a non-scalar value.
 fn toml_hex(chars: &mut std::str::Chars<'_>, n: usize) -> Option<char> {
     let mut v: u32 = 0;
     for _ in 0..n {
@@ -2287,8 +2297,9 @@ fn toml_hex(chars: &mut std::str::Chars<'_>, n: usize) -> Option<char> {
 }
 
 /// Decode TOML basic-string escapes (`\\ \" \/ \b \f \n \r \t \uXXXX`
-/// `\UXXXXXXXX`) in a manifest value. `None` on invalid escape — the
-/// manifest is then not valid TOML (Cargo rejects it), so the caller
+/// `\UXXXXXXXX`, plus the line-ending-backslash continuation in
+/// multiline strings) in a manifest value. `None` on invalid escape —
+/// the manifest is then not valid TOML (Cargo rejects it), so the caller
 /// treats the root as unknown (fail-closed problem, same as L-4 r15).
 fn decode_basic_escapes(s: &str) -> Option<String> {
     if !s.contains('\\') {
@@ -2299,6 +2310,26 @@ fn decode_basic_escapes(s: &str) -> Option<String> {
     while let Some(c) = chars.next() {
         if c != '\\' {
             out.push(c);
+            continue;
+        }
+        // TOML line-ending backslash (M-3 r18): a `\` with only trailing
+        // blanks before the newline trims the break plus all whitespace
+        // around it (cargo resolves `"""l\` + newline + `  .rs"""`
+        // to `l.rs`). A single-line value never holds `\n`, so this arm
+        // cannot fire there — and anything else after the blanks stays an
+        // invalid escape (fail closed below).
+        let rest = chars.as_str();
+        let blanks = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        if rest[blanks..].starts_with('\n') {
+            for _ in 0..blanks {
+                chars.next();
+            }
+            chars.next();
+            let after = chars.as_str();
+            let ws = after.len() - after.trim_start_matches([' ', '\t', '\n']).len();
+            for _ in 0..ws {
+                chars.next();
+            }
             continue;
         }
         match chars.next()? {
@@ -3173,6 +3204,8 @@ fn literal_string(text: &str, buf: &[u8], pos: usize) -> Option<(String, usize)>
 /// for true cfgs; a false cfg over-follows noisily, same as the scan's
 /// existing `#[cfg]` blindness). Strings in the predicate are skipped
 /// (`target_os = "…"`) and the match anchors at the top-level comma.
+/// `cfg_attr` layers nest (`cfg_attr(a, cfg_attr(b, path = …))` compiles
+/// — verified against rustc), so wrappers peel in a loop (H-1 r18).
 fn match_path_attr(text: &str, buf: &[u8], idx: usize) -> Option<(String, usize)> {
     let mut pos = idx + 1;
     skip_gap_tokens(text, buf, &mut pos);
@@ -3181,9 +3214,18 @@ fn match_path_attr(text: &str, buf: &[u8], idx: usize) -> Option<(String, usize)
     }
     pos += 1;
     skip_gap_tokens(text, buf, &mut pos);
-    if text.get(pos..).is_some_and(|r| r.starts_with("cfg_attr"))
-        && word_ends_clean(text, pos, "cfg_attr")
-    {
+    // Peel `cfg_attr(pred, …)` wrappers outermost-first: each layer
+    // expands when its cfg holds, so a nested `cfg_attr(a, cfg_attr(b,
+    // path = …))` still yields the path (H-1 r18). Every iteration
+    // consumes at least `cfg_attr(` past the current position, so the
+    // loop terminates; a wrapper without `(` or without a top-level
+    // comma is not a path attribute at all.
+    loop {
+        let is_wrapper = text.get(pos..).is_some_and(|r| r.starts_with("cfg_attr"))
+            && word_ends_clean(text, pos, "cfg_attr");
+        if !is_wrapper {
+            break;
+        }
         pos += "cfg_attr".len();
         skip_gap_tokens(text, buf, &mut pos);
         if buf.get(pos) != Some(&b'(') {
@@ -5221,6 +5263,24 @@ mod tests {
             code_redirections("#[cfg_attr(all(), warn(dead_code))]\n"),
             (Vec::<String>::new(), false)
         );
+        // H-1 r18: `cfg_attr` layers nest (`cfg_attr(a, cfg_attr(b,
+        // path = "…"))` compiles — verified against rustc), so wrappers
+        // peel outermost-first, with strings skipped at every layer.
+        assert_eq!(
+            code_redirections("#[cfg_attr(all(), cfg_attr(all(), path = \"n.rs\"))]\n"),
+            (vec!["n.rs".to_owned()], false)
+        );
+        assert_eq!(
+            code_redirections(
+                "#[cfg_attr(target_os = \"linux\", cfg_attr(all(), path = \"o.rs\"))]\n"
+            ),
+            (vec!["o.rs".to_owned()], false)
+        );
+        // A wrapper without a top-level comma is not a path attribute.
+        assert_eq!(
+            code_redirections("#[cfg_attr(all())]\n"),
+            (Vec::<String>::new(), false)
+        );
     }
 
     #[test]
@@ -5346,6 +5406,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(!ok, "cfg_attr-redirected unsafe passed the scan:\n{out}");
         assert!(out.contains("hidden2.txt"), "wrong file flagged:\n{out}");
+    }
+
+    #[test]
+    fn unsafe_scan_follows_nested_cfg_attr_path_redirection() {
+        // H-1 r18 run level: `#[cfg_attr(a, cfg_attr(b, path = "…"))]`
+        // compiles the target when the cfgs hold (verified against
+        // rustc) — the follower peels wrappers outermost-first.
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xcfgredir2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
+        std::fs::write(
+            src.join("redir.rs"),
+            "#![forbid(unsafe_code)]\n#[cfg_attr(all(), cfg_attr(all(), path = \"hidden3.txt\"))]\nmod hidden3;\n",
+        )
+        .expect("redir");
+        std::fs::write(src.join("hidden3.txt"), "pub unsafe fn evil() {}\n").expect("hidden");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            !ok,
+            "nested cfg_attr-redirected unsafe passed the scan:\n{out}"
+        );
+        assert!(out.contains("hidden3.txt"), "wrong file flagged:\n{out}");
+    }
+
+    #[test]
+    fn unsafe_scan_follows_redirections_inside_manifest_roots() {
+        // H-2 r18 run level: a custom manifest root's own `#[path]`
+        // targets compile as Rust too — the follower runs after the
+        // manifest expansion, so chains rooted at custom roots resolve
+        // transitively (previously the expansion ran after the follow
+        // and this `unsafe` sailed through GREEN).
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xrootredir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::create_dir_all(dir.join("custom")).expect("custom dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"custom/a.txt\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            dir.join("custom").join("a.txt"),
+            "#![forbid(unsafe_code)]\n#[path = \"b.txt\"]\nmod b;\n",
+        )
+        .expect("custom root");
+        std::fs::write(
+            dir.join("custom").join("b.txt"),
+            "pub unsafe fn evil() {}\n",
+        )
+        .expect("hidden");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            !ok,
+            "redirection inside manifest root passed the scan:\n{out}"
+        );
+        assert!(out.contains("b.txt"), "wrong file flagged:\n{out}");
     }
 
     #[test]
@@ -5772,6 +5900,47 @@ mod tests {
         let (roots, problem) = manifest_custom_roots(&dir);
         assert_eq!(problem, None);
         assert_eq!(roots, vec![dir.join("custom/sp\nan.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_trims_continuation_backslash() {
+        // M-3 r18: a TOML line-ending backslash trims the break plus all
+        // whitespace around it (cargo resolves `"""l\` + newline +
+        // `  .rs"""` to `l.rs`) — decoding must agree instead of
+        // fail-closing a valid manifest.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-cont-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"\"\"custom/l\\\n  .rs\"\"\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/l.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_underscore_escapes() {
+        // M-3 r18: `\u` takes exactly four hex digits — TOML has no `_`
+        // separators (cargo rejects `\u12_4b` as "too few digits"), so it
+        // fails closed like every other invalid escape.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-uesc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"a\\u12_4b.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "underscore escape surfaced no problem");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

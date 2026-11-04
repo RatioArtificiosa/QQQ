@@ -3460,21 +3460,21 @@ of the 47 it could ever see.
 
 **`unreachable` is now empty, and that is the honest result rather than a disappointment.** Every one
 of the 47 codes has a construction site. What the corrected measurement does say — and it is the claim
-that survives — is that **only five can be reached from a shell**, and that **30 have no
+that survives — is that **only six can be reached from a shell**, and that **29 have no
 integration-test reproducer**.
 
 #### Measured, by kind
 
 | Kind | Count | Codes |
 |---|---|---|
-| `cli` | **5** | `1001`, `2001`, `2002`, `6004`, `7001` |
+| `cli` | **6** | `1001`, `2001`, `2002`, `6004`, `7001`, `7004` |
 | `test` | **12** | `1002`, `2005`, `3001`, `3002`, `3003`, `3004`, `3006`, `3007`, `3008`, `4003`, `6002`, `6003` |
-| `src` | **30** | `1003`, `1004`, `1005`, `1006`, `1007`, `2003`, `2004`, `2006`, `2007`, `3005`, `3009`, `4001`, `4002`, `4004`, `4005`, `5001`, `5002`, `5003`, `5004`, `5005`, `5006`, `5007`, `6001`, `6005`, `6006`, `6007`, `6008`, `7002`, `7003`, `7004` |
+| `src` | **29** | `1003`, `1004`, `1005`, `1006`, `1007`, `2003`, `2004`, `2006`, `2007`, `3005`, `3009`, `4001`, `4002`, `4004`, `4005`, `5001`, `5002`, `5003`, `5004`, `5005`, `5006`, `5007`, `6001`, `6005`, `6006`, `6007`, `6008`, `7002`, `7003` |
 | `unreachable` | **0** | *(none)* |
 
-**Only 5 of 47 codes can be reproduced from the command line.** The other 42 need a Rust test, a
+**Only 6 of 47 codes can be reproduced from the command line.** The other 41 need a Rust test, a
 running server, or a hostile guest — which is itself the most useful thing this page can tell an
-agent: *if you are debugging from a shell, you will see at most these five.*
+agent: *if you are debugging from a shell, you will see at most these six.*
 
 ---
 
@@ -3526,15 +3526,25 @@ qqqai migrate        # -> QQQ-6004
 
 #### `QQQ-7001` — `McpArgumentInvalid`
 
+Omit a value a flag needs:
+
+```bash
+qqqai build --target    # -> QQQ-7001 (a bare flag is a missing value)
+```
+
+> This section used to demonstrate `QQQ-7001` with `build --nonsense-flag`. That was itself the
+> defect this page records: an unknown flag is not a malformed argument, and since the
+> `CliFlagUnknown` canonicalization it reports `QQQ-7004` instead (next section). A missing value
+> is still `QQQ-7001` — the invocation names no value to check, so there is nothing to be
+> *wrong* about the way a bad value is wrong. See `§O-373` for the original report.
+
+#### `QQQ-7004` — `CliFlagUnknown`
+
 Pass a flag the command does not take:
 
 ```bash
-qqqai build --nonsense-flag    # -> QQQ-7001
+qqqai build --nonsense-flag    # -> QQQ-7004
 ```
-
-> **`QQQ-7004` (`CliFlagUnknown`) is the code that *should* fire here, and it fires for nothing.**
-> An unknown flag **and** an unknown subcommand both report `QQQ-7001` — an MCP argument error for a
-> CLI typo. `QQQ-7004` is `unreachable`. See `§O-373`.
 
 ---
 

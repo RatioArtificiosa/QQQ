@@ -928,6 +928,22 @@ struct Outcome {
     secs: u64,
 }
 
+/// The log/summary label for a step: the human name plus the exact argv, so
+/// two forms sharing one name (`check_conformance` bare/`--matrix`,
+/// `audit_unsafe` x3, ...) are told apart in `run`, `ok`/`FAIL` and
+/// `GATE RED` lines. Keyed summaries on the bare name cannot say which form
+/// failed (M1); the label matches `cmd_list`'s `args.join(" ")` spelling so
+/// the summary greps against the coverage manifest.
+fn step_label(step: &Step) -> String {
+    match &step.kind {
+        StepKind::Py { args } => format!("{} [{}]", step.name, args.join(" ")),
+        StepKind::Cmd { program, args, .. } => {
+            format!("{} [{program} {}]", step.name, args.join(" "))
+        }
+        StepKind::UnsafeScan | StepKind::HelpBrevity => step.name.to_owned(),
+    }
+}
+
 /// The parsed subcommand.
 #[derive(Debug, PartialEq, Eq)]
 enum Args {
@@ -1050,6 +1066,7 @@ fn run_cmd(program: &str, args: &[String], dir: Option<&Path>, workspace: &Path)
 
 fn run_step(step: &Step, workspace: &Path, python: &[String]) -> Outcome {
     let start = Instant::now();
+    let label = step_label(step);
     if step.lane == Lane::Seq {
         // Name the step up front: a hung step never reaches its completion
         // line, so without this the log goes silent instead of identifying
@@ -1057,7 +1074,7 @@ fn run_step(step: &Step, workspace: &Path, python: &[String]) -> Outcome {
         // start lines would interleave across threads and name nothing
         // reliably. (`println!` line-flushes, so this is visible pre-hang
         // even when stdout is piped.)
-        println!("run  {}", step.name);
+        println!("run  {label}");
     }
     let (ok, output) = match &step.kind {
         StepKind::Cmd { program, args, dir } => {
@@ -1077,14 +1094,14 @@ fn run_step(step: &Step, workspace: &Path, python: &[String]) -> Outcome {
         StepKind::HelpBrevity => run_help_brevity(workspace),
     };
     let outcome = Outcome {
-        name: step.name.to_owned(),
+        name: label,
         ok,
         secs: start.elapsed().as_secs(),
     };
     if ok {
-        println!("ok   {:<22} ({}s)", outcome.name, outcome.secs);
+        println!("ok   {:<64} ({}s)", outcome.name, outcome.secs);
     } else {
-        println!("FAIL {:<22} ({}s)", outcome.name, outcome.secs);
+        println!("FAIL {:<64} ({}s)", outcome.name, outcome.secs);
         println!("{output}");
     }
     outcome
@@ -1095,9 +1112,11 @@ fn run_step(step: &Step, workspace: &Path, python: &[String]) -> Outcome {
 // ---------------------------------------------------------------------------
 
 /// A line violates iff `unsafe` opens a code position outside the exception
-/// crate and the recognised allowances. Faithful port of the CI grep:
-/// `\bunsafe[[:space:]]*(\{|fn\b|impl\b|extern\b|trait\b)` minus the
-/// `crates/qqq-sys/`, `forbid(unsafe_code)` and `cfg_attr` exclusions.
+/// crate. Faithful port of the CI grep:
+/// `\bunsafe[[:space:]]*(\{|fn\b|impl\b|extern\b|trait\b)`, minus only the
+/// `crates/qqq-sys/` directory (skipped by the caller). The crate-level
+/// forbid attribute is exempted by `unsafe_line_exempt`, narrowly: a
+/// `cfg_attr` mention elsewhere on the line never exempts (M2).
 fn unsafe_line_is_violation(line: &str) -> bool {
     // String literals are skipped: a real `unsafe` block can never hide in
     // string data, so matching there is pure false-positive surface. (The CI
@@ -1315,12 +1334,33 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
             i += 1;
             continue;
         }
-        // First code character: it must open the attribute.
-        return line.get(i..).is_some_and(|t| {
-            t.starts_with("#![forbid(unsafe_code)]") || t.starts_with("#![ forbid(unsafe_code)]")
-        });
+        // First code character: it must open the attribute. The lint list
+        // may carry siblings (`#![forbid(unsafe_code, warnings)]`), so the
+        // match ends at the `unsafe_code` boundary: the next character must
+        // close, separate, or space — never extend the identifier
+        // (`unsafe_codex` is a different lint, L13 residual).
+        let rest = line.get(i..).unwrap_or("");
+        let Some(rest) = rest.strip_prefix("#![") else {
+            return false;
+        };
+        let rest = rest.trim_start_matches([' ', '\t']);
+        let Some(rest) = rest.strip_prefix("forbid(unsafe_code") else {
+            return false;
+        };
+        return rest.starts_with([')', ',', ' ', '\t']);
     }
     false
+}
+
+/// Lines exempt from the unsafe scan: the crate-level forbid attribute
+/// itself, and nothing else. The old whole-line skip (`contains` on
+/// `forbid(unsafe_code)` or `cfg_attr`) let a real code-shaped opener hide
+/// behind a trailing mention of `cfg_attr`, evading the scan (M2) — the
+/// dangerous direction. Pure attribute lines carry no code-shaped `unsafe`
+/// anyway (`unsafe_code` fails the word boundary), so narrowing the
+/// exemption to attribute-position lines loses no legitimate skip.
+fn unsafe_line_exempt(line: &str) -> bool {
+    line_has_forbid_attr(line, &mut 0)
 }
 
 fn starts_word(s: &str, word: &str) -> bool {
@@ -1384,7 +1424,7 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
                 continue;
             }
             for (n, line) in text.lines().enumerate() {
-                if line.contains("forbid(unsafe_code)") || line.contains("cfg_attr") {
+                if unsafe_line_exempt(line) {
                     continue;
                 }
                 if unsafe_line_is_violation(line) {
@@ -1461,18 +1501,46 @@ const HELP_COMMANDS: &[&str] = &[
 /// builds there), then cargo's own answer, then the default. The CI step
 /// this ports assumed `workspace/target`, which is wrong everywhere the
 /// target directory is configured — including the bridge this gate runs in.
+///
+/// A relative `CARGO_TARGET_DIR` resolves against the caller's working
+/// directory, not the workspace: `resolve_target_debug_dir` pins it under
+/// the workspace so invoking xtask from a subdir probes the right tree
+/// (L4). There is deliberately no per-step timeout on top (L3): a hung
+/// checker blocks its lane until the CI job's own 60-minute backstop kills
+/// it. The sequential lane still prints its `run` line up front, so the
+/// in-flight step is named in the log instead of going silent.
 fn target_debug_dir(workspace: &Path) -> PathBuf {
-    if let Ok(dir) = std::env::var("CARGO_TARGET_DIR")
-        && !dir.is_empty()
-    {
-        return PathBuf::from(dir).join("debug");
-    }
-    if let Ok(o) = Command::new("cargo")
+    let via_env = std::env::var("CARGO_TARGET_DIR")
+        .ok()
+        .filter(|d| !d.is_empty());
+    let via_metadata = Command::new("cargo")
         .args(["metadata", "--format-version=1", "--no-deps"])
         .current_dir(workspace)
         .output()
-        && let Some(d) = parse_target_dir(&o.stdout)
+        .ok()
+        .and_then(|o| parse_target_dir(&o.stdout));
+    resolve_target_debug_dir(workspace, via_env.as_deref(), via_metadata)
+}
+
+/// Pure core of `target_debug_dir`, so the relative-var pinning is unit
+/// tested without mutating the process environment (cargo tests share it).
+fn resolve_target_debug_dir(
+    workspace: &Path,
+    cargo_target_dir: Option<&str>,
+    metadata_dir: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(dir) = cargo_target_dir
+        && !dir.is_empty()
     {
+        let base = PathBuf::from(dir);
+        let base = if base.is_relative() {
+            workspace.join(base)
+        } else {
+            base
+        };
+        return base.join("debug");
+    }
+    if let Some(d) = metadata_dir {
         return d.join("debug");
     }
     workspace.join("target").join("debug")
@@ -1480,15 +1548,39 @@ fn target_debug_dir(workspace: &Path) -> PathBuf {
 
 /// The `target_directory` value from `cargo metadata` JSON, without serde
 /// (this crate has no dependencies by design): scan for the key and decode
-/// the quoted string, escapes included. Anything malformed yields `None`
-/// and the caller falls back to the default directory.
+/// the quoted string, escapes included. Whitespace around the colon is
+/// skipped and `\uXXXX` escapes decoded, so a spaced or non-ASCII metadata
+/// answer still resolves instead of silently falling back to the default
+/// directory (L5: a false "missing; run the build step first"). Anything
+/// malformed yields `None` and the caller falls back.
 fn parse_target_dir(json: &[u8]) -> Option<PathBuf> {
-    const KEY: &[u8] = b"\"target_directory\":\"";
-    let start = json.windows(KEY.len()).position(|w| w == KEY)? + KEY.len();
+    const KEY: &[u8] = b"\"target_directory\"";
+    let mut it = json
+        .windows(KEY.len())
+        .position(|w| w == KEY)
+        .and_then(|pos| json.get(pos + KEY.len()..))?
+        .iter();
+    for b in it.by_ref() {
+        if *b == b' ' || *b == b'\t' || *b == b'\n' || *b == b'\r' {
+            continue;
+        }
+        if *b == b':' {
+            break;
+        }
+        return None;
+    }
+    for b in it.by_ref() {
+        if *b == b' ' || *b == b'\t' || *b == b'\n' || *b == b'\r' {
+            continue;
+        }
+        if *b == b'"' {
+            break;
+        }
+        return None;
+    }
     let mut out: Vec<u8> = Vec::new();
-    let mut bytes = json.get(start..)?.iter();
     loop {
-        let b = *bytes.next()?;
+        let b = *it.next()?;
         if b == b'"' {
             break;
         }
@@ -1496,13 +1588,24 @@ fn parse_target_dir(json: &[u8]) -> Option<PathBuf> {
             out.push(b);
             continue;
         }
-        match bytes.next()? {
+        match it.next()? {
             b'n' => out.push(b'\n'),
             b't' => out.push(b'\t'),
             b'r' => out.push(b'\r'),
             b'\\' => out.push(b'\\'),
             b'"' => out.push(b'"'),
             b'/' => out.push(b'/'),
+            b'u' => {
+                let mut quad = [0u8; 4];
+                for q in &mut quad {
+                    *q = *it.next()?;
+                }
+                let hex = std::str::from_utf8(&quad).ok()?;
+                let cp = u32::from_str_radix(hex, 16).ok()?;
+                let ch = char::from_u32(cp)?;
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
             _ => return None,
         }
     }
@@ -1614,6 +1717,18 @@ fn scrub_git_env(cmd: &mut Command) {
     cmd.env_remove("GIT_INDEX_FILE");
 }
 
+/// The checker's verdict for one injection: detected (checker failed and
+/// its output carries the expected marker) or missed. A checker that never
+/// ran — spawn failure, empty argv — is an infrastructure error, never a
+/// pass: matching the needle against a crash dump that happens to contain
+/// it would certify a broken harness as DETECTED (L8).
+fn injection_verdict(ok: bool, output: &str, expect: &str) -> Result<bool, String> {
+    if output.contains("failed to spawn") || output.contains("empty argv") {
+        return Err(format!("checker did not run: {output}"));
+    }
+    Ok(!ok && output.contains(expect))
+}
+
 /// Run `git` in `dir`, returning trimmed stdout on success.
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("git");
@@ -1660,14 +1775,34 @@ fn worktree_contains(list: &str, dir: &Path) -> bool {
 /// Apply one injection on a detached worktree of HEAD, run its checker
 /// there, and remove the worktree on every path out. Returns the
 /// checker's verdict: detected (pass) or missed (fail).
+///
+/// The worktree pins HEAD, not the working tree (L9): with uncommitted
+/// changes the injection certifies a different tree than the one under
+/// development. That is accepted — the gate runs on clean CI checkouts —
+/// so a dirty tree warns rather than refuses. The before/after byte
+/// comparison below covers only the injected file (L6): the checker runs
+/// with the worktree as its working directory, but nothing stops a checker
+/// from reaching absolute paths, so a hostile or buggy checker could touch
+/// the real tree elsewhere unobserved. Single-file is the phase-1 proof
+/// scope (one `INJECTIONS` entry mirroring `fault_inject_no_ambient.py`
+/// injection 1, L10); widening the proof means more injections first, then
+/// a tree-wide comparison.
 fn fault_inject(workspace: &Path, python: &[String], name: &str) -> Result<bool, String> {
     let inj = INJECTIONS.iter().find(|i| i.name == name).ok_or_else(|| {
         format!("unknown injection {name:?}; see `cargo xtask fault-inject --list`")
     })?;
+    if let Ok(status) = git(workspace, &["status", "--porcelain"])
+        && !status.is_empty()
+    {
+        eprintln!(
+            "warning: working tree is dirty; the worktree pins HEAD, so this injection certifies HEAD, not the uncommitted changes"
+        );
+    }
     let dir = worktree_dir(name);
     if dir.exists() {
         return Err(format!(
-            "stale worktree dir {} exists; remove it first",
+            "stale worktree dir {} exists; remove it first (`git worktree remove --force {}`, then `git worktree prune` if the admin entry survives a manual `rm -rf`)",
+            dir.display(),
             dir.display()
         ));
     }
@@ -1711,7 +1846,7 @@ fn fault_inject(workspace: &Path, python: &[String], name: &str) -> Result<bool,
             Some((head, tail)) => run_cmd(head, tail, None, &dir),
             None => (false, "empty argv for the checker".to_owned()),
         };
-        Ok(!ok && output.contains(inj.expect))
+        injection_verdict(ok, &output, inj.expect)
     })();
     cleanup(workspace, &dir);
     let after =
@@ -1739,7 +1874,14 @@ fn fault_inject(workspace: &Path, python: &[String], name: &str) -> Result<bool,
 fn cmd_list() -> ExitCode {
     // Machine-readable coverage manifest for `check_gate_parity.py`: the
     // python invocations this gate runs, one normalized `tools/...` line
-    // each, exactly as the parity checker normalises both gates.
+    // each, exactly as the parity checker normalises both gates. Python
+    // rows only, by design (L12): parity rule 5 covers `tools/check_*.py`,
+    // and the non-check scripts this gate runs (portable-shell ports,
+    // `normalize_eol --check`, fault-injection proofs) are compared
+    // gate-to-gate by rules 1-4 instead. A helper that neither gate runs is
+    // visible there as agreement-on-nothing only if it was never in either
+    // gate — extending rule 5's glob is a tools-section decision, because
+    // most `tools/*.py` are libraries, not gate checks.
     for step in PY_STEPS {
         if let StepKind::Py { args } = &step.kind {
             println!("{}", args.join(" "));
@@ -1775,7 +1917,7 @@ fn cmd_ci(workspace: &Path, python: &[String]) -> ExitCode {
     println!("---- summary ----");
     for o in &outcomes {
         println!(
-            "{:<24} {} ({}s)",
+            "{:<64} {} ({}s)",
             o.name,
             if o.ok { "ok" } else { "FAILED" },
             o.secs
@@ -2303,6 +2445,136 @@ mod tests {
         assert_eq!(parse_target_dir(b"{}"), None);
         assert_eq!(parse_target_dir(b"{\"target_directory\":\"\"}"), None);
         assert_eq!(parse_target_dir(b"not json"), None);
+    }
+
+    #[test]
+    fn target_dir_tolerates_spacing_and_unicode_escapes() {
+        // `cargo metadata` is compact today, but the key lookup must not
+        // depend on zero whitespace after the colon: a spaced variant must
+        // still resolve instead of silently falling back to
+        // `workspace/target` (L5: false "missing; run build first").
+        let spaced = br#"{"target_directory" : "/tmp/qqq-target"}"#;
+        assert_eq!(
+            parse_target_dir(spaced),
+            Some(PathBuf::from("/tmp/qqq-target"))
+        );
+        // `\u` escapes must decode, not reject: otherwise a non-ASCII path
+        // yields `None` and the same silent fallback.
+        let uni = br#"{"target_directory":"/tmp/\u0041bc"}"#;
+        assert_eq!(parse_target_dir(uni), Some(PathBuf::from("/tmp/Abc")));
+    }
+
+    #[test]
+    fn target_debug_dir_keeps_relative_vars_under_workspace() {
+        // A relative `CARGO_TARGET_DIR` joins the process working directory
+        // under `PathBuf::from(dir)`, not the workspace: invoking xtask from
+        // a subdir then probes the wrong tree (L4). The helper pins the
+        // relative form under the workspace.
+        let ws = Path::new("/ws");
+        assert_eq!(
+            resolve_target_debug_dir(ws, Some("target-custom"), None),
+            PathBuf::from("/ws/target-custom/debug")
+        );
+        assert_eq!(
+            resolve_target_debug_dir(ws, Some("/abs/t"), None),
+            PathBuf::from("/abs/t/debug")
+        );
+        assert_eq!(
+            resolve_target_debug_dir(ws, None, Some(PathBuf::from("/m/t"))),
+            PathBuf::from("/m/t/debug")
+        );
+        assert_eq!(
+            resolve_target_debug_dir(ws, None, None),
+            PathBuf::from("/ws/target/debug")
+        );
+    }
+
+    #[test]
+    fn step_labels_distinguish_duplicate_names() {
+        // PY_STEPS reuses one name per form (3x `check_conformance`, 3x
+        // `audit_unsafe`, ...): a summary keyed by name alone cannot say
+        // which argv failed (M1). Labels must differ per duplicate.
+        let mut seen = std::collections::HashSet::new();
+        for s in all_steps() {
+            let label = step_label(&s);
+            assert!(
+                seen.insert(label.clone()),
+                "duplicate step label {label:?}; the summary stays ambiguous"
+            );
+        }
+        let bare = Step::py(
+            Lane::Par,
+            "check_conformance",
+            &["tools/check_conformance.py"],
+        );
+        let matrix = Step::py(
+            Lane::Par,
+            "check_conformance",
+            &["tools/check_conformance.py", "--matrix"],
+        );
+        assert_ne!(step_label(&bare), step_label(&matrix));
+    }
+
+    #[test]
+    fn unsafe_scan_flags_trailing_cfg_attr_mention() {
+        // The old whole-line `cfg_attr` skip let a real opener through
+        // whenever the line mentioned `cfg_attr` (M2). The violation is tested first now; a pure
+        // attribute line still carries no code-shaped `unsafe` and stays
+        // clean. `concat!` keeps the fixtures off the scanner's own file.
+        assert!(unsafe_line_is_violation(concat!(
+            "    unsafe ",
+            "{ f(); } // cfg_attr gated?"
+        )));
+        assert!(!unsafe_line_is_violation(
+            "#![cfg_attr(not(feature = \"x\"), forbid(unsafe_code))]"
+        ));
+    }
+
+    #[test]
+    fn forbid_check_accepts_multi_lint_attributes() {
+        // `#![forbid(unsafe_code, warnings)]` proves the forbid: the old
+        // exact-match read it as missing and failed the gate on a compliant
+        // tree (L13 residual, fail-noisy).
+        let mut b = 0;
+        assert!(line_has_forbid_attr(
+            "#![forbid(unsafe_code, warnings)]",
+            &mut b
+        ));
+        let mut b = 0;
+        assert!(line_has_forbid_attr("#![ forbid(unsafe_code) ]", &mut b));
+        let mut b = 0;
+        assert!(!line_has_forbid_attr("#![forbid(unsafe_codex)]", &mut b));
+    }
+
+    #[test]
+    fn injection_verdict_rejects_infra_failures() {
+        // A checker that never ran (spawn failure, empty argv) must be an
+        // infrastructure error, never a pass: matching the needle against a
+        // crash dump that happens to contain it is a false DETECTED (L8).
+        assert!(injection_verdict(false, "failed to spawn python: gone", "std::env").is_err());
+        assert!(injection_verdict(false, "empty argv for the checker", "std::env").is_err());
+        assert_eq!(
+            injection_verdict(false, "ambient read: std::env::var", "std::env"),
+            Ok(true)
+        );
+        assert_eq!(
+            injection_verdict(true, "ambient read: std::env::var", "std::env"),
+            Ok(false)
+        );
+        assert_eq!(injection_verdict(false, "all clean", "std::env"), Ok(false));
+    }
+
+    #[test]
+    fn unsafe_scan_certifies_the_real_tree() {
+        // End-to-end wiring tripwire: the matcher unit tests pin shapes,
+        // but only a run over the real tree catches a self-flag — a prose
+        // comment shaped like a violation (the M2 fix once flagged two of
+        // its own new comments, caught by the gate, not by any unit test).
+        // This scans `crates/` in seconds; the full gate remains the
+        // authority, this is the fast feedback.
+        let workspace = workspace_root().expect("workspace root");
+        let (ok, output) = run_unsafe_scan(&workspace);
+        assert!(ok, "unsafe scan flags the real tree:\n{output}");
     }
 
     #[test]

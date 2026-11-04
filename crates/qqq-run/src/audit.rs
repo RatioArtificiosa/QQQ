@@ -838,12 +838,10 @@ fn json_escape(s: &str) -> String {
                 // Supplementary-plane members escape as surrogate pairs; the
                 // pair math lives in the shared text module so both audit
                 // JSON escapers share it instead of duplicating it.
-                let n = u32::from(ch);
-                if n > 0xFFFF {
-                    let (hi, lo) = qqq_cap::text::utf16_surrogate_pair(n);
+                if let Some((hi, lo)) = qqq_cap::text::utf16_surrogate_pair(ch) {
                     let _ = write!(out, "\\u{hi:04x}\\u{lo:04x}");
                 } else {
-                    let _ = write!(out, "\\u{n:04x}");
+                    let _ = write!(out, "\\u{:04x}", u32::from(ch));
                 }
             }
             c => out.push(c),

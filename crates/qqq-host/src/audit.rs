@@ -497,8 +497,10 @@ impl fmt::Display for AuditRecord {
 /// An unterminated escape, an unknown escape letter, or a lone surrogate is **not** repaired
 /// here — it returns `None`, and the caller refuses the record. This is a parser for an evidence
 /// record: a lenient one would let a corrupted line become a plausible-looking record, which is
-/// the failure the whole module exists to prevent. `\uXXXX` is decoded only for the control
-/// range `json_escape` emits, so the two are exact inverses over the values this type produces.
+/// the failure the whole module exists to prevent. `\uXXXX` is decoded for the control
+/// range `json_escape` emits, plus surrogate pairs (which the audit JSON escapers emit
+/// for supplementary-plane members) — so the two are exact inverses over the values this
+/// type produces, and agree with `serde_json` on the rest.
 fn json_unescape(s: &str) -> Option<String> {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -519,7 +521,34 @@ fn json_unescape(s: &str) -> Option<String> {
                     return None;
                 }
                 let code = u32::from_str_radix(&hex, 16).ok()?;
-                out.push(char::from_u32(code)?);
+                // Surrogate halves combine: the audit JSON escapers emit
+                // supplementary-plane members as pairs, and the two parsers
+                // (this hand-written one and serde_json) must decode the
+                // same character — otherwise an export and a stream row
+                // disagree on what was recorded. Checked arithmetic throughout:
+                // a malformed pair refuses (`None`) rather than wrapping.
+                if (0xD800u32..0xDC00u32).contains(&code) {
+                    if chars.next()? != '\\' || chars.next()? != 'u' {
+                        return None;
+                    }
+                    let lo_hex: String = chars.by_ref().take(4).collect();
+                    if lo_hex.len() != 4 {
+                        return None;
+                    }
+                    let lo = u32::from_str_radix(&lo_hex, 16).ok()?;
+                    if !(0xDC00u32..0xE000u32).contains(&lo) {
+                        return None;
+                    }
+                    let n = 0x1_0000u32
+                        .checked_add(code.checked_sub(0xD800)?.checked_shl(10)?)?
+                        .checked_add(lo.checked_sub(0xDC00)?)?;
+                    out.push(char::from_u32(n)?);
+                } else {
+                    // Lone low surrogates (and every other non-scalar) fail
+                    // in `from_u32`: a half that never pairs is malformed
+                    // input, not a character.
+                    out.push(char::from_u32(code)?);
+                }
             }
             _ => return None,
         }
@@ -3239,6 +3268,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **Surrogate pairs decode, lone halves refuse.**
+    ///
+    /// The audit JSON escapers emit supplementary-plane members as pairs,
+    /// so the hand parser must decode what they (and serde_json) produce —
+    /// and nothing else. A lone high or low half is malformed input, not a
+    /// character, and refuses like every other structural violation in this
+    /// function. Raw supplementary characters (what the stream writer
+    /// emits) pass through untouched either way.
+    #[test]
+    fn json_unescape_combines_pairs_and_refuses_lone_halves() {
+        assert_eq!(
+            json_unescape("a\\udb40\\uddefb"),
+            Some("a\u{E01EF}b".to_owned())
+        );
+        assert_eq!(
+            json_unescape("a\\ud800\\udc00b"),
+            Some("a\u{10000}b".to_owned())
+        );
+        for hostile in [
+            "a\\ud800b",
+            "a\\udc00b",
+            "a\\udb40b",
+            "a\\udb40\\udb40b",
+            "a\\udb40\\u0041b",
+            "a\\udb40",
+            "a\\udb40\\u",
+        ] {
+            assert!(
+                json_unescape(hostile).is_none(),
+                "{hostile:?} must not parse"
+            );
+        }
+        // Raw passthrough is untouched: supplementary and invisible members
+        // the writer emits raw decode to themselves.
+        assert_eq!(json_unescape("a\u{E01EF}b"), Some("a\u{E01EF}b".to_owned()));
+        assert_eq!(json_unescape("a\u{200B}b"), Some("a\u{200B}b".to_owned()));
     }
 
     /// **F-09: HMAC-SHA-256 matches the RFC 4231 vectors.**

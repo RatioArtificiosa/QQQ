@@ -1935,8 +1935,11 @@ pub struct Server {
 ///
 /// [`Server::validate`] rejects dead keys at parse time: empty, non-lowercase,
 /// carrying a `:port`, a trailing dot, whitespace, or brackets — and an empty
-/// map, which would behave as absent. A mapping that can never match (or that
-/// labels nothing) is dead configuration reading as policy.
+/// map, which would behave as absent. A bracketed IPv6 literal (`[::1]`) is
+/// the one bracketed shape that parses: the matcher preserves brackets when
+/// stripping the port, so it looks the key up verbatim. A mapping that can
+/// never match (or that labels nothing) is dead configuration reading as
+/// policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenantHosts {
@@ -2702,34 +2705,65 @@ allow_origins = ["https://app.example.com"]
     /// defect.
     #[test]
     fn tenant_hosts_reject_dead_keys() {
-        for (hosts, field) in [
-            ("{}", "empty map"),
-            ("{ \"\" = \"shop\" }", "host"),
-            ("{ \"shop.example.com\" = \"\" }", "tenant"),
-            ("{ \"SHOP.example.com\" = \"shop\" }", "case"),
-            ("{ \"shop.example.com:8443\" = \"shop\" }", "port"),
-            ("{ \"shop.example.com.\" = \"shop\" }", "trailing dot"),
-            ("{ \"shop .example.com\" = \"shop\" }", "whitespace"),
-            ("{ \"[::1]\" = \"shop\" }", "brackets"),
+        // Each case pins its own arm's message: a generic "contains the
+        // table" assert would pass even if the wrong check fired.
+        for (hosts, field, expects) in [
+            ("{}", "empty map", "empty"),
+            ("{ \"\" = \"shop\" }", "host", "must not be empty"),
+            (
+                "{ \"shop.example.com\" = \"\" }",
+                "tenant",
+                "must not be empty",
+            ),
+            ("{ \"SHOP.example.com\" = \"shop\" }", "case", "lowercase"),
+            (
+                "{ \"shop.example.com:8443\" = \"shop\" }",
+                "port",
+                "can never match",
+            ),
+            (
+                "{ \"shop.example.com.\" = \"shop\" }",
+                "trailing dot",
+                "can never match",
+            ),
+            (
+                "{ \"shop .example.com\" = \"shop\" }",
+                "whitespace",
+                "can never match",
+            ),
+            ("{ \"[xyz]\" = \"shop\" }", "brackets", "can never match"),
             // Controls and invisibles can never arrive in a real Host
             // header, so a key carrying one is dead the same way — and the
-            // refusal must not echo it raw (a bidi override would reorder
-            // the operator's terminal). TOML escapes keep the fixture
-            // reviewable.
-            ("{ \"shop\\u202E.example.com\" = \"shop\" }", "bidi key"),
+            // refusal must name the reason, not just the table.
+            (
+                "{ \"shop\\u202E.example.com\" = \"shop\" }",
+                "bidi key",
+                "can never match",
+            ),
             (
                 "{ \"shop\\u200B.example.com\" = \"shop\" }",
                 "zero-width key",
+                "can never match",
             ),
-            ("{ \"shop\\u0001.example.com\" = \"shop\" }", "control key"),
+            (
+                "{ \"shop\\u0001.example.com\" = \"shop\" }",
+                "control key",
+                "can never match",
+            ),
             (
                 "{ \"shop.example.com\" = \"acme\\u200Bcorp\" }",
                 "invisible label",
+                "valid tenant id",
             ),
-            ("{ \"shop.example.com\" = \"a\\\"b\" }", "quote label"),
+            (
+                "{ \"shop.example.com\" = \"a\\\"b\" }",
+                "quote label",
+                "valid tenant id",
+            ),
             (
                 "{ \"shop.example.com\" = \"acme\\u00A0corp\" }",
                 "nbsp label",
+                "valid tenant id",
             ),
         ] {
             let text = format!(
@@ -2738,10 +2772,23 @@ allow_origins = ["https://app.example.com"]
             );
             let err = Manifest::parse(&text).expect_err(&format!("dead {field} must be refused"));
             assert!(
-                err.to_string().contains("server.tenants"),
-                "the error must name the table: {err}"
+                err.to_string().contains(expects),
+                "dead {field} must fail naming its reason, got: {err}"
             );
         }
+        // A bracketed IPv6 literal parses: `ws::host_name` preserves brackets
+        // when stripping the port, so `[::1]:8080` normalizes to `[::1]` and
+        // looks the key up verbatim — refusing it would lie about a mapping
+        // that works.
+        let m = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = { \"[::1]\" = \"loopback\" }\n",
+        )
+        .expect("a bracketed IPv6 literal must parse");
+        assert_eq!(
+            m.server.tenants.expect("tenants").hosts.get("[::1]"),
+            Some(&"loopback".to_owned())
+        );
     }
 
     /// A tenant label no reader can distinguish from another is dead

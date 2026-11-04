@@ -86,12 +86,10 @@ fn json_escape(s: &str) -> String {
                 // `1` — silent corruption instead of a loud error. The pair
                 // math lives in `qqq_core::text` so both audit JSON
                 // escapers share it instead of duplicating it.
-                let n = u32::from(c);
-                if n > 0xFFFF {
-                    let (hi, lo) = utf16_surrogate_pair(n);
+                if let Some((hi, lo)) = utf16_surrogate_pair(c) {
                     let _ = write!(out, "\\u{hi:04x}\\u{lo:04x}");
                 } else {
-                    let _ = write!(out, "\\u{n:04x}");
+                    let _ = write!(out, "\\u{:04x}", u32::from(c));
                 }
             }
             c => out.push(c),

@@ -4461,10 +4461,19 @@ mod tests {
             resolve_with(Some(&hosts), None, "127.0.0.1"),
             TenantResolution::Unknown(String::new())
         );
-        // IPv6 literals keep their brackets out of the match.
+        // IPv6 literals keep their brackets through normalization: `[::1]:8080`
+        // strips the port but not the brackets, so a table WITHOUT a `[::1]`
+        // key refuses while a table WITH one resolves — brackets are part
+        // of the match key, not stripped from it.
         assert_eq!(
             resolve_with(Some(&hosts), Some("[::1]:8080"), "127.0.0.1"),
             TenantResolution::Unknown("[::1]".to_owned())
+        );
+        let loopback_hosts: BTreeMap<String, String> =
+            BTreeMap::from([("[::1]".to_owned(), "loopback".to_owned())]);
+        assert_eq!(
+            resolve_with(Some(&loopback_hosts), Some("[::1]:8080"), "127.0.0.1"),
+            TenantResolution::Resolved("loopback".to_owned())
         );
         assert_eq!(
             resolve_with(None, Some("shop.example.com"), "127.0.0.1"),

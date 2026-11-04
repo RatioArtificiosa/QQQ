@@ -59,7 +59,7 @@
 //!
 //! See Proposal §5.3, §6.4 and Checklist `SRV-001`, `SRV-002`, `SRV-019`.
 
-use crate::manifest::{AuthMode, Cors, ManifestError, Route, Server, quoted};
+use crate::manifest::{quoted, AuthMode, Cors, ManifestError, Route, Server};
 
 /// The HTTP methods a route may declare, in the spelling `qqq.toml` uses.
 ///
@@ -133,6 +133,103 @@ fn validate_tls(tls: &crate::manifest::ServerTls) -> Result<(), ManifestError> {
 /// is refused rather than silently switching the feature off — unless
 /// components are mapped: an mTLS-only deployment resolves tenants from
 /// client certificates and needs no `Host` mapping at all.
+/// Check one `[server.tenants]` host entry: a key the matcher can never
+/// produce, or a label no renderer can show honestly, is dead configuration
+/// reading as policy.
+///
+/// Extracted from `validate_tenants` (which clippy's line budget asked
+/// for), because one entry's rule must read in one place: a caller that
+/// inlined the arms would duplicate the "which forms can match" answer,
+/// and the two copies would disagree the next time it changes.
+fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
+    if host.trim().is_empty() {
+        return Err(ManifestError::InvalidField {
+            field: "server.tenants.hosts".to_owned(),
+            reason: "a host key must not be empty; an empty key never matches".to_owned(),
+        });
+    }
+    // Matching lowercases the request's host, so a mixed-case key would
+    // never match: reject it here with the spelling to use, the way
+    // non-canonical per-tenant addresses are refused, rather than
+    // letting a deployment silently serve every host as unmapped.
+    // Debug-formatted: a hostile key is echoed into a startup error on
+    // the operator's terminal, and a raw bidi override there would
+    // reorder the message meant to warn about it.
+    if host != host.to_ascii_lowercase() {
+        return Err(ManifestError::InvalidField {
+            field: "server.tenants.hosts".to_owned(),
+            reason: format!(
+                "host keys must be lowercase; `{host:?}` never matches because \
+                 requests are compared lowercased — write `{}`",
+                host.to_ascii_lowercase()
+            ),
+        });
+    }
+    // The request side strips any `:port` before lookup (`ws::host_name`),
+    // so a key that still carries one — or a trailing dot, whitespace,
+    // or brackets — can never equal a normalized request host. Controls,
+    // layout-forgers, and invisible format characters cannot arrive in a
+    // real `Host` header either, so a key carrying one is dead the same
+    // way — and would render invisibly in every log line that names it.
+    // Over-long keys are dead too: no DNS name exceeds 253 bytes.
+    // Bracketed IPv6 literals (`[::1]`) are the one bracketed shape
+    // that can match: `ws::host_name` preserves brackets when stripping
+    // the port, so a request Host of `[::1]:8080` normalizes to `[::1]`
+    // and looks the key up verbatim. Refusing it would lie about a
+    // mapping that works — loopback-only deployments legitimately name
+    // their loopback tenant.
+    let bracketed_v6 = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .is_some_and(|inner| inner.parse::<std::net::Ipv6Addr>().is_ok());
+    if host.len() > 253 {
+        return Err(ManifestError::InvalidField {
+            field: "server.tenants.hosts".to_owned(),
+            reason: format!(
+                "host key `{host:?}` exceeds the 253-byte DNS maximum and can never arrive"
+            ),
+        });
+    }
+    if (host.contains(':') && !bracketed_v6)
+        || host.ends_with('.')
+        || host.chars().any(char::is_whitespace)
+        || ((host.contains('[') || host.contains(']')) && !bracketed_v6)
+        || host.chars().any(|c| {
+            c.is_control()
+                || crate::text::is_layout_forgery(c)
+                || crate::text::is_invisible_format(c)
+        })
+    {
+        return Err(ManifestError::InvalidField {
+            field: "server.tenants.hosts".to_owned(),
+            reason: format!(
+                "host key `{host:?}` can never match: write the bare \
+                 lowercased host without port, trailing dot, whitespace, \
+                 brackets, or invisible characters, as it arrives after normalization"
+            ),
+        });
+    }
+    if label.trim().is_empty() {
+        return Err(ManifestError::InvalidField {
+            field: "server.tenants.hosts".to_owned(),
+            reason: format!("the tenant for host `{host:?}` must not be empty"),
+        });
+    }
+    // Labels render into access records, metrics, and audit rows: an
+    // invisible character (a zero-width space, an NBSP, a bidi
+    // override) would be a tenant no reader can tell apart from its
+    // visible twin. `TenantId` refuses the whole class, so the table
+    // routes through it rather than growing a parallel list — a label
+    // the policy layer would refuse must not be issued here.
+    if let Err(reason) = crate::egress::TenantId::new(label) {
+        return Err(ManifestError::InvalidField {
+            field: "server.tenants.hosts".to_owned(),
+            reason: format!("the tenant for host `{host:?}` is not a valid tenant id: {reason}"),
+        });
+    }
+    Ok(())
+}
+
 fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), ManifestError> {
     if tenants.hosts.is_empty() && tenants.components.is_empty() {
         return Err(ManifestError::InvalidField {
@@ -143,82 +240,8 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
         });
     }
     for (host, label) in &tenants.hosts {
-        if host.trim().is_empty() {
-            return Err(ManifestError::InvalidField {
-                field: "server.tenants.hosts".to_owned(),
-                reason: "a host key must not be empty; an empty key never matches".to_owned(),
-            });
-        }
-        // Matching lowercases the request's host, so a mixed-case key would
-        // never match: reject it here with the spelling to use, the way
-        // non-canonical per-tenant addresses are refused, rather than
-        // letting a deployment silently serve every host as unmapped.
-        // Debug-formatted: a hostile key is echoed into a startup error on
-        // the operator's terminal, and a raw bidi override there would
-        // reorder the message meant to warn about it.
-        if host != &host.to_ascii_lowercase() {
-            return Err(ManifestError::InvalidField {
-                field: "server.tenants.hosts".to_owned(),
-                reason: format!(
-                    "host keys must be lowercase; `{host:?}` never matches because \
-                     requests are compared lowercased — write `{}`",
-                    host.to_ascii_lowercase()
-                ),
-            });
-        }
-        // The request side strips any `:port` before lookup (`ws::host_name`),
-        // so a key that still carries one — or a trailing dot, whitespace,
-        // or brackets — can never equal a normalized request host. Controls,
-        // layout-forgers, and invisible format characters cannot arrive in a
-        // real `Host` header either, so a key carrying one is dead the same
-        // way — and would render invisibly in every log line that names it.
-        if host.contains(':')
-            || host.ends_with('.')
-            || host.chars().any(char::is_whitespace)
-            || host.contains('[')
-            || host.contains(']')
-            || host.chars().any(|c| {
-                c.is_control()
-                    || crate::text::is_layout_forgery(c)
-                    || crate::text::is_invisible_format(c)
-            })
-        {
-            return Err(ManifestError::InvalidField {
-                field: "server.tenants.hosts".to_owned(),
-                reason: format!(
-                    "host key `{host:?}` can never match: write the bare \
-                     lowercased host without port, trailing dot, whitespace, \
-                     brackets, or invisible characters, as it arrives after normalization"
-                ),
-            });
-        }
-        if label.trim().is_empty() {
-            return Err(ManifestError::InvalidField {
-                field: "server.tenants.hosts".to_owned(),
-                reason: format!("the tenant for host `{host:?}` must not be empty"),
-            });
-        }
-        // Labels render into access records, metrics, and audit rows: an
-        // invisible character (a zero-width space, an NBSP, a bidi
-        // override) would be a tenant no reader can tell apart from its
-        // visible twin. `TenantId` refuses the whole class, so the table
-        // routes through it rather than growing a parallel list — a label
-        // the policy layer would refuse must not be issued here.
-        if let Err(reason) = crate::egress::TenantId::new(label) {
-            return Err(ManifestError::InvalidField {
-                field: "server.tenants.hosts".to_owned(),
-                reason: format!(
-                    "the tenant for host `{host:?}` is not a valid tenant id: {reason}"
-                ),
-            });
-        }
+        validate_host_entry(host, label)?;
     }
-    // Component overrides key on the resolved tenant label: an empty label
-    // or an empty artifact name would route nowhere, which is dead config
-    // with a security shape (a tenant silently served by the wrong
-    // component). An empty map is the single-component default and stays
-    // allowed — unlike hosts, where an empty table (without components)
-    // disables the feature the section promises.
     for (label, artifact) in &tenants.components {
         if label.trim().is_empty() || artifact.trim().is_empty() {
             return Err(ManifestError::InvalidField {
@@ -255,21 +278,20 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
                 ),
             });
         }
-        // Artifacts are bare Cargo package names (`[A-Za-z0-9_-]`), resolved
-        // by `find_artifact` as `{package}.wasm` under the build directory.
-        // Anything outside that charset — a control character, whitespace,
-        // a path separator, parent navigation, or a file suffix — can never
-        // name a built artifact, so it is refused here instead of failing
-        // at serve time far from the line that is wrong.
-        if artifact != artifact.trim()
-            || !artifact
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
+        // Artifacts are bare Cargo package names, resolved by `find_artifact`
+        // as `{package}.wasm` under the build directory. Anything that is
+        // not a valid package name — a control character, whitespace, a path
+        // separator, parent navigation, a file suffix, a leading digit, a
+        // trailing separator, or more than 64 characters — can never name a
+        // built artifact, so it is refused here instead of failing at serve
+        // time far from the line that is wrong. `PackageName` is the same
+        // gate `[package] name` passes at parse, so an artifact the
+        // toolchain itself built always passes too.
+        if let Err(reason) = qqq_core::PackageName::new(artifact.clone()) {
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.components".to_owned(),
                 reason: format!(
-                    "component artifact `{artifact}` never resolves; write the bare package name"
+                    "component artifact `{artifact}` never resolves ({reason}); write the bare package name"
                 ),
             });
         }

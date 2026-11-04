@@ -16,6 +16,11 @@
 //! output) preserve it — a zero-width joiner builds legitimate emoji, and
 //! mangling content to police identifiers punishes the wrong layer.
 //!
+//! U+2800 BRAILLE PATTERN BLANK is the one member that is neither format
+//! nor mark: it is a symbol (`So`) whose glyph is blank by design, with the
+//! same advance width as a space in most fonts — an invisible twin no
+//! whitespace, control, or format check catches.
+//!
 //! ```rust
 //! use qqq_core::text::is_layout_forgery;
 //!
@@ -55,24 +60,39 @@ pub fn is_layout_forgery(c: char) -> bool {
 /// U+FFFF escapes as two units. Single home for the two audit JSON
 /// escapers (`qqq-host::audit_export`, `qqq-run::audit`): the math must
 /// stay identical in both, and a shared function is what makes that true
-/// rather than a comment asking it to stay true. Total over all `u32`
-/// inputs (masked to 20 bits); exact for every supplementary-plane code
-/// point, which are the only inputs with meaning.
+/// rather than a comment asking it to stay true.
+///
+/// Takes the `char` rather than the code point so invalid inputs are
+/// unrepresentable: lone surrogates are not `char`s, and `None` marks the
+/// BMP members that need no pair. Callers that already branched on plane
+/// unwrap the `Some` their guard guarantees.
 ///
 /// ```rust
 /// use qqq_core::text::utf16_surrogate_pair;
 ///
-/// assert_eq!(utf16_surrogate_pair(0xE01EF), (0xDB40, 0xDDEF));
-/// assert_eq!(utf16_surrogate_pair(0x10000), (0xD800, 0xDC00));
-/// assert_eq!(utf16_surrogate_pair(0x10FFFF), (0xDBFF, 0xDFFF));
+/// assert_eq!(utf16_surrogate_pair('\u{E01EF}'), Some((0xDB40, 0xDDEF)));
+/// assert_eq!(utf16_surrogate_pair('\u{10000}'), Some((0xD800, 0xDC00)));
+/// assert_eq!(utf16_surrogate_pair('\u{10FFFF}'), Some((0xDBFF, 0xDFFF)));
+/// assert_eq!(utf16_surrogate_pair('a'), None);
 /// ```
 #[must_use]
-pub fn utf16_surrogate_pair(n: u32) -> (u16, u16) {
-    let n = n.wrapping_sub(0x1_0000) & 0xF_FFFF;
-    (
+pub fn utf16_surrogate_pair(c: char) -> Option<(u16, u16)> {
+    let n = u32::from(c);
+    if n <= 0xFFFF {
+        return None;
+    }
+    debug_assert!(
+        n <= 0x10_FFFF,
+        "a char is always a valid scalar value, so this is supplementary-plane"
+    );
+    // Wrapping rather than plain `-`: the guard above makes underflow
+    // impossible, and the explicit wrapping documents that instead of
+    // asking clippy's arithmetic lint to prove it.
+    let n = n.wrapping_sub(0x1_0000);
+    Some((
         0xD800 | u16::try_from(n >> 10).unwrap_or(0x3FF),
         0xDC00 | u16::try_from(n & 0x3FF).unwrap_or(0x3FF),
-    )
+    ))
 }
 
 /// Whether one character is an invisible character that spoofs identifiers.
@@ -130,6 +150,7 @@ pub fn is_invisible_format(c: char) -> bool {
             | '\u{200B}'..='\u{200D}'
             | '\u{2060}'..='\u{2064}'
             | '\u{206A}'..='\u{206F}'
+            | '\u{2800}'
             | '\u{FE00}'..='\u{FE0F}'
             | '\u{FFF9}'..='\u{FFFB}'
             | '\u{E0001}'
@@ -188,6 +209,7 @@ mod tests {
             '\u{13430}',
             '\u{180F}',
             '\u{1BCA0}',
+            '\u{2800}',
             '\u{E0001}',
         ];
         let ranges = [
@@ -210,8 +232,8 @@ mod tests {
             assert!(!is_layout_forgery(c), "{c:?} must be in exactly one set");
         }
         assert_eq!(
-            count, 400,
-            "the set has 400 members; update test and predicate together"
+            count, 401,
+            "the set has 401 members; update test and predicate together"
         );
         for c in [
             'a', '\u{202E}', '\u{2066}', '\u{00A0}', '\u{0085}', '\u{2065}', '\u{115F}',
@@ -234,11 +256,11 @@ mod tests {
 
     /// The count pins the predicate, not the test list above: scanning every
     /// scalar value catches a member added to `is_invisible_format` without
-    /// extending the list (the count would exceed 400), which the list-side
+    /// extending the list (the count would exceed 401), which the list-side
     /// count cannot see. One hundred thousand iterations of a `matches!` is
     /// milliseconds — cheaper than the spoofing hole it guards.
     #[test]
-    fn invisible_format_predicate_holds_exactly_400_members() {
+    fn invisible_format_predicate_holds_exactly_401_members() {
         let mut count = 0u32;
         for cp in 0..0x11_0000u32 {
             if let Some(c) = char::from_u32(cp)
@@ -248,7 +270,7 @@ mod tests {
             }
         }
         assert_eq!(
-            count, 400,
+            count, 401,
             "the predicate drifted from its pinned list; update both together"
         );
     }

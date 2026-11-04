@@ -1973,6 +1973,13 @@ fn scan_crate_rs_files(
     violations.extend(redir_problems);
     files.sort();
     files.dedup();
+    // M-3 r20: a custom `build = …` or `build = false` uncompiles the
+    // conventional build.rs — drop it from the body scan too (dead code
+    // is not a root; the forbid check skips it the same way).
+    if roots.skip_build_rs {
+        let conventional = dir.join("build.rs");
+        files.retain(|f| f != &conventional);
+    }
     // Canonical exception root, hoisted out of the per-file loop (L-9).
     let qsys_canon = std::fs::canonicalize(workspace.join("crates").join("qqq-sys"))
         .unwrap_or_else(|_| workspace.join("crates").join("qqq-sys"));
@@ -2223,6 +2230,34 @@ fn collect_bin_roots(
     bins
 }
 
+/// Cut a manifest line at the first `#` outside quotes (comment strip).
+/// Returns the byte index where code ends. `#` is legal inside quoted
+/// filenames, and `\` escapes only inside `"…"` strings (M-4 r16) — TOML
+/// `'...'` literals have no escapes. Split out for reuse on value
+/// continuation lines (L-2 r20).
+fn manifest_code_cut(raw_line: &str) -> usize {
+    let mut cut = raw_line.len();
+    let mut quote = None;
+    let mut escaped = false;
+    for (i, c) in raw_line.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' && q == '"' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            quote = Some(c);
+        } else if c == '#' {
+            cut = i;
+            break;
+        }
+    }
+    cut
+}
+
 /// Strip one matching ASCII quote pair around a TOML key or section name
 /// (`"path"`, `'lib'`), returning the text unchanged when it is not
 /// quoted. H-1 r15/r16: Cargo accepts quoted keys and quoted table
@@ -2241,6 +2276,110 @@ fn strip_one_quote_pair(s: &str) -> &str {
         &rest[..end]
     } else {
         s
+    }
+}
+
+/// Process one manifest `key = rest` value: resolve next-line values,
+/// gate `[package] build` bools/non-strings, parse/decode the value, and
+/// push the root or record a fail-closed problem. Split out of
+/// `manifest_roots` for the line budget.
+fn manifest_process_value(
+    out: &mut ManifestRoots,
+    section: &ManifestSection,
+    norm: &str,
+    rest: &str,
+    raw_lines: &[&str],
+    li: &mut usize,
+    dir: &Path,
+) {
+    let mut rest = rest;
+    // L-2 r20: `path =` with the value on the next line is valid TOML
+    // (blanks and comments may surround `=`) — read it instead of
+    // fail-closing a valid manifest.
+    if rest.is_empty() {
+        let mut j = *li;
+        let mut found = false;
+        while let Some(&next) = raw_lines.get(j) {
+            j += 1;
+            let code = next[..manifest_code_cut(next)].trim();
+            if code.is_empty() {
+                continue;
+            }
+            rest = code;
+            *li = j;
+            found = true;
+            break;
+        }
+        if !found {
+            return;
+        }
+    }
+    if section == &ManifestSection::Package && norm == "build" {
+        if rest == "false" || rest == "true" {
+            // `build = false` disables the script: the conventional
+            // build.rs is dead code (M-3 r20). `true` keeps it.
+            if rest == "false" {
+                out.skip_build_rs = true;
+            }
+            return;
+        }
+        if !(rest.starts_with('"') || rest.starts_with('\'')) {
+            // M-1 r20: `build = 5` is invalid Cargo (not a string,
+            // not a bool) — fail closed, unlike the silent bools.
+            if out.problem.is_none() {
+                out.problem = Some("Cargo.toml build value is not a string".to_owned());
+            }
+            return;
+        }
+        // A string build value (even an unresolvable one) means a
+        // custom script: the conventional build.rs is not compiled
+        // (M-3 r20) — skip its forbid check and body scan below.
+        out.skip_build_rs = true;
+    }
+    match parse_manifest_value(rest, raw_lines, li) {
+        ManifestValue::Value(value) => {
+            if !value.is_empty() {
+                // L-1 r15: fold `.`/`..` lexically so spellings like
+                // `sub/../lib.rs` merge with the walked path instead of
+                // double-scanning (and so the callers' lexical
+                // outside-gate sees the real shape — M-2 r15).
+                let root = fold_dot_components(&dir.join(&value));
+                // C-1 r19: custom build scripts join lib_bin (scanned
+                // + forbid-checked exactly like a conventional
+                // build.rs); aux roots stay scan-only.
+                if section == &ManifestSection::Aux {
+                    out.aux.push(root);
+                } else {
+                    out.lib_bin.push(root);
+                }
+            } else if out.problem.is_none() {
+                // M-2 r20: `path = ""` is invalid Cargo — an empty
+                // root is unknown, so fail closed, never skip.
+                out.problem = Some(format!("Cargo.toml {norm} value is empty"));
+            }
+        }
+        ManifestValue::BadEscape => {
+            if out.problem.is_none() {
+                out.problem = Some(format!("Cargo.toml {norm} value has invalid escape"));
+            }
+        }
+        // M-1 r19: a `path`/`build = …` line with no closer names an
+        // unknown root (truncated line, unclosed string) — fail closed
+        // with a problem, never silently skip. Non-string values in
+        // `[lib]` sections are invalid Cargo, so they land here
+        // correctly; `[package] build = false` never reaches the
+        // parser (guarded above: bools are valid and mean "no custom
+        // script").
+        ManifestValue::Unclosed => {
+            if out.problem.is_none() {
+                out.problem = Some(format!("Cargo.toml {norm} value unclosed"));
+            }
+        }
+        ManifestValue::TrailingJunk => {
+            if out.problem.is_none() {
+                out.problem = Some(format!("Cargo.toml {norm} value has trailing characters"));
+            }
+        }
     }
 }
 
@@ -2263,6 +2402,12 @@ struct ManifestRoots {
     /// Present-but-unreadable manifest (L-4 r15): the named roots are
     /// unknown, so callers fail loudly instead of certifying them.
     problem: Option<String>,
+    /// `[package] build = "custom/…"`, `build = false`, or an unresolvable
+    /// string build value (M-3 r20): a custom script or disabled script
+    /// means the conventional `build.rs` is NOT compiled — skip its
+    /// forbid check and body scan (it would be dead code). Defaults to
+    /// false: no key (or `build = true`) means the conventional file.
+    skip_build_rs: bool,
 }
 
 /// Escape-aware search for a TOML value closer: returns the byte index
@@ -2360,6 +2505,50 @@ enum ManifestSection {
     Other,
 }
 
+/// How a manifest key resolves: a normalized root key, an unparseable
+/// target-table shape (fail closed), or an unrelated key (dependencies
+/// and friends are not crate roots — skip silently).
+enum KeyUse<'a> {
+    Key(&'a str),
+    Unsupported,
+    Ignore,
+}
+
+/// Classify one manifest key in its section (H-1 r20). Dotted keys
+/// (`lib.path`, `package.build`) and whole-section inline tables
+/// (`lib = {...}`) are TOML-valid Cargo — resolve the known root forms,
+/// fail closed on target-table shapes the line parser cannot resolve,
+/// and ignore everything else. Dotted target heads outside `[package]`
+/// are ignored, not failed: there they are either invalid Cargo or a
+/// dependency (e.g. `[dependencies] lib.path`), never a target root of
+/// this crate — and the line parser stays silent on invalid lines
+/// without a root-shaped key.
+fn classify_manifest_key<'a>(section: &ManifestSection, key: &'a str) -> KeyUse<'a> {
+    if let Some(dot) = key.find('.') {
+        let (head, tail) = (&key[..dot], &key[dot + 1..]);
+        match (section, head, tail) {
+            (ManifestSection::Package, "lib", "path") => KeyUse::Key("path"),
+            (ManifestSection::Package, "package", "build") => KeyUse::Key("build"),
+            (
+                ManifestSection::Package,
+                "lib" | "bin" | "test" | "example" | "bench" | "package",
+                _,
+            ) => KeyUse::Unsupported,
+            _ => KeyUse::Ignore,
+        }
+    } else {
+        match (section, key) {
+            (ManifestSection::LibBin | ManifestSection::Aux, "path") => KeyUse::Key("path"),
+            (ManifestSection::Package, "build") => KeyUse::Key("build"),
+            (
+                ManifestSection::Package | ManifestSection::LibBin | ManifestSection::Aux,
+                "lib" | "bin" | "test" | "example" | "bench" | "package",
+            ) => KeyUse::Unsupported,
+            _ => KeyUse::Ignore,
+        }
+    }
+}
+
 /// Outcome of parsing one manifest `path = value` right-hand side.
 enum ManifestValue {
     /// Decoded value (TOML basic escapes applied for `"…"` strings).
@@ -2368,6 +2557,9 @@ enum ManifestValue {
     Unclosed,
     /// Invalid escape in a `"…"` value: invalid TOML, fail closed.
     BadEscape,
+    /// Trailing characters after the closer (`path = "a" "b"`): invalid
+    /// TOML, fail closed instead of certifying a guess (L-4 r20).
+    TrailingJunk,
 }
 
 /// Parse the value of a manifest `path = …` line whose right-hand side
@@ -2410,6 +2602,12 @@ fn parse_manifest_value(rest: &str, lines: &[&str], li: &mut usize) -> ManifestV
     let Some(raw) = chunk.get(..end) else {
         return ManifestValue::Unclosed;
     };
+    // L-4 r20: anything but blanks after the closer is invalid TOML —
+    // comments were stripped before the key split, so a remainder is
+    // junk, not a second value.
+    if !chunk[end + mark.len()..].trim().is_empty() {
+        return ManifestValue::TrailingJunk;
+    }
     if !backslash_escapes {
         return ManifestValue::Value(raw.to_owned());
     }
@@ -2469,32 +2667,7 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
     let mut li = 0;
     while let Some(&raw_line) = raw_lines.get(li) {
         li += 1;
-        // Strip `#` comments, but never inside quotes — `#` is legal in
-        // Unix/Windows filenames (M-3 r14: `path = "a#b/lib.rs"` must not
-        // truncate to `path = "a`). A `\` escapes the next char inside
-        // `"…"` strings only (L-3 r15, M-4 r16): TOML `'…'` literals have
-        // no escapes, so a `\` there is content and the quote still
-        // closes — treating it as an escape would miss the real closer.
-        let mut cut = raw_line.len();
-        let mut quote = None;
-        let mut escaped = false;
-        for (i, c) in raw_line.char_indices() {
-            if let Some(q) = quote {
-                if escaped {
-                    escaped = false;
-                } else if c == '\\' && q == '"' {
-                    escaped = true;
-                } else if c == q {
-                    quote = None;
-                }
-            } else if c == '"' || c == '\'' {
-                quote = Some(c);
-            } else if c == '#' {
-                cut = i;
-                break;
-            }
-        }
-        let t = raw_line[..cut].trim();
+        let t = raw_line[..manifest_code_cut(raw_line)].trim();
         // TOML-legal spacing inside brackets (`[ lib ]`, `[ [bin]]`).
         let inner = t
             .strip_prefix('[')
@@ -2514,6 +2687,12 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
                 _ => ManifestSection::Other,
             };
             continue;
+        } else if t.starts_with('[') {
+            // L-3 r20: `[lib] garbage` is not a header — invalid TOML, so
+            // the section resets instead of misattributing the next `path`
+            // to the prior section.
+            section = ManifestSection::Other;
+            continue;
         }
         if section == ManifestSection::Other {
             continue;
@@ -2523,61 +2702,34 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
         // root entirely. Split at the first `=` (keys never contain a
         // bare one), strip one matching quote pair, and compare. In
         // `[package]` only `build` names a root (C-1 r19: a custom build
-        // script compiles as Rust); `build = false` and friends are not
-        // paths and stay silent.
+        // script compiles as Rust); `build = false`/`true` are valid
+        // bools meaning "no custom script" and stay silent.
         let Some(eq) = t.find('=') else {
             continue;
         };
         let key = strip_one_quote_pair(t[..eq].trim());
-        let want = match section {
-            ManifestSection::LibBin | ManifestSection::Aux => key == "path",
-            ManifestSection::Package => key == "build",
-            ManifestSection::Other => false,
+        let norm = match classify_manifest_key(&section, key) {
+            KeyUse::Key(k) => k,
+            KeyUse::Unsupported => {
+                // Target-table shape the line parser cannot resolve
+                // (`lib = {...}`, `bin = […]`, unknown dotted forms):
+                // invalid or exotic Cargo, fail closed (H-1 r20).
+                if out.problem.is_none() {
+                    out.problem = Some(format!("Cargo.toml {key} is not a resolvable path value"));
+                }
+                continue;
+            }
+            KeyUse::Ignore => continue,
         };
-        if !want {
-            continue;
-        }
-        let rest = t[eq + 1..].trim_start();
-        if section == ManifestSection::Package && !(rest.starts_with('"') || rest.starts_with('\''))
-        {
-            continue;
-        }
-        match parse_manifest_value(rest, &raw_lines, &mut li) {
-            ManifestValue::Value(value) => {
-                if !value.is_empty() {
-                    // L-1 r15: fold `.`/`..` lexically so spellings like
-                    // `sub/../lib.rs` merge with the walked path instead of
-                    // double-scanning (and so the callers' lexical
-                    // outside-gate sees the real shape — M-2 r15).
-                    let root = fold_dot_components(&dir.join(&value));
-                    // C-1 r19: custom build scripts join lib_bin (scanned
-                    // + forbid-checked exactly like a conventional
-                    // build.rs); aux roots stay scan-only.
-                    if section == ManifestSection::Aux {
-                        out.aux.push(root);
-                    } else {
-                        out.lib_bin.push(root);
-                    }
-                }
-            }
-            ManifestValue::BadEscape => {
-                if out.problem.is_none() {
-                    out.problem = Some("Cargo.toml has invalid escape in path value".to_owned());
-                }
-            }
-            // M-1 r19: a `path`/`build = …` line with no closer names an
-            // unknown root (truncated line, unclosed string) — fail closed
-            // with a problem, never silently skip. Non-string values in
-            // `[lib]` sections are invalid Cargo, so they land here
-            // correctly; `[package] build = false` never reaches the
-            // parser (guarded above: bools are valid and mean "no custom
-            // script").
-            ManifestValue::Unclosed => {
-                if out.problem.is_none() {
-                    out.problem = Some("Cargo.toml path value unclosed".to_owned());
-                }
-            }
-        }
+        manifest_process_value(
+            &mut out,
+            &section,
+            norm,
+            t[eq + 1..].trim_start(),
+            &raw_lines,
+            &mut li,
+            dir,
+        );
     }
     out.lib_bin.sort();
     out.lib_bin.dedup();
@@ -2590,7 +2742,7 @@ fn check_crate_roots(
     workspace: &Path,
     dir: &Path,
     name: &str,
-    lib_bin: &[PathBuf],
+    roots: &ManifestRoots,
     violations: &mut Vec<String>,
     missing: &mut Vec<String>,
 ) {
@@ -2648,11 +2800,16 @@ fn check_crate_roots(
     // `lib_bin` arrives pre-parsed from the shared per-crate parse (L-3
     // r17); aux (test/example/bench) roots are never forbid-checked here
     // (see `ManifestRoots::aux`).
-    let mut roots = vec![
+    let mut all_roots = vec![
         dir.join("src").join("lib.rs"),
         dir.join("src").join("main.rs"),
-        dir.join("build.rs"),
     ];
+    // M-3 r20: no `build = …` key (or `build = true`) means the
+    // conventional build.rs compiles — check it. A custom string build
+    // or `build = false` uncompiles it (dead code is not a root).
+    if !roots.skip_build_rs {
+        all_roots.push(dir.join("build.rs"));
+    }
     // M-1 r15: manifest roots get the same outside-gate as the scan loop
     // before they are read — `root_ok` must never open an arbitrary file
     // (an absolute `path = "/etc/x"` or an escaping relative one). Roots
@@ -2660,19 +2817,19 @@ fn check_crate_roots(
     // otherwise; outside roots are skipped here because the scan loop
     // already emits the outside-workspace violation for them.
     let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    for root in lib_bin {
+    for root in &roots.lib_bin {
         let inside = std::fs::canonicalize(root).map_or_else(
             |_| fold_dot_components(root).strip_prefix(workspace).is_ok(),
             |c| c.strip_prefix(&ws_canon).is_ok(),
         );
         if inside {
-            roots.push(root.clone());
+            all_roots.push(root.clone());
         }
     }
-    roots.extend(collect_bin_roots(dir, &rel, violations));
+    all_roots.extend(collect_bin_roots(dir, &rel, violations));
     let mut unreadable = false;
     let mut missing_root = false;
-    for root in &roots {
+    for root in &all_roots {
         match root_ok(root) {
             Some(true) => {}
             None => unreadable = true,
@@ -2735,7 +2892,7 @@ fn scan_one_crate(
     let roots = manifest_roots(dir);
     scan_crate_rs_files(workspace, dir, &roots, violations, files_scanned);
     if name != "qqq-sys" {
-        check_crate_roots(workspace, dir, name, &roots.lib_bin, violations, missing);
+        check_crate_roots(workspace, dir, name, &roots, violations, missing);
     }
 }
 
@@ -5591,6 +5748,103 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_scan_requires_custom_build_script_forbid() {
+        // C-1 r19 run level: a custom build script without the attribute
+        // fails loudly like a conventional `build.rs`.
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xbuildforbid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::create_dir_all(dir.join("custom")).expect("custom dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = \"custom/b.rs\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(dir.join("custom").join("b.rs"), "pub fn f() {}\n").expect("build");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            !ok,
+            "unforbidden custom build script passed the scan:\n{out}"
+        );
+        assert!(
+            out.contains("missing forbid"),
+            "wrong failure shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_ignores_disabled_build_script() {
+        // M-3 r20 run level: `build = false` uncompiles the conventional
+        // `build.rs` — neither its body nor its missing forbid may fail
+        // the scan (its `unsafe` is dead code, not shipped code).
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xnobuild-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = false\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(dir.join("build.rs"), "pub unsafe fn evil() {}\n").expect("stray build");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(ok, "disabled build.rs failed the scan:\n{out}");
+    }
+
+    #[test]
+    fn unsafe_scan_skips_outside_build_script_without_reading() {
+        // C-1 r19 run level: an outside-workspace custom build script is
+        // refused like any other outside root — and never read (its
+        // content must not leak into evidence as "missing forbid").
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xbuildout-{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        let outside = std::env::temp_dir().join(format!("qqq-xtask-xbuildoutside-{pid}.rs"));
+        let _ = std::fs::remove_file(&outside);
+        std::fs::write(&outside, "pub unsafe fn evil() {}\n").expect("outside file");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"probe\"\nbuild = \"../../../qqq-xtask-xbuildoutside-{pid}.rs\"\n\n[lib]\npath = \"src/lib.rs\"\n"
+            ),
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+        assert!(!ok, "outside build script passed the scan:\n{out}");
+        assert!(
+            out.contains("outside the workspace"),
+            "wrong failure shape:\n{out}"
+        );
+        assert!(
+            !out.contains("missing forbid"),
+            "ungated read of outside build leaked into evidence:\n{out}"
+        );
+    }
+
+    #[test]
     fn unsafe_scan_reports_unreadable_manifest_once() {
         // L-3 r17 run level: one unreadable manifest must yield one
         // problem entry, not one per consumer (scan loop +
@@ -6022,6 +6276,249 @@ mod tests {
         let (roots, problem) = manifest_custom_roots(&dir);
         assert_eq!(problem, None);
         assert_eq!(roots, vec![dir.join("src/lib.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_parses_dotted_lib_path() {
+        // H-1 r20: `lib.path = "…"` is TOML-valid Cargo — a dotted custom
+        // root compiles exactly like `[lib] path = …`.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-dotted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nlib.path = \"custom/d.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/d.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_parses_dotted_package_build() {
+        // H-1 r20: `package.build = "…"` names the build script from
+        // inside `[package]`, same as a bare `build` key.
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-dotbuild-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\npackage.build = \"custom/b2.txt\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/b2.txt")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_inline_lib_table() {
+        // H-1 r20: `lib = { path = "e.rs" }` is a custom root the
+        // line parser cannot resolve — fail closed with a problem,
+        // never silently skip (same contract as invalid escapes).
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-inline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nlib = { path = \"e.rs\" }\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "inline lib table surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_ignores_non_target_dotted_keys() {
+        // H-1 r20 pin: dotted keys outside target tables (workspace
+        // inheritance like `version.workspace`) are not roots and not
+        // problems — dependencies are not crate roots.
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-dotother-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nversion.workspace = true\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("src/lib.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_int_build() {
+        // M-1 r20: `build = 5` is invalid Cargo (not a string, not a
+        // bool) — fail closed, unlike the silent `false`.
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-intbuild-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = 5\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(roots, vec![dir.join("src/lib.rs")]);
+        assert!(problem.is_some(), "non-string build surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_empty_path() {
+        // M-2 r20: `path = ""` is invalid Cargo — an empty root is
+        // unknown, so fail closed instead of skipping silently.
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-emptypath-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "empty path surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_trailing_junk() {
+        // L-4 r20: `path = "a.rs" "b"` is invalid TOML — taking the first
+        // value and ignoring the rest would certify a guess.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-junk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"a.rs\" \"b\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "trailing junk surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_resets_on_malformed_header() {
+        // L-3 r20: `[lib] garbage` is not a header — the section must
+        // reset instead of letting the next `path` inherit the prior one.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-badhdr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n[lib]\npath = \"a.rs\"\n[lib] garbage\npath = \"q.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(
+            roots,
+            vec![dir.join("a.rs")],
+            "malformed header leaked section: {roots:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_reads_next_line_value() {
+        // L-2 r20: `path =` with the value on the next line is valid TOML
+        // (blank/comment lines allowed around `=`) — read it instead of
+        // fail-closing a valid manifest.
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-nextline-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath =\n# a comment line\n\"nl.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("nl.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_parses_quoted_single_triple_build() {
+        // L-5 r20 gap pins: quoted keys, literals, triples and escapes
+        // work for `build` exactly like `path`.
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-buildforms-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\"build\" = 'custom/sq.rs'\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/sq.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = \"\"\"custom/tq.rs\"\"\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/tq.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = \"a\\\"b.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("a\"b.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = \"a\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "unclosed build surfaced no problem");
+        assert!(
+            problem.is_some_and(|p| p.contains("build")),
+            "problem names the wrong key"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

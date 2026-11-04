@@ -1517,6 +1517,9 @@ pub fn is_host_controlled_header(name: &str) -> bool {
 /// assert_eq!(escape_header_value("a\u{85}b"), "a%C2%85b");
 /// assert_eq!(escape_header_value("a\u{200B}b"), "a%E2%80%8Bb");
 /// assert_eq!(escape_header_value("a\u{2061}b"), "a%E2%81%A1b");
+/// assert_eq!(escape_header_value("a\u{2062}b"), "a%E2%81%A2b");
+/// assert_eq!(escape_header_value("a\u{600}b"), "a%D8%80b");
+/// assert_eq!(escape_header_value("a\u{A0}b"), "a%C2%A0b");
 /// ```
 #[must_use]
 pub fn escape_header_value(value: &str) -> String {
@@ -1533,10 +1536,12 @@ pub fn escape_header_value(value: &str) -> String {
             '\t' => out.push('\t'),
             // Any other control (C0, DEL, C1) percent-encodes as its UTF-8
             // bytes: `c as u8` would truncate multibyte controls, and a raw
-            // byte would let the value terminate its own line. Layout-forgers
-            // and invisible format characters take the same arm through the
-            // shared predicates.
+            // byte would let the value terminate its own line. Layout-forgers,
+            // invisible format characters, and non-space whitespace (NBSP
+            // twins the ASCII space; tab passes through above) take the same
+            // arm through the shared predicates.
             c if c.is_control()
+                || (c.is_whitespace() && c != ' ' && c != '\t')
                 || qqq_cap::text::is_layout_forgery(c)
                 || qqq_cap::text::is_invisible_format(c) =>
             {

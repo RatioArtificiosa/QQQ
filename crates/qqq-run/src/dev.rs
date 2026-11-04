@@ -957,7 +957,9 @@ mod tests {
         // character no reader can see — even at the cost of an emoji joiner.
         // One member per range: dropping any range from the predicate must
         // fail here, not pass silently.
-        for invisible in ["\u{200B}", "\u{2062}", "\u{FE0F}", "\u{600}", "\u{E0001}"] {
+        for invisible in [
+            "\u{200B}", "\u{2062}", "\u{FE0F}", "\u{600}", "\u{180F}", "\u{A0}",
+        ] {
             let zwsp = qqq_core::Error::new(
                 qqq_core::ErrorCode::CompilationFailed,
                 format!("fail{invisible}der"),

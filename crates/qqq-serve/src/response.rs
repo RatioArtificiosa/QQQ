@@ -891,16 +891,19 @@ pub fn not_found() -> Response {
 /// amplification. U+2028/U+2029 are separators, not controls, but break lines
 /// the same way. Invisible format characters strip too: a zero-width space is
 /// neither control nor layout-forger, but a reflected hostname nobody can see
-/// is the same spoofing primitive. The refusal still names the host — the fix
-/// for an unmapped host is evident — just never more than 64 clean chars of it.
+/// is the same spoofing primitive. Non-space whitespace strips for the same
+/// reason (NBSP twins the ASCII space); the ASCII space itself is content.
+/// The refusal still names the host — the fix for an unmapped host is
+/// evident — just never more than 64 clean chars of it.
 #[must_use]
 pub fn sanitize_reflected(value: &str) -> String {
     value
         .chars()
         .filter(|c| {
-            !c.is_control()
-                && !qqq_host::boundary::is_layout_forgery(*c)
-                && !qqq_host::boundary::is_invisible_format(*c)
+            !(c.is_control()
+                || (*c != ' ' && c.is_whitespace())
+                || qqq_host::boundary::is_layout_forgery(*c)
+                || qqq_host::boundary::is_invisible_format(*c))
         })
         .take(64)
         .collect()
@@ -1173,7 +1176,9 @@ mod tests {
         // Invisible format characters strip like controls: a zero-width space
         // is neither, but a reflected hostname nobody can see is the same
         // spoofing primitive — and the visible prefix still names the host.
-        let sneaky = super::misdirected("ev\u{200b}il.example.com\u{202e}");
+        // Non-breaking spaces strip too (they twin the ASCII space); the
+        // trailing newline is the refusal's own framing, not reflected input.
+        let sneaky = super::misdirected("ev\u{200b}il\u{A0}.example.com\u{202e}");
         let sneaky_body = String::from_utf8_lossy(&sneaky.body).into_owned();
         assert!(
             !sneaky_body
@@ -1188,6 +1193,14 @@ mod tests {
             sneaky_body.contains("evil.example.com"),
             "stripping invisibles must leave the readable host: {sneaky_body:?}"
         );
+        // The whitespace check runs on the sanitizer output directly: the
+        // refusal body legitimately ends with `\n`, which is whitespace.
+        let stripped = super::sanitize_reflected("ev\u{200b}il\u{A0}.example.com\u{202e}");
+        assert!(
+            !stripped.chars().any(|c| c != ' ' && c.is_whitespace()),
+            "no non-space whitespace may survive sanitizing: {stripped:?}"
+        );
+        assert_eq!(stripped, "evil.example.com");
     }
 
     /// **The framing rule.** A response with neither `Content-Length` nor

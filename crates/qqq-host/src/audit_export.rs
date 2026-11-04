@@ -75,7 +75,11 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() || is_layout_forgery(c) || is_invisible_format(c) => {
+            c if c.is_control()
+                || (c.is_whitespace() && c != ' ')
+                || is_layout_forgery(c)
+                || is_invisible_format(c) =>
+            {
                 // Supplementary-plane members (`E0001`, tag characters) do
                 // not fit `\uXXXX`: JSON needs a UTF-16 surrogate pair, and
                 // a 5-digit `\ue0001` would parse as `\ue000` plus a literal
@@ -674,6 +678,21 @@ mod tests {
                 back, supplementary,
                 "{supplementary:?} must round-trip, not just parse"
             );
+        }
+        // Plane boundaries pair exactly: the largest supplementary member
+        // (U+E01EF) escapes as a pair, while a non-member above the plane
+        // (U+10000, a regular letter; U+10FFFF, unassigned) and the BMP
+        // ceiling U+FFFF pass through raw — the branch condition is
+        // membership, not plane. Paired with `qqq-run`'s escaper: the
+        // surrogate math must stay identical in both.
+        assert_eq!(json_escape("a\u{E01EF}b"), "a\\udb40\\uddefb");
+        assert_eq!(json_escape("a\u{10000}b"), "a\u{10000}b");
+        assert_eq!(json_escape("a\u{10FFFF}b"), "a\u{10FFFF}b");
+        assert_eq!(json_escape("a\u{FFFF}b"), "a\u{FFFF}b");
+        for edge in ["a\u{E01EF}b", "a\u{10000}b", "a\u{10FFFF}b", "a\u{FFFF}b"] {
+            let back: String =
+                serde_json::from_str(&format!("\"{}\"", json_escape(edge))).expect("must parse");
+            assert_eq!(back, edge, "{edge:?} must round-trip");
         }
     }
 

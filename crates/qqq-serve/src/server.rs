@@ -1567,10 +1567,14 @@ pub struct TenantSources<'h, 'f> {
 ///
 /// Mirrors the identifier half of `qqq_cap::egress::TenantId::new` (empty,
 /// surrounding whitespace, controls, layout-forgers, invisible format
-/// characters, quotes, backslashes): quotes and backslashes never name a
-/// tenant either, because they desynchronise naive `"tenant":...` scans of
-/// the audit stream. Kept as a predicate rather than a `TenantId` so the
-/// fallback can name the fingerprint; the test below pins the agreement.
+/// characters, quotes, backslashes, 256-byte bound): quotes and backslashes
+/// never name a tenant either, because they desynchronise naive `"tenant":...`
+/// scans of the audit stream. Interior non-space whitespace (NBSP twins the
+/// ASCII space) falls back too, while regular spaces stay (`Jean Dupont`
+/// keeps attributing verbatim); clean names over 256 bytes fall back as
+/// well, because no label renderer budgets more. Kept as a predicate rather
+/// than a `TenantId` so the fallback can name the fingerprint; the test below
+/// pins the agreement.
 fn identity_label_is_safe(subject: &str) -> bool {
     if subject.is_empty() || subject.len() > 256 || subject.trim() != subject {
         return false;

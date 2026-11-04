@@ -205,4 +205,25 @@ mod tests {
             );
         }
     }
+
+    /// The count pins the predicate, not the test list above: scanning every
+    /// scalar value catches a member added to `is_invisible_format` without
+    /// extending the list (the count would exceed 400), which the list-side
+    /// count cannot see. One hundred thousand iterations of a `matches!` is
+    /// milliseconds — cheaper than the spoofing hole it guards.
+    #[test]
+    fn invisible_format_predicate_holds_exactly_400_members() {
+        let mut count = 0u32;
+        for cp in 0..0x11_0000u32 {
+            if let Some(c) = char::from_u32(cp)
+                && is_invisible_format(c)
+            {
+                count += 1;
+            }
+        }
+        assert_eq!(
+            count, 400,
+            "the predicate drifted from its pinned list; update both together"
+        );
+    }
 }

@@ -303,9 +303,11 @@ pub struct RuleInfo {
 /// `qqq_cap::text`) reorder or break the visible text the same way. Invisible
 /// format characters fold too: build output is guest- and compiler-influenced
 /// text rendered to the operator's terminal, and a zero-width space there is
-/// the same spoofing primitive. Joiners that build legitimate emoji are
-/// sacrificed deliberately: a diagnostic line must never contain a character
-/// no reader can see, and an emoji that renders as `�` still names its place.
+/// the same spoofing primitive. Non-space whitespace folds as well (an NBSP
+/// renders exactly like the space it spoofs). Joiners that build legitimate
+/// emoji are sacrificed deliberately: a diagnostic line must never contain a
+/// character no reader can see, and an emoji that renders as `�` still names
+/// its place.
 /// The replacement is U+FFFD rather than a space or a deletion: a visibly broken
 /// character tells the reader something was there, while dropping the byte
 /// could make two different forged messages render identically. Mirrors
@@ -315,15 +317,17 @@ pub struct RuleInfo {
 /// text reaches the operator's log through the same shape.
 pub(crate) fn sanitize_log_line(s: &str) -> String {
     if s.chars().all(|c| {
-        !c.is_control()
-            && !qqq_cap::text::is_layout_forgery(c)
-            && !qqq_cap::text::is_invisible_format(c)
+        !(c.is_control()
+            || (c.is_whitespace() && c != ' ')
+            || qqq_cap::text::is_layout_forgery(c)
+            || qqq_cap::text::is_invisible_format(c))
     }) {
         return s.to_owned();
     }
     s.chars()
         .map(|c| {
             if c.is_control()
+                || (c.is_whitespace() && c != ' ')
                 || qqq_cap::text::is_layout_forgery(c)
                 || qqq_cap::text::is_invisible_format(c)
             {
@@ -827,6 +831,7 @@ fn json_escape(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c.is_control()
+                || (c.is_whitespace() && c != ' ')
                 || qqq_cap::text::is_layout_forgery(c)
                 || qqq_cap::text::is_invisible_format(c) =>
             {
@@ -1553,6 +1558,13 @@ mod tests {
                 "{supplementary:?} must round-trip, not just parse"
             );
         }
+        // Plane boundaries pair exactly: the largest supplementary member
+        // (U+E01EF) escapes as a pair, while non-members (U+10000, a regular
+        // letter; U+10FFFF, unassigned) and the BMP ceiling pass through raw.
+        assert_eq!(json_escape("a\u{E01EF}b"), "a\\udb40\\uddefb");
+        assert_eq!(json_escape("a\u{10000}b"), "a\u{10000}b");
+        assert_eq!(json_escape("a\u{10FFFF}b"), "a\u{10FFFF}b");
+        assert_eq!(json_escape("a\u{FFFF}b"), "a\u{FFFF}b");
         let doc = format!(
             "{{\"text\":\"{}\"}}",
             json_escape("he said \"hi\"\nthen left")

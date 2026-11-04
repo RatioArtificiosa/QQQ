@@ -187,6 +187,18 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
                 reason: format!("the tenant for host `{host}` must not be empty"),
             });
         }
+        // Labels render into access records, metrics, and audit rows: an
+        // invisible character (a zero-width space, an NBSP, a bidi
+        // override) would be a tenant no reader can tell apart from its
+        // visible twin. `TenantId` refuses the whole class, so the table
+        // routes through it rather than growing a parallel list — a label
+        // the policy layer would refuse must not be issued here.
+        if let Err(reason) = crate::egress::TenantId::new(label) {
+            return Err(ManifestError::InvalidField {
+                field: "server.tenants.hosts".to_owned(),
+                reason: format!("the tenant for host `{host}` is not a valid tenant id: {reason}"),
+            });
+        }
     }
     // Component overrides key on the resolved tenant label: an empty label
     // or an empty artifact name would route nowhere, which is dead config

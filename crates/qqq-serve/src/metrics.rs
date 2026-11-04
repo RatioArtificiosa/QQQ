@@ -1148,8 +1148,12 @@ fn prometheus_escape(value: &str) -> String {
             // Fold, never pass through: a raw U+2028 inside a quoted label
             // parses fine but forges lines for every human or grep that reads
             // the exposition, and the identity path above proves hostile
-            // input reaches this arm from real certificates.
+            // input reaches this arm from real certificates. Non-space
+            // whitespace (NBSP renders exactly like a space) folds too —
+            // labels with interior spaces stay readable, invisible twins do
+            // not.
             c if c.is_control()
+                || (c.is_whitespace() && c != ' ')
                 || qqq_core::text::is_layout_forgery(c)
                 || qqq_core::text::is_invisible_format(c) =>
             {
@@ -1274,8 +1278,17 @@ mod tests {
         assert_eq!(prometheus_escape("a\u{85}b"), "a\u{FFFD}b");
         assert_eq!(prometheus_escape("a\u{202E}b"), "a\u{FFFD}b");
         // One member per invisible range, so dropping any range from the
-        // predicate fails here rather than passing silently.
-        for invisible in ["\u{200B}", "\u{2062}", "\u{FE0F}", "\u{600}", "\u{E0001}"] {
+        // predicate fails here rather than passing silently. Non-breaking
+        // spaces fold too (they twin the ASCII space); plain spaces stay.
+        for invisible in [
+            "\u{200B}",
+            "\u{2062}",
+            "\u{FE0F}",
+            "\u{600}",
+            "\u{180F}",
+            "\u{E0001}",
+            "\u{A0}",
+        ] {
             assert_eq!(
                 prometheus_escape(&format!("a{invisible}b")),
                 "a\u{FFFD}b",

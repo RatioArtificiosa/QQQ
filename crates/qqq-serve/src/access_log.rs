@@ -912,23 +912,27 @@ fn one_line(s: &str) -> String {
         .collect()
 }
 
-/// Fold invisible format characters in an identifier for rendering.
+/// Fold invisible characters in an identifier for rendering.
 ///
 /// Scoped to labels (tenant names) rather than widening [`one_line`]:
 /// [`one_line`] renders messages too, and messages legitimately carry
 /// joiners (emoji sequences) that must survive. Tenant labels are
-/// identifiers — no legitimate label contains a zero-width space — so an
-/// invisible there folds. Applied before the field encoder, so controls
-/// still escape precisely (`\uXXXX` in JSON) rather than folding.
+/// identifiers — no legitimate label contains a zero-width space, and a
+/// non-breaking space renders exactly like the ASCII space it spoofs — so
+/// both fold here. Applied before the field encoder, so controls still
+/// escape precisely (`\uXXXX` in JSON) rather than folding.
 #[must_use]
 fn fold_label_invisibles(label: &str) -> String {
-    if !label.chars().any(qqq_host::is_invisible_format) {
+    if !label
+        .chars()
+        .any(|c| qqq_host::is_invisible_format(c) || (c.is_whitespace() && c != ' '))
+    {
         return label.to_owned();
     }
     label
         .chars()
         .map(|c| {
-            if qqq_host::is_invisible_format(c) {
+            if qqq_host::is_invisible_format(c) || (c.is_whitespace() && c != ' ') {
                 '\u{FFFD}'
             } else {
                 c
@@ -1267,7 +1271,17 @@ mod tests {
     /// Messages keep their joiners (content rule); only the label folds.
     #[test]
     fn tenant_labels_fold_every_invisible_range() {
-        for invisible in ["\u{200B}", "\u{2062}", "\u{FE0F}", "\u{600}"] {
+        for invisible in [
+            "\u{200B}",
+            "\u{2062}",
+            "\u{FE0F}",
+            "\u{600}",
+            "\u{180F}",
+            "\u{1D173}",
+            "\u{FFF9}",
+            "\u{E0001}",
+            "\u{A0}",
+        ] {
             let mut r = record();
             r.tenant = format!("acme{invisible}corp");
             let human = r.render_human();
@@ -1407,9 +1421,16 @@ mod tests {
             !human.contains('\u{200B}'),
             "no invisible survives in the human line: {human:?}"
         );
+        // Exact truncated value: 11 folded chars plus the ellipsis. A bare
+        // `contains("acme�corpo")` would pass with and without truncation,
+        // so the missing tail is asserted too.
         assert!(
-            human.contains("acme\u{FFFD}corpo"),
+            human.contains("acme\u{FFFD}corpor\u{2026}"),
             "the folded tenant truncates to the column: {human:?}"
+        );
+        assert!(
+            !human.contains("corporation-wide"),
+            "the tail must be cut, not merely folded: {human:?}"
         );
         let json = r.render_json();
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");

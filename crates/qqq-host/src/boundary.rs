@@ -159,11 +159,17 @@ pub fn render_for_diagnostic(value: &str) -> String {
             // get their own arm sharing the predicate with the trap escaper.
             // Invisible format characters fold too: this renders guest values
             // into operator-facing diagnostics, and a diagnostic line must
-            // never contain a character no reader can see.
+            // never contain a character no reader can see. Non-space
+            // whitespace (NBSP twins the ASCII space) folds for the same
+            // reason; the ASCII space itself stays readable.
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() || is_layout_forgery(c) || is_invisible_format(c) => {
+            c if c.is_control()
+                || (c.is_whitespace() && c != ' ')
+                || is_layout_forgery(c)
+                || is_invisible_format(c) =>
+            {
                 // Non-printable: show the code point rather than the byte, so a
                 // reader can tell what it was. `write!` into the `String` rather
                 // than `push_str(&format!(..))`, which allocates a temporary for
@@ -1414,6 +1420,14 @@ mod tests {
             rendered.contains("\\u{200b}") && rendered.contains("\\u{2061}"),
             "each invisible escapes visibly: {rendered:?}"
         );
+        // A non-breaking space twins the ASCII space: it escapes rather
+        // than passing as a lookalike blank.
+        let nbsp = render_for_diagnostic("ok\u{A0}forged");
+        assert!(
+            !nbsp.contains('\u{A0}'),
+            "NBSP must not pass through: {nbsp:?}"
+        );
+        assert!(nbsp.contains("\\u{a0}"), "NBSP escapes visibly: {nbsp:?}");
     }
 
     #[test]

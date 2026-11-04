@@ -2724,6 +2724,48 @@ allow_origins = ["https://app.example.com"]
         }
     }
 
+    /// A tenant label no reader can distinguish from another is dead
+    /// configuration with a spoofing shape: `acme` and `acme\u{200B}` would
+    /// be two tenants in every renderer and one tenant to every reader.
+    /// The labels route through `TenantId`, so anything the policy layer
+    /// refuses — invisibles, controls, quotes — is refused here at parse.
+    /// Written with TOML `\uXXXX` escapes (not literals) so the fixture
+    /// stays reviewable.
+    #[test]
+    fn tenant_hosts_reject_invisible_labels() {
+        for (toml_escape, why) in [
+            ("\\u200B", "zero-width space"),
+            ("\\u00A0", "non-breaking space"),
+            ("\\u202E", "bidi override"),
+            ("\\\"", "quote"),
+        ] {
+            let text = format!(
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [server.tenants]\nhosts = {{ \"shop.example.com\" = \"acme{toml_escape}corp\" }}\n"
+            );
+            let err = Manifest::parse(&text)
+                .expect_err(&format!("invisible {why} label must be refused"));
+            assert!(
+                err.to_string().contains("server.tenants"),
+                "the error must name the table: {err}"
+            );
+        }
+        // Ordinary labels — including interior ASCII spaces — still parse.
+        let m = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = { \"shop.example.com\" = \"John Doe\" }\n",
+        )
+        .expect("spaced labels must parse");
+        assert_eq!(
+            m.server
+                .tenants
+                .expect("tenants")
+                .hosts
+                .get("shop.example.com"),
+            Some(&"John Doe".to_owned())
+        );
+    }
+
     /// Component artifact names are bare Cargo package names: anything that
     /// cannot name a built artifact — a control character, a path
     /// separator, parent navigation, or a file suffix — is dead

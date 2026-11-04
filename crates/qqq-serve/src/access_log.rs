@@ -413,7 +413,11 @@ impl Record {
         let _ = write!(out, "\"level\":{}", json_string(self.level.as_str()));
         let _ = write!(out, ",\"trace_id\":{}", json_string(self.trace_id.as_str()));
         let _ = write!(out, ",\"span_id\":{}", json_string(self.span_id.as_str()));
-        let _ = write!(out, ",\"tenant\":{}", json_string(&self.tenant));
+        let _ = write!(
+            out,
+            ",\"tenant\":{}",
+            json_string(&fold_label_invisibles(&self.tenant))
+        );
         let _ = write!(out, ",\"component\":{}", json_string(&self.component));
         let _ = write!(out, ",\"manifest_rev\":{}", json_string(&self.manifest_rev));
         let _ = write!(out, ",\"msg\":{}", json_string(&self.msg));
@@ -458,7 +462,7 @@ impl Record {
             self.level.as_upper(),
             self.trace_id.as_str(),
             self.span_id.as_str(),
-            one_line(&truncate(&self.tenant, 12)),
+            one_line(&fold_label_invisibles(&truncate(&self.tenant, 12))),
             one_line(&self.component),
             one_line(&self.manifest_rev)
         );
@@ -882,6 +886,10 @@ fn truncate(s: &str, max: usize) -> String {
 /// The replacement is `U+FFFD` rather than a deletion or an escape: a line with a
 /// visibly broken character tells a reader that something was there, while silently
 /// dropping the byte could make two different forged messages render identically.
+///
+/// U+0085 folds through the `is_control` arm (C1 controls are controls);
+/// the shared predicate is what catches the separators and bidi overrides,
+/// which are not.
 #[must_use]
 fn one_line(s: &str) -> String {
     // `is_control` misses separators and bidi overrides; the shared predicate
@@ -896,6 +904,31 @@ fn one_line(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_control() || qqq_host::is_layout_forgery(c) {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Fold invisible format characters in an identifier for rendering.
+///
+/// Scoped to labels (tenant names) rather than widening [`one_line`]:
+/// [`one_line`] renders messages too, and messages legitimately carry
+/// joiners (emoji sequences) that must survive. Tenant labels are
+/// identifiers — no legitimate label contains a zero-width space — so an
+/// invisible there folds. Applied before the field encoder, so controls
+/// still escape precisely (`\uXXXX` in JSON) rather than folding.
+#[must_use]
+fn fold_label_invisibles(label: &str) -> String {
+    if !label.chars().any(qqq_host::is_invisible_format) {
+        return label.to_owned();
+    }
+    label
+        .chars()
+        .map(|c| {
+            if qqq_host::is_invisible_format(c) {
                 '\u{FFFD}'
             } else {
                 c
@@ -1196,11 +1229,34 @@ mod tests {
             "no invisible layout survives: {clean:?}"
         );
         assert_eq!(clean.chars().filter(|c| *c == '\u{FFFD}').count(), 2);
-        // C1 controls and the zero-width no-break space fold the same way:
-        // U+0085 is not `is_control`, and U+FEFF is a layout-forger, so both
-        // need the shared predicate to be caught.
+        // U+0085 folds through the `is_control` arm, not the predicate (C1
+        // controls are controls); U+FEFF is a layout-forger, so it needs the
+        // shared predicate. Both pins stay: the first guards the control arm,
+        // the second the predicate arm.
         assert_eq!(one_line("a\u{85}b"), "a\u{FFFD}b");
         assert_eq!(one_line("a\u{FEFF}b"), "a\u{FFFD}b");
+    }
+
+    /// An invisible format character in a tenant label folds in both
+    /// encodings: the label is an identifier, and `acme` vs `acme\u{200B}`
+    /// must not render identically. Messages keep their joiners (emoji);
+    /// only the label field is scoped this way.
+    #[test]
+    fn tenant_labels_fold_invisibles_in_both_encodings() {
+        let mut r = record();
+        r.tenant = "acme\u{200B}corp".to_owned();
+        let human = r.render_human();
+        assert!(
+            human.contains("acme\u{FFFD}corp"),
+            "the human tenant field must fold: {human:?}"
+        );
+        assert!(
+            !human.contains('\u{200B}'),
+            "no invisible survives in the human line: {human:?}"
+        );
+        let json = r.render_json();
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["tenant"], "acme\u{FFFD}corp");
     }
 
     /// **The two encodings carry the same fields.**

@@ -1051,6 +1051,17 @@ fn write_tenant_counters(m: &HttpMetrics, out: &mut String) {
     ] {
         let _ = writeln!(out, "# HELP {name} {help}");
         let _ = writeln!(out, "# TYPE {name} counter");
+        // Aggregate by ESCAPED label: two raw-distinct names that fold
+        // identically (a separator tenant and a bidi tenant both render as
+        // `evil�tenant`) must not emit two lines with the same label set —
+        // Prometheus rejects duplicate series, which would turn an
+        // adversarial name pair into a scrape outage. The registry stays
+        // exact (per-raw-name counters, so attribution never merges); only
+        // the exposition merges what no reader can tell apart, summing with
+        // saturation. A `BTreeMap` keeps the emission order deterministic
+        // (§10.5), and aggregation can only shrink the bounded series count,
+        // never grow it.
+        let mut series: BTreeMap<String, u64> = BTreeMap::new();
         for index in 0..=ceiling + 1 {
             let label = m
                 .tenants
@@ -1065,11 +1076,13 @@ fn write_tenant_counters(m: &HttpMetrics, out: &mut String) {
             if n == 0 {
                 continue;
             }
-            let _ = writeln!(
-                out,
-                "{name}{{tenant=\"{}\"}} {n}",
-                prometheus_escape(&label)
-            );
+            series
+                .entry(prometheus_escape(&label))
+                .and_modify(|v| *v = v.saturating_add(n))
+                .or_insert(n);
+        }
+        for (label, n) in &series {
+            let _ = writeln!(out, "{name}{{tenant=\"{label}\"}} {n}");
         }
     }
 }
@@ -1279,14 +1292,19 @@ mod tests {
             text.contains("tenant=\"evil\\\" tenant\""),
             "the quote must be escaped: {text}"
         );
-        // Both invisible tenants fold to the same visible label: the registry
-        // still counts them as two series (attribution stays exact), while no
-        // reader sees a raw separator or bidi override. Two identical labels
-        // is why the count below is exact, not a lower bound.
+        // Both invisible tenants fold to the same visible label, so the
+        // exposition carries ONE merged series: two lines with the same
+        // label set would be a duplicate series, which Prometheus rejects.
+        // The registry still counts them as two series (attribution stays
+        // exact), and the merged line sums both tenants' bytes.
         assert_eq!(
             text.matches("tenant=\"evil\u{FFFD}tenant\"").count(),
-            2,
-            "separator and bidi tenants must both render folded: {text}"
+            1,
+            "folded tenants must merge into one series line: {text}"
+        );
+        assert!(
+            text.contains("tenant=\"evil\u{FFFD}tenant\"} 10"),
+            "the merged series sums both tenants' bytes: {text}"
         );
         assert!(
             !text.contains('\u{2028}') && !text.contains('\u{202E}'),
@@ -1294,8 +1312,8 @@ mod tests {
         );
         assert_eq!(
             text.matches("tenant=").count(),
-            3,
-            "exactly the three recorded tenants render, one label each: {text}"
+            2,
+            "the quote tenant and the one merged folded series: {text}"
         );
         // And every metric line must still have exactly one label list.
         for line in text.lines().filter(|l| !l.starts_with('#')) {

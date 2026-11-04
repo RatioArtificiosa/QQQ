@@ -57,13 +57,15 @@
 use std::fmt::Write as _;
 
 use crate::audit::{AuditStream, LedgerError, Outcome};
-use qqq_core::text::is_layout_forgery;
+use qqq_core::text::{is_invisible_format, is_layout_forgery};
 
 /// Escape a string for embedding in a JSON string literal.
 ///
 /// Shares the rule with `qqq-run`'s own helper through the shared
-/// `is_layout_forgery` predicate rather than a parallel list: DEL, C1, and
-/// the Unicode separators all escape, and the two encoders cannot drift.
+/// predicates rather than a parallel list: DEL, C1, the Unicode separators,
+/// and invisible format characters all escape (`\uXXXX` is valid JSON, so
+/// unlike the Prometheus exposition nothing is lost), and the two encoders
+/// cannot drift.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -73,7 +75,7 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() || is_layout_forgery(c) => {
+            c if c.is_control() || is_layout_forgery(c) || is_invisible_format(c) => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c => out.push(c),
@@ -636,6 +638,11 @@ mod tests {
         assert_eq!(json_escape(r"a\b"), r"a\\b");
         assert_eq!(json_escape("a\nb"), r"a\nb");
         assert_eq!(json_escape("a\u{1}b"), r"a\u0001b");
+        // Layout-forgers and invisible format characters escape too: an
+        // audit row no reader can see is a row no auditor can verify, and
+        // `\uXXXX` is valid JSON so nothing is lost by escaping.
+        assert_eq!(json_escape("a\u{202E}b"), r"a\u202eb");
+        assert_eq!(json_escape("a\u{200B}b"), r"a\u200bb");
         // And the whole document still parses with a control character present.
         let s = stream_with(&[(Outcome::Denied, qqq_cap::capability::Capability::FsWrite)]);
         let sarif = to_sarif(&s).expect("intact chain");

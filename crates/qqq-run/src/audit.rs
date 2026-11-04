@@ -300,8 +300,13 @@ pub struct RuleInfo {
 ///
 /// A `\n` or ANSI escape in rendered text forges lines on the reader's
 /// terminal; layout-forgers (separators, bidi overrides — see
-/// `qqq_cap::text`) reorder or break the visible text the same way. The
-/// replacement is U+FFFD rather than a space or a deletion: a visibly broken
+/// `qqq_cap::text`) reorder or break the visible text the same way. Invisible
+/// format characters fold too: build output is guest- and compiler-influenced
+/// text rendered to the operator's terminal, and a zero-width space there is
+/// the same spoofing primitive. Joiners that build legitimate emoji are
+/// sacrificed deliberately: a diagnostic line must never contain a character
+/// no reader can see, and an emoji that renders as `�` still names its place.
+/// The replacement is U+FFFD rather than a space or a deletion: a visibly broken
 /// character tells the reader something was there, while dropping the byte
 /// could make two different forged messages render identically. Mirrors
 /// `one_line` in `qqq-core` and the access-log redactor, which face the same
@@ -309,14 +314,19 @@ pub struct RuleInfo {
 /// `pub(crate)` so the guest failure path shares it: guest-influenced error
 /// text reaches the operator's log through the same shape.
 pub(crate) fn sanitize_log_line(s: &str) -> String {
-    if s.chars()
-        .all(|c| !c.is_control() && !qqq_cap::text::is_layout_forgery(c))
-    {
+    if s.chars().all(|c| {
+        !c.is_control()
+            && !qqq_cap::text::is_layout_forgery(c)
+            && !qqq_cap::text::is_invisible_format(c)
+    }) {
         return s.to_owned();
     }
     s.chars()
         .map(|c| {
-            if c.is_control() || qqq_cap::text::is_layout_forgery(c) {
+            if c.is_control()
+                || qqq_cap::text::is_layout_forgery(c)
+                || qqq_cap::text::is_invisible_format(c)
+            {
                 '\u{FFFD}'
             } else {
                 c
@@ -804,6 +814,8 @@ pub fn parse_fail_on(text: &str) -> Result<Severity> {
 /// U+2028/U+2029 are valid JSON but were line terminators in JavaScript
 /// string literals before ES2019; a consumer parsing SARIF with an old
 /// engine would throw on the raw characters, so they escape like controls.
+/// Invisible format characters escape the same way: `\u200b` is valid JSON,
+/// and an audit row no reader can see is a row no auditor can verify.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -813,7 +825,10 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() || qqq_cap::text::is_layout_forgery(c) => {
+            c if c.is_control()
+                || qqq_cap::text::is_layout_forgery(c)
+                || qqq_cap::text::is_invisible_format(c) =>
+            {
                 use std::fmt::Write as _;
                 let _ = write!(out, "\\u{:04x}", u32::from(c));
             }
@@ -1510,6 +1525,7 @@ mod tests {
         assert_eq!(json_escape("a\u{2028}b"), "a\\u2028b");
         assert_eq!(json_escape("a\u{2029}b"), "a\\u2029b");
         assert_eq!(json_escape("a\u{202e}b"), "a\\u202eb");
+        assert_eq!(json_escape("a\u{200b}b"), "a\\u200bb");
         let doc = format!(
             "{{\"text\":\"{}\"}}",
             json_escape("he said \"hi\"\nthen left")

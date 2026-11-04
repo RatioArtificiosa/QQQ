@@ -952,6 +952,15 @@ mod tests {
                 .any(|c| c.is_control() || qqq_cap::text::is_layout_forgery(c)),
             "bidi overrides must not reach the terminal: {clean_bidi:?}"
         );
+        // Invisible format characters fold as well: the sanitizer is a
+        // diagnostic renderer, and a diagnostic line must never contain a
+        // character no reader can see — even at the cost of an emoji joiner.
+        let zwsp = qqq_core::Error::new(qqq_core::ErrorCode::CompilationFailed, "fail\u{200B}der");
+        let clean_zwsp = reload_message(Some(&zwsp));
+        assert!(
+            !clean_zwsp.chars().any(qqq_cap::text::is_invisible_format),
+            "invisibles must not reach the terminal: {clean_zwsp:?}"
+        );
         assert!(clean.contains("fail"), "{clean}");
     }
 

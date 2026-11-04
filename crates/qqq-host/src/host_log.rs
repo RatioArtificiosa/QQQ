@@ -409,10 +409,11 @@ pub fn format_record(record: &LogRecord) -> String {
 
 fn quote(s: &str) -> String {
     use std::fmt::Write as _;
-    // Byte checks cannot see multibyte characters: U+0085 rides two bytes past
-    // the ASCII-control test. The trigger is therefore char-level, and the
-    // shared layout-forgery predicate covers the separators and bidi controls
-    // that are not controls at all. Invisible format characters trigger
+    // Byte checks cannot see multibyte characters: U+2028 rides three bytes
+    // past an ASCII scan. The trigger is therefore char-level, and the shared
+    // layout-forgery predicate covers the separators and bidi controls that
+    // are not controls at all. (C1 controls like U+0085 are controls, so the
+    // `is_control` arm catches them; the char-level scan is for what it misses.) Invisible format characters trigger
     // quoting too — but only quoting, never escaping: a joiner may be
     // legitimate content (emoji, Persian orthography), so the value is
     // preserved exactly and the quotes mark it as attributed, not bare.

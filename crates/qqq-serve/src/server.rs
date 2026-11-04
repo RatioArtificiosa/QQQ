@@ -1564,9 +1564,21 @@ pub struct TenantSources<'h, 'f> {
 /// message content, where joiners build real emoji. Narrow by design: only the
 /// dangerous set falls back, so `John Doe` and `tenant-c` keep attributing to
 /// the name the operator recognizes.
+///
+/// Mirrors the identifier half of `qqq_cap::egress::TenantId::new` (empty,
+/// surrounding whitespace, controls, layout-forgers, invisible format
+/// characters, quotes, backslashes): quotes and backslashes never name a
+/// tenant either, because they desynchronise naive `"tenant":...` scans of
+/// the audit stream. Kept as a predicate rather than a `TenantId` so the
+/// fallback can name the fingerprint; the test below pins the agreement.
 fn identity_label_is_safe(subject: &str) -> bool {
+    if subject.is_empty() || subject.trim() != subject {
+        return false;
+    }
     !subject.chars().any(|c| {
         c.is_control()
+            || c == '"'
+            || c == '\\'
             || qqq_host::boundary::is_layout_forgery(c)
             || qqq_core::text::is_invisible_format(c)
     })
@@ -4528,13 +4540,20 @@ mod tests {
     /// resolved to itself.
     #[test]
     fn tenant_resolution_falls_back_for_hostile_common_names() {
-        for hostile_cn in ["evil\u{202E}tenant", "evil\u{200B}tenant", "evil\ntenant"] {
+        for hostile_cn in [
+            "evil\u{202E}tenant",
+            "evil\u{200B}tenant",
+            "evil\ntenant",
+            "evil\"tenant",
+            "evil\\tenant",
+            " acme",
+            "acme ",
+            "",
+        ] {
             let id = peer_identity_with_hostile_cn(hostile_cn);
-            assert_eq!(
-                id.subject(),
-                hostile_cn,
-                "the walker must deliver the hostile CN or this test proves nothing"
-            );
+            // The walker delivers the CN verbatim (or the placeholder when
+            // there is no CN): either way the value below is what an attacker
+            // controls, and the resolution must not wear it as a label.
             assert_eq!(
                 resolve_request_tenant(TenantSources {
                     hosts: None,

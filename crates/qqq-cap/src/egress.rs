@@ -78,12 +78,15 @@ impl TenantId {
     /// # Errors
     ///
     /// Rejects an empty name, a name with leading or trailing whitespace, a
-    /// name with control characters, and a name with invisible layout-forgers
-    /// ([`crate::text`]: line/paragraph separators, bidi overrides). The first
-    /// two would make two spellings of the same tenant compare unequal — a
-    /// policy that applies to `"acme"` but not `"acme "` is a policy with a
-    /// hole nobody can see — and the rest would let a name forge a log line
-    /// or reorder the text around it.
+    /// name with control characters, a name with layout-forgers
+    /// ([`crate::text`]: line/paragraph separators, bidi overrides), a name
+    /// with invisible format characters (zero-width spaces and joiners and
+    /// their kin — distinct keys no reader can tell apart), and a name with
+    /// quotes or backslashes (they would desynchronise the hand-written
+    /// audit JSON parser). The first two would make two spellings of the same
+    /// tenant compare unequal — a policy that applies to `"acme"` but not
+    /// `"acme "` is a policy with a hole nobody can see — and the rest would
+    /// let a name forge a log line or reorder the text around it.
     pub fn new(name: &str) -> Result<Self, String> {
         if name.is_empty() {
             return Err("a tenant id must not be empty".to_owned());
@@ -1231,6 +1234,7 @@ mod tests {
             "acme\u{200C}corp",
             "acme\u{200D}corp",
             "acme\u{2060}corp",
+            "acme\u{2061}corp",
             "acme\u{AD}corp",
             "acme\u{180E}corp",
             "acme\u{FE0F}corp",

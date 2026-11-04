@@ -2943,21 +2943,34 @@ fn free_addr() -> std::net::SocketAddr {
 /// `read`).
 fn connect(addr: &std::net::SocketAddr) -> std::net::TcpStream {
     let stream = std::net::TcpStream::connect(addr).expect("connect");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("timeouts must set");
+    arm_read_timeout(&stream, 10);
     stream
         .set_write_timeout(Some(std::time::Duration::from_secs(10)))
         .expect("timeouts must set");
     stream
 }
 
+/// Arm a read bound, tolerating a socket the peer already reset.
+///
+/// On macOS, `set_read_timeout` on a reset socket fails with `EINVAL`
+/// instead of succeeding: the server answered (a refusal) and closed with
+/// unread request bytes outstanding, so the close carried RST rather than
+/// FIN. A dead socket's reads return at once (`Ok(0)` on FIN, an error on
+/// RST), so no bound is needed to terminate the loop — while a live socket
+/// still gets one, so a silent server fails the test instead of hanging
+/// the suite. Any *other* arming failure is a harness bug and stays loud.
+fn arm_read_timeout(stream: &std::net::TcpStream, secs: u64) {
+    match stream.set_read_timeout(Some(std::time::Duration::from_secs(secs))) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
+        Err(e) => panic!("timeouts must set: {e}"),
+    }
+}
+
 /// Read one response head (through the blank line) with a bound.
 fn read_head(stream: &mut std::net::TcpStream) -> Vec<u8> {
     use std::io::Read as _;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("timeouts must set");
+    arm_read_timeout(stream, 10);
     let mut buf = Vec::new();
     let mut one = [0u8; 1];
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -2971,7 +2984,16 @@ fn read_head(stream: &mut std::net::TcpStream) -> Vec<u8> {
             Ok(_) => buf.push(one[0]),
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // The bound elapsed without a byte: keep waiting for the head
+                // until the deadline above fires.
+            }
+            // A reset peer is a closed peer: return what arrived rather than
+            // failing the harness. Callers assert on the bytes, so a
+            // truncated answer still fails loudly — with the content, not a
+            // harness panic.
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
             Err(e) => panic!("the head must read: {e}"),
         }
     }
@@ -2981,9 +3003,7 @@ fn read_head(stream: &mut std::net::TcpStream) -> Vec<u8> {
 /// Read until the peer closes or the bound elapses.
 fn read_rest(stream: &mut std::net::TcpStream, secs: u64) -> Vec<u8> {
     use std::io::Read as _;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(secs)))
-        .expect("timeouts must set");
+    arm_read_timeout(stream, secs);
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -2996,6 +3016,13 @@ fn read_rest(stream: &mut std::net::TcpStream, secs: u64) -> Vec<u8> {
             {
                 break;
             }
+            // A reset peer is a closed peer: return what arrived rather than
+            // failing the harness. Callers assert on the bytes, so a
+            // truncated answer still fails loudly — with the content, not a
+            // harness panic. This is the same race as the arming fix above:
+            // unread request bytes outstanding turn the server's close into
+            // RST instead of FIN.
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
             Err(e) => panic!("the body must read: {e}"),
         }
         if buf.len() > 1_000_000 {
@@ -3003,6 +3030,58 @@ fn read_rest(stream: &mut std::net::TcpStream, secs: u64) -> Vec<u8> {
         }
     }
     buf
+}
+
+/// Arming a read bound never panics and a dead socket's reads terminate.
+///
+/// Regression test for a macOS-only CI failure: a server that answered (a
+/// refusal) and closed with unread request bytes outstanding closes with
+/// RST rather than FIN, and `set_read_timeout` on the reset socket fails
+/// with `EINVAL` instead of succeeding. The old `.expect("timeouts must
+/// set")` turned that race into a red gate. The peer here is dropped with
+/// unread bytes outstanding to force the reset path; the test then asserts
+/// the two properties the production path depends on rather than any
+/// platform's errno spelling.
+#[test]
+fn a_reset_socket_still_terminates_reads() {
+    use std::io::{Read as _, Write as _};
+    use std::time::{Duration, Instant};
+
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("a free loopback port must bind");
+    let addr = listener
+        .local_addr()
+        .expect("a bound socket has an address");
+    let mut client = std::net::TcpStream::connect(addr).expect("connect");
+    let (server, _) = listener.accept().expect("accept");
+    // Unread by the peer on purpose: the close below carries RST, not FIN.
+    client
+        .write_all(b"unread-by-peer")
+        .expect("the bytes must send");
+    drop(server);
+
+    // Wait for the reset (or close) to land so the test is deterministic,
+    // not racy: either terminal state ends the loop below.
+    let start = Instant::now();
+    let mut probe = [0u8; 1];
+    loop {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the peer's close must arrive"
+        );
+        if !matches!(
+            client.read(&mut probe),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted
+        ) {
+            break;
+        }
+    }
+
+    // Must not panic, whatever errno the platform produced for the dead
+    // socket, and the subsequent read must terminate rather than hang.
+    arm_read_timeout(&client, 5);
+    let rest = read_rest(&mut client, 5);
+    let _ = rest;
 }
 
 /// Write one masked client text frame, per RFC 6455 §5.3.

@@ -1164,135 +1164,248 @@ fn unsafe_line_is_violation(line: &str) -> bool {
     // end of line hides the rest of the line -- the multiline residual,
     // fail-unsafe in theory; in practice the audit tool threads raw state
     // across lines, and this scan's regression tests pin the single-line
-    // shapes. Block comments left open at end of line are the same class of
-    // residual, single-line by the same design. Precision here must never
+    // shapes. Newlines inside the input reset plain strings, chars and line
+    // comments (none of them can legally span lines) but thread raw strings
+    // and block comments (both can): the caller feeds adjacent line pairs
+    // joined by `\n`, so a dangling `unsafe` at end of line still finds its
+    // opener on the next one (H-r3-H1). Precision here must never
     // be mistaken for completeness.
     let bytes = line.as_bytes();
     let mut i = 0;
-    let mut in_string = false;
-    let mut in_char = false;
-    let mut in_raw: Option<usize> = None;
-    // Rust block comments nest; `//` runs to end of line. Both are tracked
-    // so comment-held quotes stay inert (H2); the `unsafe` check below runs
-    // in comment text too, per the comments-match policy above.
-    let mut comment_depth: u32 = 0;
-    let mut in_line_comment = false;
-    while let Some(&b) = bytes.get(i) {
-        if let Some(n) = in_raw {
-            // Inside a raw string: no escapes, exact-count close only.
-            if b == b'"' {
-                let mut k = 0;
-                while bytes.get(i + 1 + k) == Some(&b'#') {
-                    k += 1;
-                }
-                if k == n {
-                    in_raw = None;
-                    i += 1 + k;
-                    continue;
-                }
-            }
-            i += 1;
+    let mut st = ScanState::default();
+    while bytes.get(i).is_some() {
+        if step_literal_text(bytes, &mut i, &mut st) {
             continue;
         }
-        if in_string {
-            if b == b'\\' {
-                i += 2;
-                continue;
-            }
-            if b == b'"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_char {
-            if b == b'\\' {
-                i += 2;
-                continue;
-            }
-            if b == b'\'' {
-                in_char = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_line_comment || comment_depth > 0 {
-            if comment_depth > 0 {
-                if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                    comment_depth = comment_depth.saturating_sub(1);
-                    i += 2;
-                    continue;
-                }
-                if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-                    comment_depth += 1;
-                    i += 2;
-                    continue;
-                }
-            }
-            if is_unsafe_opener(line, bytes, i) {
+        if st.in_line_comment || st.comment_depth > 0 {
+            if step_comment_text(
+                line,
+                bytes,
+                &mut i,
+                &mut st.in_line_comment,
+                &mut st.comment_depth,
+            ) {
                 return true;
             }
-            i += 1;
             continue;
         }
-        if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
-            in_line_comment = true;
-            i += 2;
-            continue;
-        }
-        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            comment_depth += 1;
-            i += 2;
-            continue;
-        }
-        if b == b'"' {
-            if let Some(n) = raw_opener(line, i) {
-                in_raw = Some(n);
-            } else {
-                in_string = true;
-            }
-            i += 1;
-            continue;
-        }
-        if b == b'\'' {
-            let rest = line.get(i + 1..).unwrap_or("");
-            if rest.chars().take(3).collect::<String>().contains('\'') {
-                in_char = true;
-            }
-            i += 1;
-            continue;
-        }
-        if is_unsafe_opener(line, bytes, i) {
+        if step_code_text(line, bytes, &mut i, &mut st) {
             return true;
         }
-        i += 1;
     }
+    false
+}
+
+/// Track literal state (raw strings, plain strings, chars) plus the
+/// newline resets at `*i`. Returns true when the position was literal
+/// content or a newline (caller `continue`s); advances `*i` past escapes
+/// and closers. Raw strings and block comments thread through `\n` (both
+/// can span lines); plain strings, chars and line comments reset (none
+/// can) — carrying an unclosed quote would hide the next line (miss).
+fn step_literal_text(bytes: &[u8], i: &mut usize, st: &mut ScanState) -> bool {
+    let Some(&b) = bytes.get(*i) else {
+        return false;
+    };
+    if let Some(n) = st.in_raw {
+        // Inside a raw string: no escapes, exact-count close only.
+        if b == b'"' {
+            let mut k = 0;
+            while bytes.get(*i + 1 + k) == Some(&b'#') {
+                k += 1;
+            }
+            if k == n {
+                st.in_raw = None;
+                *i += 1 + k;
+                return true;
+            }
+        }
+        *i += 1;
+        return true;
+    }
+    if st.in_string {
+        if b == b'\n' {
+            st.in_string = false;
+            *i += 1;
+            return true;
+        }
+        if b == b'\\' {
+            *i += 2;
+            return true;
+        }
+        if b == b'"' {
+            st.in_string = false;
+        }
+        *i += 1;
+        return true;
+    }
+    if st.in_char {
+        if b == b'\n' {
+            st.in_char = false;
+            *i += 1;
+            return true;
+        }
+        if b == b'\\' {
+            *i += 2;
+            return true;
+        }
+        if b == b'\'' {
+            st.in_char = false;
+        }
+        *i += 1;
+        return true;
+    }
+    if b == b'\n' {
+        // Newlines end line comments (block comments and raw strings
+        // thread through, handled in their own branches).
+        st.in_line_comment = false;
+        *i += 1;
+        return true;
+    }
+    false
+}
+
+/// Lexer state for one scan unit (a line, or a `\n`-joined pair): literal
+/// tracking plus comment tracking. One struct so the step helpers below
+/// take a single state argument instead of five.
+#[derive(Default)]
+struct ScanState {
+    in_string: bool,
+    in_char: bool,
+    in_raw: Option<usize>,
+    in_line_comment: bool,
+    comment_depth: u32,
+}
+
+/// One step outside strings/chars/comments: comment openers, literal
+/// openers, and the `unsafe`-opener check. Returns true on a violation;
+/// otherwise advances `*i` past what it consumed.
+fn step_code_text(line: &str, bytes: &[u8], i: &mut usize, st: &mut ScanState) -> bool {
+    let Some(&b) = bytes.get(*i) else {
+        return false;
+    };
+    if b == b'/' && bytes.get(*i + 1) == Some(&b'/') {
+        st.in_line_comment = true;
+        *i += 2;
+        return false;
+    }
+    if b == b'/' && bytes.get(*i + 1) == Some(&b'*') {
+        st.comment_depth += 1;
+        *i += 2;
+        return false;
+    }
+    if b == b'"' {
+        if let Some(n) = raw_opener(line, *i) {
+            st.in_raw = Some(n);
+        } else {
+            st.in_string = true;
+        }
+        *i += 1;
+        return false;
+    }
+    if b == b'\'' {
+        let rest = line.get(*i + 1..).unwrap_or("");
+        if rest.chars().take(3).collect::<String>().contains('\'') {
+            st.in_char = true;
+        }
+        *i += 1;
+        return false;
+    }
+    if is_unsafe_opener(line, bytes, *i, false) {
+        return true;
+    }
+    *i += 1;
+    false
+}
+
+/// One step while inside comment text (`in_line_comment || depth > 0`).
+/// Comment-held quotes never toggle string state (H2); the `unsafe` check
+/// still runs, per the comments-match policy. Returns true on a violation
+/// at this position; otherwise advances `*i` past what it consumed.
+fn step_comment_text(
+    line: &str,
+    bytes: &[u8],
+    i: &mut usize,
+    in_line_comment: &mut bool,
+    comment_depth: &mut u32,
+) -> bool {
+    let Some(&b) = bytes.get(*i) else {
+        return false;
+    };
+    if b == b'\n' {
+        // Newlines end line comments (block comments thread through, via
+        // the depth branch below). Without this reset a `//`-commented
+        // keyword would govern a real block on the next line — precisely
+        // backwards: the commented keyword governs nothing.
+        *in_line_comment = false;
+        *i += 1;
+        return false;
+    }
+    if *comment_depth > 0 {
+        if b == b'*' && bytes.get(*i + 1) == Some(&b'/') {
+            *comment_depth = comment_depth.saturating_sub(1);
+            *i += 2;
+            return false;
+        }
+        if b == b'/' && bytes.get(*i + 1) == Some(&b'*') {
+            *comment_depth += 1;
+            *i += 2;
+            return false;
+        }
+    }
+    if is_unsafe_opener(line, bytes, *i, *in_line_comment) {
+        return true;
+    }
+    *i += 1;
     false
 }
 
 /// The `unsafe`-opener test at byte `i`: the word `unsafe` on a non-identifier
 /// boundary followed by an opener — `{`, `fn`, `impl`, `extern`, `trait` —
-/// with only whitespace and block comments between them (H3: a comment
-/// sitting between the keyword and the brace used to hide the opener;
-/// nesting resolves, so text inside the comment never decides).
-fn is_unsafe_opener(line: &str, bytes: &[u8], i: usize) -> bool {
+/// with only whitespace (newlines included), and block comments between
+/// them (H3: a comment sitting between the keyword and the brace used to
+/// hide the opener; H-r3-H1: `unsafe` may dangle at end of line with the
+/// opener on the next — the caller feeds adjacent line pairs, and the gap
+/// skips the joining newline; nesting resolves, so text inside the comment
+/// never decides).
+///
+/// `same_line_only` stops the gap at `\n`: inside a `//` comment the
+/// keyword governs nothing on the next line (`// unsafe` plus a real block
+/// is precisely not a violation), while block comments and code see across.
+fn is_unsafe_opener(line: &str, bytes: &[u8], i: usize, same_line_only: bool) -> bool {
     if bytes.get(i) != Some(&b'u')
         || !line.get(i..).is_some_and(|t| t.starts_with("unsafe"))
-        || !(i == 0 || bytes.get(i - 1).is_none_or(|p| !is_ident(*p)))
+        // LOW r3: the boundary is Unicode-aware like `starts_word` below —
+        // a byte check reads `é` as two non-ident bytes and flagging
+        // `éunsafe{` as a violation (it is one identifier, not the keyword).
+        || !(i == 0
+            || line
+                .get(..i)
+                .is_none_or(|pre| !pre.ends_with(|c: char| c.is_alphanumeric() || c == '_')))
     {
         return false;
     }
     let mut j = i + "unsafe".len();
     loop {
-        while bytes.get(j).is_some_and(|x| *x == b' ' || *x == b'\t') {
-            j += 1;
+        while let Some(&x) = bytes.get(j) {
+            if x == b' ' || x == b'\t' {
+                j += 1;
+            } else if x == b'\n' {
+                if same_line_only {
+                    return false;
+                }
+                j += 1;
+            } else {
+                break;
+            }
         }
         if bytes.get(j) == Some(&b'/') && bytes.get(j + 1) == Some(&b'*') {
             j += 2;
             let mut depth: u32 = 1;
             let mut closed = false;
             while let Some(&c) = bytes.get(j) {
-                if c == b'/' && bytes.get(j + 1) == Some(&b'*') {
+                if c == b'\n' && same_line_only {
+                    return false;
+                } else if c == b'/' && bytes.get(j + 1) == Some(&b'*') {
                     depth += 1;
                     j += 2;
                 } else if c == b'*' && bytes.get(j + 1) == Some(&b'/') {
@@ -1323,10 +1436,6 @@ fn is_unsafe_opener(line: &str, bytes: &[u8], i: usize) -> bool {
         || starts_word(rest, "trait")
 }
 
-fn is_ident(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
 /// A `"` at byte `i` opens a raw string iff walking back over `#`s lands on
 /// `r`, `br` or `cr` with a non-identifier char (or the line start) before
 /// it — the lexer's own rule, so `bar"` stays an identifier plus a string.
@@ -1349,7 +1458,13 @@ fn raw_opener(line: &str, i: usize) -> Option<usize> {
         return None;
     };
     let start = j - prefix_len;
-    if start > 0 && bytes.get(start - 1).is_some_and(|b| is_ident(*b)) {
+    // Same Unicode-aware boundary as the opener test: a non-ASCII
+    // identifier char before the `r` makes it an identifier, not a prefix.
+    if start > 0
+        && line
+            .get(..start)
+            .is_some_and(|pre| pre.ends_with(|c: char| c.is_alphanumeric() || c == '_'))
+    {
         return None;
     }
     Some(hashes)
@@ -1453,7 +1568,13 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
             return false;
         };
         let rest = rest.trim_start_matches([' ', '\t']);
-        let Some(rest) = rest.strip_prefix("forbid(") else {
+        // Space between the lint path and its list is legal Rust
+        // (`#![forbid (unsafe_code)]`), so it cannot count as absent.
+        let Some(rest) = rest.strip_prefix("forbid") else {
+            return false;
+        };
+        let rest = rest.trim_start_matches([' ', '\t']);
+        let Some(rest) = rest.strip_prefix('(') else {
             return false;
         };
         let Some(end) = rest.find(')') else {
@@ -1493,6 +1614,82 @@ fn starts_word(s: &str, word: &str) -> bool {
             .is_none_or(|c| !c.is_alphanumeric() && c != '_')
 }
 
+/// Scan one crate's `.rs` files for `unsafe` code positions, recording
+/// violations. Split out of `run_unsafe_scan` so each lane stays readable.
+fn scan_crate_rs_files(
+    workspace: &Path,
+    dir: &Path,
+    violations: &mut Vec<String>,
+    files_scanned: &mut usize,
+) {
+    let mut files = Vec::new();
+    let mut dir_problems = Vec::new();
+    collect_rs_into(dir, &mut files, &mut dir_problems);
+    // M4: an unreadable directory fails the scan like an unreadable
+    // file — certifying the rest GREEN would vouch for code never seen.
+    violations.extend(dir_problems);
+    files.sort();
+    for f in &files {
+        let rel = f
+            .strip_prefix(workspace)
+            .unwrap_or(f)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Ok(text) = std::fs::read_to_string(f) else {
+            // An unreadable file is a scan failure, not a skip: skipping
+            // it would certify a tree the scanner never saw.
+            violations.push(format!("{rel}: unreadable, scan incomplete"));
+            continue;
+        };
+        *files_scanned += 1;
+        if rel.starts_with("crates/qqq-sys/") {
+            continue;
+        }
+        scan_rs_text(&rel, &text, violations);
+    }
+}
+
+/// Scan one file's text: every line alone, then every adjacent pair.
+/// The pair re-test closes the cross-line shape (H-r3-H1: `unsafe` dangling
+/// at end of line with the opener on the next); pairs whose lines already
+/// flagged are skipped to avoid double-reporting the same finding.
+fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut flagged: Vec<bool> = Vec::with_capacity(lines.len());
+    for (n, line) in lines.iter().enumerate() {
+        if unsafe_line_exempt(line) {
+            flagged.push(false);
+            continue;
+        }
+        if unsafe_line_is_violation(line) {
+            violations.push(format!("{rel}:{}:{line}", n + 1));
+            flagged.push(true);
+        } else {
+            flagged.push(false);
+        }
+    }
+    for (n, w) in lines.windows(2).enumerate() {
+        let [a, b] = w else { continue };
+        if flagged.get(n) == Some(&true) || flagged.get(n + 1) == Some(&true) {
+            continue;
+        }
+        let mut pair = String::with_capacity(a.len() + b.len() + 1);
+        pair.push_str(a);
+        pair.push('\n');
+        pair.push_str(b);
+        if unsafe_line_exempt(&pair) {
+            continue;
+        }
+        if unsafe_line_is_violation(&pair) {
+            violations.push(format!(
+                "{rel}:{}:cross-line `unsafe` opener (the keyword dangles at the end of line {})",
+                n + 2,
+                n + 1
+            ));
+        }
+    }
+}
+
 fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
     let mut violations = Vec::new();
     let mut missing = Vec::new();
@@ -1503,7 +1700,20 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             "cannot read crates/; the scan certifies nothing".to_owned(),
         );
     };
-    for e in rd.flatten() {
+    for e in rd {
+        // H-r3-H2: `flatten()` would silently drop an `Err` entry (I/O
+        // mid-listing) and certify the surviving files GREEN — the same
+        // fail-open shape M4 closed for unreadable directories.
+        let e = match e {
+            Ok(e) => e,
+            Err(e) => {
+                violations.push(format!(
+                    "{}: directory entry unreadable mid-listing, scan incomplete: {e}",
+                    workspace.join("crates").display()
+                ));
+                continue;
+            }
+        };
         if e.file_type().is_ok_and(|t| t.is_dir()) {
             crates.push(e.path());
         }
@@ -1526,38 +1736,7 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             // The scanner itself is scanned like every other crate: no
             // exception, and it must carry the forbid attribute to prove it.
         }
-        let mut files = Vec::new();
-        let mut dir_problems = Vec::new();
-        collect_rs_into(dir, &mut files, &mut dir_problems);
-        // M4: an unreadable directory fails the scan like an unreadable
-        // file — certifying the rest GREEN would vouch for code never seen.
-        violations.extend(dir_problems);
-        files.sort();
-        for f in &files {
-            let rel = f
-                .strip_prefix(workspace)
-                .unwrap_or(f)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let Ok(text) = std::fs::read_to_string(f) else {
-                // An unreadable file is a scan failure, not a skip: skipping
-                // it would certify a tree the scanner never saw.
-                violations.push(format!("{rel}: unreadable, scan incomplete"));
-                continue;
-            };
-            files_scanned += 1;
-            if rel.starts_with("crates/qqq-sys/") {
-                continue;
-            }
-            for (n, line) in text.lines().enumerate() {
-                if unsafe_line_exempt(line) {
-                    continue;
-                }
-                if unsafe_line_is_violation(line) {
-                    violations.push(format!("{rel}:{}:{line}", n + 1));
-                }
-            }
-        }
+        scan_crate_rs_files(workspace, dir, &mut violations, &mut files_scanned);
         if name != "qqq-sys" {
             // The attribute must be real code, not a comment mentioning it:
             // a commented-out forbid is one uncomment away from absent, so a
@@ -1619,7 +1798,19 @@ fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String
             return;
         }
     };
-    for e in rd.flatten() {
+    for e in rd {
+        // Same fail-loud contract as the caller (H-r3-H2): a dropped `Err`
+        // entry would certify a partial listing GREEN.
+        let e = match e {
+            Ok(e) => e,
+            Err(e) => {
+                problems.push(format!(
+                    "{}: directory entry unreadable mid-listing, scan incomplete: {e}",
+                    dir.display()
+                ));
+                continue;
+            }
+        };
         let p = e.path();
         if e.file_type().is_ok_and(|t| t.is_dir()) {
             collect_rs_into(&p, out, problems);
@@ -1651,11 +1842,16 @@ fn target_debug_dir(workspace: &Path) -> PathBuf {
     let via_env = std::env::var("CARGO_TARGET_DIR")
         .ok()
         .filter(|d| !d.is_empty());
+    // M-r3-MED: a failed `cargo metadata` (toolchain broken mid-gate)
+    // must not silently fall back to `workspace/target` and then fail as
+    // "missing; run the build step first" — check `success()` like the
+    // `git` and interpreter-discovery paths do.
     let via_metadata = Command::new("cargo")
         .args(["metadata", "--format-version=1", "--no-deps"])
         .current_dir(workspace)
         .output()
         .ok()
+        .filter(|o| o.status.success())
         .and_then(|o| parse_target_dir(&o.stdout));
     resolve_target_debug_dir(workspace, via_env.as_deref(), via_metadata)
 }
@@ -1697,15 +1893,33 @@ fn resolve_target_debug_dir(
 /// the quoted string, escapes included. Whitespace around the colon is
 /// skipped and `\uXXXX` escapes decoded, so a spaced or non-ASCII metadata
 /// answer still resolves instead of silently falling back to the default
-/// directory (L5: a false "missing; run the build step first"). Anything
-/// malformed yields `None` and the caller falls back.
+/// directory (L5: a false "missing; run the build step first"). Every key
+/// occurrence is tried in turn — the first hit may sit inside a string
+/// value (M-r3-MED) — and surrogate pairs combine; anything malformed
+/// yields `None` and the caller falls back.
 fn parse_target_dir(json: &[u8]) -> Option<PathBuf> {
     const KEY: &[u8] = b"\"target_directory\"";
-    let mut it = json
-        .windows(KEY.len())
-        .position(|w| w == KEY)
-        .and_then(|pos| json.get(pos + KEY.len()..))?
-        .iter();
+    let mut search = json;
+    while let Some(pos) = search.windows(KEY.len()).position(|w| w == KEY) {
+        let Some(after) = search.get(pos + KEY.len()..) else {
+            break;
+        };
+        if let Some(dir) = parse_target_dir_at(after) {
+            return Some(dir);
+        }
+        let Some(next) = search.get(pos + 1..) else {
+            break;
+        };
+        search = next;
+    }
+    None
+}
+
+/// Decode one key occurrence: colon, opening quote, then the escaped string.
+/// Surrogate pairs (`\uD83D\uDE00`) combine into the astral character; a
+/// lone surrogate is malformed and refuses this occurrence (M-r3-MED).
+fn parse_target_dir_at(json: &[u8]) -> Option<PathBuf> {
+    let mut it = json.iter();
     for b in it.by_ref() {
         if *b == b' ' || *b == b'\t' || *b == b'\n' || *b == b'\r' {
             continue;
@@ -1742,12 +1956,23 @@ fn parse_target_dir(json: &[u8]) -> Option<PathBuf> {
             b'"' => out.push(b'"'),
             b'/' => out.push(b'/'),
             b'u' => {
-                let mut quad = [0u8; 4];
-                for q in &mut quad {
-                    *q = *it.next()?;
-                }
-                let hex = std::str::from_utf8(&quad).ok()?;
-                let cp = u32::from_str_radix(hex, 16).ok()?;
+                let cp = parse_hex4(&mut it)?;
+                let cp = if (0xD800..0xDC00).contains(&cp) {
+                    // High surrogate: the low half must follow immediately.
+                    if *it.next()? != b'\\' || *it.next()? != b'u' {
+                        return None;
+                    }
+                    let lo = parse_hex4(&mut it)?;
+                    if !(0xDC00..0xE000).contains(&lo) {
+                        return None;
+                    }
+                    0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+                } else if (0xDC00..0xE000).contains(&cp) {
+                    // Lone low surrogate: malformed.
+                    return None;
+                } else {
+                    cp
+                };
                 let ch = char::from_u32(cp)?;
                 let mut buf = [0u8; 4];
                 out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
@@ -1761,10 +1986,24 @@ fn parse_target_dir(json: &[u8]) -> Option<PathBuf> {
     std::str::from_utf8(&out).ok().map(PathBuf::from)
 }
 
+/// Four hex digits after `\u` as a code point number.
+fn parse_hex4(it: &mut std::slice::Iter<'_, u8>) -> Option<u32> {
+    let mut quad = [0u8; 4];
+    for q in &mut quad {
+        *q = *it.next()?;
+    }
+    let hex = std::str::from_utf8(&quad).ok()?;
+    u32::from_str_radix(hex, 16).ok()
+}
+
 /// The `--help` brevity standard (`DX-013`): at most 40 lines, all 16
-/// commands present with their leading spaces, and the loop proven to run.
+/// commands present as indented entries, and the loop proven to run.
 /// Counts from the process output like the CI pipe does — never held in a
 /// shell variable, which is the vacuity the CI comments warn about.
+/// Presence keys on the command as the first token of an *indented* line
+/// (LOW r3): pinning clap's exact four spaces would read a layout change
+/// as 16 missing commands, while an unindented prose match ("run the
+/// doctor …") must never count.
 fn help_check(output: &str) -> Result<(usize, usize), String> {
     let text = output.replace("\r\n", "\n");
     if text.is_empty() {
@@ -1775,8 +2014,10 @@ fn help_check(output: &str) -> Result<(usize, usize), String> {
     let lines = text.lines().count();
     let mut present = 0;
     for cmd in HELP_COMMANDS {
-        let needle = format!("    {cmd} ");
-        if text.lines().any(|l| l.starts_with(&needle)) {
+        if text
+            .lines()
+            .any(|l| l.starts_with([' ', '\t']) && l.split_whitespace().next() == Some(*cmd))
+        {
             present += 1;
         } else {
             return Err(format!("the help omits the {cmd} command"));
@@ -1827,6 +2068,8 @@ fn run_help_brevity(workspace: &Path) -> (bool, String) {
 // ---------------------------------------------------------------------------
 
 /// One named injection: what to change, where, and what must be detected.
+/// `expect` is a substring of a `FAIL`-prefixed report line the checker
+/// prints on detection (see `injection_verdict`) — never of a crash dump.
 struct Injection {
     name: &'static str,
     file: &'static str,
@@ -1869,9 +2112,21 @@ fn scrub_git_env(cmd: &mut Command) {
 /// infrastructure error, never a pass — matching the needle against a crash
 /// dump that happens to contain it would certify a broken harness as
 /// DETECTED.
+///
+/// M-r3-MED: the marker must ride a `FAIL`-prefixed report line — the
+/// checkers' report contract (`  FAIL  {path}: {construct} — {reason}`).
+/// A traceback that echoes the injected source still fails the checker, but
+/// it is a crash, not a detection. `Injection.expect` must therefore be a
+/// substring of such a report line, not of arbitrary output.
 fn injection_verdict(run: Result<(bool, String), String>, expect: &str) -> Result<bool, String> {
     let (ok, output) = run.map_err(|e| format!("checker did not run: {e}"))?;
-    Ok(!ok && output.contains(expect))
+    if ok {
+        return Ok(false);
+    }
+    let detected = output
+        .lines()
+        .any(|l| l.contains(expect) && l.trim_start().starts_with("FAIL"));
+    Ok(detected)
 }
 
 /// Run `git` in `dir`, returning trimmed stdout on success.
@@ -2035,7 +2290,19 @@ fn fault_inject(workspace: &Path, python: &[String], name: &str) -> Result<bool,
             "worktree {} still listed after removal",
             dir.display()
         )),
-        Ok(_) => detected,
+        // LOW r3: `remove --force` unregisters the worktree but can leave
+        // the directory behind (locked file on Windows) — the admin list
+        // alone would call that clean, and the next run would die on the
+        // stale-dir error instead. Check the disk too.
+        Ok(_) => {
+            if dir.exists() {
+                return Err(format!(
+                    "worktree {} still on disk after removal (locked file?); delete it and run `git worktree prune`",
+                    dir.display()
+                ));
+            }
+            detected
+        }
         Err(e) => Err(format!("cannot verify worktree removal: {e}")),
     }
 }
@@ -2511,6 +2778,9 @@ mod tests {
             "    // unsafe ",
             "{ in a comment"
         )));
+        // The word boundary is Unicode-aware (LOW r3): `éunsafe` is one
+        // identifier, not the keyword plus a brace.
+        assert!(!unsafe_line_is_violation("éunsafe { x(); }"));
     }
 
     #[test]
@@ -2648,6 +2918,17 @@ mod tests {
         // yields `None` and the same silent fallback.
         let uni = br#"{"target_directory":"/tmp/\u0041bc"}"#;
         assert_eq!(parse_target_dir(uni), Some(PathBuf::from("/tmp/Abc")));
+        // Surrogate pairs combine (M-r3-MED): a lone high surrogate is
+        // malformed and falls back, a pair decodes.
+        let pair = br#"{"target_directory":"/tmp/\uD83D\uDE00"}"#;
+        assert_eq!(
+            parse_target_dir(pair),
+            Some(PathBuf::from("/tmp/\u{1F600}"))
+        );
+        // The first key hit may sit inside a string value (M-r3-MED) — keep
+        // searching instead of refusing on its non-colon follower.
+        let inner = br#"{"a":"\"target_directory\"","target_directory":"/real"}"#;
+        assert_eq!(parse_target_dir(inner), Some(PathBuf::from("/real")));
     }
 
     #[test]
@@ -2749,6 +3030,9 @@ mod tests {
         // M3: the verdict takes `run_cmd`'s `Result`, not English prose —
         // a spawn failure is an infrastructure error even when its message
         // happens to contain the needle (old shape: false DETECTED).
+        // M-r3-MED: the marker must ride a `FAIL`-prefixed report line (the
+        // checkers' report contract) — a traceback echoing the injected
+        // source is a crash, not a detection.
         assert!(
             injection_verdict(Err("failed to spawn python: gone".to_owned()), "std::env").is_err()
         );
@@ -2764,14 +3048,30 @@ mod tests {
         );
         assert_eq!(
             injection_verdict(
-                Ok((false, "ambient read: std::env::var".to_owned())),
+                Ok((
+                    false,
+                    "  FAIL  crates/x/src.rs:3: `std::env::var` — ambient".to_owned()
+                )),
                 "std::env"
             ),
             Ok(true)
         );
         assert_eq!(
             injection_verdict(
-                Ok((true, "ambient read: std::env::var".to_owned())),
+                Ok((
+                    false,
+                    "Traceback (most recent call last):\n  File \"chk\", line 1\nstd::env::var(\"Q\")\nValueError: boom".to_owned()
+                )),
+                "std::env"
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            injection_verdict(
+                Ok((
+                    true,
+                    "  FAIL  crates/x/src.rs:3: `std::env::var`".to_owned()
+                )),
                 "std::env"
             ),
             Ok(false)
@@ -2874,6 +3174,38 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_scan_sees_across_the_line_break() {
+        // H-r3-H1: `unsafe` dangling at end of line with the opener on the
+        // next is valid Rust the single-line machine cannot see. The pair
+        // re-test closes it; a commented-out keyword plus a real block is
+        // precisely not a violation (the keyword governs nothing).
+        assert!(unsafe_line_is_violation("unsafe\n{ x(); }"));
+        assert!(unsafe_line_is_violation("unsafe /* trailing */\n{ x(); }"));
+        assert!(!unsafe_line_is_violation("// unsafe\n{ x(); }"));
+    }
+
+    #[test]
+    fn unsafe_scan_flags_cross_line_openers_in_tree() {
+        // H-r3-H1 run level: the pair re-test lives in `run_unsafe_scan`,
+        // so pin it there on a synthetic crate — forbid present (a missing
+        // attribute would fail the scan for the wrong reason), the only
+        // violation the dangling keyword plus next-line brace.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xline-{}", std::process::id()));
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
+        std::fs::write(
+            src.join("main.rs"),
+            "#![forbid(unsafe_code)]\nfn main() {\n    let x = unsafe\n    { 1 };\n    let _ = x;\n}\n",
+        )
+        .expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "cross-line opener passed the scan:\n{out}");
+        assert!(out.contains("cross-line"), "wrong failure shape:\n{out}");
+    }
+
+    #[test]
     fn forbid_check_reads_the_whole_lint_list() {
         // M2: the forbid may sit second (`warnings, unsafe_code` is the
         // alphabetical order) with generous spacing — a prefix-only match
@@ -2890,6 +3222,9 @@ mod tests {
         ));
         let mut b = 0;
         assert!(!line_has_forbid_attr("#![forbid(warnings)]", &mut b));
+        // Space between the lint path and its list is legal Rust.
+        let mut b = 0;
+        assert!(line_has_forbid_attr("#![forbid (unsafe_code)]", &mut b));
     }
 
     #[test]
@@ -2909,6 +3244,14 @@ mod tests {
         assert!(help_check(&help.replace("    migrate ", "    gone ")).is_err());
         let long = help.repeat(4);
         assert!(help_check(&long).is_err());
+        // LOW r3: the presence check keys on the command as the first
+        // whitespace-separated token under *some* indent — a clap layout
+        // change (2 spaces instead of 4) must not read as 16 missing
+        // commands. Prose still cannot match: the line must be indented.
+        let narrow = help.replace("    ", "  ");
+        let (_, present) = help_check(&narrow).expect("indent-tolerant fixture must pass");
+        assert_eq!(present, 16);
+        assert!(help_check("run the doctor when sick\n").is_err());
     }
 
     #[test]

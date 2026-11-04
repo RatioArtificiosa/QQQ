@@ -1145,6 +1145,14 @@ fn run_step(step: &Step, workspace: &Path, python: &[String]) -> Outcome {
 /// forbid attribute is exempted by `unsafe_line_exempt`, narrowly: a
 /// `cfg_attr` mention elsewhere on the line never exempts (M2).
 fn unsafe_line_is_violation(line: &str) -> bool {
+    unsafe_line_is_violation_in(line, None)
+}
+
+/// The violation test with an entry raw state: `Some(hash)` means the line
+/// starts inside a multiline raw string opened earlier, so leading content
+/// is prose — but the string may close mid-line with real code after it
+/// (C1 r5), which this threads to instead of skipping or misreading.
+fn unsafe_line_is_violation_in(line: &str, initial_raw: Option<usize>) -> bool {
     // String literals are skipped: a real `unsafe` block can never hide in
     // string data, so matching there is pure false-positive surface. (The CI
     // grep this ports cannot tell strings from code; this is intentionally
@@ -1172,7 +1180,10 @@ fn unsafe_line_is_violation(line: &str) -> bool {
     // be mistaken for completeness.
     let bytes = line.as_bytes();
     let mut i = 0;
-    let mut st = ScanState::default();
+    let mut st = ScanState {
+        in_raw: initial_raw,
+        ..ScanState::default()
+    };
     while bytes.get(i).is_some() {
         if step_literal_text(bytes, &mut i, &mut st) {
             continue;
@@ -1519,6 +1530,68 @@ fn skip_inline_block_comments(mut rest: &str) -> &str {
     }
 }
 
+/// Remove every `/*…*/` comment (nesting) from `s`. An unclosed trailing
+/// comment truncates (fail-noisy: the remaining list is then incomplete).
+/// The output is always valid UTF-8: comment markers are ASCII, so
+/// removals never split a multi-byte char.
+fn strip_block_comments(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&c) = bytes.get(i) {
+        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let mut depth: u32 = 1;
+            i += 2;
+            while let Some(&c2) = bytes.get(i) {
+                if c2 == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    depth += 1;
+                    i += 2;
+                } else if c2 == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    depth = depth.saturating_sub(1);
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Whether `t` (already trimmed) is one complete `/*…*/` comment and/// nothing else — balanced, so dropping the line from significant pairing
+/// loses no tokens (H1 r5). An unclosed opener stays: pairs thread block
+/// depth instead.
+fn complete_block_comment(t: &str) -> bool {
+    let Some(body) = t.strip_prefix("/*").and_then(|r| r.strip_suffix("*/")) else {
+        return false;
+    };
+    let bytes = body.as_bytes();
+    let mut depth: u32 = 0;
+    let mut i = 0;
+    while let Some(&c) = bytes.get(i) {
+        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            depth += 1;
+            i += 2;
+        } else if c == b'*' && bytes.get(i + 1) == Some(&b'/') {
+            if depth == 0 {
+                // Closes the outer comment early: code follows the comment.
+                return body.get(i + 2..).is_some_and(|r| r.trim().is_empty());
+            }
+            depth = depth.saturating_sub(1);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    depth == 0
+}
+
 /// A line carries the crate-level attribute iff `#![forbid(unsafe_code)]`
 /// opens the line's code: leading whitespace allowed, but the `#` must be
 /// the first character outside any string, char, line comment or block
@@ -1580,9 +1653,13 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
             return false;
         }
         if b == b'\'' {
+            // L1 r5: a char literal opens the same verdict — an inner
+            // attribute must lead the line, and a leading literal (string
+            // or char) means it does not. Lifetimes never enter here:
+            // without a closing quote nearby the `'` is skipped above.
             let rest = line.get(i + 1..).unwrap_or("");
             if rest.chars().take(3).collect::<String>().contains('\'') {
-                in_char = true;
+                return false;
             }
             i += 1;
             continue;
@@ -1622,24 +1699,62 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
         let Some(rest) = rest.strip_prefix("forbid") else {
             return false;
         };
-        // So is a block comment there (LOW r4): `forbid/*c*/(...)` is one
-        // token stream, and whitespace-trimming alone would miss it.
-        let rest = skip_inline_block_comments(rest);
-        let rest = rest.trim_start_matches([' ', '\t']);
-        let Some(rest) = rest.strip_prefix('(') else {
-            return false;
-        };
-        let Some(end) = rest.find(')') else {
-            return false;
-        };
-        let Some(list) = rest.get(..end) else {
-            return false;
-        };
-        return list
-            .split(',')
-            .any(|lint| lint.trim_matches([' ', '\t', '\r']) == "unsafe_code");
+        return forbid_list_has_unsafe_code(rest);
     }
     false
+}
+
+/// Whether the lint list after `forbid` names `unsafe_code`: `forbid`,
+/// optional spaces/comments, `(`, then the comma-separated list up to the
+/// matching `)` — comments stripped before splitting, so neither a paren
+/// nor a comma inside one can truncate or split the list (L2 r5). Extracted
+/// from `line_has_forbid_attr` for the line budget.
+fn forbid_list_has_unsafe_code(after_forbid: &str) -> bool {
+    // A block comment between path and list is one token stream (LOW r4).
+    let rest = skip_inline_block_comments(after_forbid);
+    let rest = rest.trim_start_matches([' ', '\t']);
+    let Some(rest) = rest.strip_prefix('(') else {
+        return false;
+    };
+    // The closing paren is the MATCHING one.
+    let bytes = rest.as_bytes();
+    let mut k = 0;
+    let mut end = None;
+    while let Some(&c) = bytes.get(k) {
+        if c == b'/' && bytes.get(k + 1) == Some(&b'*') {
+            let mut depth: u32 = 1;
+            k += 2;
+            while let Some(&c2) = bytes.get(k) {
+                if c2 == b'/' && bytes.get(k + 1) == Some(&b'*') {
+                    depth += 1;
+                    k += 2;
+                } else if c2 == b'*' && bytes.get(k + 1) == Some(&b'/') {
+                    depth = depth.saturating_sub(1);
+                    k += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+        } else if c == b')' {
+            end = Some(k);
+            break;
+        } else {
+            k += 1;
+        }
+    }
+    let Some(end) = end else {
+        return false;
+    };
+    let Some(span) = rest.get(..end) else {
+        return false;
+    };
+    let stripped = strip_block_comments(span);
+    stripped
+        .split(',')
+        .any(|lint| lint.trim_matches([' ', '\t', '\r']) == "unsafe_code")
 }
 
 /// Lines exempt from the unsafe scan: the crate-level forbid attribute
@@ -1654,8 +1769,18 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
 /// opener after the attribute (`#![forbid(unsafe_code)]` plus a real block
 /// on the same line, legal as a block-inner attribute) must still flag.
 /// Checking the violation first keeps the dangerous direction loud.
+///
+/// C1: both checks accept the entry raw state. A line that starts inside a
+/// multiline raw string is content, not code — but the string may close
+/// mid-line with a real block after the closer, which a fresh state would
+/// read as a string plus code and a skip would hide entirely.
+/// Seeding threads the string to its closer and checks the tail.
 fn unsafe_line_exempt(line: &str) -> bool {
-    line_has_forbid_attr(line, &mut 0) && !unsafe_line_is_violation(line)
+    unsafe_line_exempt_in(line, None)
+}
+
+fn unsafe_line_exempt_in(line: &str, initial_raw: Option<usize>) -> bool {
+    line_has_forbid_attr(line, &mut 0) && !unsafe_line_is_violation_in(line, initial_raw)
 }
 
 fn starts_word(s: &str, word: &str) -> bool {
@@ -1701,18 +1826,19 @@ fn scan_crate_rs_files(
     }
 }
 
-/// Whether each line starts inside a multiline raw string (no code there).
-/// One threading pass with the shared step helpers — no drift by
-/// construction. Strings, chars and line comments reset at every joining
-/// newline (same as the pair scan); only raw strings and block comments
-/// thread through. Callers skip raw-content lines for single hits and
-/// refuse pairs that start in one: a content line ending in `unsafe` must
-/// not resolve against the next line as code.
-fn raw_entry_states(lines: &[&str]) -> Vec<bool> {
+/// Whether each line starts inside a multiline raw string (its opening
+/// hash count), or outside one (`None`). One threading pass with the shared
+/// step helpers — no drift by construction. Strings, chars and line
+/// comments reset at every joining newline (same as the pair scan); only
+/// raw strings and block comments thread through. Callers seed per-line
+/// scans with the entry hash so content stays prose but a closer with real
+/// code after it still flags (C1 r5) — never skip the line, never scan it
+/// fresh.
+fn raw_entry_states(lines: &[&str]) -> Vec<Option<usize>> {
     let mut st = ScanState::default();
     let mut out = Vec::with_capacity(lines.len());
     for line in lines {
-        out.push(st.in_raw.is_some());
+        out.push(st.in_raw);
         let bytes = line.as_bytes();
         let mut i = 0;
         while bytes.get(i).is_some() {
@@ -1753,11 +1879,15 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
     let raw_entry = raw_entry_states(&lines);
     let mut flagged: Vec<bool> = Vec::with_capacity(lines.len());
     for (n, line) in lines.iter().enumerate() {
-        if raw_entry.get(n) == Some(&true) || unsafe_line_exempt(line) {
+        // C1: no line is skipped for starting inside a raw string — the
+        // entry hash seeds the scan, so content stays prose but a closer
+        // with real code after it still flags.
+        let initial = raw_entry.get(n).copied().flatten();
+        if unsafe_line_exempt_in(line, initial) {
             flagged.push(false);
             continue;
         }
-        if unsafe_line_is_violation(line) {
+        if unsafe_line_is_violation_in(line, initial) {
             violations.push(format!("{rel}:{}:{line}", n + 1));
             flagged.push(true);
         } else {
@@ -1768,12 +1898,15 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
         .iter()
         .enumerate()
         .filter(|(_, l)| {
-            // Blank and full-line-`//` separators carry no tokens. Dropping
-            // a raw-string content line that happens to start with `//` is
-            // safe: the pair machine re-derives raw state from the first
-            // line, so the content still classifies as a string.
+            // Blank, full-line-`//`, and complete full-line-`/*…*/`
+            // separators carry no tokens (H1 r5: a comment-only line
+            // between the keyword and the opener must not break the pair).
+            // An unclosed `/*` stays: pairs thread block depth. Dropping a
+            // raw-string content line that looks like a comment is safe:
+            // the pair machine re-derives raw state from the first line, so
+            // the content still classifies as a string.
             let t = l.trim();
-            !(t.is_empty() || t.starts_with("//"))
+            !(t.is_empty() || t.starts_with("//") || complete_block_comment(t))
         })
         .map(|(n, l)| (n, *l))
         .collect();
@@ -1781,7 +1914,10 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
         let (Some(&(na, a)), Some(&(nb, b))) = (w.first(), w.get(1)) else {
             continue;
         };
-        if raw_entry.get(na) == Some(&true)
+        // A pair that starts inside a raw string is content, not code
+        // (entry hash present) — the single-line seeded scan already
+        // judges the closer line itself.
+        if raw_entry.get(na).copied().flatten().is_some()
             || flagged.get(na) == Some(&true)
             || flagged.get(nb) == Some(&true)
         {
@@ -1865,18 +2001,21 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             // a commented-out forbid is one uncomment away from absent, so a
             // text `contains` here would certify a root on hearsay — the same
             // shape `tools/audit_unsafe.py` guards with its prose filing.
-            let lib = dir.join("src").join("lib.rs");
+            // M1 r5: EVERY existing root carries it — a forbid in lib.rs no
+            // longer excuses a missing one in main.rs (either-or was the
+            // dual-root hole).
+            let lib_path = dir.join("src").join("lib.rs");
             let mut depth = 0;
-            let has = std::fs::read_to_string(&lib)
-                .is_ok_and(|t| t.lines().any(|l| line_has_forbid_attr(l, &mut depth)));
-            if !has {
-                let main = dir.join("src").join("main.rs");
-                let mut depth = 0;
-                let has_main = std::fs::read_to_string(&main)
+            let lib_ok = !lib_path.is_file()
+                || std::fs::read_to_string(&lib_path)
                     .is_ok_and(|t| t.lines().any(|l| line_has_forbid_attr(l, &mut depth)));
-                if !has_main {
-                    missing.push(name.clone());
-                }
+            let main_path = dir.join("src").join("main.rs");
+            let mut depth = 0;
+            let main_ok = !main_path.is_file()
+                || std::fs::read_to_string(&main_path)
+                    .is_ok_and(|t| t.lines().any(|l| line_has_forbid_attr(l, &mut depth)));
+            if !(lib_ok && main_ok) {
+                missing.push(name.clone());
             }
         }
     }
@@ -1940,10 +2079,21 @@ fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String
             }
         };
         let p = e.path();
-        if e.file_type().is_ok_and(|t| t.is_dir()) {
-            collect_rs_into(&p, out, problems);
-        } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
-            out.push(p);
+        // H2 r5: a failed `file_type` (dangling target, denied stat) is a
+        // hole the same size as a failed listing — neither dir nor file may
+        // silently vanish. (Symlink *targets* are not followed, L11 above;
+        // this arm is about the stat itself failing.)
+        match e.file_type() {
+            Ok(t) if t.is_dir() => collect_rs_into(&p, out, problems),
+            Ok(_) => {
+                if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                    out.push(p);
+                }
+            }
+            Err(e) => problems.push(format!(
+                "{}: cannot stat entry, scan incomplete: {e}",
+                p.display()
+            )),
         }
     }
 }
@@ -3047,6 +3197,11 @@ mod tests {
         // Item-level is not crate-level.
         let mut b = 0;
         assert!(!line_has_forbid_attr("#[forbid(unsafe_code)]", &mut b));
+        // L1 r5: a leading char literal means the attribute does not lead
+        // the line — same as a leading string. (Lifetimes never enter the
+        // char branch: no closing quote nearby.)
+        let mut b = 0;
+        assert!(!line_has_forbid_attr("'a' #![forbid(unsafe_code)]", &mut b));
         // An attribute after a same-line block comment is real code.
         let mut b = 0;
         assert!(line_has_forbid_attr(
@@ -3390,7 +3545,7 @@ mod tests {
         std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
         std::fs::write(
             src.join("main.rs"),
-            "#![forbid(unsafe_code)]\nfn main() {\n    let x = unsafe\n\n    // SAFETY: separated\n    { 1 };\n    let _ = x;\n}\n",
+            "#![forbid(unsafe_code)]\nfn main() {\n    let x = unsafe\n\n    // SAFETY: separated\n    /* also separated */\n    { 1 };\n    let _ = x;\n}\n",
         )
         .expect("main");
         let (ok, out) = run_unsafe_scan(&root);
@@ -3417,7 +3572,10 @@ mod tests {
             "{ y };",
         ];
         let entry = raw_entry_states(&lines);
-        assert_eq!(entry, vec![false, true, true, true, false, false, false]);
+        assert_eq!(
+            entry,
+            vec![None, Some(1), Some(1), Some(1), None, None, None]
+        );
     }
 
     #[test]
@@ -3437,6 +3595,53 @@ mod tests {
         let (ok, out) = run_unsafe_scan(&root);
         let _ = std::fs::remove_dir_all(&root);
         assert!(ok, "multiline raw content flagged as code:\n{out}");
+    }
+
+    #[test]
+    fn unsafe_scan_flags_code_after_a_raw_closer() {
+        // C1 r5: a line that starts inside a raw string may close it
+        // mid-line with a real block after the closer — seeding threads
+        // to the closer and flags the tail, instead of skipping
+        // the line or misreading the content as code.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xtail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
+        std::fs::write(
+            src.join("main.rs"),
+            "#![forbid(unsafe_code)]\nfn main() {\n    let s = r#\"\nfoo\n\"#; unsafe { 1 };\n    let _ = s;\n}\n",
+        )
+        .expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "code after a raw closer passed the scan:\n{out}");
+        // The hit must come from the seeded single-line scan (which shows
+        // the line), not the pair scan: the pair path misreads this shape
+        // as string-plus-code and must stay out of it.
+        assert!(
+            !out.contains("cross-line"),
+            "wrong mechanism (pair instead of seeded line):\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_requires_every_crate_root() {
+        // M1 r5: a forbid in lib.rs must not excuse a missing one in
+        // main.rs — every existing root carries the attribute.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
+        std::fs::write(src.join("main.rs"), "fn main() {}\n").expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "unforbidden bin root passed the scan:\n{out}");
+        assert!(
+            out.contains("missing forbid"),
+            "wrong failure shape:\n{out}"
+        );
     }
 
     #[test]
@@ -3462,6 +3667,15 @@ mod tests {
         // So is a block comment there (LOW r4): token stream, not text.
         let mut b = 0;
         assert!(line_has_forbid_attr("#![forbid/*c*/(unsafe_code)]", &mut b));
+        // L2 r5: comments inside the list do not hide the lint — nor does
+        // a paren inside a comment end the list early.
+        let mut b = 0;
+        assert!(line_has_forbid_attr("#![forbid(/*c*/unsafe_code)]", &mut b));
+        let mut b = 0;
+        assert!(line_has_forbid_attr(
+            "#![forbid(/* ) */, unsafe_code)]",
+            &mut b
+        ));
     }
 
     #[test]

@@ -496,12 +496,14 @@ pub fn package_of(interface: &str) -> String {
 /// # Why plural, and what the singular wrapper is for
 ///
 /// Two capabilities may legitimately unlock one interface (`qqq:http/http`
-/// carries both `send` and `incoming-authority`), so the audit answer is a
-/// list: reporting only one understates what an artifact can do, and
-/// understating is the one failure an audit surface must not have. The
-/// pre-flight gate, by contrast, must demand **one** grant to check — so
-/// [`capability_for_import`] answers with the strongest, fail-closed, and
-/// documents that it is the gate's answer, not the audit's.
+/// carries both `send` and `incoming-authority`). The remediation path needs
+/// the whole list: naming one grant when the interface needs two leaves the
+/// component still failing after the operator pastes the fix. The **report**
+/// path, by contrast, names the strongest — the host re-checks the grant on
+/// every call, so an ungranted half is denied rather than exercised, and
+/// reporting unexercised halves as required would mandate over-grants
+/// (`LANG-005`). So [`capability_for_import`] answers with the strongest,
+/// fail-closed, and documents that it is the reporting and gate answer.
 ///
 /// ```
 /// let caps = qqq_run::run::capabilities_for_import("qqq:http/http@1.0.0");
@@ -517,9 +519,9 @@ pub fn capabilities_for_import(interface: &str) -> Vec<qqq_cap::Capability> {
     // **Every match is returned, strongest first.** Two capabilities may
     // legitimately map to one interface: `qqq:http/http` carries both `send`
     // (outbound) and `incoming-authority` (which server is serving), so
-    // importing it implies `http.client` *and* `http.server`. An audit surface
-    // that names only one understates what the artifact can do — the failure
-    // this shape exists to prevent.
+    // importing it implies `http.client` *and* `http.server`. The remediation
+    // path needs the whole list — naming one grant when the interface needs
+    // two leaves the component still failing after the paste.
     let matches: Vec<qqq_cap::Capability> = qqq_cap::Capability::all()
         .iter()
         .copied()
@@ -624,9 +626,11 @@ fn all_index(c: qqq_cap::Capability) -> usize {
 /// The single capability the pre-flight gate demands for an import.
 ///
 /// This is [`capabilities_for_import`] reduced to its strongest match:
-/// fail-closed, one grant to check. It is the gate's answer — used where
-/// enforcement needs a decision — not the audit's answer, which must name
-/// every implied capability. Callers that report authority use the plural.
+/// fail-closed, one grant to check. It is the reporting answer — used by
+/// `inspect` and by enforcement — not an understatement: the host re-checks
+/// the grant on every call, so whatever half is ungranted is denied.
+/// Callers that enumerate what an interface *could* need (the missing-grant
+/// remediation) use the plural.
 #[must_use]
 pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
     capabilities_for_import(interface).into_iter().next()

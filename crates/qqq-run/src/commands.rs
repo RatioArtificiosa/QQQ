@@ -1236,24 +1236,26 @@ impl CommandOutput for ArtifactDiff {
 
 /// Sort one imported interface into `required` or `unmapped`.
 ///
-/// The 0.2 baseline links unconditionally with no grant involved, so its names
-/// are neither requirements nor findings: reporting every `wasi:cli/stdout` a
-/// `wasm32-wasip2` `std` pulls in as "unmapped" would bury a genuinely unknown
-/// import in noise the operator learns to ignore.
+/// The mapping reports the **strongest** capability the import implies, not
+/// every one: the host re-checks the grant on every call (`send` demands
+/// `http.client`, `incoming-authority` demands `http.server`), so an
+/// ungranted half is denied, not silently exercised. Reporting every implied
+/// capability would demand grants the artifact may never exercise — for the
+/// serve-only reference application it would mandate the inert `http.client`
+/// over-grant `LANG-005` exists to forbid. The 0.2 baseline links
+/// unconditionally with no grant involved, so its names are neither
+/// requirements nor findings.
 fn classify_import(iface: &str, required: &mut Vec<CapabilityReport>, unmapped: &mut Vec<String>) {
     if crate::run::is_wasi02_baseline(iface) {
         return;
     }
-    let caps = crate::run::capabilities_for_import(iface);
-    if caps.is_empty() {
-        unmapped.push(iface.to_owned());
-    }
-    for cap in caps {
-        required.push(CapabilityReport {
+    match crate::run::capability_for_import(iface) {
+        Some(cap) => required.push(CapabilityReport {
             name: cap.name().to_owned(),
             interface: iface.to_owned(),
             implemented: crate::run::interface_implemented(iface),
-        });
+        }),
+        None => unmapped.push(iface.to_owned()),
     }
 }
 
@@ -1326,11 +1328,11 @@ pub fn inspect_artifact(path: &std::path::Path) -> Result<ArtifactReport> {
 
     let imports = component.imported_interfaces(&engine);
 
-    // Map each imported interface to **every** capability it requires. One
-    // interface can imply several (`qqq:http/http` is both `http.client` and
-    // `http.server`): reporting only the strongest understates what the
-    // artifact can do, and understating is the one failure an audit surface
-    // must not have. An import with no matching capability is *not* dropped:
+    // Map each imported interface to the capability it requires, strongest
+    // match wins. The host re-checks the grant on every call, so an ungranted
+    // half is denied rather than exercised — reporting every implied
+    // capability would demand grants a serve-only artifact never exercises
+    // (`LANG-005`). An import with no matching capability is *not* dropped:
     // it is reported as unmapped, because an interface the host cannot name is
     // exactly the thing an auditor needs to see.
     let mut required = Vec::new();
@@ -2729,12 +2731,14 @@ window_seconds = 60
         );
     }
 
-    /// The audit surface reports every implied capability, not just the strongest.
+    /// The remediation path sees every implied capability, not just the strongest.
     ///
-    /// `qqq:http/http` is unlocked by both `HttpClient` and `HttpServer`: an
-    /// artifact importing it for send-only can also serve, and naming only the
-    /// server half hides the exfiltration path. The singular mapping stays the
-    /// gate's answer; this is the audit's.
+    /// `qqq:http/http` is unlocked by both `HttpClient` and `HttpServer`: a
+    /// missing-grant error that names only the server half leaves a send-using
+    /// component failing after the paste. The singular mapping stays the
+    /// reporting answer (per-call enforcement denies ungranted halves, so the
+    /// report must not demand unexercised grants); this is the enumeration the
+    /// remediation builds on.
     #[test]
     fn an_interface_implying_several_capabilities_reports_all_of_them() {
         let http = crate::run::capabilities_for_import("qqq:http/http@1.0.0");

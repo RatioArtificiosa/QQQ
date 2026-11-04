@@ -2804,27 +2804,63 @@ allow_origins = ["https://app.example.com"]
                 "{key} must survive parsing"
             );
         }
-        for (hosts, why) in [
-            ("{ \"[xyz]\" = \"shop\" }", "non-IP brackets"),
-            ("{ \"[::1\" = \"shop\" }", "unbalanced bracket"),
-            ("{ \"[fe80::1%]\" = \"shop\" }", "empty zone"),
-            ("{ \"::1\" = \"shop\" }", "unbracketed IPv6"),
-            ("{ \"[127.0.0.1]\" = \"shop\" }", "bracketed IPv4"),
-            ("{ \"[fe80::1%eth 0]\" = \"shop\" }", "spaced zone"),
-            ("{ \"münchen.de\" = \"shop\" }", "non-ASCII host"),
+        for (hosts, why, expects) in [
+            (
+                "{ \"[xyz]\" = \"shop\" }",
+                "non-IP brackets",
+                "can never match",
+            ),
+            (
+                "{ \"[::1\" = \"shop\" }",
+                "unbalanced bracket",
+                "can never match",
+            ),
+            (
+                "{ \"[fe80::1%]\" = \"shop\" }",
+                "empty zone",
+                "can never match",
+            ),
+            (
+                "{ \"::1\" = \"shop\" }",
+                "unbracketed IPv6",
+                "can never match",
+            ),
+            (
+                "{ \"[127.0.0.1]\" = \"shop\" }",
+                "bracketed IPv4",
+                "can never match",
+            ),
+            (
+                "{ \"[fe80::1%eth 0]\" = \"shop\" }",
+                "spaced zone",
+                "can never match",
+            ),
+            (
+                "{ \"münchen.de\" = \"shop\" }",
+                "non-ASCII host",
+                "can never match",
+            ),
         ] {
             let text = format!(
                 "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
                  [server.tenants]\nhosts = {hosts}\n"
             );
-            Manifest::parse(&text).expect_err(&format!("{why} must be refused"));
+            let err = Manifest::parse(&text).expect_err(&format!("{why} must be refused"));
+            assert!(
+                err.to_string().contains(expects),
+                "dead {why} must fail naming its reason, got: {err}"
+            );
         }
         let long_host = format!(
             "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
              [server.tenants]\nhosts = {{ \"{}.example.com\" = \"shop\" }}",
             "a".repeat(250)
         );
-        Manifest::parse(&long_host).expect_err("an over-long host must be refused");
+        let err = Manifest::parse(&long_host).expect_err("an over-long host must be refused");
+        assert!(
+            err.to_string().contains("253-byte"),
+            "an over-long host must fail on the length bound, got: {err}"
+        );
         // Exactly 253 bytes parses: the bound is DNS-real, not rounded.
         let max_host = format!(
             "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
@@ -2934,10 +2970,12 @@ allow_origins = ["https://app.example.com"]
     }
 
     /// Component keys match resolved labels verbatim: anything that cannot
-    /// appear in a resolved label — a control character or a non-ASCII
+    /// appear in a resolved label — a control character or an invisible
     /// lookalike such as NBSP or a zero-width space — never matches and is
     /// refused at parse time. Interior ASCII spaces stay allowed: a
-    /// `John Doe` common name matches its key exactly.
+    /// `John Doe` common name matches its key exactly. Plain non-ASCII
+    /// letters stay allowed too: the gate is `TenantId`, and `münchen`
+    /// resolves exactly as written.
     #[test]
     fn tenant_component_keys_reject_non_label_characters() {
         for (key, why) in [
@@ -2984,6 +3022,17 @@ allow_origins = ["https://app.example.com"]
         assert!(
             err.to_string().contains("server.tenants.components"),
             "the error must name the table: {err}"
+        );
+        // A non-ASCII label matches verbatim through the shared gate.
+        let umlaut = Manifest::parse(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = { \"shop.example.com\" = \"münchen\" }\n\
+             [server.tenants.components]\n\"münchen\" = \"shop-app\"\n",
+        )
+        .expect("a non-ASCII label must map where it resolves");
+        assert_eq!(
+            umlaut.server.tenants.expect("tenants").components["münchen"],
+            "shop-app"
         );
     }
 

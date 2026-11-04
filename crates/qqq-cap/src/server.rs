@@ -202,7 +202,7 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
                 && z.chars()
                     .all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c))
         });
-    if host.len() > 253 {
+    if !ip_literal && host.len() > 253 {
         return Err(ManifestError::InvalidField {
             field: "server.tenants.hosts".to_owned(),
             reason: format!(
@@ -278,32 +278,19 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
                 reason: "component keys and artifact names must not be empty; an empty entry routes no tenant to no component".to_owned(),
             });
         }
-        // Keys match resolved tenant labels verbatim, so anything that
-        // cannot name a tenant is dead configuration reading as policy:
-        // it never equals the label a request resolves to. Servable
-        // labels are ASCII (certificate common names, host names, peer
-        // addresses); a CN that is not a printable string decodes with
-        // replacement characters and must not map either — it falls
-        // through to the default component. Surrounding whitespace,
-        // control characters, and non-ASCII lookalikes (NBSP,
-        // zero-width spaces) are therefore refused. Interior ASCII
-        // spaces stay allowed — a `John Doe` common name matches its
-        // key exactly. Quotes and backslashes are refused too: resolved
-        // labels route through `TenantId`, which refuses both, so a
-        // quoted key could never equal a resolved label. Over-long keys
-        // are refused for the same reason (`TenantId` bounds 256 bytes).
-        if label != label.trim()
-            || label
-                .chars()
-                .any(|c| c.is_control() || (c.is_whitespace() && c != ' ') || !c.is_ascii())
-            || label.contains('"')
-            || label.contains('\\')
-            || label.len() > 256
-        {
+        // Keys match resolved tenant labels verbatim, so the check is the
+        // same gate the labels themselves pass: `TenantId::new`. Anything
+        // it refuses can never equal a resolved label — and the two cannot
+        // drift, because there is only one rule. (An earlier revision
+        // required ASCII here while `TenantId` allowed non-ASCII labels
+        // like `münchen`, silently stranding them on the default component;
+        // sharing the gate removes the split. Interior spaces stay allowed:
+        // a `John Doe` common name matches its key exactly.)
+        if let Err(reason) = crate::egress::TenantId::new(label) {
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.components".to_owned(),
                 reason: format!(
-                    "component key `{}` never matches; write the label exactly as resolved",
+                    "component key `{}` never matches ({reason}); write the label exactly as resolved",
                     crate::text::escape_for_error(label)
                 ),
             });

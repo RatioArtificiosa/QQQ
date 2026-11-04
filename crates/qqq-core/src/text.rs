@@ -283,7 +283,9 @@ mod tests {
     /// Every supplementary member pairs and round-trips: the JSON escapers
     /// rely on [`utf16_surrogate_pair`] for exactly this set, so a member
     /// the helper mishandles is a corruption the round-trip tests would
-    /// only catch one member at a time.
+    /// only catch one member at a time. The count pins the set: E0020-E007F
+    /// (96) + E0100-E01EF (240) + 1D173-1D7A (8) + 110BD, 110CD, 13430,
+    /// 1BCA0, E0001 (5).
     #[test]
     fn every_supplementary_member_pairs_and_round_trips() {
         let mut count = 0u32;
@@ -317,8 +319,10 @@ mod tests {
             );
         }
         // E0020-E007F (96) + E0100-E01EF (240) + 1D173-1D7A (8) + 110BD,
-        // 110CD, 13430, 1BCA0, E0001 (5): the count pins the set exactly,
-        // so a dropped range fails here rather than passing silently.
+        // 110CD, 13430, 1BCA0, E0001 (5) = 349. The count pins the set
+        // exactly, so a dropped member fails here rather than passing
+        // silently. (A count of 346 misses the three astral singletons
+        // 110BD/110CD/13430 — verified against the UCD, not by hand.)
         assert_eq!(
             count, 349,
             "the set holds 349 supplementary members; update test and predicate together"

@@ -157,10 +157,13 @@ pub fn render_for_diagnostic(value: &str) -> String {
             // Escape everything that could forge structure in a log consumer.
             // Layout-forgers (`U+2028`, bidi controls) are not C0/C1, so they
             // get their own arm sharing the predicate with the trap escaper.
+            // Invisible format characters fold too: this renders guest values
+            // into operator-facing diagnostics, and a diagnostic line must
+            // never contain a character no reader can see.
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() || is_layout_forgery(c) => {
+            c if c.is_control() || is_layout_forgery(c) || is_invisible_format(c) => {
                 // Non-printable: show the code point rather than the byte, so a
                 // reader can tell what it was. `write!` into the `String` rather
                 // than `push_str(&format!(..))`, which allocates a temporary for
@@ -1393,6 +1396,23 @@ mod tests {
         assert!(
             rendered.contains("\\u{2028}") && rendered.contains("\\u{202e}"),
             "each control escapes visibly: {rendered:?}"
+        );
+    }
+
+    /// Invisible format characters escape like layout-forgers: a diagnostic
+    /// carries guest values to an operator, and a zero-width space there is
+    /// the same spoofing primitive — while legitimate content (café above)
+    /// still passes through.
+    #[test]
+    fn rendering_escapes_invisible_format_characters() {
+        let rendered = render_for_diagnostic("ok\u{200B}\u{2061}forged");
+        assert!(
+            !rendered.contains('\u{200B}') && !rendered.contains('\u{2061}'),
+            "invisibles must not pass through: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\u{200b}") && rendered.contains("\\u{2061}"),
+            "each invisible escapes visibly: {rendered:?}"
         );
     }
 

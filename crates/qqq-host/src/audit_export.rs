@@ -76,7 +76,22 @@ fn json_escape(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c.is_control() || is_layout_forgery(c) || is_invisible_format(c) => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
+                // Supplementary-plane members (`E0001`, tag characters) do
+                // not fit `\uXXXX`: JSON needs a UTF-16 surrogate pair, and
+                // a 5-digit `\ue0001` would parse as `\ue000` plus a literal
+                // `1` — silent corruption instead of a loud error.
+                let n = u32::from(c);
+                if n > 0xFFFF {
+                    let n = n - 0x1_0000;
+                    let _ = write!(
+                        out,
+                        "\\u{:04x}\\u{:04x}",
+                        0xD800 + (n >> 10),
+                        0xDC00 + (n & 0x3FF)
+                    );
+                } else {
+                    let _ = write!(out, "\\u{n:04x}");
+                }
             }
             c => out.push(c),
         }
@@ -647,6 +662,19 @@ mod tests {
         let s = stream_with(&[(Outcome::Denied, qqq_cap::capability::Capability::FsWrite)]);
         let sarif = to_sarif(&s).expect("intact chain");
         serde_json::from_str::<serde_json::Value>(&sarif).expect("escapes must keep it parseable");
+        // Supplementary-plane members escape as surrogate pairs and
+        // round-trip exactly: a 5-digit `\ue0001` would parse as `\ue000`
+        // plus a literal `1`, so parseable-only assertions cannot catch it —
+        // only equality with the original proves the round trip.
+        for supplementary in ["a\u{E0001}b", "a\u{E007F}b", "a\u{E01EF}b", "a\u{1D173}b"] {
+            let escaped = json_escape(supplementary);
+            let back: String = serde_json::from_str(&format!("\"{escaped}\""))
+                .expect("surrogate pairs must parse");
+            assert_eq!(
+                back, supplementary,
+                "{supplementary:?} must round-trip, not just parse"
+            );
+        }
     }
 
     /// **Both exports refuse a broken chain rather than rendering one.**

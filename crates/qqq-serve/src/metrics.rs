@@ -1061,7 +1061,7 @@ fn write_tenant_counters(m: &HttpMetrics, out: &mut String) {
         // saturation. A `BTreeMap` keeps the emission order deterministic
         // (§10.5), and aggregation can only shrink the bounded series count,
         // never grow it.
-        let mut series: BTreeMap<String, u64> = BTreeMap::new();
+        let mut raw: Vec<(String, u64)> = Vec::new();
         for index in 0..=ceiling + 1 {
             let label = m
                 .tenants
@@ -1076,15 +1076,30 @@ fn write_tenant_counters(m: &HttpMetrics, out: &mut String) {
             if n == 0 {
                 continue;
             }
-            series
-                .entry(prometheus_escape(&label))
-                .and_modify(|v| *v = v.saturating_add(n))
-                .or_insert(n);
+            raw.push((prometheus_escape(&label), n));
         }
-        for (label, n) in &series {
+        for (label, n) in &merge_series(raw) {
             let _ = writeln!(out, "{name}{{tenant=\"{label}\"}} {n}");
         }
     }
+}
+
+/// Merge per-index counters by (already escaped) label, summing with
+/// saturation.
+///
+/// Split out of [`write_tenant_counters`] so the saturation is unit-testable:
+/// production volumes never reach `u64::MAX`, but an untested `+` would wrap
+/// silently if they ever did, and a wrapping merge would under-report the
+/// busiest tenant — the one an operator most needs to see.
+fn merge_series(raw: Vec<(String, u64)>) -> BTreeMap<String, u64> {
+    let mut series: BTreeMap<String, u64> = BTreeMap::new();
+    for (label, n) in raw {
+        series
+            .entry(label)
+            .and_modify(|v| *v = v.saturating_add(n))
+            .or_insert(n);
+    }
+    series
 }
 
 /// Microseconds as the seconds a Prometheus `_seconds` metric carries.
@@ -1258,7 +1273,15 @@ mod tests {
         assert_eq!(prometheus_escape("a\u{2029}b"), "a\u{FFFD}b");
         assert_eq!(prometheus_escape("a\u{85}b"), "a\u{FFFD}b");
         assert_eq!(prometheus_escape("a\u{202E}b"), "a\u{FFFD}b");
-        assert_eq!(prometheus_escape("a\u{200B}b"), "a\u{FFFD}b");
+        // One member per invisible range, so dropping any range from the
+        // predicate fails here rather than passing silently.
+        for invisible in ["\u{200B}", "\u{2062}", "\u{FE0F}", "\u{600}", "\u{E0001}"] {
+            assert_eq!(
+                prometheus_escape(&format!("a{invisible}b")),
+                "a\u{FFFD}b",
+                "{invisible:?} must fold"
+            );
+        }
         assert_eq!(prometheus_escape("plain"), "plain");
     }
 
@@ -1323,6 +1346,21 @@ mod tests {
                 "a line with unbalanced braces is a forged label: {line}"
             );
         }
+    }
+
+    /// Merging saturates rather than wraps: production volumes never reach
+    /// `u64::MAX`, but an untested `+` would under-report the busiest tenant
+    /// exactly when the operator most needs the true number.
+    #[test]
+    fn merging_saturates_instead_of_wrapping() {
+        let merged = super::merge_series(vec![
+            ("a".to_owned(), u64::MAX),
+            ("a".to_owned(), 1),
+            ("b".to_owned(), 2),
+        ]);
+        assert_eq!(merged.get("a"), Some(&u64::MAX));
+        assert_eq!(merged.get("b"), Some(&2));
+        assert_eq!(merged.len(), 2);
     }
 
     /// **The exposition's per-tenant series are bounded by the ceiling, like the registry's.**

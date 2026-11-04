@@ -955,12 +955,19 @@ mod tests {
         // Invisible format characters fold as well: the sanitizer is a
         // diagnostic renderer, and a diagnostic line must never contain a
         // character no reader can see — even at the cost of an emoji joiner.
-        let zwsp = qqq_core::Error::new(qqq_core::ErrorCode::CompilationFailed, "fail\u{200B}der");
-        let clean_zwsp = reload_message(Some(&zwsp));
-        assert!(
-            !clean_zwsp.chars().any(qqq_cap::text::is_invisible_format),
-            "invisibles must not reach the terminal: {clean_zwsp:?}"
-        );
+        // One member per range: dropping any range from the predicate must
+        // fail here, not pass silently.
+        for invisible in ["\u{200B}", "\u{2062}", "\u{FE0F}", "\u{600}", "\u{E0001}"] {
+            let zwsp = qqq_core::Error::new(
+                qqq_core::ErrorCode::CompilationFailed,
+                format!("fail{invisible}der"),
+            );
+            let clean_zwsp = reload_message(Some(&zwsp));
+            assert!(
+                !clean_zwsp.chars().any(qqq_cap::text::is_invisible_format),
+                "{invisible:?} must not reach the terminal: {clean_zwsp:?}"
+            );
+        }
         assert!(clean.contains("fail"), "{clean}");
     }
 

@@ -78,12 +78,13 @@ impl TenantId {
     /// # Errors
     ///
     /// Rejects an empty name, a name with leading or trailing whitespace, a
-    /// name with control characters, a name with layout-forgers
-    /// ([`crate::text`]: line/paragraph separators, bidi overrides), a name
-    /// with invisible format characters (zero-width spaces and joiners and
-    /// their kin — distinct keys no reader can tell apart), and a name with
-    /// quotes or backslashes (they would desynchronise the hand-written
-    /// audit JSON parser). The first two would make two spellings of the same
+    /// name with interior non-space whitespace (NBSP renders exactly like a
+    /// space; regular spaces stay legal), a name with control characters, a
+    /// name with layout-forgers ([`crate::text`]: line/paragraph separators,
+    /// bidi overrides), a name with invisible format characters (zero-width
+    /// spaces and joiners and their kin — distinct keys no reader can tell
+    /// apart), and a name with quotes or backslashes (they would
+    /// desynchronise the hand-written audit JSON parser). The first two would make two spellings of the same
     /// tenant compare unequal — a policy that applies to `"acme"` but not
     /// `"acme "` is a policy with a hole nobody can see — and the rest would
     /// let a name forge a log line or reorder the text around it.
@@ -109,6 +110,17 @@ impl TenantId {
                 "a tenant id must not have surrounding whitespace: {name:?}. \
                  Two spellings of one tenant would otherwise compare unequal, and \
                  a policy that matches one but not the other has a hole in it."
+            ));
+        }
+        // Interior whitespace other than the ASCII space is refused: `acme`
+        // and `acme\u{A0}corp` are distinct identifiers that render
+        // identically in most fonts (NBSP has the same advance width as a
+        // space), while a regular space stays legal — mapped identities like
+        // `John Doe` need it, and it is visible.
+        if name.chars().any(|c| c.is_whitespace() && c != ' ') {
+            return Err(format!(
+                "a tenant id must not contain non-space whitespace: {name:?}. \
+                 Two spellings of one tenant would otherwise display identically."
             ));
         }
         if name
@@ -1230,14 +1242,25 @@ mod tests {
     #[test]
     fn a_tenant_id_rejects_invisible_format_characters() {
         for hostile in [
+            // One representative per range, so dropping any range from the
+            // predicate fails here rather than passing silently.
+            "acme\u{AD}corp",
+            "acme\u{34F}corp",
+            "acme\u{600}corp",
+            "acme\u{6DD}corp",
+            "acme\u{180B}corp",
+            "acme\u{180F}corp",
+            "acme\u{1D173}corp",
             "acme\u{200B}corp",
             "acme\u{200C}corp",
             "acme\u{200D}corp",
             "acme\u{2060}corp",
-            "acme\u{2061}corp",
-            "acme\u{AD}corp",
-            "acme\u{180E}corp",
+            "acme\u{2062}corp",
+            "acme\u{206A}corp",
+            "acme\u{FE00}corp",
             "acme\u{FE0F}corp",
+            "acme\u{FFF9}corp",
+            "acme\u{A0}corp",
             "\u{200B}",
         ] {
             assert!(
@@ -1245,8 +1268,10 @@ mod tests {
                 "{hostile:?} must not be a tenant id"
             );
         }
-        // Legitimate lookalikes stay valid: emoji content and C1 controls
-        // are a different class (the latter was already refused above).
+        // Legitimate lookalikes stay valid: regular spaces (mapped
+        // identities), emoji content and C1 controls are a different class
+        // (the latter was already refused above).
+        assert!(TenantId::new("John Doe").is_ok());
         assert!(TenantId::new("acme-corp.eu").is_ok());
         assert!(TenantId::new("2001:db8::1").is_ok());
     }

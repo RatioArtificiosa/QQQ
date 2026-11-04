@@ -65,11 +65,14 @@ pub fn is_layout_forgery(c: char) -> bool {
 /// validators refuse them, and value quoters treat them as a quoting trigger
 /// while preserving the content inside quotes.
 ///
-/// The set is the assigned invisible code points of the format and
-/// default-ignorable classes, not an exhaustive Unicode table: unassigned
-/// code points are skipped (one that later assigns as visible must not be
-/// refused), and visibly-rendering fillers (Hangul `115F`-`1160`, `3164`)
-/// are excluded — they cannot spoof because they can be seen.
+/// The set is the assigned invisible code points of the format,
+/// combining-mark, and default-ignorable classes — verified against the
+/// Unicode Character Database (category `Cf`/`Mn`, non-control,
+/// non-whitespace, zero-width in most renderings). Unassigned code points
+/// are skipped (one that later assigns as visible must not be refused;
+/// `2065` stays out even though it sits inside the `206x` block), and
+/// visibly-rendering fillers (Hangul `115F`-`1160`, `3164`) are excluded
+/// — they cannot spoof because they can be seen.
 ///
 /// ```rust
 /// use qqq_core::text::is_invisible_format;
@@ -77,6 +80,7 @@ pub fn is_layout_forgery(c: char) -> bool {
 /// assert!(is_invisible_format('\u{200B}'));
 /// assert!(is_invisible_format('\u{200D}'));
 /// assert!(is_invisible_format('\u{2062}'));
+/// assert!(is_invisible_format('\u{0600}'));
 /// assert!(!is_invisible_format('a'));
 /// assert!(!is_invisible_format('\u{202E}'));
 /// ```
@@ -86,10 +90,22 @@ pub fn is_invisible_format(c: char) -> bool {
         c,
         '\u{00AD}'
             | '\u{034F}'
-            | '\u{180B}'..='\u{180E}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{1BCA0}'
+            | '\u{1D173}'..='\u{1D17A}'
             | '\u{200B}'..='\u{200D}'
             | '\u{2060}'..='\u{2064}'
+            | '\u{206A}'..='\u{206F}'
             | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FFF9}'..='\u{FFFB}'
             | '\u{E0001}'
             | '\u{E0020}'..='\u{E007F}'
             | '\u{E0100}'..='\u{E01EF}'
@@ -131,22 +147,50 @@ mod tests {
     /// preserved by them, or surfaces disagree about what it is. Ranges are
     /// iterated rather than sampled, so a hole in the middle of a range
     /// (the `2061`-`2063` class) fails instead of passing on endpoints.
+    /// The count pins the whole list: adding a member to the predicate
+    /// without extending this test fails, and so does shrinking either side.
     #[test]
     fn invisible_format_covers_every_member_and_stays_disjoint() {
-        let singles = ['\u{00AD}', '\u{034F}', '\u{180E}', '\u{E0001}'];
+        let singles = [
+            '\u{00AD}',
+            '\u{034F}',
+            '\u{06DD}',
+            '\u{070F}',
+            '\u{08E2}',
+            '\u{110BD}',
+            '\u{110CD}',
+            '\u{13430}',
+            '\u{180F}',
+            '\u{1BCA0}',
+            '\u{E0001}',
+        ];
         let ranges = [
-            '\u{180B}'..='\u{180D}',
+            '\u{0600}'..='\u{0605}',
+            '\u{0890}'..='\u{0891}',
+            '\u{180B}'..='\u{180E}',
+            '\u{1D173}'..='\u{1D17A}',
             '\u{200B}'..='\u{200D}',
             '\u{2060}'..='\u{2064}',
+            '\u{206A}'..='\u{206F}',
             '\u{FE00}'..='\u{FE0F}',
+            '\u{FFF9}'..='\u{FFFB}',
             '\u{E0020}'..='\u{E007F}',
             '\u{E0100}'..='\u{E01EF}',
         ];
+        let mut count = 0u32;
         for c in singles.into_iter().chain(ranges.into_iter().flatten()) {
+            count += 1;
             assert!(is_invisible_format(c), "{c:?} must be an invisible format");
             assert!(!is_layout_forgery(c), "{c:?} must be in exactly one set");
         }
-        for c in ['a', '\u{202E}', '\u{2066}', '\u{00A0}', '\u{0085}'] {
+        assert_eq!(
+            count, 400,
+            "the set has 400 members; update test and predicate together"
+        );
+        for c in [
+            'a', '\u{202E}', '\u{2066}', '\u{00A0}', '\u{0085}', '\u{2065}', '\u{115F}',
+            '\u{2000}', '\u{3000}',
+        ] {
             assert!(
                 !is_invisible_format(c),
                 "{c:?} must not be an invisible format"

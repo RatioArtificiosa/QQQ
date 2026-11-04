@@ -817,6 +817,7 @@ pub fn parse_fail_on(text: &str) -> Result<Severity> {
 /// Invisible format characters escape the same way: `\u200b` is valid JSON,
 /// and an audit row no reader can see is a row no auditor can verify.
 fn json_escape(s: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
@@ -829,8 +830,22 @@ fn json_escape(s: &str) -> String {
                 || qqq_cap::text::is_layout_forgery(c)
                 || qqq_cap::text::is_invisible_format(c) =>
             {
-                use std::fmt::Write as _;
-                let _ = write!(out, "\\u{:04x}", u32::from(c));
+                // Supplementary-plane members (`E0001`, tag characters) do
+                // not fit `\uXXXX`: JSON needs a UTF-16 surrogate pair, and
+                // a 5-digit `\ue0001` would parse as `\ue000` plus a literal
+                // `1` — silent corruption instead of a loud error.
+                let n = u32::from(ch);
+                if n > 0xFFFF {
+                    let n = n - 0x1_0000;
+                    let _ = write!(
+                        out,
+                        "\\u{:04x}\\u{:04x}",
+                        0xD800 + (n >> 10),
+                        0xDC00 + (n & 0x3FF)
+                    );
+                } else {
+                    let _ = write!(out, "\\u{n:04x}");
+                }
             }
             c => out.push(c),
         }
@@ -1526,6 +1541,18 @@ mod tests {
         assert_eq!(json_escape("a\u{2029}b"), "a\\u2029b");
         assert_eq!(json_escape("a\u{202e}b"), "a\\u202eb");
         assert_eq!(json_escape("a\u{200b}b"), "a\\u200bb");
+        // Supplementary-plane members escape as surrogate pairs and
+        // round-trip exactly: parseable-only assertions cannot catch a
+        // 5-digit `\ue0001` corrupting into `\ue000` plus a literal `1`.
+        for supplementary in ["a\u{E0001}b", "a\u{1D173}b"] {
+            let escaped = json_escape(supplementary);
+            let back: String = serde_json::from_str(&format!("\"{escaped}\""))
+                .expect("surrogate pairs must parse");
+            assert_eq!(
+                back, supplementary,
+                "{supplementary:?} must round-trip, not just parse"
+            );
+        }
         let doc = format!(
             "{{\"text\":\"{}\"}}",
             json_escape("he said \"hi\"\nthen left")

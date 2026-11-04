@@ -1516,6 +1516,7 @@ pub fn is_host_controlled_header(name: &str) -> bool {
 /// assert_eq!(escape_header_value("a\u{2028}b"), "a%E2%80%A8b");
 /// assert_eq!(escape_header_value("a\u{85}b"), "a%C2%85b");
 /// assert_eq!(escape_header_value("a\u{200B}b"), "a%E2%80%8Bb");
+/// assert_eq!(escape_header_value("a\u{2061}b"), "a%E2%81%A1b");
 /// ```
 #[must_use]
 pub fn escape_header_value(value: &str) -> String {

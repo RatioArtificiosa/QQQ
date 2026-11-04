@@ -960,7 +960,10 @@ fn json_string(s: &str) -> String {
             // Every other control, plus invisible layout-forgers: JSON requires
             // the controls escaped and old JS engines throw on raw U+2028/29,
             // so both escape the same way. The shared predicate keeps this
-            // encoder agreeing with the audit and host-log ones.
+            // encoder agreeing with the audit and host-log ones over
+            // controls+forgery; invisibles are preserved here (messages are
+            // content and may carry joiners) and escaped in SARIF (audit rows
+            // are diagnostics). Same behavior contract, scoped per surface.
             c if c.is_control() || qqq_host::is_layout_forgery(c) => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
             }
@@ -1259,6 +1262,25 @@ mod tests {
         assert_eq!(v["tenant"], "acme\u{FFFD}corp");
     }
 
+    /// One member per invisible range in the tenant field, so dropping any
+    /// range from the predicate fails here rather than passing silently.
+    /// Messages keep their joiners (content rule); only the label folds.
+    #[test]
+    fn tenant_labels_fold_every_invisible_range() {
+        for invisible in ["\u{200B}", "\u{2062}", "\u{FE0F}", "\u{600}"] {
+            let mut r = record();
+            r.tenant = format!("acme{invisible}corp");
+            let human = r.render_human();
+            assert!(
+                human.contains("acme\u{FFFD}corp"),
+                "{invisible:?} must fold in the human tenant field: {human:?}"
+            );
+            let json = r.render_json();
+            let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+            assert_eq!(v["tenant"], "acme\u{FFFD}corp");
+        }
+    }
+
     /// **The two encodings carry the same fields.**
     ///
     /// # Why this test exists
@@ -1368,6 +1390,30 @@ mod tests {
         let line = r.render_human();
         assert!(line.contains('…'), "{line}");
         assert!(!line.contains('\n'), "{line}");
+    }
+
+    /// A long hostile tenant diverges between encodings on purpose: the human
+    /// line shows the folded tenant truncated to its fixed column, while the
+    /// JSON carries the full folded value. Both fold the invisible (no raw
+    /// `\u{200B}` anywhere); only the width differs, which is the column
+    /// contract, not a second source of truth.
+    #[test]
+    fn a_long_hostile_tenant_folds_in_both_encodings() {
+        let (t, s) = ids();
+        let mut r = Record::new(Level::Info, t, s, "acme", "svc", "rev", "msg");
+        r.tenant = "acme\u{200B}corporation-wide-tenant".to_owned();
+        let human = r.render_human();
+        assert!(
+            !human.contains('\u{200B}'),
+            "no invisible survives in the human line: {human:?}"
+        );
+        assert!(
+            human.contains("acme\u{FFFD}corpo"),
+            "the folded tenant truncates to the column: {human:?}"
+        );
+        let json = r.render_json();
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["tenant"], "acme\u{FFFD}corporation-wide-tenant");
     }
 
     // -- redaction ----------------------------------------------------------

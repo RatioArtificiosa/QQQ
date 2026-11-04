@@ -1572,11 +1572,15 @@ pub struct TenantSources<'h, 'f> {
 /// the audit stream. Kept as a predicate rather than a `TenantId` so the
 /// fallback can name the fingerprint; the test below pins the agreement.
 fn identity_label_is_safe(subject: &str) -> bool {
-    if subject.is_empty() || subject.trim() != subject {
+    if subject.is_empty() || subject.len() > 256 || subject.trim() != subject {
         return false;
     }
     !subject.chars().any(|c| {
-        c.is_control()
+        // `TenantId` refuses any non-space whitespace for the same reason
+        // (NBSP renders exactly like a space); regular spaces stay legal so
+        // mapped identities like `John Doe` keep attributing verbatim.
+        (c.is_whitespace() && c != ' ')
+            || c.is_control()
             || c == '"'
             || c == '\\'
             || qqq_host::boundary::is_layout_forgery(c)
@@ -4551,9 +4555,6 @@ mod tests {
             "",
         ] {
             let id = peer_identity_with_hostile_cn(hostile_cn);
-            // The walker delivers the CN verbatim (or the placeholder when
-            // there is no CN): either way the value below is what an attacker
-            // controls, and the resolution must not wear it as a label.
             assert_eq!(
                 resolve_request_tenant(TenantSources {
                     hosts: None,
@@ -4576,6 +4577,54 @@ mod tests {
             }),
             TenantResolution::Resolved("tenant-c".to_owned())
         );
+        // A long clean CN also falls back: labels are bounded like TenantId's
+        // 256 bytes, and a 300-char name would otherwise become a 300-char
+        // series label in every renderer.
+        let long = peer_identity_with_hostile_cn(&"a".repeat(257));
+        assert_eq!(
+            resolve_request_tenant(TenantSources {
+                hosts: None,
+                host: None,
+                fallback: "127.0.0.1",
+                identity: Some(&long),
+            }),
+            TenantResolution::Resolved(long.fingerprint().to_owned())
+        );
+    }
+
+    /// The label gate, pinned directly: empty, over-long, padded, quoted,
+    /// and whitespace-spoofed subjects fall back, while ordinary names
+    /// (including interior spaces) pass. The empty case never reaches this
+    /// function through the walker (no CN yields the placeholder arm), so it
+    /// is pinned here rather than through a certificate.
+    #[test]
+    fn identity_label_gate_mirrors_tenant_id() {
+        for hostile in [
+            "",
+            " ",
+            " acme",
+            "acme ",
+            "a\"b",
+            "a\\b",
+            "a\nb",
+            "a\u{A0}b",
+            "a\u{202E}b",
+            "a\u{200B}b",
+            "a\u{600}b",
+        ] {
+            assert!(
+                !identity_label_is_safe(hostile),
+                "{hostile:?} must not be a tenant label"
+            );
+        }
+        assert!(identity_label_is_safe(&"a".repeat(256)));
+        assert!(!identity_label_is_safe(&"a".repeat(257)));
+        for clean in ["tenant-c", "John Doe", "acme", "2001:db8::1"] {
+            assert!(
+                identity_label_is_safe(clean),
+                "{clean:?} must stay a tenant label"
+            );
+        }
     }
 
     /// A certificate whose common name is not SAN-safe, for hostile-identity

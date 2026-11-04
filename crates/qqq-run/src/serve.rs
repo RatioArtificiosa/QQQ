@@ -579,7 +579,8 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
                      --accept-limit, --aot-cache, --audit-log, \
                      --audit-hmac-key-file, --redact-from, --log-format, \
                      --metrics-path, --trace-sample, --trace-keep-failures, \
-                     --deterministic and --allow-deterministic-public",
+                     --deterministic and --allow-deterministic-public; \
+                     run `qqqai serve --help` for details",
                 ));
             }
         }
@@ -680,10 +681,18 @@ fn expand_equals(args: &[String]) -> Vec<String> {
 }
 
 /// Read the value that follows a flag.
+///
+/// Absent and empty both mean missing: `--flag ""` names nothing real, and
+/// reporting it as missing points at the invocation rather than at a
+/// downstream parse of an empty string.
 fn value_of(args: &[String], i: usize, flag: &str) -> Result<String> {
-    args.get(i + 1).cloned().ok_or_else(|| {
-        usage(format!("`{flag}` needs a value")).with_remediation(format!("write `{flag} <value>`"))
-    })
+    args.get(i + 1)
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            usage(format!("`{flag}` needs a value"))
+                .with_remediation(format!("write `{flag} <value>`"))
+        })
 }
 
 /// A usage error — the invocation was wrong, not the project.
@@ -2224,6 +2233,8 @@ mod tests {
     ///
     /// `dev` and `run` grew `=` twins while `serve` called the same spelling
     /// unknown; the expansion up front keeps every arm single-sourced.
+    /// Every observability flag is exercised here so the extracted
+    /// `parse_observability_flag` has no untested branch.
     #[test]
     fn equals_forms_parse_like_space_forms() {
         let o = options(&args(&[
@@ -2233,6 +2244,11 @@ mod tests {
             "--accept-limit=3",
             "--audit-log=a.jsonl",
             "--trace-sample=on",
+            "--trace-keep-failures",
+            "--metrics-path=/metrics",
+            "--log-format=json",
+            "--redact-from=s.env",
+            "--audit-hmac-key-file=k.hex",
         ]))
         .expect("= forms must parse");
         assert_eq!(o.listen, "0.0.0.0:8080");
@@ -2241,6 +2257,11 @@ mod tests {
         assert_eq!(o.accept_limit, Some(3));
         assert_eq!(o.audit_log.as_deref(), Some("a.jsonl"));
         assert_eq!(o.trace_rate.as_deref(), Some("on"));
+        assert!(o.trace_keep_failures);
+        assert_eq!(o.metrics_path.as_deref(), Some("/metrics"));
+        assert_eq!(o.log_format.as_deref(), Some("json"));
+        assert_eq!(o.redact_from.as_deref(), Some("s.env"));
+        assert_eq!(o.audit_hmac_key_file.as_deref(), Some("k.hex"));
         // Unknown flags keep their spelling, so the error names the whole thing.
         let err = options(&args(&["--bogus=x"])).expect_err("must be refused");
         assert!(

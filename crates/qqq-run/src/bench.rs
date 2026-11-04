@@ -88,11 +88,18 @@ impl Default for BenchOptions {
 }
 
 /// Read the next value after a flag.
+///
+/// Absent and empty both mean missing: `--flag ""` names nothing real, and
+/// reporting it as missing points at the invocation rather than at a
+/// downstream parse of an empty string.
 fn value_of(args: &[String], i: usize, flag: &str) -> Result<String, Error> {
-    args.get(i + 1).cloned().ok_or_else(|| {
-        usage(format!("`{flag}` needs a value"))
-            .with_remediation(format!("for example `{flag} 127.0.0.1:8080`"))
-    })
+    args.get(i + 1)
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            usage(format!("`{flag}` needs a value"))
+                .with_remediation(format!("for example `{flag} 127.0.0.1:8080`"))
+        })
 }
 
 /// The value-taking flags: both spellings parse identically, via the shared
@@ -204,7 +211,7 @@ pub fn options(args: &[String]) -> Result<BenchOptions, Error> {
                 // code says which reading to do, the message names the flag.
                 return Err(Error::new(
                     ErrorCode::CliFlagUnknown,
-                    format!("unknown option `{other}` for `qqqai bench`"),
+                    format!("unknown flag `{other}` for `bench`"),
                 )
                 .with_remediation(
                     "run `qqqai bench --help`; the options are --listen, --only, \

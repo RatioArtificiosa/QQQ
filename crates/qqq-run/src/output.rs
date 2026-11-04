@@ -1132,10 +1132,12 @@ mod tests {
         assert_eq!(v["command"], "why");
         assert_eq!(v["error"]["code"], "QQQ-4003");
         assert_eq!(v["error"]["retryable"], false);
-        assert!(v["error"]["docs_url"]
-            .as_str()
-            .unwrap()
-            .ends_with("QQQ-4003"));
+        assert!(
+            v["error"]["docs_url"]
+                .as_str()
+                .unwrap()
+                .ends_with("QQQ-4003")
+        );
         assert!(v["error"]["remediation"].is_string());
         // Context must be an array of named objects, not tuples.
         assert_eq!(v["error"]["context"][0]["name"], "capability");

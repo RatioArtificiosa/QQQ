@@ -4051,11 +4051,11 @@ fn build_options(args: &[String]) -> Result<qqq_run::BuildOptions, qqq_core::Err
         };
         match a {
             "--aot-cache" => {
-                cache = Some(std::path::PathBuf::from(
-                    args.get(i + 1)
-                        .ok_or_else(|| missing_value("--aot-cache"))
-                        .and_then(|v| non_empty_value("--aot-cache", v))?,
-                ));
+                cache = Some(std::path::PathBuf::from(required_value(
+                    args,
+                    i,
+                    "--aot-cache",
+                )?));
                 bits |= qqq_run::BuildOptions::AOT;
                 i += 1;
             }
@@ -4178,11 +4178,11 @@ fn run_options(
                 i += 1;
             }
             "--aot-cache" => {
-                opts.aot_cache = Some(std::path::PathBuf::from(
-                    args.get(i + 1)
-                        .ok_or_else(|| missing_value("--aot-cache"))
-                        .and_then(|v| non_empty_value("--aot-cache", v))?,
-                ));
+                opts.aot_cache = Some(std::path::PathBuf::from(required_value(
+                    args,
+                    i,
+                    "--aot-cache",
+                )?));
                 i += 1;
             }
             "--replay" => {
@@ -5982,6 +5982,7 @@ mod tests {
         // Bare and empty value flags are usage errors, not silent defaults.
         inspect_args(&args(&["--manifest"])).expect_err("bare --manifest must fail");
         inspect_args(&args(&["--diff="])).expect_err("empty --diff= must fail");
+        inspect_args(&args(&["--diff", ""])).expect_err("space-empty --diff must fail");
         // A manifest override with an artifact is refused: the artifact path
         // answers from the bytes, so the flag is either leftover or confusion.
         let p = inspect_args(&args(&["--manifest", "q.toml"])).expect("parses");
@@ -6274,6 +6275,16 @@ mod tests {
         schema_args(&argv(&["--command"])).expect_err("bare --command must fail");
         schema_args(&argv(&["--command="])).expect_err("empty --command= must fail");
         schema_args(&argv(&["--bogus"])).expect_err("unknown flags must fail");
+        // `schema` describes the CLI itself: no manifest, no positionals.
+        let err =
+            schema_args(&argv(&["--manifest", "q.toml"])).expect_err("schema takes no manifest");
+        assert!(
+            err.message.contains("takes no `--manifest`"),
+            "{}",
+            err.message
+        );
+        let err = schema_args(&argv(&["caps"])).expect_err("positionals must fail");
+        assert!(err.message.contains("no positional"), "{}", err.message);
         // Empty `=` values are missing values, not empty strings.
         run_options(&argv(&["--artifact="]), GlobalFlags::default())
             .expect_err("empty --artifact= must fail");
@@ -6338,5 +6349,22 @@ mod tests {
         assert!(err.message.contains("one filter"), "{}", err.message);
         // Single-dash audit flags are refused, not swallowed.
         audit_args(&argv(&["-x"])).expect_err("single-dash flags are flags");
+        // `update`/`install` accept `--manifest` in both spellings (stripped
+        // for `with_manifest`); a bare one fails loudly.
+        let _ = update_options(&argv(&["--manifest=x.toml"]), GlobalFlags::default())
+            .expect("= twin parses");
+        update_options(&argv(&["--manifest"]), GlobalFlags::default())
+            .expect_err("bare --manifest must fail");
+        let _ = install_options(&argv(&["--manifest=x.toml"]), GlobalFlags::default())
+            .expect("= twin parses");
+        install_options(&argv(&["--manifest"]), GlobalFlags::default())
+            .expect_err("bare --manifest must fail");
+        // Space-form empties fail in serve/bench too, via shared value_of.
+        let err = qqq_run::serve::options(&argv(&["--listen", ""]))
+            .expect_err("empty --listen must fail");
+        assert!(err.to_string().contains("needs a value"), "got {err}");
+        let err = qqq_run::bench::options(&argv(&["--requests", ""]))
+            .expect_err("empty --requests must fail");
+        assert!(err.to_string().contains("needs a value"), "got {err}");
     }
 }

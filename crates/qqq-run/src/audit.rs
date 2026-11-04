@@ -490,11 +490,32 @@ fn unused_grants(loaded: &LoadedManifest) -> Vec<Finding> {
     let Ok(report) = crate::commands::inspect_artifact(&artifact) else {
         return Vec::new();
     };
-    let required: std::collections::BTreeSet<&str> =
-        report.required.iter().map(|c| c.name.as_str()).collect();
+    let required = expand_required(&report);
 
     let resolution = qqq_cap::resolve::Resolution::from_manifest(&loaded.manifest);
     unused_grants_from(&resolution.grants.capabilities(), &required)
+}
+
+/// Every capability the artifact's imports imply, not just the reported one.
+///
+/// The report names the strongest match per import (per-call enforcement
+/// denies ungranted halves, so unexercised halves are not requirements).
+/// But "unused" asks the opposite question — whether a grant *could* be
+/// exercised — and there the unreported halves count: an artifact importing
+/// `qqq:http/http` with both halves granted uses the interface fully, so
+/// neither half is unused. Comparing grants against the singular names would
+/// flag `http.client` (and `fs.read`/`fs.watch`) as unused for every app
+/// that imports the whole interface — a false positive that trains operators
+/// to delete grants the guest exercises.
+fn expand_required(report: &crate::commands::ArtifactReport) -> std::collections::BTreeSet<&str> {
+    let mut required = std::collections::BTreeSet::new();
+    for r in &report.required {
+        required.insert(r.name.as_str());
+        for c in crate::run::capabilities_for_import(&r.interface) {
+            required.insert(c.name());
+        }
+    }
+    required
 }
 
 /// The pure predicate: which grants the artifact does not import.
@@ -1025,6 +1046,42 @@ mod tests {
         let both: std::collections::BTreeSet<&str> =
             ["http.server", "clock.wall"].into_iter().collect();
         assert!(unused_grants_from(&granted, &both).is_empty());
+    }
+
+    /// The unused check expands singular report entries to every implied
+    /// capability before comparing.
+    ///
+    /// An artifact importing `qqq:http/http` with both halves granted uses the
+    /// interface fully: comparing the grants against the singular report name
+    /// (`http.server`) would flag `http.client` as unused — a false positive
+    /// that trains operators to delete grants the guest exercises.
+    #[test]
+    fn expanded_required_covers_every_implied_capability() {
+        use crate::commands::{ArtifactReport, CapabilityReport, Posture};
+        let report = ArtifactReport {
+            artifact: "a.wasm".to_owned(),
+            digest: "sha256:abc".to_owned(),
+            size_bytes: 8,
+            kind: "component".to_owned(),
+            required: vec![CapabilityReport {
+                name: "http.server".to_owned(),
+                interface: "qqq:http/http@1.0.0".to_owned(),
+                implemented: false,
+            }],
+            unmapped_interfaces: Vec::new(),
+            posture: Posture::Exposed,
+        };
+        let expanded = expand_required(&report);
+        assert!(
+            expanded.contains("http.server") && expanded.contains("http.client"),
+            "both halves count as used: {expanded:?}"
+        );
+        // And the predicate stays silent for the fully-granted pair.
+        let granted = [
+            qqq_cap::Capability::HttpServer,
+            qqq_cap::Capability::HttpClient,
+        ];
+        assert!(unused_grants_from(&granted, &expanded).is_empty());
     }
 
     /// With no built artifact the rule reports **nothing**, rather than guessing from the source.

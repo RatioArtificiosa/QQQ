@@ -592,7 +592,7 @@ pub fn capabilities_for_import(interface: &str) -> Vec<qqq_cap::Capability> {
         .collect();
 
     // Every match, strongest first — `qqq:fs/filesystem` is unlocked by
-    // `FsRead`, `FsWrite` **and** `FsWatch`, and the audit surface must name
+    // `FsRead`, `FsWrite` **and** `FsWatch`, and the remediation must name
     // all three rather than only the strongest.
     strongest_first(matching)
 }
@@ -783,7 +783,7 @@ fn import_error(check: &ImportCheck, loaded: &LoadedManifest) -> Error {
     .with_context("granted", check.satisfied.join(", "))
     .with_context("project", loaded.name().to_owned())
     .with_remediation(match implicated.first() {
-        Some(cap) => remediation_for(&implicated, *cap),
+        Some(_) => remediation_for(&implicated),
         None => format!(
             "run `{} caps` to see what is granted, and `{} why <capability>` to \
              understand a decision",
@@ -807,36 +807,94 @@ fn import_error(check: &ImportCheck, loaded: &LoadedManifest) -> Error {
     e
 }
 
-/// The remediation for a failed import check: the stanza to paste.
+/// The remediation for a failed import check: the stanza(s) to paste.
 ///
 /// One interface can imply several capabilities, and the operator pastes once:
 /// a remediation that names one grant when the interface needs two leaves the
-/// component still failing. So the stanza covers the strongest, and any other
-/// implied capability is named in the same text (the machine-readable
-/// `also_implicated` context carries them separately).
+/// component still failing. So every implicated capability appears — as a
+/// merged single table where the manifest schema has one, as separate stanzas
+/// where the schema repeats (array tables paste fine).
 ///
-/// The `http` pair is the exception that proves the shape: both halves live in
-/// one `[capabilities.http]` table, and two pasted tables would be
-/// duplicate-table invalid TOML — so a component missing both gets the whole
-/// table, not two stanzas to merge by hand.
-fn remediation_for(implicated: &[qqq_cap::Capability], strongest: qqq_cap::Capability) -> String {
-    use qqq_cap::Capability::{HttpClient, HttpServer};
-    if implicated.len() == 2 && implicated.contains(&HttpServer) && implicated.contains(&HttpClient)
-    {
-        return crate::commands::HTTP_TABLE_STANZA.to_owned();
+/// Merging matters because same-table stanzas do not compose: two pasted
+/// `[capabilities.crypto]` tables are duplicate-table invalid TOML. The merge
+/// is exact, never whole-table — emitting the full `crypto` table for two
+/// missing of five would smuggle three unasked grants including the covert
+/// `crypto.random`, which is the over-grant this whole function exists to
+/// prevent.
+fn remediation_for(implicated: &[qqq_cap::Capability]) -> String {
+    // Group by namespace, strongest-first order preserved.
+    let mut groups: Vec<(&str, Vec<qqq_cap::Capability>)> = Vec::new();
+    for &c in implicated {
+        match groups.iter_mut().find(|(ns, _)| *ns == c.namespace()) {
+            Some((_, g)) => g.push(c),
+            None => groups.push((c.namespace(), vec![c])),
+        }
     }
-    let mut out = crate::commands::fix_stanza_for(strongest);
-    if implicated.len() > 1 {
-        let rest = implicated
-            .iter()
-            .skip(1)
-            .map(|c| c.name().to_owned())
-            .collect::<Vec<_>>()
-            .join(", ");
-        out.push_str("\n\nAlso required: ");
-        out.push_str(&rest);
-        out.push_str(" — one stanza per capability; merge same-table entries into a single table");
+    let mut parts: Vec<String> = Vec::new();
+    for (ns, caps) in &groups {
+        // Array tables (`[[capabilities.fs]]`, `[[capabilities.sql]]`,
+        // `[[capabilities.queue]]`) repeat, so one stanza per capability
+        // pastes fine. Every other namespace is a single table: merge the key
+        // lines under one header.
+        if caps.len() > 1 && is_single_table(ns) {
+            parts.push(merge_table_stanzas(
+                &caps
+                    .iter()
+                    .map(|c| crate::commands::fix_stanza_for(*c))
+                    .collect::<Vec<_>>(),
+            ));
+        } else {
+            for c in caps {
+                parts.push(crate::commands::fix_stanza_for(*c));
+            }
+        }
     }
+    let mut out = parts.join("\n\n");
+    if parts.len() > 1 {
+        out.push_str("\n\nPaste every stanza above; each grants only what it names.");
+    }
+    out
+}
+
+/// Whether a manifest namespace is a single table (merging required) rather
+/// than a repeatable array of tables (one stanza per entry pastes fine).
+fn is_single_table(namespace: &str) -> bool {
+    !matches!(namespace, "fs" | "sql" | "queue")
+}
+
+/// Merge several single-table stanzas into one paste-safe stanza.
+///
+/// The merge is line-structural, not string-blind: table headers (lines whose
+/// first non-space character is `[`) are deduplicated, key lines are
+/// concatenated in order, and everything rides under one `add to qqq.toml`
+/// prefix. The inputs come from [`crate::commands::fix_stanza_for`], whose
+/// shape this function depends on — pinned by the remediation tests below.
+fn merge_table_stanzas(stanzas: &[String]) -> String {
+    const PREFIX: &str = "add to qqq.toml:\n\n";
+    let mut headers: Vec<&str> = Vec::new();
+    let mut keys: Vec<&str> = Vec::new();
+    for stanza in stanzas {
+        for line in stanza.strip_prefix(PREFIX).unwrap_or(stanza).lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('[') {
+                if !headers.contains(&trimmed) {
+                    headers.push(trimmed);
+                }
+            } else if !trimmed.is_empty() {
+                keys.push(line);
+            }
+        }
+    }
+    let mut out = PREFIX.to_owned();
+    for header in headers {
+        out.push_str(header);
+        out.push('\n');
+    }
+    for key in keys {
+        out.push_str(key);
+        out.push('\n');
+    }
+    out.pop();
     out
 }
 
@@ -1853,12 +1911,14 @@ mod tests {
     /// A component missing both `http` halves gets one table, not two stanzas.
     ///
     /// Both halves live in one `[capabilities.http]` table: two pasted tables
-    /// would be duplicate-table invalid TOML, so the pair case is the one
-    /// remediation that covers more than the strongest.
+    /// would be duplicate-table invalid TOML. The merge carries both key
+    /// lines, and nothing else — a whole-table fallback would smuggle nothing
+    /// here only because both halves are missing; the merge stays exact when
+    /// they are not.
     #[test]
     fn http_pair_remediation_is_one_table() {
         use qqq_cap::Capability::{HttpClient, HttpServer};
-        let out = remediation_for(&[HttpServer, HttpClient], HttpServer);
+        let out = remediation_for(&[HttpServer, HttpClient]);
         assert!(
             out.contains("server = true") && out.contains("client = "),
             "both directions must be granted: {out}"
@@ -1870,21 +1930,76 @@ mod tests {
         );
     }
 
+    /// Same-table multi-misses merge to one paste-safe stanza, exactly.
+    ///
+    /// Two missing of five `crypto` capabilities must not emit two
+    /// `[capabilities.crypto]` tables (duplicate-table invalid TOML) and must
+    /// not emit the whole table either (three unasked grants including the
+    /// covert `crypto.random`). The merge carries exactly the missing lines.
+    #[test]
+    fn crypto_multi_miss_remediation_merges_exactly() {
+        use qqq_cap::Capability::{CryptoHash, CryptoRandom};
+        use qqq_cap::manifest::Manifest;
+        let out = remediation_for(&[CryptoRandom, CryptoHash]);
+        assert_eq!(
+            out.matches("[capabilities.crypto]").count(),
+            1,
+            "one table: {out}"
+        );
+        assert!(
+            out.contains("random = true") && out.contains("hash = "),
+            "both missing lines, nothing else: {out}"
+        );
+        // And the merged stanza parses to exactly the two missing grants.
+        let body = out
+            .strip_prefix("add to qqq.toml:\n\n")
+            .expect("the remediation carries the stanza prefix");
+        let manifest = Manifest::parse(&format!(
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
+        ))
+        .expect("the merged stanza must parse");
+        assert_eq!(
+            manifest.declared_capabilities(),
+            vec![CryptoRandom, CryptoHash],
+            "the merge must grant exactly the missing pair"
+        );
+    }
+
+    /// A mixed miss (pair plus another namespace) merges the pair and keeps
+    /// the array-table stanza separate — array tables repeat, so they paste
+    /// fine as-is.
+    #[test]
+    fn mixed_miss_remediation_merges_only_single_tables() {
+        use qqq_cap::Capability::{FsWrite, HttpClient, HttpServer};
+        let out = remediation_for(&[HttpServer, HttpClient, FsWrite]);
+        assert_eq!(
+            out.matches("[capabilities.http]").count(),
+            1,
+            "the http pair merges: {out}"
+        );
+        assert!(
+            out.contains("append-only"),
+            "the fs stanza stays separate (array tables repeat): {out}"
+        );
+    }
+
     /// Any other multi-capability interface names the rest alongside the stanza.
     ///
     /// A remediation that names one grant when the interface needs several
     /// leaves the component still failing after the operator pastes the fix.
+    /// Array-table namespaces (`fs`) keep one stanza per capability — they
+    /// repeat, so they paste fine — while single-table groups merge.
     #[test]
     fn multi_cap_remediation_names_the_rest() {
         use qqq_cap::Capability::{FsRead, FsWatch, FsWrite};
-        let out = remediation_for(&[FsWrite, FsRead, FsWatch], FsWrite);
+        let out = remediation_for(&[FsWrite, FsRead, FsWatch]);
         assert!(
             out.contains("append-only"),
             "the strongest still leads: {out}"
         );
         assert!(
-            out.contains("Also required:"),
-            "the other implied grants must be visible, not just in context: {out}"
+            out.contains("Paste every stanza above"),
+            "several stanzas must say so: {out}"
         );
     }
 

@@ -920,8 +920,16 @@ fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
             diff_against = Some(v.clone());
             i += 1;
         } else if let Some(v) = a.strip_prefix("--diff=") {
+            if v.is_empty() {
+                return Err(missing_value("--diff"));
+            }
             diff_against = Some(v.to_owned());
         } else if TAKES_VALUE.contains(&a) {
+            // A bare `--manifest` is a usage error, not a silent no-op.
+            // (`--diff` cannot reach this arm: the exact match above owns it.)
+            if a == "--manifest" && args.get(i + 1).is_none() {
+                return Err(missing_value("--manifest"));
+            }
             i += 1;
         } else if a.starts_with("--manifest=") {
             // Self-contained: no value to skip, and nothing here is an
@@ -943,6 +951,15 @@ fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
             ));
         } else if artifact.is_none() {
             artifact = Some(a.to_owned());
+        } else {
+            // A second positional is refused, not dropped: `inspect a.wasm
+            // b.wasm` inspecting only `a.wasm` would answer about a file the
+            // operator may not have meant.
+            return Err(qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                format!("`inspect` takes one artifact path, not `{a}`"),
+            )
+            .with_remediation("compare two artifacts with `inspect new.wasm --diff old.wasm`"));
         }
         i += 1;
     }
@@ -1022,6 +1039,11 @@ fn dispatch_audit(
                     return ExitCode::from(exit::USAGE);
                 }
             }
+        } else if a == "--manifest" && args.get(i + 1).is_none() {
+            // A bare `--manifest` is a usage error, not a silent no-op.
+            let e = missing_value("--manifest");
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
         } else if a.starts_with("--") && a != "--manifest" && !a.starts_with("--manifest=") {
             // **An unknown flag is refused rather than dropped.** There was no arm here, so
             // `qqqai audit --bogus` printed the human report and exited `0`: the caller got an answer
@@ -1706,6 +1728,7 @@ fn dispatch_openapi(
 ///
 /// A pure function so tests can pin the parsing without building an `Output`
 /// sink or touching the filesystem.
+#[derive(Debug)]
 struct OpenapiArgs {
     out: Option<String>,
     manifest: Option<std::path::PathBuf>,
@@ -1723,6 +1746,13 @@ fn openapi_args(args: &[String]) -> Result<OpenapiArgs, qqq_core::Error> {
             break;
         };
         if let Some(v) = a.strip_prefix("--out=") {
+            if v.is_empty() {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    "`--out` needs a file path".to_owned(),
+                )
+                .with_remediation("write `--out openapi.json`"));
+            }
             out = Some(v.to_owned());
         } else if a == "--out" || a == "-o" {
             // `let ... else`, not a `match` with one meaningful arm: a bare `--out` is a
@@ -3495,6 +3525,7 @@ fn dispatch_caps(
 /// A pure function so tests can pin the parsing without building an `Output`
 /// sink. `--manifest` (both spellings) is skipped with its value — owned by
 /// `with_manifest`, like every sibling command.
+#[derive(Debug)]
 struct CapsArgs {
     explain: bool,
 }
@@ -3508,7 +3539,15 @@ fn caps_args(args: &[String]) -> Result<CapsArgs, qqq_core::Error> {
         };
         match a {
             "--explain" => explain = true,
-            "--manifest" => i += 1,
+            "--manifest" => {
+                // A bare `--manifest` is a usage error, not a silent no-op:
+                // without this arm `caps --manifest` discarded the flag and
+                // described the ambient project.
+                if args.get(i + 1).is_none() {
+                    return Err(missing_value("--manifest"));
+                }
+                i += 1;
+            }
             // The `=` twin is self-contained: no value to skip. Without this
             // arm it fell into the unknown-flag refusal below, so
             // `caps --manifest=x.toml` failed while `with_manifest`
@@ -3524,7 +3563,18 @@ fn caps_args(args: &[String]) -> Result<CapsArgs, qqq_core::Error> {
                      the global `--manifest`",
                 ));
             }
-            _ => {}
+            other => {
+                // `caps` takes no positionals: a stray word is a typo (often
+                // a capability name meant for `why`), and ignoring it would
+                // report grants the operator did not ask about.
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    format!("`caps` takes no positional arguments, not `{other}`"),
+                )
+                .with_remediation(
+                    "run `caps --explain`, or `why <capability>` to explain one grant",
+                ));
+            }
         }
         i += 1;
     }
@@ -3589,8 +3639,12 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 /// `caps` and `inspect` refuse.
 fn first_positional_cap(args: &[String]) -> Result<Option<String>, qqq_core::Error> {
     let mut rest: &[String] = args;
+    let mut found: Option<String> = None;
     while let Some((a, tail)) = rest.split_first() {
         if a == "--manifest" {
+            if tail.is_empty() {
+                return Err(missing_value("--manifest"));
+            }
             rest = tail.get(1..).unwrap_or(&[]);
             continue;
         }
@@ -3605,9 +3659,20 @@ fn first_positional_cap(args: &[String]) -> Result<Option<String>, qqq_core::Err
             )
             .with_remediation("`why` takes a capability and the global `--manifest`"));
         }
-        return Ok(Some(a.clone()));
+        if found.is_some() {
+            // `why` explains one capability: a second positional is a
+            // mistake (often a second guess at the name), and explaining
+            // only the first would hide it.
+            return Err(qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                format!("`why` takes one capability, not `{a}` either"),
+            )
+            .with_remediation("for example: qqqai why crypto.hash"));
+        }
+        found = Some(a.clone());
+        rest = tail;
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// Decode `qqqai build`'s own flags.
@@ -5445,6 +5510,12 @@ mod tests {
             .expect_err("unknown flag must fail");
         assert_eq!(err.code, qqq_core::ErrorCode::CliFlagUnknown);
         assert!(err.message.contains("--bogus"), "{}", err.message);
+        // A bare `--manifest` is a usage error, not a silent no-op.
+        first_positional_cap(&args(&["--manifest"])).expect_err("a flag value must follow");
+        // Two positionals: explaining only the first would hide the mistake.
+        let err = first_positional_cap(&args(&["crypto.hash", "http.client"]))
+            .expect_err("a second capability must fail");
+        assert!(err.message.contains("one capability"), "{}", err.message);
     }
 
     #[test]
@@ -5468,6 +5539,13 @@ mod tests {
         let p = inspect_args(&args(&["--diff=b.wasm"])).expect("parses");
         assert_eq!(p.diff_against.as_deref(), Some("b.wasm"));
         assert_eq!(p.artifact, None);
+        // A second positional is refused: inspecting only the first would
+        // answer about a file the operator may not have meant.
+        let err = inspect_args(&args(&["a.wasm", "b.wasm"])).expect_err("two artifacts");
+        assert!(err.message.contains("one artifact"), "{}", err.message);
+        // Bare and empty value flags are usage errors, not silent defaults.
+        inspect_args(&args(&["--manifest"])).expect_err("bare --manifest must fail");
+        inspect_args(&args(&["--diff="])).expect_err("empty --diff= must fail");
     }
 
     #[test]
@@ -5483,6 +5561,11 @@ mod tests {
             caps_args(&args(&["--bogus"])).is_err(),
             "unknown flags must still be refused"
         );
+        // A bare `--manifest` is a usage error, not a silent no-op; a
+        // positional is a typo (often a capability meant for `why`).
+        caps_args(&args(&["--manifest"])).expect_err("bare --manifest must fail");
+        let err = caps_args(&args(&["http.client"])).expect_err("positionals must fail");
+        assert!(err.message.contains("no positional"), "{}", err.message);
     }
 
     #[test]
@@ -5506,6 +5589,8 @@ mod tests {
             openapi_args(&args(&["--bogus"])).is_err(),
             "unknown flags must still be refused"
         );
+        openapi_args(&args(&["--out="])).expect_err("empty --out= must fail");
+        openapi_args(&args(&["--manifest"])).expect_err("bare --manifest must fail");
     }
 
     #[test]

@@ -713,6 +713,11 @@ pub fn openapi(loaded: &crate::manifest_loader::LoadedManifest) -> Result<Openap
 // ---------------------------------------------------------------------------
 
 /// The result of `qqqai inspect`.
+///
+/// [`CommandOutput::command`] is `inspect` for both this and [`ArtifactDiff`]:
+/// one command, two payload shapes. Consumers branch on shape, not on the
+/// command name — a report carries `artifact`/`digest`/`required`, a diff
+/// carries `before`/`after`/`added` — so the shared name never merges them.
 #[derive(Debug, Clone, Serialize)]
 pub struct InspectOutput {
     /// The project name.
@@ -1128,6 +1133,11 @@ pub fn diff_artifacts(before: &ArtifactReport, after: &ArtifactReport) -> Artifa
 }
 
 /// The authority difference between two artifacts.
+///
+/// [`CommandOutput::command`] is `inspect` for both this and [`InspectOutput`]:
+/// one command, two payload shapes. Consumers branch on shape, not on the
+/// command name — a diff carries `before`/`after`/`added`, a report carries
+/// `artifact`/`digest`/`required` — so the shared name never merges them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ArtifactDiff {
     /// The artifact compared from.
@@ -2731,7 +2741,7 @@ window_seconds = 60
         );
     }
 
-    /// The remediation path sees every implied capability, not just the strongest.
+    /// The remediation enumerates every implied capability, not just the strongest.
     ///
     /// `qqq:http/http` is unlocked by both `HttpClient` and `HttpServer`: a
     /// missing-grant error that names only the server half leaves a send-using
@@ -2740,7 +2750,7 @@ window_seconds = 60
     /// report must not demand unexercised grants); this is the enumeration the
     /// remediation builds on.
     #[test]
-    fn an_interface_implying_several_capabilities_reports_all_of_them() {
+    fn an_interface_implying_several_capabilities_enumerates_all_for_remediation() {
         let http = crate::run::capabilities_for_import("qqq:http/http@1.0.0");
         assert_eq!(
             http.len(),

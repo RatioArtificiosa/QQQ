@@ -1866,6 +1866,25 @@ fn starts_word(s: &str, word: &str) -> bool {
             .is_none_or(|c| !is_ident_char(c))
 }
 
+/// Whether `f` lives under the audited `crates/qqq-sys/` exception — by
+/// path *component*, not string prefix (H-2 r11). A directory literally
+/// named `qqq-sys\evil` (legal on Unix/git) mangles to
+/// `crates/qqq-sys/evil/…` under `replace('\\', "/")`, and a prefix test
+/// would exempt a tree that is not the exception crate. Components cannot
+/// be confused this way.
+fn is_qqq_sys_path(workspace: &Path, f: &Path) -> bool {
+    use std::path::Component;
+    let mut comps = match f.strip_prefix(workspace) {
+        Ok(r) => r.components(),
+        Err(_) => return false,
+    };
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(Component::Normal(a)), Some(Component::Normal(b)))
+        if a == "crates" && b == "qqq-sys"
+    )
+}
+
 /// Scan one crate's `.rs` files for `unsafe` code positions, recording
 /// violations. Split out of `run_unsafe_scan` so each lane stays readable.
 fn scan_crate_rs_files(
@@ -1887,11 +1906,14 @@ fn scan_crate_rs_files(
     violations.extend(redir_problems);
     files.sort();
     for f in &files {
-        let rel = f
-            .strip_prefix(workspace)
-            .unwrap_or(f)
-            .to_string_lossy()
-            .replace('\\', "/");
+        // M-7 r11: path-derived fragments are sanitized at format time —
+        // a hostile filename must not split the violation report.
+        let rel = sanitize_for_log(
+            &f.strip_prefix(workspace)
+                .unwrap_or(f)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
         let Ok(text) = std::fs::read_to_string(f) else {
             // An unreadable file is a scan failure, not a skip: skipping
             // it would certify a tree the scanner never saw.
@@ -1899,7 +1921,11 @@ fn scan_crate_rs_files(
             continue;
         };
         *files_scanned += 1;
-        if rel.starts_with("crates/qqq-sys/") {
+        // H-3 r11: a symlink *file* inside qqq-sys is still scanned — the
+        // exemption covers the audited crate's own files, not outside
+        // content linked under its name. `symlink_metadata` never follows.
+        let is_link = std::fs::symlink_metadata(f).is_ok_and(|m| m.file_type().is_symlink());
+        if !is_link && is_qqq_sys_path(workspace, f) {
             continue;
         }
         scan_rs_text(&rel, &text, violations);
@@ -1968,7 +1994,10 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
             continue;
         }
         if unsafe_line_is_violation_in(line, initial_raw, initial_depth) {
-            violations.push(format!("{rel}:{}:{line}", n + 1));
+            // The echoed line is evidence, but lone CRs and ESC bytes in
+            // it would rewrite the report terminal — redact those, keep
+            // the rest verbatim for grep-ability.
+            violations.push(format!("{rel}:{}:{}", n + 1, sanitize_for_log(line)));
             flagged.push(true);
         } else {
             flagged.push(false);
@@ -2042,6 +2071,72 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
 /// (`unreadable`), not a missing lint. The file scan already reports
 /// unreadable files the same way; the root check must agree on the repair
 /// (fix perms, not add a lint).
+/// Enumerate binary roots: every `src/bin/<name>.rs` and every
+/// `src/bin/<name>/main.rs` (cargo's second binary form). Extracted from
+/// `check_crate_roots` for the line budget. Fail-loud on unreadable
+/// entries and symlinked bins (H-4/M-6 r11): the collector never follows
+/// them, so vouching for their targets would certify unseen code.
+fn collect_bin_roots(
+    dir: &Path,
+    rel: &dyn Fn() -> String,
+    violations: &mut Vec<String>,
+) -> Vec<PathBuf> {
+    let mut bins: Vec<PathBuf> = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir.join("src").join("bin")) else {
+        return bins;
+    };
+    for e in rd {
+        // M-6 r11: a dropped `Err` here would hide an unforbidden bin
+        // root — the same fail-loud contract as the crate listing.
+        let e = match e {
+            Ok(e) => e,
+            Err(e) => {
+                violations.push(format!(
+                    "{}: bin entry unreadable mid-listing, scan incomplete: {e}",
+                    rel()
+                ));
+                continue;
+            }
+        };
+        let p = e.path();
+        // H-4 r11: no-follow stat — a symlinked bin entry is never
+        // recursed by the collector, so vouching for its target here
+        // would certify unseen code. Fail closed instead.
+        let ft = match e.file_type() {
+            Ok(t) => t,
+            Err(e) => {
+                violations.push(format!(
+                    "{}: cannot stat bin entry, scan incomplete: {e}",
+                    sanitize_for_log(&p.to_string_lossy())
+                ));
+                continue;
+            }
+        };
+        if ft.is_symlink() {
+            violations.push(format!(
+                "{}: symlinked bin entry, scan incomplete",
+                sanitize_for_log(&p.to_string_lossy())
+            ));
+            continue;
+        }
+        if ft.is_dir() {
+            // Second binary form: src/bin/<name>/main.rs.
+            let main = p.join("main.rs");
+            if main.is_file() {
+                bins.push(main);
+            }
+        } else if p
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| x.eq_ignore_ascii_case("rs"))
+        {
+            bins.push(p);
+        }
+    }
+    bins.sort();
+    bins
+}
+
 fn check_crate_roots(
     workspace: &Path,
     dir: &Path,
@@ -2083,10 +2178,12 @@ fn check_crate_roots(
         Some(found)
     };
     let rel = || {
-        dir.strip_prefix(workspace)
-            .unwrap_or(dir)
-            .to_string_lossy()
-            .replace('\\', "/")
+        sanitize_for_log(
+            &dir.strip_prefix(workspace)
+                .unwrap_or(dir)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
     };
     // M-1 r9 + r10: every compilable root carries the attribute —
     // lib.rs, main.rs, each src/bin/<name>.rs, each src/bin/<name>/main.rs
@@ -2101,31 +2198,7 @@ fn check_crate_roots(
         dir.join("src").join("main.rs"),
         dir.join("build.rs"),
     ];
-    if let Ok(rd) = std::fs::read_dir(dir.join("src").join("bin")) {
-        let mut bins: Vec<PathBuf> = rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .flat_map(|p| {
-                if p.is_dir() {
-                    // Second binary form: src/bin/<name>/main.rs.
-                    let main = p.join("main.rs");
-                    if main.is_file() {
-                        return vec![main];
-                    }
-                    return vec![];
-                }
-                if p.extension()
-                    .and_then(|x| x.to_str())
-                    .is_some_and(|x| x.eq_ignore_ascii_case("rs"))
-                {
-                    vec![p]
-                } else {
-                    vec![]
-                }
-            })
-            .collect();
-        bins.sort();
-        roots.extend(bins);
-    }
+    roots.extend(collect_bin_roots(dir, &rel, violations));
     let mut unreadable = false;
     let mut missing_root = false;
     for root in &roots {
@@ -2161,7 +2234,7 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             Err(e) => {
                 violations.push(format!(
                     "{}: directory entry unreadable mid-listing, scan incomplete: {e}",
-                    workspace.join("crates").display()
+                    sanitize_for_log(&workspace.join("crates").display().to_string())
                 ));
                 continue;
             }
@@ -2175,7 +2248,7 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             Ok(_) => {}
             Err(e) => violations.push(format!(
                 "{}: cannot stat entry, scan incomplete: {e}",
-                workspace.join("crates").display()
+                sanitize_for_log(&workspace.join("crates").display().to_string())
             )),
         }
     }
@@ -2215,7 +2288,8 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             let _ = writeln!(out, "{v}");
         }
         for m in &missing {
-            let _ = writeln!(out, "missing forbid(unsafe_code): {m}");
+            // Crate names come from directory names: sanitize like paths.
+            let _ = writeln!(out, "missing forbid(unsafe_code): {}", sanitize_for_log(m));
         }
         return (false, out);
     }
@@ -2228,11 +2302,53 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
     )
 }
 
-/// Sanitize an extracted path for log output: a raw-string literal can
-/// legally span lines, and echoing a raw newline would split the violation
-/// report across lines (M-2 r9). `?` marks the redaction visibly.
+/// Sanitize untrusted text for violation output. Paths may legally span
+/// lines (raw-string `#[path]`, hostile filenames), and echoed source may
+/// carry a lone CR or an escape character — any of which would split the
+/// report or restyle a terminal reading the log (M-2 r9, M-7 r11). `?`
+/// marks the redaction visibly; everything else passes through untouched
+/// so findings stay greppable.
 fn sanitize_for_log(s: &str) -> String {
-    s.replace(['\n', '\r'], "?")
+    s.replace(['\n', '\r', '\u{1b}'], "?")
+}
+
+/// Decide whether a redirection `target` (joined onto its file's `base`
+/// dir) stays inside the workspace. Canonicalizes first so symlinks are
+/// resolved before gating (M-2 r10): a lexical `..` fold would attest the
+/// wrong file when a link sits in the middle. Falls back to the lexical
+/// path when the target does not exist (rustc fails those loudly); the
+/// pushed path is always the lexical one so `rel` reporting and the
+/// qqq-sys exemption keep working on tree-shaped paths. Returns the path
+/// to push and whether it is inside.
+fn gate_redirect(
+    workspace_canon: &Path,
+    workspace: &Path,
+    base: &Path,
+    target: &str,
+) -> (PathBuf, bool) {
+    // Lexical normalization first (no fs touch): `..` folds without
+    // following links, so the fallback path below keeps working when the
+    // target does not exist.
+    let mut joined = PathBuf::new();
+    for c in base.join(target).components() {
+        use std::path::Component;
+        match c {
+            Component::ParentDir => {
+                joined.pop();
+            }
+            Component::CurDir => {}
+            _ => joined.push(c.as_os_str()),
+        }
+    }
+    if let Ok(canon) = std::fs::canonicalize(&joined) {
+        return (joined, canon.strip_prefix(workspace_canon).is_ok());
+    }
+    // Unresolvable: gate lexically. A `..` that escapes lexically is
+    // outside; anything else is presumed inside and left for rustc (a
+    // missing file fails the build loudly, and the scan loop reports
+    // unreadable files it cannot read).
+    let inside = joined.strip_prefix(workspace).is_ok();
+    (joined, inside)
 }
 
 /// Extra compilable files pulled in by `#[path = "…"]` and
@@ -2258,13 +2374,18 @@ fn follow_code_redirections(
 ) {
     use std::collections::HashSet;
     let rel_of = |p: &Path| {
-        p.strip_prefix(workspace)
-            .unwrap_or(p)
-            .to_string_lossy()
-            .replace('\\', "/")
+        sanitize_for_log(
+            &p.strip_prefix(workspace)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
     };
     let mut seen: HashSet<PathBuf> = files.iter().cloned().collect();
     let mut queue: Vec<PathBuf> = files.clone();
+    // Hoisted out of the per-target loop (L-9 r11): canonicalizing the
+    // workspace root once instead of per redirection.
+    let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     while let Some(f) = queue.pop() {
         // Unreadable files are skipped here: the scan loop reports them
         // as `unreadable` when it reaches them below.
@@ -2280,47 +2401,8 @@ fn follow_code_redirections(
             ));
         }
         for target in targets {
-            // Lexical normalization (no fs touch): `..` segments resolve
-            // without following links, so `strip_prefix` and the qqq-sys
-            // exemption keep working on the result.
-            let mut p = PathBuf::new();
-            for c in base.join(&target).components() {
-                use std::path::Component;
-                match c {
-                    Component::ParentDir => {
-                        p.pop();
-                    }
-                    Component::CurDir => {}
-                    _ => p.push(c.as_os_str()),
-                }
-            }
-            // M-2 r10: resolve symlinks before gating — lexical folding
-            // cannot see through a link pointing outside (or into qqq-sys
-            // from elsewhere). Only the DECISION uses the canonical path;
-            // the pushed path stays lexical so `rel` reporting and the
-            // qqq-sys exemption are unchanged. Canonicalization failure
-            // falls back to the lexical gate (fail-closed on the
-            // unreadable side is already handled by the scan loop).
-            let gated_out = std::fs::canonicalize(&p)
-                .ok()
-                .and_then(|canon| {
-                    let ws = std::fs::canonicalize(workspace)
-                        .unwrap_or_else(|_| workspace.to_path_buf());
-                    if canon.strip_prefix(&ws).is_err() {
-                        Some(())
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    if p.strip_prefix(workspace).is_err() {
-                        Some(())
-                    } else {
-                        None
-                    }
-                })
-                .is_some();
-            if gated_out {
+            let (p, inside) = gate_redirect(&ws_canon, workspace, &base, &target);
+            if !inside {
                 problems.push(format!(
                     "{}: references code outside the workspace ({}), scan incomplete",
                     rel_of(&f),
@@ -2677,7 +2759,7 @@ fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String
         Err(e) => {
             problems.push(format!(
                 "{}: unreadable directory, scan incomplete: {e}",
-                dir.display()
+                sanitize_for_log(&dir.display().to_string())
             ));
             return;
         }
@@ -2690,7 +2772,7 @@ fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String
             Err(e) => {
                 problems.push(format!(
                     "{}: directory entry unreadable mid-listing, scan incomplete: {e}",
-                    dir.display()
+                    sanitize_for_log(&dir.display().to_string())
                 ));
                 continue;
             }
@@ -2715,7 +2797,7 @@ fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String
             }
             Err(e) => problems.push(format!(
                 "{}: cannot stat entry, scan incomplete: {e}",
-                p.display()
+                sanitize_for_log(&p.display().to_string())
             )),
         }
     }
@@ -4533,6 +4615,24 @@ mod tests {
     }
 
     #[test]
+    fn gate_redirect_stays_inside_without_symlinks() {
+        // L-10 r11: the containment gate, pinned without symlinks so it
+        // runs everywhere (the live symlink test covers the link half and
+        // skips where the OS forbids creating them).
+        let ws = PathBuf::from(if cfg!(windows) { "C:\\ws" } else { "/ws" });
+        let ws_canon = ws.clone();
+        let base = ws.join("crates").join("probe").join("src");
+        // Inside, plain and dotted. (Unresolvable targets gate lexically
+        // and deterministically — nothing here exists on disk.)
+        assert!(gate_redirect(&ws_canon, &ws, &base, "hidden.txt").1);
+        assert!(gate_redirect(&ws_canon, &ws, &base, "sub/../hidden.txt").1);
+        // Outside: escaping past the root (four levels up from src/) and
+        // absolute paths.
+        assert!(!gate_redirect(&ws_canon, &ws, &base, "/etc/passwd").1);
+        assert!(!gate_redirect(&ws_canon, &ws, &base, "../../../../outside.txt").1);
+    }
+
+    #[test]
     fn unsafe_scan_follows_path_redirections() {
         // H-3 r7 run level: a `#[path = "hidden.txt"]` module compiles as
         // Rust regardless of extension — the scan must see its `unsafe`.
@@ -4701,7 +4801,7 @@ mod tests {
         .expect("lib");
         std::fs::write(
             src.join("main.rs"),
-            "#[forbid(unsafe_code)]\n#[path = \"link/evil.txt\"]\nmod evil;\nfn main() {}\n",
+            "#![forbid(unsafe_code)]\n#[path = \"link/evil.txt\"]\nmod evil;\nfn main() {}\n",
         )
         .expect("main");
         let (ok, out) = run_unsafe_scan(&root);

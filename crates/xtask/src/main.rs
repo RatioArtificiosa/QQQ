@@ -1511,12 +1511,14 @@ fn raw_opener(line: &str, i: usize) -> Option<usize> {
     Some(hashes)
 }
 
-/// Skip `/*…*/` block comments (nesting) plus surrounding spaces/tabs at
-/// the start of `rest`, returning what follows. Single-purpose helper for
-/// the forbid-attribute parser (LOW r4): token-stream spacing, not text.
+/// Skip whitespace (the full Unicode alphabet, L-5 r7) and `/*…*/` block
+/// comments (nesting) at the start of `rest`, returning what follows.
+/// Single-purpose helper for token-stream spacing, not text: the
+/// forbid-attribute parser and the `#[path]`/`include!` follower share it
+/// so `forbid\x0B/*c*/(…)` and `include /*c*/ !(…)` both resolve.
 fn skip_inline_block_comments(mut rest: &str) -> &str {
     loop {
-        rest = rest.trim_start_matches([' ', '\t']);
+        rest = rest.trim_start_matches(char::is_whitespace);
         if !(rest.starts_with("/*")) {
             return rest;
         }
@@ -1578,6 +1580,27 @@ fn strip_block_comments(s: &str) -> String {
         }
     }
     String::from_utf8(out).unwrap_or_default()
+}
+
+/// If `line` (which starts inside a raw string of `hash` hashes) closes it,
+/// return what follows the closer. Byte-level but boundary-safe: only
+/// ASCII `"`/`#` are examined, so indices never split a multi-byte char.
+fn raw_tail_after_close(line: &str, hash: usize) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while let Some(&c) = bytes.get(i) {
+        if c == b'"' {
+            let mut k = 0;
+            while bytes.get(i + 1 + k) == Some(&b'#') {
+                k += 1;
+            }
+            if k == hash {
+                return line.get(i + 1 + k..);
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Whether trimmed `t` is only separators: blank, a `//` line comment, or
@@ -1859,7 +1882,9 @@ fn scan_crate_rs_files(
     violations.extend(dir_problems);
     // H-3 r7: follow `#[path]`/`include!` redirections into non-`.rs`
     // files — they compile as Rust regardless of extension.
-    follow_code_redirections(&mut files);
+    let mut redir_problems = Vec::new();
+    follow_code_redirections(workspace, &mut files, &mut redir_problems);
+    violations.extend(redir_problems);
     files.sort();
     for f in &files {
         let rel = f
@@ -1957,9 +1982,12 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
             // (H1 r5, M-1 r6): `//…`, complete `/*…*/`, and mixed
             // `/*…*/ //…` lines between the keyword and the opener must not
             // break the pair. Anything else stays — including an unclosed
-            // `/*` (pairs thread block depth) and raw-string content that
-            // looks like a comment (the pair machine re-derives raw state
-            // from the first line).
+            // `/*` (pairs thread block depth). A raw-string content line
+            // that looks like a comment is harmless either way: the pair
+            // scan below seeds line a's entry state, so content still
+            // classifies as a string whether such a line is dropped or
+            // kept — L-1 r8 documents this no-op rather than
+            // special-casing the filter.
             let t = l.trim();
             !is_comment_only_separator(t)
         })
@@ -2033,12 +2061,21 @@ fn check_crate_roots(
         let lines: Vec<&str> = text.lines().collect();
         let raw_entry = raw_entry_states(&lines);
         let found = lines.iter().enumerate().any(|(n, l)| {
-            // Raw content never counts; block-comment state threads in (a
-            // closer followed by a real forbid still counts — skipping on
-            // entry depth alone would miss it).
+            // Raw content never counts as a forbid — but a closer with a
+            // real forbid after it on the same line does (L-7 r8: skipping
+            // entry-raw lines wholesale would miss `#![forbid]` after
+            // `"#`, a false missing on a compliant tree). Block-comment
+            // state threads in (a closer followed by a real forbid still
+            // counts — skipping on entry depth alone would miss it).
             let (raw, depth) = raw_entry.get(n).copied().unwrap_or((None, 0));
-            if raw.is_some() {
-                return false;
+            if let Some(hash) = raw {
+                return match raw_tail_after_close(l, hash) {
+                    Some(tail) => {
+                        let mut depth = depth;
+                        line_has_forbid_attr(tail, &mut depth)
+                    }
+                    None => false,
+                };
             }
             let mut depth = depth;
             line_has_forbid_attr(l, &mut depth)
@@ -2154,13 +2191,29 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
 /// extension (H-3 r7): one `#[path = "evil.txt"]` line hides arbitrary
 /// `unsafe` from an unsuffixed scan. `include_str!`/`include_bytes!` are
 /// data, not code — following them would flag their prose as code, against
-/// the scan's own string policy. Only double-quoted literals decode (`\\`,
-/// `\"`, simple escapes); dynamic paths (`concat!`, `env!`) are left for
-/// rustc — and for the build to fail on. Cycle-safe via the visited set;
-/// unresolvable targets are ignored (rustc fails the build elsewhere,
-/// loudly).
-fn follow_code_redirections(files: &mut Vec<PathBuf>) {
+/// the scan's own string policy.
+/// Paths that resolve outside the workspace are refused, not followed
+/// (M r8): following them would read arbitrary files into the scan output.
+///
+/// A dynamic `include!` (non-literal argument, e.g. `concat!(env!(…))`)
+/// is a fail-closed violation, not a skip: generated code is real code the
+/// static scan cannot see (H-1 r8). (A dynamic `#[path]` cannot compile —
+/// attributes take literals only — so it stays silent and lets rustc
+/// report it.)
+/// Cycle-safe via the visited set; unresolvable targets are ignored
+/// (rustc fails the build elsewhere, loudly).
+fn follow_code_redirections(
+    workspace: &Path,
+    files: &mut Vec<PathBuf>,
+    problems: &mut Vec<String>,
+) {
     use std::collections::HashSet;
+    let rel_of = |p: &Path| {
+        p.strip_prefix(workspace)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
     let mut seen: HashSet<PathBuf> = files.iter().cloned().collect();
     let mut queue: Vec<PathBuf> = files.clone();
     while let Some(f) = queue.pop() {
@@ -2170,7 +2223,14 @@ fn follow_code_redirections(files: &mut Vec<PathBuf>) {
             continue;
         };
         let base = f.parent().map(Path::to_path_buf).unwrap_or_default();
-        for target in code_redirections(&text) {
+        let (targets, dynamic) = code_redirections(&text);
+        if dynamic {
+            problems.push(format!(
+                "{}: dynamic include! path, generated code is outside the static scan",
+                rel_of(&f)
+            ));
+        }
+        for target in targets {
             // Lexical normalization (no fs touch): `..` segments resolve
             // without following links, so `strip_prefix` and the qqq-sys
             // exemption keep working on the result.
@@ -2185,6 +2245,14 @@ fn follow_code_redirections(files: &mut Vec<PathBuf>) {
                     _ => p.push(c.as_os_str()),
                 }
             }
+            if p.strip_prefix(workspace).is_err() {
+                problems.push(format!(
+                    "{}: references code outside the workspace ({}), scan incomplete",
+                    rel_of(&f),
+                    target
+                ));
+                continue;
+            }
             if seen.insert(p.clone()) && p.is_file() {
                 files.push(p.clone());
                 queue.push(p);
@@ -2193,92 +2261,305 @@ fn follow_code_redirections(files: &mut Vec<PathBuf>) {
     }
 }
 
-/// The `#[path = "…"]` and `include!("…")` targets in `text`. Byte-level,
-/// boundary-safe: non-ASCII bytes advance by char so `text[i..]` never
-/// splits a boundary (which would panic, not mis-scan).
-fn code_redirections(text: &str) -> Vec<String> {
-    fn quoted(bytes: &[u8], mut j: usize) -> Option<(String, usize)> {
-        // bytes[j] == b'"': returns (value, index past the closing quote).
-        let mut out: Vec<u8> = Vec::new();
-        j += 1;
-        loop {
-            let c = *bytes.get(j)?;
-            if c == b'\\' {
-                let e = *bytes.get(j + 1)?;
-                out.push(match e {
-                    b'n' => b'\n',
-                    b't' => b'\t',
-                    b'r' => b'\r',
-                    b'\\' => b'\\',
-                    b'"' => b'"',
-                    b'0' => 0,
-                    _ => return None,
-                });
-                j += 2;
-            } else if c == b'"' {
-                j += 1;
-                break;
-            } else if c == b'\n' {
+/// One hex digit's value, for `\x41` / `\u{…}` escapes in `#[path]` /
+/// `include!` literals.
+fn hex_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decode one escape after `\` at `pos` (`pos` points at the backslash).
+/// Returns the decoded bytes and the total consumed length.
+fn decode_escape(buf: &[u8], pos: usize) -> Option<(Vec<u8>, usize)> {
+    let esc = *buf.get(pos + 1)?;
+    match esc {
+        b'n' => Some((vec![b'\n'], 2)),
+        b't' => Some((vec![b'\t'], 2)),
+        b'r' => Some((vec![b'\r'], 2)),
+        b'\\' => Some((vec![b'\\'], 2)),
+        b'"' => Some((vec![b'"'], 2)),
+        b'\'' => Some((vec![b'\''], 2)),
+        b'0' => Some((vec![0], 2)),
+        b'x' => {
+            let hi = hex_val(*buf.get(pos + 2)?)?;
+            let lo = hex_val(*buf.get(pos + 3)?)?;
+            Some((vec![hi << 4 | lo], 4))
+        }
+        b'u' => {
+            if buf.get(pos + 2) != Some(&b'{') {
                 return None;
+            }
+            let mut idx = pos + 3;
+            let mut cp: u32 = 0;
+            let mut digits = 0;
+            loop {
+                let cur = *buf.get(idx)?;
+                if cur == b'}' {
+                    idx += 1;
+                    break;
+                }
+                if cur == b'_' && digits > 0 {
+                    idx += 1;
+                    continue;
+                }
+                cp = cp * 16 + u32::from(hex_val(cur)?);
+                digits += 1;
+                if digits > 6 {
+                    return None;
+                }
+                idx += 1;
+            }
+            if digits == 0 {
+                return None;
+            }
+            let ch = char::from_u32(cp)?;
+            let mut tmp = [0u8; 4];
+            Some((ch.encode_utf8(&mut tmp).as_bytes().to_vec(), idx - pos))
+        }
+        _ => None,
+    }
+}
+
+/// A `"…"` literal at `pos` (which points at the opening quote), with
+/// escapes; returns the value and the index past the closing quote.
+fn quoted_lit(buf: &[u8], mut pos: usize) -> Option<(String, usize)> {
+    pos += 1;
+    let mut out: Vec<u8> = Vec::new();
+    loop {
+        let cur = *buf.get(pos)?;
+        if cur == b'\\' {
+            let (mut decoded, used) = decode_escape(buf, pos)?;
+            out.append(&mut decoded);
+            pos += used;
+        } else if cur == b'"' {
+            pos += 1;
+            break;
+        } else if cur == b'\n' {
+            return None;
+        } else {
+            out.push(cur);
+            pos += 1;
+        }
+    }
+    Some((String::from_utf8(out).ok()?, pos))
+}
+
+/// A raw-string literal at `pos` (`r"…"`, `r#"…"#`, …): no escapes,
+/// exact-count close (M-3 r8). Returns the value and the index past it.
+fn raw_quoted_lit(buf: &[u8], mut pos: usize) -> Option<(String, usize)> {
+    pos += 1;
+    let mut hashes = 0;
+    while buf.get(pos) == Some(&b'#') {
+        hashes += 1;
+        pos += 1;
+    }
+    if buf.get(pos) != Some(&b'"') {
+        return None;
+    }
+    pos += 1;
+    let mut out: Vec<u8> = Vec::new();
+    loop {
+        let cur = *buf.get(pos)?;
+        if cur == b'"' {
+            let mut closing = 0;
+            while buf.get(pos + 1 + closing) == Some(&b'#') {
+                closing += 1;
+            }
+            if closing == hashes {
+                pos += 1 + closing;
+                break;
+            }
+            out.push(cur);
+            pos += 1;
+        } else {
+            out.push(cur);
+            pos += 1;
+        }
+    }
+    Some((String::from_utf8(out).ok()?, pos))
+}
+
+/// Whitespace (Unicode, like the scanner gap) and `/*…*/` block comments
+/// between tokens: `include /*c*/ !(…)`, `#[ path = …]` are valid Rust.
+/// Unclosed comments stop the skip (the caller decides; content after an
+/// unclosed opener is a residual, not a gap).
+fn skip_gap_tokens(text: &str, buf: &[u8], pos: &mut usize) {
+    loop {
+        while let Some(r) = text.get(*pos..).and_then(|r| r.chars().next()) {
+            if r.is_whitespace() {
+                *pos += r.len_utf8();
             } else {
-                out.push(c);
-                j += 1;
+                break;
             }
         }
-        Some((String::from_utf8(out).ok()?, j))
-    }
-    fn skip_ws(bytes: &[u8], j: &mut usize) {
-        while bytes
-            .get(*j)
-            .is_some_and(|&c| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r')
-        {
-            *j += 1;
+        if buf.get(*pos) == Some(&b'/') && buf.get(*pos + 1) == Some(&b'*') {
+            let mut depth: u32 = 1;
+            *pos += 2;
+            let mut closed = false;
+            while let Some(&cur) = buf.get(*pos) {
+                if cur == b'/' && buf.get(*pos + 1) == Some(&b'*') {
+                    depth += 1;
+                    *pos += 2;
+                } else if cur == b'*' && buf.get(*pos + 1) == Some(&b'/') {
+                    depth = depth.saturating_sub(1);
+                    *pos += 2;
+                    if depth == 0 {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    *pos += 1;
+                }
+            }
+            if !closed {
+                return;
+            }
+        } else {
+            return;
         }
     }
-    let bytes = text.as_bytes();
+}
+
+/// Whether `word` at `pos` ends on a word boundary: the next char must not
+/// continue an identifier (`pathname`, `includes!` are not the macros).
+fn word_ends_clean(text: &str, pos: usize, word: &str) -> bool {
+    text.get(pos + word.len()..)
+        .and_then(|r| r.chars().next())
+        .is_none_or(|c| !is_ident_char(c))
+}
+
+/// A string or raw-string literal value at `pos`; `None` if neither.
+/// (The caller decides: invalid for `#[path]`, dynamic for `include!`.)
+fn literal_string(buf: &[u8], pos: usize) -> Option<(String, usize)> {
+    if buf.get(pos) == Some(&b'"') {
+        quoted_lit(buf, pos)
+    } else if buf.get(pos) == Some(&b'r') && matches!(buf.get(pos + 1), Some(b'"' | b'#')) {
+        raw_quoted_lit(buf, pos)
+    } else {
+        None
+    }
+}
+
+/// Try `#[ path = lit ]` with gaps at `i` (which points at `#`).
+/// Returns the target and the index past the match, or `None`.
+fn match_path_attr(text: &str, buf: &[u8], idx: usize) -> Option<(String, usize)> {
+    let mut pos = idx + 1;
+    skip_gap_tokens(text, buf, &mut pos);
+    if buf.get(pos) != Some(&b'[') {
+        return None;
+    }
+    pos += 1;
+    skip_gap_tokens(text, buf, &mut pos);
+    if !(text.get(pos..).is_some_and(|r| r.starts_with("path"))
+        && word_ends_clean(text, pos, "path"))
+    {
+        return None;
+    }
+    pos += "path".len();
+    skip_gap_tokens(text, buf, &mut pos);
+    if buf.get(pos) != Some(&b'=') {
+        return None;
+    }
+    pos += 1;
+    skip_gap_tokens(text, buf, &mut pos);
+    let (target, end) = literal_string(buf, pos)?;
+    Some((target, end))
+}
+
+/// The outcome of matching `include` at `i`: a static target, a dynamic
+/// (non-literal-argument) invocation, or no invocation at all.
+enum IncludeMatch {
+    Static(String, usize),
+    Dynamic,
+    NoMatch,
+}
+
+/// Try `include !( lit )` with gaps at `i` (which points at the `i`).
+/// A non-literal argument is dynamic — fail-closed downstream (H-1 r8).
+fn match_include(text: &str, buf: &[u8], idx: usize) -> IncludeMatch {
+    if !(text.get(idx..).is_some_and(|r| r.starts_with("include"))
+        && word_ends_clean(text, idx, "include"))
+    {
+        return IncludeMatch::NoMatch;
+    }
+    let mut pos = idx + "include".len();
+    skip_gap_tokens(text, buf, &mut pos);
+    if buf.get(pos) != Some(&b'!') {
+        return IncludeMatch::NoMatch;
+    }
+    pos += 1;
+    skip_gap_tokens(text, buf, &mut pos);
+    if buf.get(pos) != Some(&b'(') {
+        return IncludeMatch::NoMatch;
+    }
+    pos += 1;
+    skip_gap_tokens(text, buf, &mut pos);
+    match literal_string(buf, pos) {
+        Some((target, end)) => IncludeMatch::Static(target, end),
+        None => IncludeMatch::Dynamic,
+    }
+}
+
+/// Static `#[path = "…"]` / `include!("…")` targets in `text`, plus whether
+/// an `include!` with a non-literal argument was seen (dynamic code path —
+/// fail-closed by the caller, H-1 r8). String/comment-aware: matches only
+/// fire at code positions, via the shared step-machine state.
+fn code_redirections(text: &str) -> (Vec<String>, bool) {
+    let buf = text.as_bytes();
     let mut out = Vec::new();
+    let mut dynamic = false;
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes.get(i).is_none_or(|b| !b.is_ascii()) {
-            i += text[i..].chars().next().map_or(1, char::len_utf8);
+    let mut st = ScanState::default();
+    while buf.get(i).is_some() {
+        let in_code = !st.in_string
+            && !st.in_char
+            && st.in_raw.is_none()
+            && !st.in_line_comment
+            && st.comment_depth == 0;
+        let mut advanced = false;
+        if in_code
+            && buf.get(i) == Some(&b'#')
+            && let Some((target, end)) = match_path_attr(text, buf, i)
+        {
+            out.push(target);
+            i = end;
+            advanced = true;
+        }
+        if !advanced
+            && in_code
+            && text.get(i..).is_some_and(|r| r.starts_with("include"))
+            && word_ends_clean(text, i, "include")
+        {
+            match match_include(text, buf, i) {
+                IncludeMatch::Static(target, end) => {
+                    out.push(target);
+                    i = end;
+                    advanced = true;
+                }
+                IncludeMatch::Dynamic => {
+                    dynamic = true;
+                }
+                IncludeMatch::NoMatch => {}
+            }
+        }
+        if advanced {
             continue;
         }
-        if text[i..].starts_with("#[path") {
-            let mut j = i + "#[path".len();
-            skip_ws(bytes, &mut j);
-            if bytes.get(j) == Some(&b'=') {
-                j += 1;
-                skip_ws(bytes, &mut j);
-                if bytes.get(j) == Some(&b'"')
-                    && let Some((p, k)) = quoted(bytes, j)
-                {
-                    out.push(p);
-                    i = k;
-                    continue;
-                }
-            }
-            i += 1;
-        } else if text[i..].starts_with("include") && bytes.get(i + "include".len()) == Some(&b'!')
-        {
-            let mut j = i + "include".len() + 1;
-            skip_ws(bytes, &mut j);
-            if bytes.get(j) == Some(&b'(') {
-                j += 1;
-                skip_ws(bytes, &mut j);
-                if bytes.get(j) == Some(&b'"')
-                    && let Some((p, k)) = quoted(bytes, j)
-                {
-                    out.push(p);
-                    i = k;
-                    continue;
-                }
-            }
-            i += 1;
-        } else {
-            i += 1;
+        // One lexer step to keep the state machine honest.
+        if step_literal_text(buf, &mut i, &mut st) {
+            continue;
         }
+        if st.in_line_comment || st.comment_depth > 0 {
+            step_comment_text(text, buf, &mut i, &mut st);
+            continue;
+        }
+        step_code_text(text, buf, &mut i, &mut st);
     }
-    out
+    (out, dynamic)
 }
 
 /// Collect every `.rs` file under `dir`. An unreadable directory is a scan
@@ -3861,7 +4142,9 @@ mod tests {
     #[test]
     fn unsafe_scan_ignores_multiline_raw_content() {
         // Entry-raw run level: mimic shapes inside a multiline raw string
-        // are prose — the pair scan must not resolve them as code.
+        // are prose — the pair scan must not resolve them as code. The
+        // `// looks-like-a-comment` content line pins L-1 r8: dropping it
+        // as a separator changes nothing because the pair is seeded.
         let root = std::env::temp_dir().join(format!("qqq-xtask-xraw-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let src = root.join("crates").join("probe").join("src");
@@ -3869,7 +4152,7 @@ mod tests {
         std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
         std::fs::write(
             src.join("main.rs"),
-            "#![forbid(unsafe_code)]\nfn main() {\n    let s = r#\"\n    foo unsafe\n    { x }\n    \"#;\n    let _ = s;\n}\n",
+            "#![forbid(unsafe_code)]\nfn main() {\n    let s = r#\"\n    foo unsafe\n    // looks-like-a-comment\n    { x }\n    \"#;\n    let _ = s;\n}\n",
         )
         .expect("main");
         let (ok, out) = run_unsafe_scan(&root);
@@ -4005,6 +4288,31 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_scan_sees_forbid_after_raw_closer() {
+        // L-7 r8: a closer with a real forbid after it on the same line
+        // counts — entry-raw lines are seeded, not skipped, in the root
+        // check too. (The forbid must still open the tail's code: a `;`
+        // before it disqualifies exactly as on a whole line.)
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xtailroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(
+            src.join("lib.rs"),
+            "let s = r#\"\nfoo\n\"# #![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            src.join("main.rs"),
+            "#![forbid(unsafe_code)]\nfn main() {}\n",
+        )
+        .expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(ok, "tail forbid misread as missing:\n{out}");
+    }
+
+    #[test]
     fn unsafe_scan_collects_uppercase_rs() {
         // L-2 r6: `EXTRA.RS` compiles via `#[path]` on a case-insensitive
         // FS — the scan must not skip it for its casing.
@@ -4045,14 +4353,43 @@ mod tests {
     #[test]
     fn code_redirections_finds_path_and_include() {
         // H-3 r7 unit: `#[path]` and `include!` targets extract;
-        // `include_str!`/`include_bytes!` (data) and dynamic paths do not.
+        // `include_str!`/`include_bytes!` (data) never do.
         assert_eq!(
             code_redirections("#[path = \"a.rs\"]\ninclude!(\"b.rs\")\ninclude_str!(\"c.txt\")\n"),
-            vec!["a.rs".to_owned(), "b.rs".to_owned()]
+            (vec!["a.rs".to_owned(), "b.rs".to_owned()], false)
         );
+        // H-3 r8: token spacing is irrelevant — `#[ path`, `include !(`
+        // and `/*…*/` between tokens are all valid Rust.
+        assert_eq!(
+            code_redirections("#[ path = \"a.rs\"]\ninclude /*c*/ ! (\"b.rs\")\n"),
+            (vec!["a.rs".to_owned(), "b.rs".to_owned()], false)
+        );
+        // Raw-string paths decode without escapes (M r8).
+        assert_eq!(
+            code_redirections("#[path = r#\"a.rs\"#]\n"),
+            (vec!["a.rs".to_owned()], false)
+        );
+        // Escaped paths decode (L r8): `\x41` is `A`, `\u{63}` is `c`.
+        assert_eq!(
+            code_redirections("#[path = \"\\x41.rs\"]\ninclude!(\"\\u{63}.rs\")\n"),
+            (vec!["A.rs".to_owned(), "c.rs".to_owned()], false)
+        );
+        // Unicode separators (M r8): NBSP between tokens is legal Rust.
+        assert_eq!(
+            code_redirections("#[path\u{a0}=\u{a0}\"a.rs\"]\n"),
+            (vec!["a.rs".to_owned()], false)
+        );
+        // A dynamic `#[path]` cannot compile (attributes take literals),
+        // so it stays silent and lets rustc report it.
         assert_eq!(
             code_redirections("#[path = concat!(env!(\"X\"), \"/a.rs\")]"),
-            Vec::<String>::new()
+            (Vec::<String>::new(), false)
+        );
+        // A dynamic `include!` compiles generated code the static scan
+        // cannot see — fail closed (H-1 r8).
+        assert_eq!(
+            code_redirections("include!(concat!(env!(\"OUT_DIR\"), \"/g.rs\"));"),
+            (Vec::<String>::new(), true)
         );
         // A mention inside a real string literal cannot match: source
         // files escape inner quotes (`\"`), and only a bare `"` opens the
@@ -4061,7 +4398,7 @@ mod tests {
         // by the existence gate in `follow_code_redirections`.)
         assert_eq!(
             code_redirections("let s = \"#[path = \\\"no.rs\\\"]\";"),
-            Vec::<String>::new()
+            (Vec::<String>::new(), false)
         );
     }
 
@@ -4092,6 +4429,66 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_scan_flags_dynamic_include() {
+        // H-1 r8: `include!(concat!(…))` compiles generated code the
+        // static scan cannot see — fail closed, do not certify.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xdyn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
+        std::fs::write(
+            src.join("main.rs"),
+            "#![forbid(unsafe_code)]\ninclude!(concat!(env!(\"OUT_DIR\"), \"/g.rs\"));\nfn main() {}\n",
+        )
+        .expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "dynamic include passed the scan:\n{out}");
+        assert!(
+            out.contains("dynamic include"),
+            "wrong failure shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_refuses_outside_workspace() {
+        // M r8: a redirection that resolves outside the workspace is
+        // refused, not followed — the scan must not read arbitrary files
+        // into its output.
+        let outside =
+            std::env::temp_dir().join(format!("qqq-xtask-xoutside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        std::fs::write(outside.join("evil.txt"), "pub unsafe fn evil() {}\n").expect("evil");
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xredirout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
+        std::fs::write(
+            src.join("main.rs"),
+            format!(
+                "#![forbid(unsafe_code)]\n#[path = \"../../../../{}/evil.txt\"]\nmod evil;\nfn main() {{}}\n",
+                outside.file_name().unwrap().to_string_lossy()
+            ),
+        )
+        .expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        assert!(!ok, "outside-workspace redirect passed the scan:\n{out}");
+        assert!(
+            out.contains("outside the workspace"),
+            "wrong failure shape:\n{out}"
+        );
+        assert!(
+            !out.contains("pub unsafe"),
+            "outside file content echoed:\n{out}"
+        );
+    }
+
+    #[test]
     fn forbid_check_reads_the_whole_lint_list() {
         // M2: the forbid may sit second (`warnings, unsafe_code` is the
         // alphabetical order) with generous spacing — a prefix-only match
@@ -4115,12 +4512,17 @@ mod tests {
         let mut b = 0;
         assert!(line_has_forbid_attr("#![forbid/*c*/(unsafe_code)]", &mut b));
         // L-5 r7: every Unicode whitespace separates — VT indent, NBSP in
-        // the list — exactly like spaces do.
+        // the list, VT before a block comment — exactly like spaces do.
         let mut b = 0;
         assert!(line_has_forbid_attr("#![forbid\x0B(unsafe_code)]", &mut b));
         let mut b = 0;
         assert!(line_has_forbid_attr(
             "#![forbid(\u{a0}unsafe_code)]",
+            &mut b
+        ));
+        let mut b = 0;
+        assert!(line_has_forbid_attr(
+            "#![forbid\x0B/*c*/(unsafe_code)]",
             &mut b
         ));
         // L2 r5: comments inside the list do not hide the lint — nor does

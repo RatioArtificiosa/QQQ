@@ -2088,11 +2088,14 @@ fn check_crate_roots(
             .to_string_lossy()
             .replace('\\', "/")
     };
-    // M-1 r9: every compilable root carries the attribute — lib.rs,
-    // main.rs, each src/bin/<name>.rs, and the crate-level build.rs.
+    // M-1 r9 + r10: every compilable root carries the attribute —
+    // lib.rs, main.rs, each src/bin/<name>.rs, each src/bin/<name>/main.rs
+    // (cargo's second binary form), and the crate-level build.rs.
     // The file scan already covers their bodies for `unsafe`; the missing
     // check must cover their roots for the lint, or a bin target could
-    // drop its forbid silently.
+    // drop its forbid silently. Custom [lib]/[[bin]] path= redirections
+    // stay a documented residual: parsing manifests would need TOML, and
+    // the value must be an exact file the author names in the open.
     let mut roots = vec![
         dir.join("src").join("lib.rs"),
         dir.join("src").join("main.rs"),
@@ -2101,10 +2104,23 @@ fn check_crate_roots(
     if let Ok(rd) = std::fs::read_dir(dir.join("src").join("bin")) {
         let mut bins: Vec<PathBuf> = rd
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.extension()
+            .flat_map(|p| {
+                if p.is_dir() {
+                    // Second binary form: src/bin/<name>/main.rs.
+                    let main = p.join("main.rs");
+                    if main.is_file() {
+                        return vec![main];
+                    }
+                    return vec![];
+                }
+                if p.extension()
                     .and_then(|x| x.to_str())
                     .is_some_and(|x| x.eq_ignore_ascii_case("rs"))
+                {
+                    vec![p]
+                } else {
+                    vec![]
+                }
             })
             .collect();
         bins.sort();
@@ -2278,7 +2294,33 @@ fn follow_code_redirections(
                     _ => p.push(c.as_os_str()),
                 }
             }
-            if p.strip_prefix(workspace).is_err() {
+            // M-2 r10: resolve symlinks before gating — lexical folding
+            // cannot see through a link pointing outside (or into qqq-sys
+            // from elsewhere). Only the DECISION uses the canonical path;
+            // the pushed path stays lexical so `rel` reporting and the
+            // qqq-sys exemption are unchanged. Canonicalization failure
+            // falls back to the lexical gate (fail-closed on the
+            // unreadable side is already handled by the scan loop).
+            let gated_out = std::fs::canonicalize(&p)
+                .ok()
+                .and_then(|canon| {
+                    let ws = std::fs::canonicalize(workspace)
+                        .unwrap_or_else(|_| workspace.to_path_buf());
+                    if canon.strip_prefix(&ws).is_err() {
+                        Some(())
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| {
+                    if p.strip_prefix(workspace).is_err() {
+                        Some(())
+                    } else {
+                        None
+                    }
+                })
+                .is_some();
+            if gated_out {
                 problems.push(format!(
                     "{}: references code outside the workspace ({}), scan incomplete",
                     rel_of(&f),
@@ -4596,6 +4638,83 @@ mod tests {
         assert!(
             out.contains("missing forbid"),
             "wrong failure shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_requires_nested_bin_root_forbid() {
+        // M-1 r10: cargo's second binary form (src/bin/<name>/main.rs) is
+        // a compilable root too — it must carry the forbid like the rest.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xbin2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(src.join("bin").join("tool")).expect("temp crate");
+        std::fs::write(
+            src.join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            src.join("bin").join("tool").join("main.rs"),
+            "fn main() {}\n",
+        )
+        .expect("bin main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "unforbidden nested bin root passed the scan:\n{out}");
+        assert!(
+            out.contains("missing forbid"),
+            "wrong failure shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_refuses_symlink_escape() {
+        // M-2 r10: a redirection through a symlink that resolves outside
+        // the workspace is refused, not followed. Skipped where the
+        // platform denies symlink creation (no privilege to test with).
+        let target_dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xlinkout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&target_dir);
+        std::fs::create_dir_all(&target_dir).expect("outside dir");
+        std::fs::write(target_dir.join("evil.txt"), "pub unsafe fn evil() {}\n").expect("evil");
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        #[cfg(unix)]
+        let link_ok = std::os::unix::fs::symlink(&target_dir, src.join("link")).is_ok();
+        #[cfg(windows)]
+        let link_ok = std::os::windows::fs::symlink_dir(&target_dir, src.join("link")).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let link_ok = false;
+        if !link_ok {
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&target_dir);
+            eprintln!("SKIP: cannot create symlinks here");
+            return;
+        }
+        std::fs::write(
+            src.join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            src.join("main.rs"),
+            "#[forbid(unsafe_code)]\n#[path = \"link/evil.txt\"]\nmod evil;\nfn main() {}\n",
+        )
+        .expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&target_dir);
+        assert!(!ok, "symlink escape passed the scan:\n{out}");
+        assert!(
+            out.contains("outside the workspace"),
+            "wrong failure shape:\n{out}"
+        );
+        assert!(
+            !out.contains("pub unsafe"),
+            "escaped content echoed:\n{out}"
         );
     }
 

@@ -470,13 +470,36 @@ impl From<&Error> for ErrorPayload {
 /// only verified by running the binary and eyeballing it.
 pub struct Output<W: Write> {
     format: Format,
+    quiet: bool,
     sink: W,
 }
 
 impl<W: Write> Output<W> {
     /// Construct an output writer.
     pub const fn new(format: Format, sink: W) -> Self {
-        Self { format, sink }
+        Self {
+            format,
+            quiet: false,
+            sink,
+        }
+    }
+
+    /// Suppress human success output.
+    ///
+    /// `--quiet` shows errors and keeps exit codes — a gate that exits
+    /// without saying why is one people work around — but hides the human
+    /// summary. Machine formats are contracts, not narration: JSON and
+    /// JSON Lines are unchanged, and commands that stream (serve, dev,
+    /// watch) manage their own sinks. What quiets, precisely, is the
+    /// `Format::Human` success path in [`Self::emit_with_exit`].
+    ///
+    /// ```
+    /// let mut out =
+    ///     qqq_run::output::Output::new(qqq_run::output::Format::Human, Vec::new());
+    /// out.set_quiet(true);
+    /// ```
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
     }
 
     /// The active format.
@@ -512,6 +535,10 @@ impl<W: Write> Output<W> {
     pub fn emit_with_exit<T: CommandOutput>(&mut self, value: &T, exit_code: u8) -> Result<()> {
         let command = value.command();
         match self.format {
+            // Quiet hides the human success story, never the verdict: errors
+            // always print and the exit code is untouched, so a gate that
+            // fails quiet still fails loudly where it matters.
+            Format::Human if self.quiet => Ok(()),
             Format::Human => self.write_line(&value.summary()),
             Format::Json | Format::JsonLines => {
                 let text = render_success(command, value, exit_code)?;
@@ -1030,6 +1057,30 @@ mod tests {
     fn human_format_prints_the_summary() {
         let s = emit_to_string(Format::Human, &Fake { value: 7 });
         assert_eq!(s.trim(), "value is 7");
+    }
+
+    /// Quiet suppresses the human success story, nothing else.
+    ///
+    /// `--quiet` was parsed and advertised ("less output") but honored
+    /// nowhere: the flag set a bit no reader read. Errors still print and
+    /// exit codes are untouched — a gate that fails quiet still fails loudly
+    /// where it matters — and machine formats are contracts, not narration.
+    #[test]
+    fn quiet_suppresses_human_success_output_only() {
+        let mut out = Output::new(Format::Human, Vec::new());
+        out.set_quiet(true);
+        out.emit(&Fake { value: 7 }).expect("emit must succeed");
+        let s = String::from_utf8(out.into_inner()).expect("utf-8");
+        assert!(s.is_empty(), "quiet human success prints nothing: {s:?}");
+
+        // Machine formats are unchanged: quiet is narration control, not a
+        // contract change.
+        let mut out = Output::new(Format::Json, Vec::new());
+        out.set_quiet(true);
+        out.emit(&Fake { value: 7 }).expect("emit must succeed");
+        let s = String::from_utf8(out.into_inner()).expect("utf-8");
+        let v: serde_json::Value = serde_json::from_str(&s).expect("must stay valid JSON");
+        assert_eq!(v["data"]["value"], 7);
     }
 
     #[test]

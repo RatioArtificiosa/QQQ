@@ -869,21 +869,47 @@ fn is_single_table(namespace: &str) -> bool {
 /// concatenated in order, and everything rides under one `add to qqq.toml`
 /// prefix. The inputs come from [`crate::commands::fix_stanza_for`], whose
 /// shape this function depends on — pinned by the remediation tests below.
+///
+/// Headers compare by table name (up to `]`), so an annotated header and a
+/// bare one still merge: the annotation is a comment, not a second table.
+/// Multi-header input cannot happen today (one namespace per group), so a
+/// second header fails loudly in tests rather than emitting TOML that binds
+/// keys to the wrong table.
 fn merge_table_stanzas(stanzas: &[String]) -> String {
     const PREFIX: &str = "add to qqq.toml:\n\n";
+    fn header_name(line: &str) -> &str {
+        let trimmed = line.trim_start();
+        match trimmed.find(']') {
+            Some(end) => &trimmed[..=end],
+            None => trimmed,
+        }
+    }
     let mut headers: Vec<&str> = Vec::new();
     let mut keys: Vec<&str> = Vec::new();
     for stanza in stanzas {
         for line in stanza.strip_prefix(PREFIX).unwrap_or(stanza).lines() {
             let trimmed = line.trim_start();
             if trimmed.starts_with('[') {
-                if !headers.contains(&trimmed) {
+                if !headers
+                    .iter()
+                    .any(|h| header_name(h) == header_name(trimmed))
+                {
                     headers.push(trimmed);
                 }
             } else if !trimmed.is_empty() {
                 keys.push(line);
             }
         }
+    }
+    debug_assert!(
+        headers.len() <= 1,
+        "one namespace per group means one header: {stanzas:?}"
+    );
+    if headers.len() > 1 {
+        // Unreachable today (groups are per-namespace), but a future caller
+        // passing two tables must not get keys silently rebound to the last
+        // header TOML saw — separate stanzas fail loudly at parse instead.
+        return stanzas.join("\n\n");
     }
     let mut out = PREFIX.to_owned();
     for header in headers {
@@ -2001,6 +2027,53 @@ mod tests {
             out.contains("Paste every stanza above"),
             "several stanzas must say so: {out}"
         );
+    }
+
+    /// `is_single_table` matches the manifest schema exactly.
+    ///
+    /// The merge is only valid for single tables: merging two `[[array]]`
+    /// entries would fold two grants into one. The schema is the authority on
+    /// which namespaces repeat, so this test reads it — a future array
+    /// namespace that lands in the allowlist would merge wrongly, and a
+    /// future single namespace left out would paste-broken.
+    #[test]
+    fn single_table_matches_the_schema() {
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("schema")
+            .join("qqq-toml.schema.json");
+        let text = std::fs::read_to_string(&schema_path).expect("the schema must be readable");
+        let schema: serde_json::Value = serde_json::from_str(&text).expect("the schema must parse");
+        let props = schema
+            .pointer("/$defs/Capabilities/properties")
+            .expect("Capabilities properties");
+        let mut arrays = Vec::new();
+        let mut singles = Vec::new();
+        for (ns, def) in props.as_object().expect("an object") {
+            // Array tables carry `"type": "array"`; single tables are objects
+            // (possibly nullable via `anyOf`).
+            let text = def.to_string();
+            if text.contains("\"array\"") {
+                arrays.push(ns.clone());
+            } else {
+                singles.push(ns.clone());
+            }
+            assert_eq!(
+                is_single_table(ns),
+                !text.contains("\"array\""),
+                "{ns}: the merge allowlist must match the schema"
+            );
+        }
+        arrays.sort_unstable();
+        assert_eq!(
+            arrays,
+            vec!["fs".to_owned(), "queue".to_owned(), "sql".to_owned()],
+            "exactly the three repeatable namespaces"
+        );
+        // Ten modelled singles plus the `other` catch-all for namespaces
+        // without a typed struct yet (also an object, so also single).
+        assert_eq!(singles.len(), 11, "eleven single tables: {singles:?}");
     }
 
     /// A package-spelled import still resolves, through the fallback branch.

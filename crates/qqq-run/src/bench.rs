@@ -103,6 +103,22 @@ fn value_of(args: &[String], i: usize, flag: &str) -> Result<String, Error> {
 /// anything is measured, because a typo should be reported while the user is
 /// looking at the command they typed (`§O-033a`) — not after ten seconds of load.
 pub fn options(args: &[String]) -> Result<BenchOptions, Error> {
+    // Both spellings, one contract: `--requests 50` and `--requests=50` parse
+    // identically, via the shared pre-expansion. The list is the contract —
+    // a flag missing here falls into the unknown-option arm.
+    const VALUE_FLAGS: [&str; 9] = [
+        "--listen",
+        "--target",
+        "--url",
+        "--only",
+        "--filter",
+        "--requests",
+        "--seconds",
+        "--connections",
+        "--timeout",
+    ];
+    let args = crate::args::expand_equals(args, &VALUE_FLAGS);
+    let args: &[String] = &args;
     let mut opts = BenchOptions::default();
     let mut i = 0;
 
@@ -1076,6 +1092,17 @@ mod tests {
     #[test]
     fn a_flag_without_a_value_is_refused() {
         let err = options(&args(&["--listen"])).expect_err("must be refused");
+        assert!(err.to_string().contains("needs a value"), "got {err}");
+    }
+
+    /// The `=` twin parses like the space form: one contract, two spellings.
+    #[test]
+    fn equals_twins_parse_like_space_forms() {
+        let opts = options(&args(&["--listen=127.0.0.1:9000", "--requests=50"])).expect("valid");
+        assert_eq!(opts.target.expect("a target").port(), 9000);
+        assert_eq!(opts.requests, Some(50));
+        // Empty is missing, not zero: `--requests=` must not measure nothing.
+        let err = options(&args(&["--requests="])).expect_err("must be refused");
         assert!(err.to_string().contains("needs a value"), "got {err}");
     }
 

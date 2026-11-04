@@ -33,6 +33,7 @@ pub use addcap::{AddCapOptions, AddCapOutput, add_cap, stanza_for};
 pub mod audit;
 pub use audit::{AuditOutput, FindingOutput};
 pub mod aot;
+pub mod args;
 pub mod bench;
 pub mod bench_output;
 pub mod build;

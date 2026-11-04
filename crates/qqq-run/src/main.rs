@@ -101,6 +101,12 @@ impl GlobalFlags {
         self.has(Self::JSON_LINES)
     }
 
+    /// Whether non-essential output is suppressed.
+    #[must_use]
+    const fn quiet(self) -> bool {
+        self.has(Self::QUIET)
+    }
+
     /// Whether this is a rehearsal.
     #[must_use]
     const fn dry_run(self) -> bool {
@@ -389,7 +395,10 @@ fn render_help(verbose: bool) -> String {
     let _ = writeln!(out, "    --json  --jsonl       machine-readable output");
     let _ = writeln!(out, "    --dry-run             show, do not do");
     if verbose {
-        let _ = writeln!(out, "    -q, --quiet           less output");
+        let _ = writeln!(
+            out,
+            "    -q, --quiet           suppress human success output (errors and exit codes unchanged)"
+        );
         let _ = writeln!(out, "    -v, --verbose         more output");
     }
     let _ = writeln!(out, "    -h, --help [--all]    this help");
@@ -631,6 +640,7 @@ fn emit_audit_report(
 fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCode {
     let format = flags.format();
     let mut out = Output::new(format, std::io::stdout());
+    out.set_quiet(flags.quiet());
 
     match name {
         CommandName::Schema => dispatch_schema(name, &mut out, args),
@@ -853,7 +863,10 @@ fn dispatch_inspect(
             let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
-        return with_manifest(name, out, args, qqq_run::commands::inspect);
+        // The manifest override comes from the parsed args, not a second
+        // scan: one parser, one answer to "which manifest".
+        let explicit = parsed.manifest.map(std::path::PathBuf::from);
+        return with_manifest_at(name, out, explicit.as_deref(), qqq_run::commands::inspect);
     };
 
     let after = match qqq_run::commands::inspect_artifact(std::path::Path::new(&path)) {
@@ -889,8 +902,8 @@ fn dispatch_inspect(
     }
 }
 
-/// The parsed `inspect` arguments: an optional artifact and an optional diff
-/// baseline.
+/// The parsed `inspect` arguments: an optional artifact, an optional diff
+/// baseline, and an optional manifest override.
 ///
 /// A pure function so tests can pin the parsing — including the refusal of
 /// unknown flags — without building an `Output` sink.
@@ -898,6 +911,7 @@ fn dispatch_inspect(
 struct InspectArgs {
     artifact: Option<String>,
     diff_against: Option<String>,
+    manifest: Option<String>,
 }
 
 fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
@@ -905,9 +919,9 @@ fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
     // mistaken for artifact paths. This is the same reasoning as
     // `build_options`'s `TAKES_VALUE`: a flag's value that is read as a
     // positional silently inspects the wrong file.
-    const TAKES_VALUE: [&str; 2] = ["--manifest", "--diff"];
     let mut artifact: Option<String> = None;
     let mut diff_against: Option<String> = None;
+    let mut manifest: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let Some(a) = args.get(i).map(String::as_str) else {
@@ -924,18 +938,16 @@ fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
                 return Err(missing_value("--diff"));
             }
             diff_against = Some(v.to_owned());
-        } else if TAKES_VALUE.contains(&a) {
-            // A bare `--manifest` is a usage error, not a silent no-op.
-            // (`--diff` cannot reach this arm: the exact match above owns it.)
-            if a == "--manifest" && args.get(i + 1).is_none() {
+        } else if a == "--manifest" {
+            let Some(v) = args.get(i + 1) else {
                 return Err(missing_value("--manifest"));
-            }
+            };
+            manifest = Some(v.clone());
             i += 1;
-        } else if a.starts_with("--manifest=") {
+        } else if let Some(v) = a.strip_prefix("--manifest=") {
             // Self-contained: no value to skip, and nothing here is an
-            // artifact path. Without this arm the `=` spelling fell into
-            // the refusal below while `with_manifest` (via `flag_value`)
-            // would have accepted it.
+            // artifact path.
+            manifest = Some(v.to_owned());
         } else if a.starts_with('-') {
             // Refused, not ignored: the global parser consumes `--json` and
             // its siblings before dispatch, so a flag-shaped argument here is
@@ -963,9 +975,21 @@ fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
         }
         i += 1;
     }
+    // A manifest override with an artifact is refused: the artifact path
+    // answers from the bytes, and a `--manifest` alongside it is either a
+    // leftover (inspected the wrong thing) or a belief the manifest matters
+    // (it does not). Silently ignoring it would bless either mistake.
+    if artifact.is_some() && manifest.is_some() {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`inspect` of an artifact takes no `--manifest`".to_owned(),
+        )
+        .with_remediation("inspect the artifact alone, or drop the path to inspect the manifest"));
+    }
     Ok(InspectArgs {
         artifact,
         diff_against,
+        manifest,
     })
 }
 
@@ -1002,11 +1026,18 @@ fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
 /// `Output::write_document` puts the SARIF text on the command's own sink (so a
 /// broken pipe is still a `QQQ-6005` rather than a panic, and so a test can
 /// capture it) and the returned payload is never printed.
-fn dispatch_audit(
-    name: CommandName,
-    args: &[String],
-    out: &mut Output<std::io::Stdout>,
-) -> ExitCode {
+/// The parsed `audit` flags: `--sarif` and an optional `--fail-on` threshold.
+///
+/// A pure function so tests can pin the parsing without building an `Output`
+/// sink. `--manifest` (both spellings) is skipped — owned by `flag_value`
+/// below, like every sibling command.
+#[derive(Debug)]
+struct AuditArgs {
+    sarif: bool,
+    fail_on: Option<qqq_run::audit::Severity>,
+}
+
+fn audit_args(args: &[String]) -> Result<AuditArgs, qqq_core::Error> {
     let mut sarif = false;
     let mut fail_on: Option<qqq_run::audit::Severity> = None;
 
@@ -1019,58 +1050,73 @@ fn dispatch_audit(
             sarif = true;
         } else if a == "--fail-on" {
             let Some(v) = args.get(i + 1) else {
-                let e = missing_value("--fail-on");
-                let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-                return ExitCode::from(exit::USAGE);
+                return Err(missing_value("--fail-on"));
             };
-            match qqq_run::audit::parse_fail_on(v) {
-                Ok(sev) => fail_on = Some(sev),
-                Err(e) => {
-                    let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-                    return ExitCode::from(exit::USAGE);
-                }
+            if v.is_empty() {
+                return Err(missing_value("--fail-on"));
             }
+            fail_on = Some(qqq_run::audit::parse_fail_on(v)?);
             i += 1;
         } else if let Some(v) = a.strip_prefix("--fail-on=") {
-            match qqq_run::audit::parse_fail_on(v) {
-                Ok(sev) => fail_on = Some(sev),
-                Err(e) => {
-                    let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-                    return ExitCode::from(exit::USAGE);
-                }
+            // An empty `--fail-on=` is a missing value, not an invalid
+            // severity: `parse_fail_on("")` would report the wrong error code
+            // for a flag that got no value at all.
+            if v.is_empty() {
+                return Err(missing_value("--fail-on"));
             }
-        } else if a == "--manifest" && args.get(i + 1).is_none() {
-            // A bare `--manifest` is a usage error, not a silent no-op.
-            let e = missing_value("--manifest");
-            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-            return ExitCode::from(exit::USAGE);
-        } else if a.starts_with("--") && a != "--manifest" && !a.starts_with("--manifest=") {
+            fail_on = Some(qqq_run::audit::parse_fail_on(v)?);
+        } else if a == "--manifest" {
+            // Owned by `flag_value` below; skip its value. A bare
+            // `--manifest` is a usage error, not a silent no-op.
+            if args.get(i + 1).is_none() {
+                return Err(missing_value("--manifest"));
+            }
+            i += 1;
+        } else if a.starts_with("--manifest=") {
+            // Self-contained twin: nothing to skip.
+        } else if a.starts_with("--") {
             // **An unknown flag is refused rather than dropped.** There was no arm here, so
             // `qqqai audit --bogus` printed the human report and exited `0`: the caller got an answer
             // to a question they did not ask, with nothing to say the option had been discarded. Of
             // the three things a command can do with a flag it does not implement -- honour it, refuse
             // it, ignore it -- **only ignoring it lies**, and `dispatch_audit_log` already refuses.
             //
-            // `--manifest` (both spellings) is excluded because `flag_value` reads it from this same
-            // argv below. Flag VALUES cannot start with `--`, so this predicate cannot catch one.
+            // `--manifest` (both spellings) is excluded above because `flag_value` reads it from
+            // this same argv below. Flag VALUES cannot start with `--`, so this predicate cannot
+            // catch one.
             //
             // `--json`, `--jsonl` and `-q` never reach here: they are **global** flags, parsed before
             // dispatch and accepted in either position. A first version of this arm special-cased
             // `--json` as a usage error, which would have broken
             // `audit_json_is_parseable_and_only_the_envelope` -- a green test. Measured, then reverted.
-            let err = qqq_core::Error::new(
+            return Err(qqq_core::Error::new(
                 qqq_core::ErrorCode::McpArgumentInvalid,
                 format!("`{a}` is not a flag `qqqai audit` understands"),
             )
             .with_remediation(
                 "`qqqai audit [--sarif] [--fail-on note|warning|error] [--manifest <path>]`; \
                  `--json` and `--jsonl` are global, so they go before the command or after it",
-            );
-            let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
-            return ExitCode::from(exit::USAGE);
+            ));
         }
         i += 1;
     }
+    Ok(AuditArgs { sarif, fail_on })
+}
+
+fn dispatch_audit(
+    name: CommandName,
+    args: &[String],
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let parsed = match audit_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let sarif = parsed.sarif;
+    let fail_on = parsed.fail_on;
 
     // Printed *before* the threshold is checked, so a failing run still says what
     // failed. A gate that exits before explaining itself is one people work
@@ -1831,6 +1877,11 @@ fn new_options(args: &[String]) -> Result<qqq_run::NewOptions, qqq_core::Error> 
                     opts.language = Language::parse(v).ok_or_else(|| {
                         unknown_choice("language", v, &Language::ALL.map(Language::as_str))
                     })?;
+                } else if let Some(v) = other.strip_prefix("--language=") {
+                    // The long alias takes `=` exactly like `--lang=` does.
+                    opts.language = Language::parse(v).ok_or_else(|| {
+                        unknown_choice("language", v, &Language::ALL.map(Language::as_str))
+                    })?;
                 } else if let Some(v) = other.strip_prefix("--template=") {
                     opts.template = Template::parse(v).ok_or_else(|| {
                         unknown_choice("template", v, &Template::ALL.map(Template::as_str))
@@ -1934,6 +1985,11 @@ fn init_options(args: &[String]) -> Result<qqq_run::InitOptions, qqq_core::Error
             "--force" => opts.force = true,
             other => {
                 if let Some(v) = other.strip_prefix("--lang=") {
+                    opts.language = Some(Language::parse(v).ok_or_else(|| {
+                        unknown_choice("language", v, &Language::ALL.map(Language::as_str))
+                    })?);
+                } else if let Some(v) = other.strip_prefix("--language=") {
+                    // The long alias takes `=` exactly like `--lang=` does.
                     opts.language = Some(Language::parse(v).ok_or_else(|| {
                         unknown_choice("language", v, &Language::ALL.map(Language::as_str))
                     })?);
@@ -2210,6 +2266,21 @@ fn test_options(
     args: &[String],
     flags: GlobalFlags,
 ) -> Result<qqq_run::TestOptions, qqq_core::Error> {
+    // Both spellings, one contract: every value flag below accepts `--flag
+    // value` and `--flag=value` identically, via the shared pre-expansion.
+    // (`-f` keeps its space form only: no short flag takes `=`.)
+    const VALUE_FLAGS: [&str; 8] = [
+        "--filter",
+        "--format",
+        "--trials",
+        "--history",
+        "--flaky",
+        "--jobs",
+        "--watch-limit",
+        "--manifest",
+    ];
+    let args = qqq_run::args::expand_equals(args, &VALUE_FLAGS);
+    let args = args.as_slice();
     let mut opts = qqq_run::TestOptions {
         dry_run: flags.dry_run(),
         json: flags.format() != Format::Human,
@@ -2280,7 +2351,14 @@ fn test_options(
                 opts.flaky = Some(std::path::PathBuf::from(v));
                 i += 1;
             }
-            "--manifest" => i += 1,
+            "--manifest" => {
+                // Owned by `with_manifest`; skip its value. A bare
+                // `--manifest` is a usage error, not a silent no-op.
+                if args.get(i + 1).is_none() {
+                    return Err(missing_value("--manifest"));
+                }
+                i += 1;
+            }
             other if other.starts_with('-') => {
                 return Err(qqq_core::Error::new(
                     qqq_core::ErrorCode::McpArgumentInvalid,
@@ -2296,6 +2374,15 @@ fn test_options(
             other => {
                 if opts.filter.is_none() {
                     opts.filter = Some(other.to_owned());
+                } else {
+                    // A second filter would silently win or lose depending on
+                    // order; naming it keeps `test foo bar` from testing only
+                    // one of the two.
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("`test` takes one filter, not `{other}` either"),
+                    )
+                    .with_remediation("combine patterns into one filter, e.g. `test 'foo|bar'`"));
                 }
             }
         }
@@ -2307,30 +2394,42 @@ fn test_options(
     // downgrade — silently dropping `--watch` would report success for work
     // that did not happen, and concatenating N JUnit/TAP documents breaks
     // the `TEST-003` raw-document invariant.
-    if opts.watch || opts.watch_limit.is_some() {
-        if opts.format.is_foreign() {
-            return Err(qqq_core::Error::new(
-                qqq_core::ErrorCode::McpArgumentInvalid,
-                "`--watch` cannot be combined with `--format junit` or `--format tap`",
-            )
-            .with_remediation("watch with the default human or json format, or drop --watch"));
-        }
-        if opts.flaky.is_some() {
-            return Err(qqq_core::Error::new(
-                qqq_core::ErrorCode::McpArgumentInvalid,
-                "`--watch` cannot be combined with `--flaky`",
-            )
-            .with_remediation("`--flaky` reports a history instead of running; drop one flag"));
-        }
-        if opts.dry_run {
-            return Err(qqq_core::Error::new(
-                qqq_core::ErrorCode::McpArgumentInvalid,
-                "`--watch` cannot be combined with `--dry-run`",
-            )
-            .with_remediation("a rehearsal has nothing to re-run; drop one flag"));
-        }
-    }
+    check_test_watch_combination(&opts)?;
     Ok(opts)
+}
+
+/// Refuse `test` flag combinations that cannot loop.
+///
+/// Split out of [`test_options`]: the three exclusions are one rule family
+/// (what a watch loop cannot do), and the arms pushed the parser over the
+/// line budget. Each stays a usage error naming both flags rather than a
+/// silent downgrade.
+fn check_test_watch_combination(opts: &qqq_run::TestOptions) -> qqq_core::Result<()> {
+    if !(opts.watch || opts.watch_limit.is_some()) {
+        return Ok(());
+    }
+    if opts.format.is_foreign() {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`--watch` cannot be combined with `--format junit` or `--format tap`",
+        )
+        .with_remediation("watch with the default human or json format, or drop --watch"));
+    }
+    if opts.flaky.is_some() {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`--watch` cannot be combined with `--flaky`",
+        )
+        .with_remediation("`--flaky` reports a history instead of running; drop one flag"));
+    }
+    if opts.dry_run {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`--watch` cannot be combined with `--dry-run`",
+        )
+        .with_remediation("a rehearsal has nothing to re-run; drop one flag"));
+    }
+    Ok(())
 }
 
 fn dispatch_dev(name: CommandName, args: &[String], out: &mut Output<std::io::Stdout>) -> ExitCode {
@@ -2519,6 +2618,11 @@ fn add_cap_options(
     // tracked only to skip the value rather than read it as the table.
     const TAKES_VALUE: [&str; 4] = ["--manifest", "--cap", "--path", "--mode"];
 
+    // Both spellings, one contract: every value flag accepts `--flag value`
+    // and `--flag=value` identically, via the shared pre-expansion.
+    let args = qqq_run::args::expand_equals(args, &["--manifest", "--cap", "--path", "--mode"]);
+    let args = args.as_slice();
+
     let mut table: Option<String> = None;
     let mut path: Option<String> = None;
     let mut mode: Option<String> = None;
@@ -2616,53 +2720,92 @@ fn dispatch_add_cap(
 }
 
 /// Dispatch `qqqai remove`.
-fn dispatch_remove(
-    name: CommandName,
-    args: &[String],
-    out: &mut Output<std::io::Stdout>,
-) -> ExitCode {
+/// The parsed `remove` arguments: a scope flag and one package name.
+///
+/// A pure function so tests can pin the parsing without building an `Output`
+/// sink. `--manifest` (both spellings) is skipped with its value — owned by
+/// `with_manifest`, like every sibling command.
+#[derive(Debug)]
+struct RemoveArgs {
+    dev: bool,
+    pkg: String,
+}
+
+fn remove_args(args: &[String]) -> Result<RemoveArgs, qqq_core::Error> {
     let mut dev = false;
     let mut pkg: Option<String> = None;
-
-    for a in args {
-        match a.as_str() {
+    let mut i = 0;
+    while i < args.len() {
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
+        match a {
             "--dev" => dev = true,
-            "--manifest" => {}
+            "--manifest" => {
+                // Owned by `with_manifest`; skip its value. A bare
+                // `--manifest` is a usage error, not a silent no-op.
+                if args.get(i + 1).is_none() {
+                    return Err(missing_value("--manifest"));
+                }
+                i += 1;
+            }
+            a if a.starts_with("--manifest=") => {}
             other if other.starts_with('-') => {
-                let e = qqq_core::Error::new(
+                return Err(qqq_core::Error::new(
                     qqq_core::ErrorCode::McpArgumentInvalid,
                     format!("unknown flag `{other}` for `remove`"),
                 )
-                .with_remediation("`remove` accepts --dev and --manifest");
-                let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-                return ExitCode::from(exit::USAGE);
+                .with_remediation("`remove` accepts --dev and --manifest"));
             }
             other if pkg.is_none() => pkg = Some(other.to_owned()),
-            _ => {}
+            _ => {
+                // `remove` takes one package: a second word is a typo (often
+                // a version constraint), and removing only the first would
+                // surprise.
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    "`remove` takes one dependency name",
+                )
+                .with_remediation("run `remove` once per dependency"));
+            }
         }
+        i += 1;
     }
 
     let Some(pkg) = pkg else {
-        let e = qqq_core::Error::new(
+        return Err(qqq_core::Error::new(
             qqq_core::ErrorCode::McpArgumentInvalid,
             "`remove` needs the name of a dependency",
         )
         .with_remediation(format!(
             "for example: {} remove qqqai/json",
             qqq_core::BINARY_NAME
-        ));
-        let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-        return ExitCode::from(exit::USAGE);
+        )));
+    };
+    Ok(RemoveArgs { dev, pkg })
+}
+
+fn dispatch_remove(
+    name: CommandName,
+    args: &[String],
+    out: &mut Output<std::io::Stdout>,
+) -> ExitCode {
+    let parsed = match remove_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
+        }
     };
 
-    let table = if dev {
+    let table = if parsed.dev {
         "dev-dependencies"
     } else {
         "dependencies"
     };
 
     with_manifest(name, out, args, |loaded| {
-        qqq_run::deps::remove(&loaded.path, table, &pkg)
+        qqq_run::deps::remove(&loaded.path, table, &parsed.pkg)
     })
 }
 
@@ -3118,6 +3261,10 @@ fn add_options(args: &[String]) -> Result<AddRequest, qqq_core::Error> {
     // package name.
     const TAKES_VALUE: [&str; 2] = ["--manifest", "--registry"];
 
+    // Both spellings, one contract: `--feature`, `--registry` and `--manifest`
+    // accept `--flag value` and `--flag=value` identically.
+    let args = qqq_run::args::expand_equals(args, &["--feature", "--registry", "--manifest"]);
+    let args = args.as_slice();
     let mut spec: Option<String> = None;
     let mut dev = false;
     let mut exact = false;
@@ -3144,6 +3291,11 @@ fn add_options(args: &[String]) -> Result<AddRequest, qqq_core::Error> {
             }
             other => {
                 if TAKES_VALUE.contains(&other) {
+                    // Owned elsewhere; skip the value. A bare `--manifest`
+                    // or `--registry` is a usage error, not a silent no-op.
+                    if args.get(i + 1).is_none() {
+                        return Err(missing_value(other));
+                    }
                     i += 1;
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
@@ -3267,22 +3419,27 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
             "--deterministic" => opts.set(qqq_run::DevOptions::DETERMINISTIC),
             other => {
                 if let Some(v) = other.strip_prefix("--port=") {
-                    opts.port = dev_port("--port", v)?;
+                    opts.port = dev_port("--port", &non_empty_value("--port", v)?)?;
                 } else if let Some(v) = other.strip_prefix("--host=") {
-                    v.clone_into(&mut opts.host);
+                    non_empty_value("--host", v)?.clone_into(&mut opts.host);
                 } else if let Some(v) = other.strip_prefix("--watch=") {
-                    opts.watch.push(v.to_owned());
+                    opts.watch.push(non_empty_value("--watch", v)?);
                 } else if let Some(v) = other.strip_prefix("--ignore=") {
-                    opts.ignore.push(v.to_owned());
+                    opts.ignore.push(non_empty_value("--ignore", v)?);
                 } else if let Some(v) = other.strip_prefix("--inspect=") {
-                    opts.inspect = Some(dev_port("--inspect", v)?);
+                    opts.inspect = Some(dev_port("--inspect", &non_empty_value("--inspect", v)?)?);
                 } else if let Some(v) = other.strip_prefix("--reload-limit=") {
+                    let v = non_empty_value("--reload-limit", v)?;
                     opts.reload_limit = Some(
                         v.parse()
-                            .map_err(|_| bad_value("--reload-limit", v, "a positive number"))?,
+                            .map_err(|_| bad_value("--reload-limit", &v, "a positive number"))?,
                     );
                 } else if other == "--manifest" {
-                    // Owned by `with_manifest`; skip its value.
+                    // Owned by `with_manifest`; skip its value. A bare
+                    // `--manifest` is a usage error, not a silent no-op.
+                    if args.get(i + 1).is_none() {
+                        return Err(missing_value("--manifest"));
+                    }
                     i += 1;
                 } else if other.starts_with("--manifest=") {
                     // `--manifest=x` twin: consumed by `with_manifest`.
@@ -3296,6 +3453,15 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
                          --reload-limit, --open, --https and --once (`--deterministic` is \
                          not supported by `dev`; use `serve`)",
                     ));
+                } else {
+                    // `dev` takes no positionals: a stray word is a typo, and
+                    // ignoring it would start a server for a project the
+                    // operator did not name.
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("`dev` takes no positional arguments, not `{other}`"),
+                    )
+                    .with_remediation("run `dev` in the project directory"));
                 }
             }
         }
@@ -3692,6 +3858,11 @@ fn build_options(args: &[String]) -> Result<qqq_run::BuildOptions, qqq_core::Err
     // Flags that take a value and must not be mistaken for boolean switches.
     const TAKES_VALUE: [&str; 2] = ["--manifest", "--target"];
 
+    // Both spellings, one contract: `--target x` and `--target=x` (also
+    // `--manifest`, `--aot-cache`) parse identically, via the shared
+    // pre-expansion. Unknown `--x=` keeps its spelling for the refusal below.
+    let args = qqq_run::args::expand_equals(args, &["--manifest", "--target", "--aot-cache"]);
+    let args = args.as_slice();
     let mut cache = None;
     let mut bits = 0u8;
     let mut target: Option<String> = None;
@@ -3721,11 +3892,13 @@ fn build_options(args: &[String]) -> Result<qqq_run::BuildOptions, qqq_core::Err
             other => {
                 // A value-taking flag this function does not own (e.g.
                 // `--manifest`) is consumed with its value so the value is not
-                // then rejected as an unknown positional.
+                // then rejected as an unknown positional. A bare one is a
+                // usage error, not a silent no-op.
                 if TAKES_VALUE.contains(&other) {
+                    if args.get(i + 1).is_none() {
+                        return Err(missing_value(other));
+                    }
                     i += 1;
-                } else if let Some(stripped) = other.strip_prefix("--target=") {
-                    target = Some(stripped.to_owned());
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
                         qqq_core::ErrorCode::McpArgumentInvalid,
@@ -3753,6 +3926,19 @@ fn missing_value(flag: &str) -> qqq_core::Error {
         format!("`{flag}` needs a value"),
     )
     .with_remediation(format!("for example: {flag} wasm32-wasip2"))
+}
+
+/// The value for a flag that takes one, refusing empties.
+///
+/// `--flag=` with nothing after it is a missing value, not an empty one: an
+/// empty path, name, or key never names anything real, and accepting it
+/// defers the failure to a confusing downstream error (file-not-found for an
+/// empty path, a parse failure for an empty key).
+fn non_empty_value(flag: &str, value: &str) -> Result<String, qqq_core::Error> {
+    if value.is_empty() {
+        return Err(missing_value(flag));
+    }
+    Ok(value.to_owned())
 }
 
 /// Decode `qqqai run`'s own flags.
@@ -3827,20 +4013,29 @@ fn run_options(
             }
             other => {
                 if let Some(v) = other.strip_prefix("--artifact=") {
-                    opts.artifact = Some(std::path::PathBuf::from(v));
+                    opts.artifact =
+                        Some(std::path::PathBuf::from(non_empty_value("--artifact", v)?));
                 } else if let Some(v) = other.strip_prefix("--cap=") {
-                    opts.caps.push(v.to_owned());
+                    opts.caps.push(non_empty_value("--cap", v)?);
                 } else if let Some(v) = other.strip_prefix("--aot-cache=") {
-                    opts.aot_cache = Some(std::path::PathBuf::from(v));
+                    opts.aot_cache =
+                        Some(std::path::PathBuf::from(non_empty_value("--aot-cache", v)?));
                 } else if let Some(v) = other.strip_prefix("--replay=") {
-                    opts.replay = Some(std::path::PathBuf::from(v));
+                    opts.replay = Some(std::path::PathBuf::from(non_empty_value("--replay", v)?));
                 } else if let Some(v) = other.strip_prefix("--replay-log=") {
-                    opts.replay_log = Some(std::path::PathBuf::from(v));
+                    opts.replay_log = Some(std::path::PathBuf::from(non_empty_value(
+                        "--replay-log",
+                        v,
+                    )?));
                 } else if other.starts_with("--manifest=") {
                     // `--manifest=x` twin: consumed by `with_manifest`.
                 } else if TAKES_VALUE.contains(&other) {
                     // `--manifest` is consumed by `with_manifest`; skip its
-                    // value here so it is not mistaken for a positional.
+                    // value here so it is not mistaken for a positional. A
+                    // bare `--manifest` is a usage error, not a silent no-op.
+                    if args.get(i + 1).is_none() {
+                        return Err(missing_value(other));
+                    }
                     i += 1;
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
@@ -3986,11 +4181,16 @@ where
 /// `--all` is therefore the default rather than a modifier with a different default: there
 /// is no other sensible reading of the bare command, and `--all` exists so a script that
 /// spells its intent gets the same answer as one that does not.
-fn dispatch_schema(
-    name: CommandName,
-    out: &mut Output<std::io::Stdout>,
-    args: &[String],
-) -> ExitCode {
+/// The parsed `schema` filter: `None` for everything, `Some` for one command.
+///
+/// A pure function so tests can pin the parsing without building an `Output`
+/// sink.
+#[derive(Debug)]
+struct SchemaArgs {
+    only: Option<String>,
+}
+
+fn schema_args(args: &[String]) -> Result<SchemaArgs, qqq_core::Error> {
     let mut only: Option<String> = None;
     let mut i = 0usize;
     while i < args.len() {
@@ -4002,29 +4202,56 @@ fn dispatch_schema(
             "--all" | "--errors" => {}
             "--command" => {
                 let Some(v) = args.get(i + 1) else {
-                    let err = qqq_core::Error::new(
+                    return Err(qqq_core::Error::new(
                         qqq_core::ErrorCode::McpArgumentInvalid,
                         "`--command` needs a command name",
                     )
-                    .with_remediation("for example: qqqai schema --command caps");
-                    let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
-                    return ExitCode::from(exit::USAGE);
+                    .with_remediation("for example: qqqai schema --command caps"));
                 };
                 only = Some(v.clone());
                 i += 1;
             }
+            other if other.starts_with("--command=") => {
+                // The `=` twin: self-contained, no value to skip. Empty is
+                // missing, not a name.
+                match other.strip_prefix("--command=") {
+                    Some(v) if !v.is_empty() => {
+                        only = Some(v.to_owned());
+                    }
+                    _ => {
+                        return Err(qqq_core::Error::new(
+                            qqq_core::ErrorCode::McpArgumentInvalid,
+                            "`--command` needs a command name",
+                        )
+                        .with_remediation("for example: qqqai schema --command caps"));
+                    }
+                }
+            }
             other => {
-                let err = qqq_core::Error::new(
+                return Err(qqq_core::Error::new(
                     qqq_core::ErrorCode::McpArgumentInvalid,
                     format!("unknown flag `{other}` for `schema`"),
                 )
-                .with_remediation("`schema` takes `--all`, `--errors`, `--command <name>`");
-                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
-                return ExitCode::from(exit::USAGE);
+                .with_remediation("`schema` takes `--all`, `--errors`, `--command <name>`"));
             }
         }
         i += 1;
     }
+    Ok(SchemaArgs { only })
+}
+
+fn dispatch_schema(
+    name: CommandName,
+    out: &mut Output<std::io::Stdout>,
+    args: &[String],
+) -> ExitCode {
+    let only = match schema_args(args) {
+        Ok(p) => p.only,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
 
     // An unknown command name is refused rather than answered with an empty map: an empty
     // `commands` reads as "this command has no schema", when the truth is "that command
@@ -5527,15 +5754,10 @@ mod tests {
         assert_eq!(err.code, qqq_core::ErrorCode::CliFlagUnknown);
         assert!(err.message.contains("--dif"), "{}", err.message);
         // Accepted shapes still parse: artifact, values, and `=` forms.
-        let p = inspect_args(&args(&[
-            "a.wasm",
-            "--diff",
-            "b.wasm",
-            "--manifest=sub/q.toml",
-        ]))
-        .expect("parses");
+        let p = inspect_args(&args(&["a.wasm", "--diff", "b.wasm"])).expect("parses");
         assert_eq!(p.artifact.as_deref(), Some("a.wasm"));
         assert_eq!(p.diff_against.as_deref(), Some("b.wasm"));
+        assert_eq!(p.manifest, None);
         let p = inspect_args(&args(&["--diff=b.wasm"])).expect("parses");
         assert_eq!(p.diff_against.as_deref(), Some("b.wasm"));
         assert_eq!(p.artifact, None);
@@ -5546,6 +5768,18 @@ mod tests {
         // Bare and empty value flags are usage errors, not silent defaults.
         inspect_args(&args(&["--manifest"])).expect_err("bare --manifest must fail");
         inspect_args(&args(&["--diff="])).expect_err("empty --diff= must fail");
+        // A manifest override with an artifact is refused: the artifact path
+        // answers from the bytes, so the flag is either leftover or confusion.
+        let p = inspect_args(&args(&["--manifest", "q.toml"])).expect("parses");
+        assert_eq!(p.manifest.as_deref(), Some("q.toml"));
+        assert_eq!(p.artifact, None);
+        let err = inspect_args(&args(&["a.wasm", "--manifest", "q.toml"]))
+            .expect_err("artifact+manifest must fail");
+        assert!(
+            err.message.contains("takes no `--manifest`"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
@@ -5763,5 +5997,93 @@ mod tests {
             Some("a.toml".to_owned())
         );
         assert_eq!(flag_value(&argv(&["build"]), "--manifest"), None);
+    }
+
+    /// **Every value flag accepts `=` like a space.**
+    ///
+    /// One contract, two spellings: the shared `expand_equals` pre-expansion
+    /// means `--filter a=b` and `--filter=a=b` (values keep their `=`) parse
+    /// identically in every parser below. A missing twin used to fall into
+    /// the unknown-flag arm and fail a spelling the sibling commands accept.
+    #[test]
+    fn equals_twins_parse_everywhere() {
+        let o = build_options(&argv(&["--target=x", "--aot-cache=c"])).expect("parses");
+        assert_eq!(o.target.as_deref(), Some("x"));
+        assert_eq!(o.aot_cache, Some(std::path::PathBuf::from("c")));
+
+        let o = test_options(
+            &argv(&["--filter=a=b", "--jobs=4", "--manifest=m.toml"]),
+            GlobalFlags::default(),
+        )
+        .expect("parses");
+        assert_eq!(o.filter.as_deref(), Some("a=b"));
+        assert_eq!(o.jobs, Some(4));
+
+        let o = add_options(&argv(&["--feature=f", "--registry=r", "pkg"])).expect("parses");
+        assert_eq!(o.edit.features, vec!["f".to_owned()]);
+        assert_eq!(o.edit.source.as_deref(), Some("registry+r"));
+
+        let o = add_cap_options(&argv(&["--cap=clock", "--path=p"]), false).expect("parses");
+        assert_eq!(o.table, "clock");
+        assert_eq!(o.path.as_deref(), Some("p"));
+
+        // The long alias takes `=` exactly like `--lang=` does.
+        let o = new_options(&argv(&["--language=rust", "app"])).expect("parses");
+        assert_eq!(o.language, qqq_run::Language::Rust);
+        let o = init_options(&argv(&["--language=rust"])).expect("parses");
+        assert_eq!(o.language, Some(qqq_run::Language::Rust));
+    }
+
+    /// **Bare and empty value flags are usage errors, not silent defaults.**
+    #[test]
+    fn dangling_and_empty_values_fail_loudly() {
+        build_options(&argv(&["--manifest"])).expect_err("bare --manifest must fail");
+        build_options(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
+        build_options(&argv(&["--target"])).expect_err("bare --target must fail");
+        test_options(&argv(&["--manifest"]), GlobalFlags::default())
+            .expect_err("bare --manifest must fail");
+        // A second bare positional is refused: two filters would silently
+        // win or lose depending on order.
+        let err = test_options(&argv(&["a", "b"]), GlobalFlags::default())
+            .expect_err("a second positional filter must fail");
+        assert!(err.message.contains("one filter"), "{}", err.message);
+        // `remove` takes one dependency; a second word is a typo.
+        let err = remove_args(&argv(&["a", "b"])).expect_err("two packages must fail");
+        assert!(err.message.contains("one dependency"), "{}", err.message);
+        remove_args(&argv(&["--manifest"])).expect_err("bare --manifest must fail");
+        let p = remove_args(&argv(&["--dev", "--manifest=x.toml", "a"])).expect("parses");
+        assert!(p.dev);
+        assert_eq!(p.pkg, "a");
+        // `schema --command=` twins the space form; empty is missing.
+        let p = schema_args(&argv(&["--command=caps"])).expect("parses");
+        assert_eq!(p.only.as_deref(), Some("caps"));
+        schema_args(&argv(&["--command"])).expect_err("bare --command must fail");
+        schema_args(&argv(&["--command="])).expect_err("empty --command= must fail");
+        schema_args(&argv(&["--bogus"])).expect_err("unknown flags must fail");
+        // Empty `=` values are missing values, not empty strings.
+        run_options(&argv(&["--artifact="]), GlobalFlags::default())
+            .expect_err("empty --artifact= must fail");
+        run_options(&argv(&["--manifest"]), GlobalFlags::default())
+            .expect_err("bare --manifest must fail");
+        dev_options(&argv(&["--host="])).expect_err("empty --host= must fail");
+        dev_options(&argv(&["extra"])).expect_err("dev takes no positionals");
+        // `audit --fail-on=` with nothing after it is a missing value, not
+        // an invalid severity; bare `--manifest` is a usage error.
+        let p = audit_args(&argv(&[
+            "--sarif",
+            "--fail-on=warning",
+            "--manifest=m.toml",
+        ]))
+        .expect("parses");
+        assert!(p.sarif);
+        assert_eq!(
+            p.fail_on,
+            Some(qqq_run::audit::Severity::Warning),
+            "the threshold must parse"
+        );
+        audit_args(&argv(&["--fail-on="])).expect_err("empty --fail-on= must fail");
+        audit_args(&argv(&["--fail-on"])).expect_err("bare --fail-on must fail");
+        audit_args(&argv(&["--manifest"])).expect_err("bare --manifest must fail");
+        audit_args(&argv(&["--bogus"])).expect_err("unknown flags must fail");
     }
 }

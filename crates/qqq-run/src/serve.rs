@@ -628,6 +628,9 @@ fn validate_standalone_flags(opts: &ServeOptions) -> Result<()> {
 /// Only the flags that take a value split; anything else keeps its spelling
 /// so the unknown-flag error names what the user typed. Values never start
 /// with `--`, so a value containing `=` is never mistaken for a flag.
+///
+/// An empty value (`--flag=`) expands to the bare flag, so `value_of`
+/// reports it missing: an empty path never names anything real.
 fn expand_equals(args: &[String]) -> Vec<String> {
     const VALUE_FLAGS: [&str; 12] = [
         "--aot-cache",
@@ -650,7 +653,12 @@ fn expand_equals(args: &[String]) -> Vec<String> {
             && VALUE_FLAGS.contains(&flag)
         {
             out.push(flag.to_owned());
-            out.push(value.to_owned());
+            // An empty value is a missing value: pushing the bare flag lets
+            // `value_of` report it instead of a downstream error about an
+            // empty path.
+            if !value.is_empty() {
+                out.push(value.to_owned());
+            }
         } else {
             out.push(arg.clone());
         }
@@ -2225,6 +2233,14 @@ mod tests {
         assert!(
             err.message.contains("--bogus"),
             "the refusal must name the flag: {}",
+            err.message
+        );
+        // Empty is missing, not empty: `--config=` must not produce an
+        // empty path that fails downstream.
+        let err = options(&args(&["--config="])).expect_err("must be refused");
+        assert!(
+            err.message.contains("needs a value"),
+            "the error must name the missing value: {}",
             err.message
         );
     }

@@ -1551,10 +1551,9 @@ pub fn inspect(loaded: &LoadedManifest) -> Result<InspectOutput> {
 /// Tenants that declare a window but no capped quantity.
 ///
 /// A window only scopes `max_requests_per_window`; on its own it bounds
-/// nothing. The entry is kept in the report (it *is* declared) with this
-/// warning, rather than dropped silently — a dropped header would hide an
-/// operator's half-written limit, while a bare entry would suggest a policy
-/// that does not exist.
+/// nothing. The entry still counts as declared — the emptiness filter keeps
+/// it, so the tenant row appears — and it additionally carries this warning,
+/// so the row is not mistaken for a policy.
 fn dead_window_warnings(manifest: &qqq_cap::manifest::Manifest) -> Vec<String> {
     let Some(limits) = manifest.server.limits.as_ref() else {
         return Vec::new();

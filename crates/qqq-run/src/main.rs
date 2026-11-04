@@ -3416,6 +3416,7 @@ fn install_options(
 }
 
 /// The parsed form of a `qqqai add` invocation.
+#[derive(Debug)]
 struct AddRequest {
     edit: qqq_run::DependencyEdit,
     dev: bool,
@@ -6461,5 +6462,59 @@ mod tests {
         // A flag where the value goes is a missing value, not the value.
         test_options(&argv(&["--filter", "--snapshot"]), GlobalFlags::default())
             .expect_err("flag-shaped value must fail");
+    }
+
+    /// **A flag where a value goes is a missing value, everywhere.**
+    ///
+    /// Round 9: `required_value`/`value_of` refused flag-shaped values, but
+    /// every `--manifest` skip (`is_none`-only) swallowed the next flag as a
+    /// path, and several space-form values (`--diff`, `--out`, `--command`,
+    /// `--fail-on`, `--key`) accepted a flag as a value. Each arm below would
+    /// previously parse or report the wrong code; now all report a missing
+    /// value.
+    #[test]
+    fn flag_shaped_values_are_missing_values() {
+        // `--manifest` skips must not swallow the next flag.
+        build_options(&argv(&["--manifest", "--release"]))
+            .expect_err("flag-shaped manifest must fail");
+        run_options(&argv(&["--manifest", "--cap", "x"]), GlobalFlags::default())
+            .expect_err("flag-shaped manifest must fail");
+        test_options(&argv(&["--manifest", "--snapshot"]), GlobalFlags::default())
+            .expect_err("flag-shaped manifest must fail");
+        dev_options(&argv(&["--manifest", "--once"])).expect_err("flag-shaped manifest must fail");
+        add_cap_options(&argv(&["--manifest", "--cap"]), false)
+            .expect_err("flag-shaped manifest must fail");
+        remove_args(&argv(&["--manifest", "--dev"])).expect_err("flag-shaped manifest must fail");
+        add_options(&argv(&["--manifest", "--dev", "pkg"]))
+            .expect_err("flag-shaped manifest must fail");
+        caps_args(&argv(&["--manifest", "--explain"])).expect_err("flag-shaped manifest must fail");
+        audit_args(&argv(&["--manifest", "--sarif"])).expect_err("flag-shaped manifest must fail");
+        strip_manifest_flag(&argv(&["--manifest", "--locked"]))
+            .expect_err("flag-shaped manifest must fail");
+        // Value flags must not accept a flag as the value.
+        inspect_args(&argv(&["--diff", "--manifest", "m.toml"]))
+            .expect_err("flag-shaped --diff must fail");
+        inspect_args(&argv(&["a.wasm", "--manifest", "--diff", "b.wasm"]))
+            .expect_err("flag-shaped --manifest must fail");
+        openapi_args(&argv(&["--out", "--manifest", "m.toml"]))
+            .expect_err("flag-shaped --out must fail");
+        openapi_args(&argv(&["--manifest", "--out", "o.json"]))
+            .expect_err("flag-shaped --manifest must fail");
+        schema_args(&argv(&["--command", "--all"])).expect_err("flag-shaped --command must fail");
+        audit_args(&argv(&["--fail-on", "--sarif"])).expect_err("flag-shaped --fail-on must fail");
+        verify_options(&argv(&["--key", "--policy", "require", "a.wasm"]))
+            .expect_err("flag-shaped --key must fail");
+        verify_options(&argv(&["--key="])).expect_err("empty --key= must fail");
+        verify_options(&argv(&["--policy="])).expect_err("empty --policy= must fail");
+        // `=` empties are missing values, not unknown choices.
+        new_options(&argv(&["--lang=", "app"])).expect_err("empty --lang= must fail");
+        new_options(&argv(&["--template=", "app"])).expect_err("empty --template= must fail");
+        init_options(&argv(&["--lang="])).expect_err("empty --lang= must fail");
+        // `--fail-on nope` is a usage error, not a manifest-syntax error.
+        let err = audit_args(&argv(&["--fail-on", "nope"])).expect_err("bad severity must fail");
+        assert_eq!(err.code, qqq_core::ErrorCode::McpArgumentInvalid);
+        // `--reload-limit 0` measures nothing, like every other zero budget.
+        dev_options(&argv(&["--reload-limit", "0"])).expect_err("zero reload-limit must fail");
+        dev_options(&argv(&["--reload-limit=0"])).expect_err("zero reload-limit= must fail");
     }
 }

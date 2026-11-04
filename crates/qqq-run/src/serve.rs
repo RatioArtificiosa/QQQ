@@ -548,6 +548,10 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
                     // Handled.
                     continue;
                 }
+                // No `--help` pointer: there is no per-command help page, so
+                // pointing at global help would send the reader somewhere
+                // that does not document these flags. The list is the whole
+                // contract instead.
                 return Err(qqq_core::Error::new(
                     qqq_core::ErrorCode::CliFlagUnknown,
                     format!("`{other}` is not a flag `serve` accepts"),
@@ -557,8 +561,7 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
                      --accept-limit, --aot-cache, --audit-log, \
                      --audit-hmac-key-file, --redact-from, --log-format, \
                      --metrics-path, --trace-sample, --trace-keep-failures, \
-                     --deterministic and --allow-deterministic-public; \
-                     run `qqqai serve --help` for details",
+                     --deterministic and --allow-deterministic-public",
                 ));
             }
         }

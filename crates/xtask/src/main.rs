@@ -1144,15 +1144,19 @@ fn run_step(step: &Step, workspace: &Path, python: &[String]) -> Outcome {
 /// `crates/qqq-sys/` directory (skipped by the caller). The crate-level
 /// forbid attribute is exempted by `unsafe_line_exempt`, narrowly: a
 /// `cfg_attr` mention elsewhere on the line never exempts (M2).
+/// Fresh-state entry point used by the unit tests: production scans go
+/// through `_in` with threaded entry state. `cfg(test)` because the gate
+/// runs `clippy -D warnings` and an unused-in-prod wrapper would fail it.
+#[cfg(test)]
 fn unsafe_line_is_violation(line: &str) -> bool {
-    unsafe_line_is_violation_in(line, None)
+    unsafe_line_is_violation_in(line, None, 0)
 }
 
 /// The violation test with an entry raw state: `Some(hash)` means the line
 /// starts inside a multiline raw string opened earlier, so leading content
 /// is prose — but the string may close mid-line with real code after it
 /// (C1 r5), which this threads to instead of skipping or misreading.
-fn unsafe_line_is_violation_in(line: &str, initial_raw: Option<usize>) -> bool {
+fn unsafe_line_is_violation_in(line: &str, initial_raw: Option<usize>, initial_depth: u32) -> bool {
     // String literals are skipped: a real `unsafe` block can never hide in
     // string data, so matching there is pure false-positive surface. (The CI
     // grep this ports cannot tell strings from code; this is intentionally
@@ -1182,6 +1186,7 @@ fn unsafe_line_is_violation_in(line: &str, initial_raw: Option<usize>) -> bool {
     let mut i = 0;
     let mut st = ScanState {
         in_raw: initial_raw,
+        comment_depth: initial_depth,
         ..ScanState::default()
     };
     while bytes.get(i).is_some() {
@@ -1564,32 +1569,50 @@ fn strip_block_comments(s: &str) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
-/// Whether `t` (already trimmed) is one complete `/*…*/` comment and/// nothing else — balanced, so dropping the line from significant pairing
-/// loses no tokens (H1 r5). An unclosed opener stays: pairs thread block
-/// depth instead.
-fn complete_block_comment(t: &str) -> bool {
-    let Some(body) = t.strip_prefix("/*").and_then(|r| r.strip_suffix("*/")) else {
-        return false;
-    };
-    let bytes = body.as_bytes();
-    let mut depth: u32 = 0;
-    let mut i = 0;
-    while let Some(&c) = bytes.get(i) {
-        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            depth += 1;
-            i += 2;
-        } else if c == b'*' && bytes.get(i + 1) == Some(&b'/') {
-            if depth == 0 {
-                // Closes the outer comment early: code follows the comment.
-                return body.get(i + 2..).is_some_and(|r| r.trim().is_empty());
+/// Whether trimmed `t` is only separators: blank, a `//` line comment, or
+/// balanced `/*…*/` block comments possibly followed by a `//` tail
+/// (M-1 r6: a comment-only line between the keyword and the opener must not
+/// break the pair). Anything else — code, strings, an unclosed `/*` —
+/// stays significant: pairs thread block depth through unclosed openers,
+/// and a stray `*/` is code-ish (L-3 r6), never a pure comment.
+fn is_comment_only_separator(t: &str) -> bool {
+    let mut rest = t;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return true;
+        }
+        if rest.starts_with("//") {
+            return true;
+        }
+        if rest.starts_with("/*") {
+            let bytes = rest.as_bytes();
+            let mut depth: u32 = 0;
+            let mut k = 0;
+            let mut closed = None;
+            while let Some(&c) = bytes.get(k) {
+                if c == b'/' && bytes.get(k + 1) == Some(&b'*') {
+                    depth += 1;
+                    k += 2;
+                } else if c == b'*' && bytes.get(k + 1) == Some(&b'/') {
+                    depth = depth.saturating_sub(1);
+                    k += 2;
+                    if depth == 0 {
+                        closed = Some(k);
+                        break;
+                    }
+                } else {
+                    k += 1;
+                }
             }
-            depth = depth.saturating_sub(1);
-            i += 2;
+            match closed.and_then(|k| rest.get(k..)) {
+                Some(after) => rest = after,
+                None => return false,
+            }
         } else {
-            i += 1;
+            return false;
         }
     }
-    depth == 0
 }
 
 /// A line carries the crate-level attribute iff `#![forbid(unsafe_code)]`
@@ -1775,12 +1798,20 @@ fn forbid_list_has_unsafe_code(after_forbid: &str) -> bool {
 /// mid-line with a real block after the closer, which a fresh state would
 /// read as a string plus code and a skip would hide entirely.
 /// Seeding threads the string to its closer and checks the tail.
+/// Fresh-state entry point used by the unit tests (same `cfg(test)`
+/// rationale as `unsafe_line_is_violation` above).
+#[cfg(test)]
 fn unsafe_line_exempt(line: &str) -> bool {
-    unsafe_line_exempt_in(line, None)
+    unsafe_line_exempt_in(line, None, 0)
 }
 
-fn unsafe_line_exempt_in(line: &str, initial_raw: Option<usize>) -> bool {
-    line_has_forbid_attr(line, &mut 0) && !unsafe_line_is_violation_in(line, initial_raw)
+fn unsafe_line_exempt_in(line: &str, initial_raw: Option<usize>, initial_depth: u32) -> bool {
+    // The forbid check seeds the entry block depth too — a line starting
+    // inside a block comment holds no attribute, and the seeded violation
+    // check below decides the line on the same state.
+    let mut depth = initial_depth;
+    line_has_forbid_attr(line, &mut depth)
+        && !unsafe_line_is_violation_in(line, initial_raw, initial_depth)
 }
 
 fn starts_word(s: &str, word: &str) -> bool {
@@ -1826,19 +1857,19 @@ fn scan_crate_rs_files(
     }
 }
 
-/// Whether each line starts inside a multiline raw string (its opening
-/// hash count), or outside one (`None`). One threading pass with the shared
-/// step helpers — no drift by construction. Strings, chars and line
-/// comments reset at every joining newline (same as the pair scan); only
-/// raw strings and block comments thread through. Callers seed per-line
-/// scans with the entry hash so content stays prose but a closer with real
-/// code after it still flags (C1 r5) — never skip the line, never scan it
-/// fresh.
-fn raw_entry_states(lines: &[&str]) -> Vec<Option<usize>> {
+/// The entry lexer state per line: the multiline raw string open at the
+/// line's start (its opening hash count, or `None`), plus the block-comment
+/// nesting depth (L-1 r6). One threading pass with the shared step helpers
+/// — no drift by construction. Strings, chars and line comments reset at
+/// every joining newline (same as the pair scan); only raw strings and
+/// block comments thread through. Callers seed per-line scans with the
+/// entry state so content stays prose but a closer with real code after it
+/// still flags (C1 r5) — never skip the line, never scan it fresh.
+fn raw_entry_states(lines: &[&str]) -> Vec<(Option<usize>, u32)> {
     let mut st = ScanState::default();
     let mut out = Vec::with_capacity(lines.len());
     for line in lines {
-        out.push(st.in_raw);
+        out.push((st.in_raw, st.comment_depth));
         let bytes = line.as_bytes();
         let mut i = 0;
         while bytes.get(i).is_some() {
@@ -1880,14 +1911,14 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
     let mut flagged: Vec<bool> = Vec::with_capacity(lines.len());
     for (n, line) in lines.iter().enumerate() {
         // C1: no line is skipped for starting inside a raw string — the
-        // entry hash seeds the scan, so content stays prose but a closer
+        // entry state seeds the scan, so content stays prose but a closer
         // with real code after it still flags.
-        let initial = raw_entry.get(n).copied().flatten();
-        if unsafe_line_exempt_in(line, initial) {
+        let (initial_raw, initial_depth) = raw_entry.get(n).copied().unwrap_or((None, 0));
+        if unsafe_line_exempt_in(line, initial_raw, initial_depth) {
             flagged.push(false);
             continue;
         }
-        if unsafe_line_is_violation_in(line, initial) {
+        if unsafe_line_is_violation_in(line, initial_raw, initial_depth) {
             violations.push(format!("{rel}:{}:{line}", n + 1));
             flagged.push(true);
         } else {
@@ -1898,15 +1929,15 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
         .iter()
         .enumerate()
         .filter(|(_, l)| {
-            // Blank, full-line-`//`, and complete full-line-`/*…*/`
-            // separators carry no tokens (H1 r5: a comment-only line
-            // between the keyword and the opener must not break the pair).
-            // An unclosed `/*` stays: pairs thread block depth. Dropping a
-            // raw-string content line that looks like a comment is safe:
-            // the pair machine re-derives raw state from the first line, so
-            // the content still classifies as a string.
+            // Blank lines and comment-only separators carry no tokens
+            // (H1 r5, M-1 r6): `//…`, complete `/*…*/`, and mixed
+            // `/*…*/ //…` lines between the keyword and the opener must not
+            // break the pair. Anything else stays — including an unclosed
+            // `/*` (pairs thread block depth) and raw-string content that
+            // looks like a comment (the pair machine re-derives raw state
+            // from the first line).
             let t = l.trim();
-            !(t.is_empty() || t.starts_with("//") || complete_block_comment(t))
+            !is_comment_only_separator(t)
         })
         .map(|(n, l)| (n, *l))
         .collect();
@@ -1914,23 +1945,22 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
         let (Some(&(na, a)), Some(&(nb, b))) = (w.first(), w.get(1)) else {
             continue;
         };
-        // A pair that starts inside a raw string is content, not code
-        // (entry hash present) — the single-line seeded scan already
-        // judges the closer line itself.
-        if raw_entry.get(na).copied().flatten().is_some()
-            || flagged.get(na) == Some(&true)
-            || flagged.get(nb) == Some(&true)
-        {
+        if flagged.get(na) == Some(&true) || flagged.get(nb) == Some(&true) {
             continue;
         }
+        // H-1 r6: seed the pair with line a's entry state instead of
+        // refusing pairs that start in raw. Content resolves as content
+        // (raw threads through), a closer on line a exposes line b as
+        // code, and a dangling keyword on a finds its opener on b.
+        let (initial_raw, initial_depth) = raw_entry.get(na).copied().unwrap_or((None, 0));
         let mut pair = String::with_capacity(a.len() + b.len() + 1);
         pair.push_str(a);
         pair.push('\n');
         pair.push_str(b);
-        if unsafe_line_exempt(&pair) {
+        if unsafe_line_exempt_in(&pair, initial_raw, initial_depth) {
             continue;
         }
-        if unsafe_line_is_violation(&pair) {
+        if unsafe_line_is_violation_in(&pair, initial_raw, initial_depth) {
             violations.push(format!(
                 "{rel}:{}:cross-line `unsafe` opener (the keyword dangles at the end of line {})",
                 nb + 1,
@@ -2004,16 +2034,25 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             // M1 r5: EVERY existing root carries it — a forbid in lib.rs no
             // longer excuses a missing one in main.rs (either-or was the
             // dual-root hole).
-            let lib_path = dir.join("src").join("lib.rs");
-            let mut depth = 0;
-            let lib_ok = !lib_path.is_file()
-                || std::fs::read_to_string(&lib_path)
-                    .is_ok_and(|t| t.lines().any(|l| line_has_forbid_attr(l, &mut depth)));
-            let main_path = dir.join("src").join("main.rs");
-            let mut depth = 0;
-            let main_ok = !main_path.is_file()
-                || std::fs::read_to_string(&main_path)
-                    .is_ok_and(|t| t.lines().any(|l| line_has_forbid_attr(l, &mut depth)));
+            // M-3 r6: a `forbid` inside a multiline raw string is content,
+            // not code — gate the hit on starting outside one, the same
+            // entry state the main scan seeds with.
+            let root_ok = |path: &Path| {
+                let Ok(text) = std::fs::read_to_string(path) else {
+                    return false;
+                };
+                let lines: Vec<&str> = text.lines().collect();
+                let raw_entry = raw_entry_states(&lines);
+                let mut depth = 0;
+                lines.iter().enumerate().any(|(n, l)| {
+                    raw_entry.get(n).copied().unwrap_or((None, 0)).0.is_none()
+                        && line_has_forbid_attr(l, &mut depth)
+                })
+            };
+            let lib_ok = !dir.join("src").join("lib.rs").is_file()
+                || root_ok(&dir.join("src").join("lib.rs"));
+            let main_ok = !dir.join("src").join("main.rs").is_file()
+                || root_ok(&dir.join("src").join("main.rs"));
             if !(lib_ok && main_ok) {
                 missing.push(name.clone());
             }
@@ -2086,7 +2125,13 @@ fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String
         match e.file_type() {
             Ok(t) if t.is_dir() => collect_rs_into(&p, out, problems),
             Ok(_) => {
-                if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                // L-2 r6: case-insensitive — `FOO.RS` compiles via an
+                // explicit `#[path]` on a case-insensitive FS, and skipping
+                // it would certify a tree with unseen code.
+                if p.extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| x.eq_ignore_ascii_case("rs"))
+                {
                     out.push(p);
                 }
             }
@@ -2140,7 +2185,24 @@ fn target_debug_dir(workspace: &Path) -> Result<PathBuf, String> {
                 o.status
             ));
         }
-        Ok(o) => parse_target_dir(&o.stdout),
+        // M-2 r6: a *successful* metadata run with no parsable directory
+        // (alien output, future format) must not silently become the
+        // default and then blame a missing build — that wrong repair is
+        // exactly what the success() gate above was added to prevent. Real
+        // cargo always emits `target_directory`, so `None` is impossible
+        // without something already being wrong.
+        Ok(o) => {
+            let Some(d) = parse_target_dir(&o.stdout) else {
+                let snippet: String = String::from_utf8_lossy(&o.stdout)
+                    .chars()
+                    .take(120)
+                    .collect();
+                return Err(format!(
+                    "`cargo metadata` succeeded but emitted no target_directory (output: {snippet:?}); refusing to guess"
+                ));
+            };
+            Some(d)
+        }
     };
     Ok(resolve_target_debug_dir(
         workspace,
@@ -3545,7 +3607,7 @@ mod tests {
         std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
         std::fs::write(
             src.join("main.rs"),
-            "#![forbid(unsafe_code)]\nfn main() {\n    let x = unsafe\n\n    // SAFETY: separated\n    /* also separated */\n    { 1 };\n    let _ = x;\n}\n",
+            "#![forbid(unsafe_code)]\nfn main() {\n    let x = unsafe\n\n    // SAFETY: separated\n    /* also */ // trailing\n    { 1 };\n    let _ = x;\n}\n",
         )
         .expect("main");
         let (ok, out) = run_unsafe_scan(&root);
@@ -3574,7 +3636,15 @@ mod tests {
         let entry = raw_entry_states(&lines);
         assert_eq!(
             entry,
-            vec![None, Some(1), Some(1), Some(1), None, None, None]
+            vec![
+                (None, 0),
+                (Some(1), 0),
+                (Some(1), 0),
+                (Some(1), 0),
+                (None, 0),
+                (None, 0),
+                (None, 0)
+            ]
         );
     }
 
@@ -3642,6 +3712,67 @@ mod tests {
             out.contains("missing forbid"),
             "wrong failure shape:\n{out}"
         );
+    }
+
+    #[test]
+    fn unsafe_scan_rejects_raw_spoofed_forbid() {
+        // M-3 r6: a forbid inside a multiline raw string is content, not
+        // code — both roots spoofed must still read as missing.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xspoof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(
+            src.join("lib.rs"),
+            "let s = r#\"\n#![forbid(unsafe_code)]\n\"#;\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            src.join("main.rs"),
+            "let t = r#\"\n#![forbid(unsafe_code)]\n\"#;\nfn main() {}\n",
+        )
+        .expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "raw-spoofed forbid passed the scan:\n{out}");
+        assert!(
+            out.contains("missing forbid"),
+            "wrong failure shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_collects_uppercase_rs() {
+        // L-2 r6: `EXTRA.RS` compiles via `#[path]` on a case-insensitive
+        // FS — the scan must not skip it for its casing.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xrs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(
+            src.join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(src.join("EXTRA.RS"), "pub unsafe fn evil() {}\n").expect("upper");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "uppercase .RS violation passed the scan:\n{out}");
+        assert!(out.contains("EXTRA.RS"), "wrong file flagged:\n{out}");
+    }
+
+    #[test]
+    fn comment_only_separator_rejects_stray_close() {
+        // L-3 r6: `/* */ */` is a complete comment plus a stray closer —
+        // the trailing `*/` is code-ish, so the line stays significant.
+        assert!(is_comment_only_separator("/* c */"));
+        assert!(is_comment_only_separator("/* c */ // trailing"));
+        assert!(is_comment_only_separator("// only"));
+        assert!(is_comment_only_separator("   "));
+        assert!(!is_comment_only_separator("/* unclosed"));
+        assert!(!is_comment_only_separator("/* */ */"));
+        assert!(!is_comment_only_separator("let x = 1; // c"));
+        assert!(!is_comment_only_separator("\"/*\""));
     }
 
     #[test]

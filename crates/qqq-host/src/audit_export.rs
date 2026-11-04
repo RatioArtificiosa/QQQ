@@ -57,7 +57,7 @@
 use std::fmt::Write as _;
 
 use crate::audit::{AuditStream, LedgerError, Outcome};
-use qqq_core::text::{is_invisible_format, is_layout_forgery};
+use qqq_core::text::{is_invisible_format, is_layout_forgery, utf16_surrogate_pair};
 
 /// Escape a string for embedding in a JSON string literal.
 ///
@@ -83,16 +83,13 @@ fn json_escape(s: &str) -> String {
                 // Supplementary-plane members (`E0001`, tag characters) do
                 // not fit `\uXXXX`: JSON needs a UTF-16 surrogate pair, and
                 // a 5-digit `\ue0001` would parse as `\ue000` plus a literal
-                // `1` — silent corruption instead of a loud error.
+                // `1` — silent corruption instead of a loud error. The pair
+                // math lives in `qqq_core::text` so both audit JSON
+                // escapers share it instead of duplicating it.
                 let n = u32::from(c);
                 if n > 0xFFFF {
-                    let n = n - 0x1_0000;
-                    let _ = write!(
-                        out,
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (n >> 10),
-                        0xDC00 + (n & 0x3FF)
-                    );
+                    let (hi, lo) = utf16_surrogate_pair(n);
+                    let _ = write!(out, "\\u{hi:04x}\\u{lo:04x}");
                 } else {
                     let _ = write!(out, "\\u{n:04x}");
                 }

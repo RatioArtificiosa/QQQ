@@ -153,11 +153,14 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
         // never match: reject it here with the spelling to use, the way
         // non-canonical per-tenant addresses are refused, rather than
         // letting a deployment silently serve every host as unmapped.
+        // Debug-formatted: a hostile key is echoed into a startup error on
+        // the operator's terminal, and a raw bidi override there would
+        // reorder the message meant to warn about it.
         if host != &host.to_ascii_lowercase() {
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.hosts".to_owned(),
                 reason: format!(
-                    "host keys must be lowercase; `{host}` never matches because \
+                    "host keys must be lowercase; `{host:?}` never matches because \
                      requests are compared lowercased — write `{}`",
                     host.to_ascii_lowercase()
                 ),
@@ -165,26 +168,34 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
         }
         // The request side strips any `:port` before lookup (`ws::host_name`),
         // so a key that still carries one — or a trailing dot, whitespace,
-        // or brackets — can never equal a normalized request host.
+        // or brackets — can never equal a normalized request host. Controls,
+        // layout-forgers, and invisible format characters cannot arrive in a
+        // real `Host` header either, so a key carrying one is dead the same
+        // way — and would render invisibly in every log line that names it.
         if host.contains(':')
             || host.ends_with('.')
             || host.chars().any(char::is_whitespace)
             || host.contains('[')
             || host.contains(']')
+            || host.chars().any(|c| {
+                c.is_control()
+                    || crate::text::is_layout_forgery(c)
+                    || crate::text::is_invisible_format(c)
+            })
         {
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.hosts".to_owned(),
                 reason: format!(
-                    "host key `{host}` can never match: write the bare \
+                    "host key `{host:?}` can never match: write the bare \
                      lowercased host without port, trailing dot, whitespace, \
-                     or brackets, as it arrives after normalization"
+                     brackets, or invisible characters, as it arrives after normalization"
                 ),
             });
         }
         if label.trim().is_empty() {
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.hosts".to_owned(),
-                reason: format!("the tenant for host `{host}` must not be empty"),
+                reason: format!("the tenant for host `{host:?}` must not be empty"),
             });
         }
         // Labels render into access records, metrics, and audit rows: an
@@ -196,7 +207,9 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
         if let Err(reason) = crate::egress::TenantId::new(label) {
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.hosts".to_owned(),
-                reason: format!("the tenant for host `{host}` is not a valid tenant id: {reason}"),
+                reason: format!(
+                    "the tenant for host `{host:?}` is not a valid tenant id: {reason}"
+                ),
             });
         }
     }
@@ -223,11 +236,17 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
         // control characters, and non-ASCII lookalikes (NBSP,
         // zero-width spaces) are therefore refused. Interior ASCII
         // spaces stay allowed — a `John Doe` common name matches its
-        // key exactly.
+        // key exactly. Quotes and backslashes are refused too: resolved
+        // labels route through `TenantId`, which refuses both, so a
+        // quoted key could never equal a resolved label. Over-long keys
+        // are refused for the same reason (`TenantId` bounds 256 bytes).
         if label != label.trim()
             || label
                 .chars()
                 .any(|c| c.is_control() || (c.is_whitespace() && c != ' ') || !c.is_ascii())
+            || label.contains('"')
+            || label.contains('\\')
+            || label.len() > 256
         {
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.components".to_owned(),

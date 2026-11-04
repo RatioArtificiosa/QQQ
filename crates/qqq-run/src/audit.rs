@@ -835,19 +835,13 @@ fn json_escape(s: &str) -> String {
                 || qqq_cap::text::is_layout_forgery(c)
                 || qqq_cap::text::is_invisible_format(c) =>
             {
-                // Supplementary-plane members (`E0001`, tag characters) do
-                // not fit `\uXXXX`: JSON needs a UTF-16 surrogate pair, and
-                // a 5-digit `\ue0001` would parse as `\ue000` plus a literal
-                // `1` — silent corruption instead of a loud error.
+                // Supplementary-plane members escape as surrogate pairs; the
+                // pair math lives in the shared text module so both audit
+                // JSON escapers share it instead of duplicating it.
                 let n = u32::from(ch);
                 if n > 0xFFFF {
-                    let n = n - 0x1_0000;
-                    let _ = write!(
-                        out,
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (n >> 10),
-                        0xDC00 + (n & 0x3FF)
-                    );
+                    let (hi, lo) = qqq_cap::text::utf16_surrogate_pair(n);
+                    let _ = write!(out, "\\u{hi:04x}\\u{lo:04x}");
                 } else {
                     let _ = write!(out, "\\u{n:04x}");
                 }

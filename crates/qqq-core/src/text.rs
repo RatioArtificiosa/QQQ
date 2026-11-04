@@ -49,6 +49,32 @@ pub fn is_layout_forgery(c: char) -> bool {
     )
 }
 
+/// Split a supplementary-plane code point into its UTF-16 surrogate pair.
+///
+/// JSON's `\u` escape holds exactly four hex digits, so a member above
+/// U+FFFF escapes as two units. Single home for the two audit JSON
+/// escapers (`qqq-host::audit_export`, `qqq-run::audit`): the math must
+/// stay identical in both, and a shared function is what makes that true
+/// rather than a comment asking it to stay true. Total over all `u32`
+/// inputs (masked to 20 bits); exact for every supplementary-plane code
+/// point, which are the only inputs with meaning.
+///
+/// ```rust
+/// use qqq_core::text::utf16_surrogate_pair;
+///
+/// assert_eq!(utf16_surrogate_pair(0xE01EF), (0xDB40, 0xDDEF));
+/// assert_eq!(utf16_surrogate_pair(0x10000), (0xD800, 0xDC00));
+/// assert_eq!(utf16_surrogate_pair(0x10FFFF), (0xDBFF, 0xDFFF));
+/// ```
+#[must_use]
+pub fn utf16_surrogate_pair(n: u32) -> (u16, u16) {
+    let n = n.wrapping_sub(0x1_0000) & 0xF_FFFF;
+    (
+        0xD800 | u16::try_from(n >> 10).unwrap_or(0x3FF),
+        0xDC00 | u16::try_from(n & 0x3FF).unwrap_or(0x3FF),
+    )
+}
+
 /// Whether one character is an invisible character that spoofs identifiers.
 ///
 /// Zero-width spaces and joiners, the word joiner, the soft hyphen, the

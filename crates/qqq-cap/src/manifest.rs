@@ -2711,6 +2711,26 @@ allow_origins = ["https://app.example.com"]
             ("{ \"shop.example.com.\" = \"shop\" }", "trailing dot"),
             ("{ \"shop .example.com\" = \"shop\" }", "whitespace"),
             ("{ \"[::1]\" = \"shop\" }", "brackets"),
+            // Controls and invisibles can never arrive in a real Host
+            // header, so a key carrying one is dead the same way — and the
+            // refusal must not echo it raw (a bidi override would reorder
+            // the operator's terminal). TOML escapes keep the fixture
+            // reviewable.
+            ("{ \"shop\\u202E.example.com\" = \"shop\" }", "bidi key"),
+            (
+                "{ \"shop\\u200B.example.com\" = \"shop\" }",
+                "zero-width key",
+            ),
+            ("{ \"shop\\u0001.example.com\" = \"shop\" }", "control key"),
+            (
+                "{ \"shop.example.com\" = \"acme\\u200Bcorp\" }",
+                "invisible label",
+            ),
+            ("{ \"shop.example.com\" = \"a\\\"b\" }", "quote label"),
+            (
+                "{ \"shop.example.com\" = \"acme\\u00A0corp\" }",
+                "nbsp label",
+            ),
         ] {
             let text = format!(
                 "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
@@ -2746,8 +2766,8 @@ allow_origins = ["https://app.example.com"]
             let err = Manifest::parse(&text)
                 .expect_err(&format!("invisible {why} label must be refused"));
             assert!(
-                err.to_string().contains("server.tenants"),
-                "the error must name the table: {err}"
+                err.to_string().contains("valid tenant id"),
+                "the refusal must come from the TenantId gate, not another arm: {err}"
             );
         }
         // Ordinary labels — including interior ASCII spaces — still parse.
@@ -2805,6 +2825,11 @@ allow_origins = ["https://app.example.com"]
             ("shop\\u00a0", "nbsp lookalike"),
             ("shop\\u200b", "zero-width lookalike"),
             ("shop\\u0001", "control character"),
+            // Quotes and backslashes can never appear in a resolved label
+            // (TenantId and the identity gate both refuse them), so a key
+            // carrying one never matches — dead configuration, refused.
+            ("a\\\"b", "quote"),
+            ("a\\\\b", "backslash"),
         ] {
             let text = format!(
                 "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
@@ -2827,6 +2852,19 @@ allow_origins = ["https://app.example.com"]
         assert_eq!(
             spaced.server.tenants.expect("tenants").components["John Doe"],
             "shop-app"
+        );
+        // Over-long keys never match either: resolved labels are bounded
+        // like TenantId's 256 bytes.
+        let long = format!(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = {{ \"shop.example.com\" = \"shop\" }}\n\
+             [server.tenants.components]\n\"{}\" = \"shop-app\"\n",
+            "a".repeat(257)
+        );
+        let err = Manifest::parse(&long).expect_err("a 257-char key must be refused");
+        assert!(
+            err.to_string().contains("server.tenants.components"),
+            "the error must name the table: {err}"
         );
     }
 

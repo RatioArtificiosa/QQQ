@@ -107,9 +107,10 @@ impl TenantId {
         }
         if name.trim() != name {
             return Err(format!(
-                "a tenant id must not have surrounding whitespace: {name:?}. \
+                "a tenant id must not have surrounding whitespace: {}. \
                  Two spellings of one tenant would otherwise compare unequal, and \
-                 a policy that matches one but not the other has a hole in it."
+                 a policy that matches one but not the other has a hole in it.",
+                crate::text::escape_for_error(name)
             ));
         }
         // Interior whitespace other than the ASCII space is refused: `acme`
@@ -119,8 +120,9 @@ impl TenantId {
         // `John Doe` need it, and it is visible.
         if name.chars().any(|c| c.is_whitespace() && c != ' ') {
             return Err(format!(
-                "a tenant id must not contain non-space whitespace: {name:?}. \
-                 Two spellings of one tenant would otherwise display identically."
+                "a tenant id must not contain non-space whitespace: {}. \
+                 Two spellings of one tenant would otherwise display identically.",
+                crate::text::escape_for_error(name)
             ));
         }
         if name
@@ -155,8 +157,9 @@ impl TenantId {
         // peer labels, mapped identities -- needs either character.
         if name.chars().any(|c| c == '"' || c == '\\') {
             return Err(format!(
-                "a tenant id must not contain quotes or backslashes: {name:?}. \
-                 They would desynchronise the audit record parser"
+                "a tenant id must not contain quotes or backslashes: {}. \
+                 They would desynchronise the audit record parser",
+                crate::text::escape_for_error(name)
             ));
         }
         Ok(Self(name.to_owned()))

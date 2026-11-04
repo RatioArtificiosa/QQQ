@@ -152,15 +152,16 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
     // never match: reject it here with the spelling to use, the way
     // non-canonical per-tenant addresses are refused, rather than
     // letting a deployment silently serve every host as unmapped.
-    // Debug-formatted: a hostile key is echoed into a startup error on
-    // the operator's terminal, and a raw bidi override there would
-    // reorder the message meant to warn about it.
+    // Escaped, not Debug-formatted: a hostile key is echoed into a startup
+    // error on the operator's terminal, and `{:?}` leaves U+2800 raw — a
+    // raw blank would reorder the message meant to warn about it.
     if host != host.to_ascii_lowercase() {
         return Err(ManifestError::InvalidField {
             field: "server.tenants.hosts".to_owned(),
             reason: format!(
-                "host keys must be lowercase; `{host:?}` never matches because \
+                "host keys must be lowercase; `{}` never matches because \
                  requests are compared lowercased — write `{}`",
+                crate::text::escape_for_error(host),
                 host.to_ascii_lowercase()
             ),
         });
@@ -202,7 +203,8 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
         return Err(ManifestError::InvalidField {
             field: "server.tenants.hosts".to_owned(),
             reason: format!(
-                "host key `{host:?}` exceeds the 253-byte DNS maximum and can never arrive"
+                "host key `{}` exceeds the 253-byte DNS maximum and can never arrive",
+                crate::text::escape_for_error(host)
             ),
         });
     }
@@ -219,16 +221,20 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
         return Err(ManifestError::InvalidField {
             field: "server.tenants.hosts".to_owned(),
             reason: format!(
-                "host key `{host:?}` can never match: write the bare \
+                "host key `{}` can never match: write the bare \
                  lowercased host without port, trailing dot, whitespace, \
-                 stray brackets, or invisible characters, as it arrives after normalization"
+                 stray brackets, or invisible characters, as it arrives after normalization",
+                crate::text::escape_for_error(host)
             ),
         });
     }
     if label.trim().is_empty() {
         return Err(ManifestError::InvalidField {
             field: "server.tenants.hosts".to_owned(),
-            reason: format!("the tenant for host `{host:?}` must not be empty"),
+            reason: format!(
+                "the tenant for host `{}` must not be empty",
+                crate::text::escape_for_error(host)
+            ),
         });
     }
     // Labels render into access records, metrics, and audit rows: an
@@ -240,7 +246,10 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
     if let Err(reason) = crate::egress::TenantId::new(label) {
         return Err(ManifestError::InvalidField {
             field: "server.tenants.hosts".to_owned(),
-            reason: format!("the tenant for host `{host:?}` is not a valid tenant id: {reason}"),
+            reason: format!(
+                "the tenant for host `{}` is not a valid tenant id: {reason}",
+                crate::text::escape_for_error(host)
+            ),
         });
     }
     Ok(())
@@ -290,7 +299,8 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.components".to_owned(),
                 reason: format!(
-                    "component key `{label}` never matches; write the label exactly as resolved"
+                    "component key `{}` never matches; write the label exactly as resolved",
+                    crate::text::escape_for_error(label)
                 ),
             });
         }
@@ -309,7 +319,8 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.components".to_owned(),
                 reason: format!(
-                    "component artifact `{artifact}` is not a valid package name ({reason}); write the bare package name"
+                    "component artifact `{}` is not a valid package name ({reason}); write the bare package name",
+                    crate::text::escape_for_error(artifact)
                 ),
             });
         }

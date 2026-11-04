@@ -2425,6 +2425,30 @@ fn check_crate_roots(
     }
 }
 
+/// Report accumulated fail-closed evidence when the scan found nothing it
+/// can certify. The bare "nothing found" message must never discard the
+/// violations that caused the emptiness (CI red r13: a lone symlinked
+/// crate dir produced violations, then `crates.is_empty()` returned "no
+/// crates found" and dropped the evidence). Missing-forbid names ride
+/// along sanitized, exactly as in the main report.
+fn incomplete_report(prefix: &str, violations: &[String], missing: &[String]) -> (bool, String) {
+    if violations.is_empty() && missing.is_empty() {
+        return (false, prefix.to_owned());
+    }
+    let mut out = String::from(prefix);
+    out.push('\n');
+    for v in violations {
+        out.push_str(v);
+        out.push('\n');
+    }
+    for m in missing {
+        out.push_str("missing forbid(unsafe_code): ");
+        out.push_str(&sanitize_for_log(m));
+        out.push('\n');
+    }
+    (false, out)
+}
+
 fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
     let mut violations = Vec::new();
     let mut missing = Vec::new();
@@ -2474,9 +2498,10 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
     }
     crates.sort();
     if crates.is_empty() {
-        return (
-            false,
-            "no crates found; the scan certifies nothing".to_owned(),
+        return incomplete_report(
+            "no crates found; the scan certifies nothing",
+            &violations,
+            &missing,
         );
     }
     let mut files_scanned = 0_usize;
@@ -2496,9 +2521,10 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
         }
     }
     if files_scanned == 0 {
-        return (
-            false,
-            "no .rs files scanned; the scan certifies nothing".to_owned(),
+        return incomplete_report(
+            "no .rs files scanned; the scan certifies nothing",
+            &violations,
+            &missing,
         );
     }
     if !violations.is_empty() || !missing.is_empty() {
@@ -4872,6 +4898,32 @@ mod tests {
         // would split the violation report.
         assert_eq!(sanitize_for_log("a\nb\rc"), "a?b?c");
         assert_eq!(sanitize_for_log("plain.rs"), "plain.rs");
+    }
+
+    #[test]
+    fn incomplete_report_keeps_evidence() {
+        // CI-red root cause (r13 batch, all three platforms): a lone
+        // symlinked crate dir filled `violations` but `crates` stayed
+        // empty, and the bare "no crates found" return dropped the
+        // evidence. The report must carry violations and missing names;
+        // the bare message survives only when there is nothing to carry.
+        let (ok, out) = incomplete_report(
+            "no crates found; the scan certifies nothing",
+            &["c/link: symlinked crate dir, scan incomplete".to_owned()],
+            &["probe".to_owned()],
+        );
+        assert!(!ok);
+        assert!(
+            out.contains("symlinked crate dir"),
+            "evidence dropped:\n{out}"
+        );
+        assert!(
+            out.contains("missing forbid(unsafe_code): probe"),
+            "missing dropped:\n{out}"
+        );
+        let (ok, out) = incomplete_report("no crates found; the scan certifies nothing", &[], &[]);
+        assert!(!ok);
+        assert_eq!(out, "no crates found; the scan certifies nothing");
     }
 
     #[test]

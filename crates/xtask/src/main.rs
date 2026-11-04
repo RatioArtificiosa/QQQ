@@ -2268,6 +2268,24 @@ fn manifest_code_cut(raw_line: &str) -> usize {
     cut
 }
 
+/// Validate a TOML table header strictly: exactly `[ name ]` or
+/// `[[ name ]]` (TOML-legal inner spacing allowed), with no leftover
+/// brackets — `[[[lib]]]` or `[lib] junk` are not headers. The old
+/// trim-everything fold accepted those and misattributed the next `path`
+/// (M-2 r22). Returns the unquoted section name, or `None`.
+fn strict_header_name(t: &str) -> Option<&str> {
+    let inner = t.strip_prefix('[')?.strip_suffix(']')?.trim();
+    // Peel at most ONE more pair: `[[bin]]` is valid, `[[[lib]]]` is not.
+    let inner = match inner.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        Some(r) => r.trim(),
+        None => inner,
+    };
+    if inner.is_empty() || inner.chars().any(|c| c == '[' || c == ']') {
+        return None;
+    }
+    Some(strip_one_quote_pair(inner))
+}
+
 /// Strip one matching ASCII quote pair around a TOML key or section name
 /// (`"path"`, `'lib'`), returning the text unchanged when it is not
 /// quoted. H-1 r15/r16: Cargo accepts quoted keys and quoted table
@@ -2673,6 +2691,10 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
     };
     let mut out = ManifestRoots::default();
     let mut section = ManifestSection::Other;
+    // M-1 r22: duplicate `path` keys in one table are invalid TOML —
+    // first wins, the second is dropped with a problem. Re-armed by
+    // every valid header ([[bin]] repeats legitimately).
+    let mut seen_path = false;
     // H-2 r16: leading UTF-8 BOMs prefix the first line — a section header
     // there must still match (editors add BOMs silently). L-2 r17: strip
     // all of them, not just one.
@@ -2684,29 +2706,32 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
     while let Some(&raw_line) = raw_lines.get(li) {
         li += 1;
         let t = raw_line[..manifest_code_cut(raw_line)].trim();
-        // TOML-legal spacing inside brackets (`[ lib ]`, `[ [bin]]`).
-        let inner = t
-            .strip_prefix('[')
-            .and_then(|r| r.strip_suffix(']'))
-            .map(str::trim)
-            .map(|r| r.trim_start_matches('[').trim_end_matches(']').trim());
-        if inner.is_some() {
+        // Strict headers only (`[ lib ]`, `[ [bin]]`): extra brackets or
+        // trailing junk are not headers (M-2 r22).
+        if let Some(name) = strict_header_name(t) {
             // H-1 r16: quoted headers (`["lib"]`) name the same section.
             // M-1 r17: `[[test]]`/`[[example]]`/`[[bench]]` custom paths
             // compile as Rust too — their bodies join the scan (as aux
             // roots, never forbid-checked: the compiler owns those
             // lints, see `ManifestRoots::aux`).
-            section = match inner.map(strip_one_quote_pair) {
-                Some("lib" | "bin") => ManifestSection::LibBin,
-                Some("test" | "example" | "bench") => ManifestSection::Aux,
-                Some("package") => ManifestSection::Package,
+            section = match name {
+                "lib" | "bin" => ManifestSection::LibBin,
+                "test" | "example" | "bench" => ManifestSection::Aux,
+                "package" => ManifestSection::Package,
                 _ => ManifestSection::Other,
             };
+            // M-1 r22: `path`/`build` keys live in one table each —
+            // a new header re-arms duplicate detection.
+            seen_path = false;
             continue;
         } else if t.starts_with('[') {
-            // L-3 r20: `[lib] garbage` is not a header — invalid TOML, so
-            // the section resets instead of misattributing the next `path`
-            // to the prior section.
+            // L-3 r20 + H-3 r22: `[lib] garbage` is not a header — invalid
+            // TOML, so the section resets instead of misattributing the
+            // next `path` to the prior section. A root-shaped line is
+            // worse than junk: fail closed with a problem.
+            if t.contains('=') && out.problem.is_none() {
+                out.problem = Some("Cargo.toml section header is malformed".to_owned());
+            }
             section = ManifestSection::Other;
             continue;
         }
@@ -2728,6 +2753,18 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
             KeyUse::Key(k) => k,
             KeyUse::Ignore => continue,
         };
+        // M-1 r22: duplicate `path` keys in one table are invalid TOML —
+        // first wins, the second is dropped with a problem (same contract
+        // as duplicate `build`).
+        if norm == "path" {
+            if seen_path {
+                if out.problem.is_none() {
+                    out.problem = Some("Cargo.toml path key is duplicated".to_owned());
+                }
+                continue;
+            }
+            seen_path = true;
+        }
         manifest_process_value(
             &mut out,
             &section,
@@ -6665,6 +6702,75 @@ mod tests {
         assert!(
             problem.is_some_and(|p| p.contains("build")),
             "problem names the wrong key"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_header_with_junk_and_key() {
+        // H-3 r22: `[lib] path = "q.rs"` is invalid TOML shaped like a
+        // root — fail closed with a problem instead of inheriting or
+        // dropping the section silently.
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-hdrjunk-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n[lib] path = \"q.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "junk header surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_duplicate_path() {
+        // M-1 r22: duplicate `path` keys are invalid TOML — first wins,
+        // the second is dropped, and a problem is recorded (same
+        // contract as duplicate `build`).
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-duppath-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"a.rs\"\npath = \"b.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(roots, vec![dir.join("a.rs")]);
+        assert!(problem.is_some(), "duplicate path surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_bracket_mismatch_header() {
+        // M-2 r22: `[[[lib]]]` is not a header (extra brackets) — strict
+        // validation rejects it instead of folding to `lib` and
+        // misattributing the next `path`.
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-badbracket-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n[[[lib]]]\npath = \"q.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(
+            problem.is_none(),
+            "bracket mismatch should reset silently (no `=` on the header line)"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

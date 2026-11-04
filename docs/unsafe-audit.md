@@ -14,7 +14,7 @@ finding than one in a crate that is allowed to have it.
 
 | Measure | Count |
 |---|---|
-| `.rs` files scanned under `crates/` | **235** |
+| `.rs` files scanned under `crates/` | **236** |
 | Code-position `unsafe` (`unsafe { }`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`) | **0** |
 | `#[allow(unsafe_code)]` in a code position | **0** |
 | `cfg_attr(..., allow(unsafe_code))` | **0** |
@@ -59,6 +59,10 @@ python tools/audit_unsafe.py --check-doc   # prints the pair that disagrees
 ``` The number above is read from the scanner, never from memory: to
 update this document, run the tool and copy its summary line, or let `--check-doc` print the pair
 of numbers that disagree.
+
+The most recent drift is **235 → 236**, from `crates/qqq-run/src/args.rs`
+(the shared `--flag=value` pre-expansion). No unsafe content changed; the
+sample grew by one file.
 
 A safety document
 whose own sample size has drifted is the "zero for the wrong reason" problem in miniature —

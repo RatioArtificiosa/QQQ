@@ -2088,15 +2088,41 @@ fn check_crate_roots(
             .to_string_lossy()
             .replace('\\', "/")
     };
-    match (
-        root_ok(&dir.join("src").join("lib.rs")),
-        root_ok(&dir.join("src").join("main.rs")),
-    ) {
-        (Some(true), Some(true)) => {}
-        (None, _) | (_, None) => {
-            violations.push(format!("{}: crate root unreadable, scan incomplete", rel()));
+    // M-1 r9: every compilable root carries the attribute — lib.rs,
+    // main.rs, each src/bin/<name>.rs, and the crate-level build.rs.
+    // The file scan already covers their bodies for `unsafe`; the missing
+    // check must cover their roots for the lint, or a bin target could
+    // drop its forbid silently.
+    let mut roots = vec![
+        dir.join("src").join("lib.rs"),
+        dir.join("src").join("main.rs"),
+        dir.join("build.rs"),
+    ];
+    if let Ok(rd) = std::fs::read_dir(dir.join("src").join("bin")) {
+        let mut bins: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| x.eq_ignore_ascii_case("rs"))
+            })
+            .collect();
+        bins.sort();
+        roots.extend(bins);
+    }
+    let mut unreadable = false;
+    let mut missing_root = false;
+    for root in &roots {
+        match root_ok(root) {
+            Some(true) => {}
+            None => unreadable = true,
+            Some(false) => missing_root = true,
         }
-        _ => missing.push(name.to_owned()),
+    }
+    if unreadable {
+        violations.push(format!("{}: crate root unreadable, scan incomplete", rel()));
+    } else if missing_root {
+        missing.push(name.to_owned());
     }
 }
 
@@ -2186,6 +2212,13 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
     )
 }
 
+/// Sanitize an extracted path for log output: a raw-string literal can
+/// legally span lines, and echoing a raw newline would split the violation
+/// report across lines (M-2 r9). `?` marks the redaction visibly.
+fn sanitize_for_log(s: &str) -> String {
+    s.replace(['\n', '\r'], "?")
+}
+
 /// Extra compilable files pulled in by `#[path = "…"]` and
 /// `include!("…")`. Both compile arbitrary files as Rust regardless of
 /// extension (H-3 r7): one `#[path = "evil.txt"]` line hides arbitrary
@@ -2249,7 +2282,7 @@ fn follow_code_redirections(
                 problems.push(format!(
                     "{}: references code outside the workspace ({}), scan incomplete",
                     rel_of(&f),
-                    target
+                    sanitize_for_log(&target)
                 ));
                 continue;
             }
@@ -2274,8 +2307,22 @@ fn hex_val(byte: u8) -> Option<u8> {
 
 /// Decode one escape after `\` at `pos` (`pos` points at the backslash).
 /// Returns the decoded bytes and the total consumed length.
-fn decode_escape(buf: &[u8], pos: usize) -> Option<(Vec<u8>, usize)> {
+/// A `\` + line break is a continuation, not an escape (H-2 r9): it
+/// contributes no bytes and skips following whitespace, exactly as rustc
+/// lexes it — rejecting it would miss a legal literal.
+fn decode_escape(buf: &[u8], pos: usize, text: &str) -> Option<(Vec<u8>, usize)> {
     let esc = *buf.get(pos + 1)?;
+    if esc == b'\n' || (esc == b'\r' && buf.get(pos + 2) == Some(&b'\n')) {
+        let mut end = if esc == b'\n' { pos + 2 } else { pos + 3 };
+        while let Some(r) = text.get(end..).and_then(|r| r.chars().next()) {
+            if r.is_whitespace() {
+                end += r.len_utf8();
+            } else {
+                break;
+            }
+        }
+        return Some((Vec::new(), end - pos));
+    }
     match esc {
         b'n' => Some((vec![b'\n'], 2)),
         b't' => Some((vec![b'\t'], 2)),
@@ -2326,19 +2373,21 @@ fn decode_escape(buf: &[u8], pos: usize) -> Option<(Vec<u8>, usize)> {
 
 /// A `"…"` literal at `pos` (which points at the opening quote), with
 /// escapes; returns the value and the index past the closing quote.
-fn quoted_lit(buf: &[u8], mut pos: usize) -> Option<(String, usize)> {
+/// A bare `\n` ends it unclosed (`None`); a lone `\r` is likewise refused
+/// (L-1 r9: rustc rejects bare CR in strings, verified live).
+fn quoted_lit(text: &str, buf: &[u8], mut pos: usize) -> Option<(String, usize)> {
     pos += 1;
     let mut out: Vec<u8> = Vec::new();
     loop {
         let cur = *buf.get(pos)?;
         if cur == b'\\' {
-            let (mut decoded, used) = decode_escape(buf, pos)?;
+            let (mut decoded, used) = decode_escape(buf, pos, text)?;
             out.append(&mut decoded);
             pos += used;
         } else if cur == b'"' {
             pos += 1;
             break;
-        } else if cur == b'\n' {
+        } else if cur == b'\n' || cur == b'\r' {
             return None;
         } else {
             out.push(cur);
@@ -2383,10 +2432,12 @@ fn raw_quoted_lit(buf: &[u8], mut pos: usize) -> Option<(String, usize)> {
     Some((String::from_utf8(out).ok()?, pos))
 }
 
-/// Whitespace (Unicode, like the scanner gap) and `/*…*/` block comments
-/// between tokens: `include /*c*/ !(…)`, `#[ path = …]` are valid Rust.
-/// Unclosed comments stop the skip (the caller decides; content after an
-/// unclosed opener is a residual, not a gap).
+/// Whitespace (Unicode, like the scanner gap), `/*…*/` block comments,
+/// and `//…` line comments between tokens: `include /*c*/ !(…)`,
+/// `#[ path = …]`, `include // why
+/// !(…)` are all valid Rust (H-1 r9: the line comment runs to `\n`, then
+/// scanning continues). Unclosed block comments stop the skip (the caller
+/// decides; content after an unclosed opener is a residual, not a gap).
 fn skip_gap_tokens(text: &str, buf: &[u8], pos: &mut usize) {
     loop {
         while let Some(r) = text.get(*pos..).and_then(|r| r.chars().next()) {
@@ -2396,7 +2447,14 @@ fn skip_gap_tokens(text: &str, buf: &[u8], pos: &mut usize) {
                 break;
             }
         }
-        if buf.get(*pos) == Some(&b'/') && buf.get(*pos + 1) == Some(&b'*') {
+        if buf.get(*pos) == Some(&b'/') && buf.get(*pos + 1) == Some(&b'/') {
+            // Line comment to end of line — then keep skipping (the opener
+            // may sit on the next line, same as the unsafe gap).
+            *pos += 2;
+            while buf.get(*pos).is_some_and(|&c| c != b'\n') {
+                *pos += 1;
+            }
+        } else if buf.get(*pos) == Some(&b'/') && buf.get(*pos + 1) == Some(&b'*') {
             let mut depth: u32 = 1;
             *pos += 2;
             let mut closed = false;
@@ -2434,9 +2492,9 @@ fn word_ends_clean(text: &str, pos: usize, word: &str) -> bool {
 
 /// A string or raw-string literal value at `pos`; `None` if neither.
 /// (The caller decides: invalid for `#[path]`, dynamic for `include!`.)
-fn literal_string(buf: &[u8], pos: usize) -> Option<(String, usize)> {
+fn literal_string(text: &str, buf: &[u8], pos: usize) -> Option<(String, usize)> {
     if buf.get(pos) == Some(&b'"') {
-        quoted_lit(buf, pos)
+        quoted_lit(text, buf, pos)
     } else if buf.get(pos) == Some(&b'r') && matches!(buf.get(pos + 1), Some(b'"' | b'#')) {
         raw_quoted_lit(buf, pos)
     } else {
@@ -2466,7 +2524,7 @@ fn match_path_attr(text: &str, buf: &[u8], idx: usize) -> Option<(String, usize)
     }
     pos += 1;
     skip_gap_tokens(text, buf, &mut pos);
-    let (target, end) = literal_string(buf, pos)?;
+    let (target, end) = literal_string(text, buf, pos)?;
     Some((target, end))
 }
 
@@ -2498,7 +2556,7 @@ fn match_include(text: &str, buf: &[u8], idx: usize) -> IncludeMatch {
     }
     pos += 1;
     skip_gap_tokens(text, buf, &mut pos);
-    match literal_string(buf, pos) {
+    match literal_string(text, buf, pos) {
         Some((target, end)) => IncludeMatch::Static(target, end),
         None => IncludeMatch::Dynamic,
     }
@@ -4393,13 +4451,43 @@ mod tests {
         );
         // A mention inside a real string literal cannot match: source
         // files escape inner quotes (`\"`), and only a bare `"` opens the
-        // value here. (An *unescaped* mention inside a comment or raw
-        // string still extracts if the file exists — fail-noisy, bounded
-        // by the existence gate in `follow_code_redirections`.)
+        // value here.
         assert_eq!(
             code_redirections("let s = \"#[path = \\\"no.rs\\\"]\";"),
             (Vec::<String>::new(), false)
         );
+        // H-1 r9: `//` line comments separate tokens — `include // why`
+        // on one line and `!(…)` on the next is valid Rust.
+        assert_eq!(
+            code_redirections("include // why\n!(\"e.txt\")\n"),
+            (vec!["e.txt".to_owned()], false)
+        );
+        assert_eq!(
+            code_redirections("#[path // why\n= \"f.rs\"]\n"),
+            (vec!["f.rs".to_owned()], false)
+        );
+        // H-2 r9: a backslash-newline inside the literal is a line
+        // continuation, not the end — the path still resolves. (Built
+        // with concat! so the test source itself stays single-line: the
+        // assembled value carries a real backslash + newline.)
+        assert_eq!(
+            code_redirections(concat!("#[path = \"g\\", "\n  h.rs\"]\n")),
+            (vec!["gh.rs".to_owned()], false)
+        );
+        // L-1 r9: a bare CR is not a legal string character (rustc
+        // rejects it), so it ends the literal unclosed — no match.
+        assert_eq!(
+            code_redirections("#[path = \"i\rr.rs\"]\n"),
+            (Vec::<String>::new(), false)
+        );
+    }
+
+    #[test]
+    fn sanitize_for_log_masks_line_breaks() {
+        // M-2 r9: raw paths may legally span lines; echoing the newline
+        // would split the violation report.
+        assert_eq!(sanitize_for_log("a\nb\rc"), "a?b?c");
+        assert_eq!(sanitize_for_log("plain.rs"), "plain.rs");
     }
 
     #[test]
@@ -4485,6 +4573,29 @@ mod tests {
         assert!(
             !out.contains("pub unsafe"),
             "outside file content echoed:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_requires_bin_root_forbid() {
+        // M-1 r9: every compilable root carries the attribute — a
+        // src/bin/<name>.rs without one fails loudly, like lib.rs/main.rs.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xbin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(src.join("bin")).expect("temp crate");
+        std::fs::write(
+            src.join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(src.join("bin").join("tool.rs"), "fn main() {}\n").expect("bin");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "unforbidden bin root passed the scan:\n{out}");
+        assert!(
+            out.contains("missing forbid"),
+            "wrong failure shape:\n{out}"
         );
     }
 

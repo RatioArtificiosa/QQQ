@@ -1404,15 +1404,26 @@ fn is_unsafe_opener(line: &str, bytes: &[u8], i: usize, same_line_only: bool) ->
     }
     let mut j = i + "unsafe".len();
     loop {
-        // H-r4-H1: every Rust line separator breaks nothing — space, tab,
-        // newline, lone CR, form feed. (str::lines already strips `\r\n`
-        // pairs; a lone `\r` or `\x0C` mid-line stays and is whitespace.)
+        // H-r4-H1 + C1 r7: every Rust line separator breaks nothing — ASCII
+        // space/tab/newline/CR/FF, plus the rest of `char::is_whitespace`
+        // (VT, NBSP, …). rustc skips all of them and the CI grep's
+        // `[[:space:]]` matches VT too, so stopping at one would miss what
+        // the port claims parity with. `line.get(j..)` needs a char
+        // boundary: ASCII bytes advance one step, anything else decodes.
         while let Some(&x) = bytes.get(j) {
-            if x == b' ' || x == b'\t' || x == b'\n' || x == b'\r' || x == b'\x0C' {
-                if x == b'\n' && same_line_only {
+            if x == b' ' || x == b'\t' || x == b'\r' || x == b'\x0C' {
+                j += 1;
+            } else if x == b'\n' {
+                if same_line_only {
                     return false;
                 }
                 j += 1;
+            } else if let Some(r) = line.get(j..).and_then(|r| r.chars().next()).filter(|c| {
+                // `\n` handled above (it alone ends a `//` line); every
+                // other Unicode whitespace gap-skips.
+                *c != '\n' && c.is_whitespace()
+            }) {
+                j += r.len_utf8();
             } else {
                 break;
             }
@@ -1698,8 +1709,15 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
                 continue;
             }
         }
-        if b == b' ' || b == b'\t' {
-            i += 1;
+        // L-5 r7: leading whitespace is every Unicode whitespace, not just
+        // space/tab — a VT-indented attribute is still the attribute.
+        // Advance by the whole char: stepping one byte into a multi-byte
+        // space would strand the scan mid-char (miss, not just slow).
+        if let Some(r) = line.get(i..).and_then(|r| r.chars().next())
+            && r.is_whitespace()
+            && r != '\n'
+        {
+            i += r.len_utf8();
             continue;
         }
         // First code character: it must open the attribute. The lint list
@@ -1716,7 +1734,10 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
         let Some(rest) = rest.strip_prefix("#![") else {
             return false;
         };
-        let rest = rest.trim_start_matches([' ', '\t']);
+        // L-5 r7: every Unicode whitespace — VT, NBSP, … — separates tokens
+        // exactly like spaces here. `char::is_whitespace` is the single
+        // alphabet shared with the gap and list trims below.
+        let rest = rest.trim_start_matches(char::is_whitespace);
         // Space between the lint path and its list is legal Rust
         // (`#![forbid (unsafe_code)]`), so it cannot count as absent.
         let Some(rest) = rest.strip_prefix("forbid") else {
@@ -1735,7 +1756,7 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
 fn forbid_list_has_unsafe_code(after_forbid: &str) -> bool {
     // A block comment between path and list is one token stream (LOW r4).
     let rest = skip_inline_block_comments(after_forbid);
-    let rest = rest.trim_start_matches([' ', '\t']);
+    let rest = rest.trim_start_matches(char::is_whitespace);
     let Some(rest) = rest.strip_prefix('(') else {
         return false;
     };
@@ -1777,7 +1798,7 @@ fn forbid_list_has_unsafe_code(after_forbid: &str) -> bool {
     let stripped = strip_block_comments(span);
     stripped
         .split(',')
-        .any(|lint| lint.trim_matches([' ', '\t', '\r']) == "unsafe_code")
+        .any(|lint| lint.trim_matches(char::is_whitespace) == "unsafe_code")
 }
 
 /// Lines exempt from the unsafe scan: the crate-level forbid attribute
@@ -1836,6 +1857,9 @@ fn scan_crate_rs_files(
     // M4: an unreadable directory fails the scan like an unreadable
     // file — certifying the rest GREEN would vouch for code never seen.
     violations.extend(dir_problems);
+    // H-3 r7: follow `#[path]`/`include!` redirections into non-`.rs`
+    // files — they compile as Rust regardless of extension.
+    follow_code_redirections(&mut files);
     files.sort();
     for f in &files {
         let rel = f
@@ -1970,6 +1994,75 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
     }
 }
 
+/// Check a crate's entry roots for the crate-level forbid attribute.
+/// Split out of `run_unsafe_scan` for the line budget.
+///
+/// The attribute must be real code, not a comment mentioning it: a
+/// commented-out forbid is one uncomment away from absent, so a text
+/// `contains` here would certify a root on hearsay — the same shape
+/// `tools/audit_unsafe.py` guards with its prose filing.
+/// M1 r5: EVERY existing root carries it — a forbid in lib.rs no longer
+/// excuses a missing one in main.rs (either-or was the dual-root hole).
+/// M-3 r6: a `forbid` inside a multiline raw string is content, not code —
+/// gate the hit on starting outside one, the same entry state the main
+/// scan seeds with.
+/// H-2 r7: the gate also consults the entry block depth instead of
+/// threading a private one — a commented-out forbid must not certify, even
+/// when the `/*` opener sits on a line whose own forbid parse fails first
+/// (which used to freeze the private depth at zero).
+/// M-4 r7: tri-state — a present-but-unreadable root is a scan failure
+/// (`unreadable`), not a missing lint. The file scan already reports
+/// unreadable files the same way; the root check must agree on the repair
+/// (fix perms, not add a lint).
+fn check_crate_roots(
+    workspace: &Path,
+    dir: &Path,
+    name: &str,
+    violations: &mut Vec<String>,
+    missing: &mut Vec<String>,
+) {
+    let root_ok = |path: &Path| -> Option<bool> {
+        if path.is_dir() {
+            return None;
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) if path.exists() => return None,
+            Err(_) => return Some(true),
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let raw_entry = raw_entry_states(&lines);
+        let found = lines.iter().enumerate().any(|(n, l)| {
+            // Raw content never counts; block-comment state threads in (a
+            // closer followed by a real forbid still counts — skipping on
+            // entry depth alone would miss it).
+            let (raw, depth) = raw_entry.get(n).copied().unwrap_or((None, 0));
+            if raw.is_some() {
+                return false;
+            }
+            let mut depth = depth;
+            line_has_forbid_attr(l, &mut depth)
+        });
+        Some(found)
+    };
+    let rel = || {
+        dir.strip_prefix(workspace)
+            .unwrap_or(dir)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    match (
+        root_ok(&dir.join("src").join("lib.rs")),
+        root_ok(&dir.join("src").join("main.rs")),
+    ) {
+        (Some(true), Some(true)) => {}
+        (None, _) | (_, None) => {
+            violations.push(format!("{}: crate root unreadable, scan incomplete", rel()));
+        }
+        _ => missing.push(name.to_owned()),
+    }
+}
+
 fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
     let mut violations = Vec::new();
     let mut missing = Vec::new();
@@ -2027,35 +2120,7 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
         }
         scan_crate_rs_files(workspace, dir, &mut violations, &mut files_scanned);
         if name != "qqq-sys" {
-            // The attribute must be real code, not a comment mentioning it:
-            // a commented-out forbid is one uncomment away from absent, so a
-            // text `contains` here would certify a root on hearsay — the same
-            // shape `tools/audit_unsafe.py` guards with its prose filing.
-            // M1 r5: EVERY existing root carries it — a forbid in lib.rs no
-            // longer excuses a missing one in main.rs (either-or was the
-            // dual-root hole).
-            // M-3 r6: a `forbid` inside a multiline raw string is content,
-            // not code — gate the hit on starting outside one, the same
-            // entry state the main scan seeds with.
-            let root_ok = |path: &Path| {
-                let Ok(text) = std::fs::read_to_string(path) else {
-                    return false;
-                };
-                let lines: Vec<&str> = text.lines().collect();
-                let raw_entry = raw_entry_states(&lines);
-                let mut depth = 0;
-                lines.iter().enumerate().any(|(n, l)| {
-                    raw_entry.get(n).copied().unwrap_or((None, 0)).0.is_none()
-                        && line_has_forbid_attr(l, &mut depth)
-                })
-            };
-            let lib_ok = !dir.join("src").join("lib.rs").is_file()
-                || root_ok(&dir.join("src").join("lib.rs"));
-            let main_ok = !dir.join("src").join("main.rs").is_file()
-                || root_ok(&dir.join("src").join("main.rs"));
-            if !(lib_ok && main_ok) {
-                missing.push(name.clone());
-            }
+            check_crate_roots(workspace, dir, &name, &mut violations, &mut missing);
         }
     }
     if files_scanned == 0 {
@@ -2082,6 +2147,138 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             crates.len()
         ),
     )
+}
+
+/// Extra compilable files pulled in by `#[path = "…"]` and
+/// `include!("…")`. Both compile arbitrary files as Rust regardless of
+/// extension (H-3 r7): one `#[path = "evil.txt"]` line hides arbitrary
+/// `unsafe` from an unsuffixed scan. `include_str!`/`include_bytes!` are
+/// data, not code — following them would flag their prose as code, against
+/// the scan's own string policy. Only double-quoted literals decode (`\\`,
+/// `\"`, simple escapes); dynamic paths (`concat!`, `env!`) are left for
+/// rustc — and for the build to fail on. Cycle-safe via the visited set;
+/// unresolvable targets are ignored (rustc fails the build elsewhere,
+/// loudly).
+fn follow_code_redirections(files: &mut Vec<PathBuf>) {
+    use std::collections::HashSet;
+    let mut seen: HashSet<PathBuf> = files.iter().cloned().collect();
+    let mut queue: Vec<PathBuf> = files.clone();
+    while let Some(f) = queue.pop() {
+        // Unreadable files are skipped here: the scan loop reports them
+        // as `unreadable` when it reaches them below.
+        let Ok(text) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        let base = f.parent().map(Path::to_path_buf).unwrap_or_default();
+        for target in code_redirections(&text) {
+            // Lexical normalization (no fs touch): `..` segments resolve
+            // without following links, so `strip_prefix` and the qqq-sys
+            // exemption keep working on the result.
+            let mut p = PathBuf::new();
+            for c in base.join(&target).components() {
+                use std::path::Component;
+                match c {
+                    Component::ParentDir => {
+                        p.pop();
+                    }
+                    Component::CurDir => {}
+                    _ => p.push(c.as_os_str()),
+                }
+            }
+            if seen.insert(p.clone()) && p.is_file() {
+                files.push(p.clone());
+                queue.push(p);
+            }
+        }
+    }
+}
+
+/// The `#[path = "…"]` and `include!("…")` targets in `text`. Byte-level,
+/// boundary-safe: non-ASCII bytes advance by char so `text[i..]` never
+/// splits a boundary (which would panic, not mis-scan).
+fn code_redirections(text: &str) -> Vec<String> {
+    fn quoted(bytes: &[u8], mut j: usize) -> Option<(String, usize)> {
+        // bytes[j] == b'"': returns (value, index past the closing quote).
+        let mut out: Vec<u8> = Vec::new();
+        j += 1;
+        loop {
+            let c = *bytes.get(j)?;
+            if c == b'\\' {
+                let e = *bytes.get(j + 1)?;
+                out.push(match e {
+                    b'n' => b'\n',
+                    b't' => b'\t',
+                    b'r' => b'\r',
+                    b'\\' => b'\\',
+                    b'"' => b'"',
+                    b'0' => 0,
+                    _ => return None,
+                });
+                j += 2;
+            } else if c == b'"' {
+                j += 1;
+                break;
+            } else if c == b'\n' {
+                return None;
+            } else {
+                out.push(c);
+                j += 1;
+            }
+        }
+        Some((String::from_utf8(out).ok()?, j))
+    }
+    fn skip_ws(bytes: &[u8], j: &mut usize) {
+        while bytes
+            .get(*j)
+            .is_some_and(|&c| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r')
+        {
+            *j += 1;
+        }
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes.get(i).is_none_or(|b| !b.is_ascii()) {
+            i += text[i..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        if text[i..].starts_with("#[path") {
+            let mut j = i + "#[path".len();
+            skip_ws(bytes, &mut j);
+            if bytes.get(j) == Some(&b'=') {
+                j += 1;
+                skip_ws(bytes, &mut j);
+                if bytes.get(j) == Some(&b'"')
+                    && let Some((p, k)) = quoted(bytes, j)
+                {
+                    out.push(p);
+                    i = k;
+                    continue;
+                }
+            }
+            i += 1;
+        } else if text[i..].starts_with("include") && bytes.get(i + "include".len()) == Some(&b'!')
+        {
+            let mut j = i + "include".len() + 1;
+            skip_ws(bytes, &mut j);
+            if bytes.get(j) == Some(&b'(') {
+                j += 1;
+                skip_ws(bytes, &mut j);
+                if bytes.get(j) == Some(&b'"')
+                    && let Some((p, k)) = quoted(bytes, j)
+                {
+                    out.push(p);
+                    i = k;
+                    continue;
+                }
+            }
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Collect every `.rs` file under `dir`. An unreadable directory is a scan
@@ -3590,6 +3787,11 @@ mod tests {
         // legally sit on the next line (same_line_only stays strict).
         assert!(unsafe_line_is_violation("unsafe\r{ x(); }"));
         assert!(unsafe_line_is_violation("unsafe // SAFETY: why\n{ x(); }"));
+        // C1 r7: VT and NBSP are whitespace to rustc and to the CI grep's
+        // `[[:space:]]` — stopping at them would miss what the port claims
+        // parity with (executed proof from the review).
+        assert!(unsafe_line_is_violation("pub unsafe\x0B{ x(); }"));
+        assert!(unsafe_line_is_violation("pub unsafe\u{a0}{ x(); }"));
     }
 
     #[test]
@@ -3645,6 +3847,14 @@ mod tests {
                 (None, 0),
                 (None, 0)
             ]
+        );
+        // L-6 r7: block-comment state threads too — the entry depth marks
+        // lines starting inside an unclosed `/*` (the closer on the line
+        // itself does not rewrite the entry).
+        let commented = vec!["/* open", "still comment", "*/ code"];
+        assert_eq!(
+            raw_entry_states(&commented),
+            vec![(None, 0), (None, 1), (None, 1)]
         );
     }
 
@@ -3742,6 +3952,59 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_scan_rejects_comment_spoofed_forbid() {
+        // H-2 r7: a commented-out forbid must not certify — even when the
+        // `/*` opener sits on a line whose own forbid parse fails first
+        // (which used to freeze the private depth at zero and let the next
+        // line's commented forbid through).
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xcspoof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(
+            src.join("lib.rs"),
+            "#![forbid(unsafe_codex)] /*\n#![forbid(unsafe_code)]\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            src.join("main.rs"),
+            "#![forbid(unsafe_code)]\nfn main() {}\n",
+        )
+        .expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "comment-spoofed forbid passed the scan:\n{out}");
+        assert!(
+            out.contains("missing forbid"),
+            "wrong failure shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_reports_unreadable_roots_loudly() {
+        // M-4 r7: a present-but-unreadable root is a scan failure, not a
+        // missing lint — the repair is fixing perms, not adding an
+        // attribute. A directory in place of the root reads as
+        // unreadable on every platform (open-for-read fails).
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xunread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(src.join("lib.rs")).expect("unreadable stand-in");
+        std::fs::write(
+            src.join("main.rs"),
+            "#![forbid(unsafe_code)]\nfn main() {}\n",
+        )
+        .expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "unreadable root passed the scan:\n{out}");
+        assert!(
+            out.contains("unreadable"),
+            "wrong failure shape (should not say missing):\n{out}"
+        );
+    }
+
+    #[test]
     fn unsafe_scan_collects_uppercase_rs() {
         // L-2 r6: `EXTRA.RS` compiles via `#[path]` on a case-insensitive
         // FS — the scan must not skip it for its casing.
@@ -3765,14 +4028,67 @@ mod tests {
     fn comment_only_separator_rejects_stray_close() {
         // L-3 r6: `/* */ */` is a complete comment plus a stray closer —
         // the trailing `*/` is code-ish, so the line stays significant.
-        assert!(is_comment_only_separator("/* c */"));
-        assert!(is_comment_only_separator("/* c */ // trailing"));
-        assert!(is_comment_only_separator("// only"));
+        // M-1 r7: balanced blocks and //-tails drop out; unclosed stays.
+        assert!(is_comment_only_separator(""));
         assert!(is_comment_only_separator("   "));
+        assert!(is_comment_only_separator("// only"));
+        assert!(is_comment_only_separator("/* c */"));
+        assert!(is_comment_only_separator("/* a /* b */ */"));
+        assert!(is_comment_only_separator("/* c */ // trailing"));
         assert!(!is_comment_only_separator("/* unclosed"));
         assert!(!is_comment_only_separator("/* */ */"));
         assert!(!is_comment_only_separator("let x = 1; // c"));
         assert!(!is_comment_only_separator("\"/*\""));
+        assert!(!is_comment_only_separator("*/ code"));
+    }
+
+    #[test]
+    fn code_redirections_finds_path_and_include() {
+        // H-3 r7 unit: `#[path]` and `include!` targets extract;
+        // `include_str!`/`include_bytes!` (data) and dynamic paths do not.
+        assert_eq!(
+            code_redirections("#[path = \"a.rs\"]\ninclude!(\"b.rs\")\ninclude_str!(\"c.txt\")\n"),
+            vec!["a.rs".to_owned(), "b.rs".to_owned()]
+        );
+        assert_eq!(
+            code_redirections("#[path = concat!(env!(\"X\"), \"/a.rs\")]"),
+            Vec::<String>::new()
+        );
+        // A mention inside a real string literal cannot match: source
+        // files escape inner quotes (`\"`), and only a bare `"` opens the
+        // value here. (An *unescaped* mention inside a comment or raw
+        // string still extracts if the file exists — fail-noisy, bounded
+        // by the existence gate in `follow_code_redirections`.)
+        assert_eq!(
+            code_redirections("let s = \"#[path = \\\"no.rs\\\"]\";"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_follows_path_redirections() {
+        // H-3 r7 run level: a `#[path = "hidden.txt"]` module compiles as
+        // Rust regardless of extension — the scan must see its `unsafe`.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xredir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
+        std::fs::write(
+            src.join("main.rs"),
+            "#![forbid(unsafe_code)]\nfn main() {}\n",
+        )
+        .expect("main");
+        std::fs::write(
+            src.join("redir.rs"),
+            "#![forbid(unsafe_code)]\n#[path = \"hidden.txt\"]\nmod hidden;\n",
+        )
+        .expect("redir");
+        std::fs::write(src.join("hidden.txt"), "pub unsafe fn evil() {}\n").expect("hidden");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "redirected unsafe passed the scan:\n{out}");
+        assert!(out.contains("hidden.txt"), "wrong file flagged:\n{out}");
     }
 
     #[test]
@@ -3798,6 +4114,15 @@ mod tests {
         // So is a block comment there (LOW r4): token stream, not text.
         let mut b = 0;
         assert!(line_has_forbid_attr("#![forbid/*c*/(unsafe_code)]", &mut b));
+        // L-5 r7: every Unicode whitespace separates — VT indent, NBSP in
+        // the list — exactly like spaces do.
+        let mut b = 0;
+        assert!(line_has_forbid_attr("#![forbid\x0B(unsafe_code)]", &mut b));
+        let mut b = 0;
+        assert!(line_has_forbid_attr(
+            "#![forbid(\u{a0}unsafe_code)]",
+            &mut b
+        ));
         // L2 r5: comments inside the list do not hide the lint — nor does
         // a paren inside a comment end the list early.
         let mut b = 0;

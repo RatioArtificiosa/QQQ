@@ -519,27 +519,6 @@ impl ArtifactSpec {
     pub fn file(path: impl Into<PathBuf>) -> Self {
         Self::File(path.into())
     }
-
-    /// Resolve the produced file, if one exists.
-    #[must_use]
-    fn resolve(&self, project_dir: &Path) -> Option<PathBuf> {
-        match self {
-            Self::Unspecified => None,
-            Self::Cargo {
-                profile,
-                target,
-                package,
-            } => find_artifact(project_dir, profile, target, package),
-            Self::File(path) => {
-                let resolved = if path.is_absolute() {
-                    path.clone()
-                } else {
-                    project_dir.join(path)
-                };
-                resolved.is_file().then_some(resolved)
-            }
-        }
-    }
 }
 
 /// A fully-resolved sequence of invocations, ready to run **in order**.
@@ -611,8 +590,20 @@ impl BuildPlan {
     /// Foreign-driver scaffolds can attach an explicit output with
     /// [`Self::with_artifact`] after constructing their pipeline. Keeping this
     /// constructor total makes dry-run tests independent of a compiler.
+    ///
+    /// All steps must share one working directory: [`BuildPlan::cwd`] reads
+    /// the first step's, and artifact discovery, staging, and AOT all treat
+    /// it as the project root. A heterogeneous plan would silently
+    /// misattribute every path, so construction asserts uniformity where
+    /// tests can see it.
     #[must_use]
     pub fn from_steps(steps: Vec<BuildStep>) -> Self {
+        debug_assert!(
+            steps
+                .windows(2)
+                .all(|w| matches!(w, [a, b] if a.cwd == b.cwd)),
+            "every step of a plan must share one working directory"
+        );
         Self {
             steps,
             artifact: ArtifactSpec::Unspecified,
@@ -793,6 +784,10 @@ impl BuildOptions {
 
     /// Set a flag.
     pub fn set(&mut self, flag: u8) {
+        debug_assert!(
+            flag & !Self::ALL == 0,
+            "reserved flag bits are not options; mask decoded input with ALL"
+        );
         self.bits |= flag;
     }
 
@@ -826,10 +821,25 @@ impl BuildOptions {
         self.has(Self::REPRODUCIBLE)
     }
 
+    /// Every flag bit defined above. Bits outside this mask are reserved,
+    /// not options: `set` ORs without checking (a builder-style setter),
+    /// so callers that decode external input must mask or validate first —
+    /// an unknown bit silently stored is a future flag misread as absent.
+    ///
+    /// ```rust
+    /// use qqq_run::build::BuildOptions;
+    /// assert_eq!(BuildOptions::ALL, BuildOptions::RELEASE | BuildOptions::DEBUG | BuildOptions::AOT | BuildOptions::REPRODUCIBLE);
+    /// ```
+    pub const ALL: u8 = Self::RELEASE | Self::DEBUG | Self::AOT | Self::REPRODUCIBLE;
+
     /// Build an option set from flags, for callers that have already decoded
     /// the command line.
     #[must_use]
     pub fn from_flags(bits: u8, target: Option<String>) -> Self {
+        debug_assert!(
+            bits & !Self::ALL == 0,
+            "reserved flag bits are not options; mask decoded input with ALL"
+        );
         Self {
             bits,
             target,
@@ -1162,7 +1172,19 @@ pub(crate) fn target_root(project_dir: &Path) -> PathBuf {
 /// predicate and the path are tested separately, and here they can be.
 fn target_root_for(project_dir: &Path, override_dir: Option<&std::ffi::OsStr>) -> PathBuf {
     match override_dir {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        Some(dir) if !dir.is_empty() => {
+            let p = PathBuf::from(dir);
+            // Relative to the project, not the process: the child cargo
+            // runs with `current_dir(project_dir)`, so a relative override
+            // means `<project>/<dir>` to cargo — resolving it against the
+            // process cwd instead looks somewhere cargo never wrote (or,
+            // worse, where another project's artifacts live).
+            if p.is_absolute() {
+                p
+            } else {
+                project_dir.join(p)
+            }
+        }
         _ => project_dir.join("target"),
     }
 }
@@ -1207,7 +1229,10 @@ pub fn find_artifact(
     target: &str,
     package: &str,
 ) -> Option<PathBuf> {
-    find_artifact_in(&artifact_dir(project_dir, profile, target), package)
+    match find_artifact_in_detailed(&artifact_dir(project_dir, profile, target), package) {
+        ArtifactSearch::Expected(path) | ArtifactSearch::SingleUnnamed(path) => Some(path),
+        ArtifactSearch::Missing | ArtifactSearch::Ambiguous(_) => None,
+    }
 }
 
 /// The matching half of [`find_artifact`], against an explicit directory.
@@ -1219,24 +1244,56 @@ pub fn find_artifact(
 /// it (plus stale build output), failing on contents it never created.
 /// Production keeps routing through [`find_artifact`]; the env routing
 /// itself is pinned by the `target_root_for` unit tests.
-fn find_artifact_in(dir: &Path, package: &str) -> Option<PathBuf> {
+///
+/// What a search of the artifact directory found.
+///
+/// The distinction between [`ArtifactSearch::Expected`] and
+/// [`ArtifactSearch::SingleUnnamed`] is the freshness gate: an expected
+/// name is cargo's own output scheme, while an unaccounted-for single file
+/// may be a stale leftover (or another tenant of a shared target dir) —
+/// so only the latter must prove it was just built.
+/// [`ArtifactSearch::Ambiguous`] carries the names so the error can list
+/// them instead of claiming nothing was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArtifactSearch {
+    /// An expected name (underscored or literal package): cargo's output.
+    Expected(PathBuf),
+    /// Exactly one `.wasm` that is neither expected name: a renamed lib
+    /// target — usable only with proof of freshness.
+    SingleUnnamed(PathBuf),
+    /// Nothing to stage.
+    Missing,
+    /// More than one unaccounted-for `.wasm`: guessing would ship the
+    /// wrong code.
+    Ambiguous(Vec<String>),
+}
+
+fn find_artifact_in_detailed(dir: &Path, package: &str) -> ArtifactSearch {
     // 1. Cargo's default: hyphens become underscores.
     let underscored = dir.join(format!("{}.wasm", package.replace('-', "_")));
     if underscored.is_file() {
-        return Some(underscored);
+        return ArtifactSearch::Expected(underscored);
     }
 
     // 2. A crate that kept the literal name.
     let literal = dir.join(format!("{package}.wasm"));
     if literal.is_file() {
-        return Some(literal);
+        return ArtifactSearch::Expected(literal);
     }
 
     // 3. A renamed lib target, but only when the answer is unambiguous.
+    // Scanned once: listing twice would let a file appear between the two
+    // scans and change the answer mid-decision.
     let candidates = list_wasm_paths(dir);
-    match candidates.len() {
-        1 => candidates.into_iter().next(),
-        _ => None,
+    match candidates.as_slice() {
+        [] => ArtifactSearch::Missing,
+        [only] => ArtifactSearch::SingleUnnamed(only.clone()),
+        _ => ArtifactSearch::Ambiguous(
+            candidates
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect(),
+        ),
     }
 }
 
@@ -1287,6 +1344,11 @@ pub enum ArtifactKind {
     CoreModule,
     /// Neither — not a WebAssembly binary at all.
     NotWasm,
+    /// A WebAssembly binary whose layer this runtime does not know.
+    /// Reported distinctly from [`Self::CoreModule`]: calling an unknown
+    /// future encoding "a core module" would misdirect the operator toward
+    /// a `cdylib` fix for a file no flag can produce.
+    Unknown,
 }
 
 impl ArtifactKind {
@@ -1297,6 +1359,7 @@ impl ArtifactKind {
             Self::Component => "component",
             Self::CoreModule => "core-module",
             Self::NotWasm => "not-wasm",
+            Self::Unknown => "unknown",
         }
     }
 
@@ -1338,29 +1401,23 @@ impl ArtifactKind {
         if bytes.len() < 8 || bytes.get(..4) != Some(b"\0asm".as_slice()) {
             return Self::NotWasm;
         }
-        // Little-endian: version = bytes[4..6], layer = bytes[6..8].
-        // Converted as arrays: eight bytes verified above, so both
-        // conversions are exact — and a short buffer is `NotWasm`, the same
-        // verdict the length check already gives.
-        let version = bytes
-            .get(4..6)
-            .and_then(|s| <[u8; 2]>::try_from(s).ok())
-            .map_or(0, u16::from_le_bytes);
+        // Little-endian layer at bytes[6..8]. The version is deliberately
+        // unread: within a known layer the encoding revision does not
+        // change what the file *is*, and policing it here would turn every
+        // future revision into a misclassification.
         let layer = bytes
             .get(6..8)
             .and_then(|s| <[u8; 2]>::try_from(s).ok())
-            .map_or(0, u16::from_le_bytes);
+            .map_or(u16::MAX, u16::from_le_bytes);
         match layer {
-            // A core module: version 1, no layer.
-            0 if version == 1 => Self::CoreModule,
-            // Any component layer. The version is an encoding revision and is
-            // not our business to police here; `Component::compile` is the
-            // authority on whether we can actually load it.
+            // A core module envelope, whatever its version.
+            0 => Self::CoreModule,
+            // A component envelope, whatever its version.
             1 => Self::Component,
-            // Unknown layer. Reported as a core module so the caller's error
-            // says "not a component" — true and actionable — rather than
-            // claiming to have found something we cannot load.
-            _ => Self::CoreModule,
+            // An envelope this runtime does not know. Reported distinctly
+            // rather than as a core module: the caller must not be told to
+            // rebuild as a cdylib for an encoding no flag can produce.
+            _ => Self::Unknown,
         }
     }
 }
@@ -1369,8 +1426,8 @@ impl ArtifactKind {
 ///
 /// # Errors
 ///
-/// * `QQQ-1002` — the file is not a component, with a message that says which
-///   of the three shapes it was.
+/// * `QQQ-1002` — the file is not a component, with a message that names
+///   which of the four shapes it was.
 /// * `QQQ-1001` — the file could not be read.
 pub fn verify_artifact(path: &Path) -> Result<ArtifactKind> {
     let bytes = std::fs::read(path).map_err(|e| {
@@ -1384,8 +1441,16 @@ pub fn verify_artifact(path: &Path) -> Result<ArtifactKind> {
         .with_cause(e.to_string())
         .with_remediation("check the build output above for a partial or failed link step")
     })?;
+    verify_bytes(&bytes, path)
+}
 
-    let kind = ArtifactKind::classify(&bytes);
+/// Classify already-read bytes, naming the artifact they describe.
+///
+/// Split out so `finish_build` verifies the same bytes it stages: reading
+/// once closes the check-then-use gap in which a swapped file could pass
+/// verification and stage something else.
+fn verify_bytes(bytes: &[u8], path: &Path) -> Result<ArtifactKind> {
+    let kind = ArtifactKind::classify(bytes);
     match kind {
         ArtifactKind::Component => Ok(kind),
         ArtifactKind::CoreModule => Err(Error::new(
@@ -1403,6 +1468,15 @@ pub fn verify_artifact(path: &Path) -> Result<ArtifactKind> {
         )
         .with_context("artifact", path.display().to_string())
         .with_remediation("check that the crate type is `cdylib` in Cargo.toml")),
+        ArtifactKind::Unknown => Err(Error::new(
+            ErrorCode::InvalidComponentArtifact,
+            "the build output uses an encoding revision this runtime does not know",
+        )
+        .with_context("artifact", path.display().to_string())
+        .with_remediation(
+            "check the toolchain targets a supported `wasm32-wasip2` component encoding; \
+             a core module with a newer version reports as a core module, not here",
+        )),
     }
 }
 
@@ -1501,12 +1575,16 @@ pub fn execute(loaded: &LoadedManifest, opts: &BuildOptions) -> Result<BuildOutp
     // is the one command where the underlying tool's own output is better than
     // anything we could synthesise: colours, progress, warnings with source
     // spans. Capturing it to reprint it would lose all of that for no gain.
+    // Timed before the first step: the fallback artifact guess must prove it
+    // was produced by *this* build, and the proof compares mtimes against
+    // this instant.
+    let started = std::time::SystemTime::now();
     let failure = run_steps(&plan)?;
 
     if let Some((index, status)) = failure {
         return Err(step_failure(&plan, index, status));
     }
-    let produced = locate_produced(&plan, loaded)?;
+    let produced = locate_produced(&plan, loaded, started)?;
     finish_build(base, &produced, &plan, loaded, opts)
 }
 
@@ -1548,67 +1626,204 @@ fn step_failure(plan: &BuildPlan, index: usize, status: std::process::ExitStatus
 
 /// Find the component a successful build produced.
 ///
+/// `started` is the instant before the build steps ran: an unaccounted-for
+/// single file is only staged when its mtime proves this build produced it,
+/// so a stale leftover (or another tenant of a shared target dir) is
+/// refused rather than shipped.
+fn locate_cargo_artifact(
+    dir: &Path,
+    package: &str,
+    started: std::time::SystemTime,
+) -> Result<std::path::PathBuf> {
+    match find_artifact_in_detailed(dir, package) {
+        ArtifactSearch::Expected(path) => Ok(confine_to(&path, dir)?),
+        ArtifactSearch::SingleUnnamed(path) => {
+            let path = confine_to(&path, dir)?;
+            prove_fresh(&path, started)?;
+            Ok(path)
+        }
+        ArtifactSearch::Ambiguous(names) => Err(Error::new(
+            ErrorCode::CompilationFailed,
+            format!(
+                "the build succeeded but no single component was produced in `{}`: \
+                 ambiguous candidates {}",
+                dir.display(),
+                names.join(", ")
+            ),
+        )
+        .with_remediation(
+            "set an explicit `[lib] name` in Cargo.toml so the output has one name; \
+             guessing between candidates would silently ship the wrong code",
+        )),
+        ArtifactSearch::Missing => {
+            let seen = list_wasm_files(dir);
+            Err(Error::new(
+                ErrorCode::CompilationFailed,
+                format!(
+                    "the build succeeded but no component was found in `{}`",
+                    dir.display()
+                ),
+            )
+            .with_cause(if seen.is_empty() {
+                "the directory contains no `.wasm` files".to_owned()
+            } else {
+                format!("found: {}", seen.join(", "))
+            })
+            .with_remediation(format!(
+                "`[package].name` is `{package}`; `Cargo.toml` must declare \
+                 `crate-type = [\"cdylib\"]` and produce a `.wasm` library target"
+            )))
+        }
+    }
+}
+
+/// Find the component a successful build produced.
+///
 /// Cargo names the artifact after the crate name rather than the package name,
 /// so the search inspects the output directory instead of computing one file
 /// name. Foreign pipelines declare an explicit [`ArtifactSpec::File`] output.
-fn locate_produced(plan: &BuildPlan, loaded: &LoadedManifest) -> Result<std::path::PathBuf> {
-    let produced = plan.artifact.resolve(plan.cwd());
-    let Some(produced) = produced else {
-        let (location, seen) = match &plan.artifact {
-            ArtifactSpec::Cargo {
-                profile, target, ..
-            } => {
-                let dir = artifact_dir(plan.cwd(), profile, target);
-                let seen = list_wasm_files(&dir);
-                (dir, seen)
-            }
-            ArtifactSpec::File(path) => {
-                let resolved = if path.is_absolute() {
-                    path.clone()
-                } else {
-                    plan.cwd().join(path)
-                };
+///
+/// `started` is the instant before the build steps ran, threaded through for
+/// the freshness proof (see [`locate_cargo_artifact`]).
+fn locate_produced(
+    plan: &BuildPlan,
+    loaded: &LoadedManifest,
+    started: std::time::SystemTime,
+) -> Result<std::path::PathBuf> {
+    match &plan.artifact {
+        ArtifactSpec::Cargo {
+            profile, target, ..
+        } => locate_cargo_artifact(
+            &artifact_dir(plan.cwd(), profile, target),
+            loaded.name(),
+            started,
+        ),
+        ArtifactSpec::File(path) => {
+            let resolved = if path.is_absolute() {
+                path.clone()
+            } else {
+                plan.cwd().join(path)
+            };
+            if resolved.is_file() {
+                Ok(resolved)
+            } else {
                 let seen = resolved.parent().map_or_else(Vec::new, list_wasm_files);
-                (resolved, seen)
-            }
-            ArtifactSpec::Unspecified => {
-                return Err(Error::new(
-                    ErrorCode::InternalInvariantViolated,
-                    "the build plan has no artifact locator",
+                Err(Error::new(
+                    ErrorCode::CompilationFailed,
+                    format!(
+                        "the build succeeded but no component was found in `{}`",
+                        resolved.display()
+                    ),
                 )
-                .with_remediation(
-                    "this is a qqqai bug; every executable build plan must declare its output",
-                ));
+                .with_cause(if seen.is_empty() {
+                    "the directory contains no `.wasm` files".to_owned()
+                } else {
+                    format!("found: {}", seen.join(", "))
+                })
+                .with_remediation(format!(
+                    "the build plan declared `{}` as its output; verify the final pipeline step writes a \
+                     validated `.wasm` component there",
+                    path.display()
+                )))
             }
-        };
-        let remediation = match &plan.artifact {
-            ArtifactSpec::Cargo { .. } => format!(
-                "`[package].name` is `{}`; `Cargo.toml` must declare \
-                 `crate-type = [\"cdylib\"]` and produce a `.wasm` library target",
-                loaded.name()
-            ),
-            ArtifactSpec::File(path) => format!(
-                "the build plan declared `{}` as its output; verify the final pipeline step writes a \
-                 validated `.wasm` component there",
-                path.display()
-            ),
-            ArtifactSpec::Unspecified => unreachable!("an unspecified plan returned above"),
-        };
-        return Err(Error::new(
+        }
+        ArtifactSpec::Unspecified => Err(Error::new(
+            ErrorCode::InternalInvariantViolated,
+            "the build plan has no artifact locator",
+        )
+        .with_remediation(
+            "this is a qqqai bug; every executable build plan must declare its output",
+        )),
+    }
+}
+
+/// Confine a discovered artifact to the directory it was discovered in.
+///
+/// `canonicalize` resolves symlinks; if the result escapes the expected
+/// root, the directory entry was a link pointing elsewhere — which for a
+/// build output means either an attack or a misconfiguration, and in both
+/// cases staging it would bless bytes from outside the build. Explicit
+/// [`ArtifactSpec::File`] paths skip this check: naming a path *is* the
+/// operator's decision, while discovering one is a guess that must stay
+/// inside the searched tree. Symlinked *roots* keep working because both
+/// sides are canonicalized before comparison. A path that cannot be
+/// canonicalized (deleted between listing and use) fails closed as missing.
+fn confine_to(path: &Path, dir: &Path) -> Result<std::path::PathBuf> {
+    let root = std::fs::canonicalize(dir).map_err(|e| {
+        Error::new(
+            ErrorCode::CompilationFailed,
+            format!("cannot confine `{}`: {}", path.display(), e),
+        )
+        .with_remediation("check the artifact directory exists and is readable")
+    })?;
+    let resolved = std::fs::canonicalize(path).map_err(|_| {
+        Error::new(
             ErrorCode::CompilationFailed,
             format!(
                 "the build succeeded but no component was found in `{}`",
-                location.display()
+                dir.display()
             ),
         )
-        .with_cause(if seen.is_empty() {
-            "the directory contains no `.wasm` files".to_owned()
-        } else {
-            format!("found: {}", seen.join(", "))
-        })
-        .with_remediation(remediation));
-    };
-    Ok(produced)
+        .with_cause(format!(
+            "`{}` vanished between listing and staging",
+            path.display()
+        ))
+        .with_remediation(
+            "re-run the build; if this repeats, inspect the artifact directory for races",
+        )
+    })?;
+    resolved.strip_prefix(&root).map_err(|_| {
+        Error::new(
+            ErrorCode::CompilationFailed,
+            format!(
+                "refusing to stage `{}`: it escapes the artifact directory `{}`",
+                path.display(),
+                dir.display()
+            ),
+        )
+        .with_remediation("check the artifact directory for symlinks pointing elsewhere")
+    })?;
+    Ok(resolved)
+}
+
+/// Refuse a guessed artifact older than the build that supposedly produced it.
+///
+/// Only the fallback-3 guess needs this proof: expected names are cargo's
+/// own output scheme (cargo rebuilds when sources change, so a present
+/// expected name is current), but an unaccounted-for single file may be a
+/// stale leftover — or another tenant of a shared target dir. A missing or
+/// unreadable mtime fails closed: without the proof, the guess stays a
+/// guess. The tolerance covers coarse filesystem timestamp granularity
+/// (FAT-family: 2 s); a stranger planted inside the tolerance window
+/// already requires target-dir writes during the build, past which point
+/// the attacker wins without this gate.
+fn prove_fresh(path: &Path, started: std::time::SystemTime) -> Result<()> {
+    use std::time::Duration;
+    let mtime = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map_err(|e| {
+            Error::new(
+                ErrorCode::CompilationFailed,
+                format!("cannot prove `{}` is fresh: {e}", path.display()),
+            )
+            .with_remediation(
+                "check the artifact directory is readable; a renamed lib target must be built \
+                 by this invocation to be staged",
+            )
+        })?;
+    if mtime + Duration::from_secs(5) < started {
+        return Err(Error::new(
+            ErrorCode::CompilationFailed,
+            format!(
+                "`{}` predates this build; refusing a stale artifact",
+                path.display()
+            ),
+        )
+        .with_remediation(
+            "clean the target directory or set an explicit `[lib] name` so the output is attributable",
+        ));
+    }
+    Ok(())
 }
 
 /// Validate, stage, digest, and optionally precompile a produced component.
@@ -1621,8 +1836,22 @@ fn finish_build(
 ) -> Result<BuildOutput> {
     // Classify before staging: an artifact that is not a component must never
     // reach `qqqai run`, because the failure there is far from its cause.
-    let kind = verify_artifact(produced)?;
-    let (dest, bytes) = stage(produced, plan.cwd(), loaded.name())?;
+    // Read once: the bytes are verified, staged, and digested from a single
+    // read, so a file swapped between a check and a re-read cannot slip a
+    // different artifact past verification.
+    let bytes = std::fs::read(produced).map_err(|e| {
+        Error::new(
+            ErrorCode::CompilationFailed,
+            format!(
+                "the build reported success but `{}` is unreadable",
+                produced.display()
+            ),
+        )
+        .with_cause(e.to_string())
+        .with_remediation("check the build output above for a partial or failed link step")
+    })?;
+    let kind = verify_bytes(&bytes, produced)?;
+    let (dest, bytes) = stage_bytes(&bytes, plan.cwd(), loaded.name())?;
 
     // `--reproducible`: the digest is what a deployment pins, so an unstable
     // digest is a supply-chain problem rather than a cosmetic one.
@@ -1646,14 +1875,15 @@ fn finish_build(
     Ok(base)
 }
 
-/// Copy the compiler's output to the stable component path, returning both the
+/// Copy already-read bytes to the stable component path, returning both the
 /// destination and the staged bytes.
 ///
-/// Reading the bytes back rather than hashing `produced` directly is deliberate:
-/// it proves the copy succeeded and gives the digest of *exactly* the file the
-/// runtime will load, so a partial copy cannot produce a digest that does not
-/// match the artifact on disk.
-fn stage(produced: &Path, project_dir: &Path, name: &str) -> Result<(PathBuf, Vec<u8>)> {
+/// Takes the bytes rather than re-reading the source: `finish_build`
+/// verifies and digests these same bytes (see [`verify_bytes`]), and a
+/// second read would reopen the check-then-use gap the single read closes.
+/// What is written is what was verified; the atomic write keeps a torn
+/// copy from producing a digest that matches no file on disk.
+fn stage_bytes(bytes: &[u8], project_dir: &Path, name: &str) -> Result<(PathBuf, Vec<u8>)> {
     let dest = component_path(project_dir, name);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -1664,8 +1894,7 @@ fn stage(produced: &Path, project_dir: &Path, name: &str) -> Result<(PathBuf, Ve
             .with_cause(e.to_string())
         })?;
     }
-    let bytes = std::fs::read(produced)
-        .map_err(|e| Error::new(ErrorCode::CompilationFailed, e.to_string()))?;
+    let bytes = bytes.to_vec();
     crate::aot::atomic_write(&dest, &bytes)?;
     Ok((dest, bytes))
 }
@@ -1682,7 +1911,10 @@ fn stage(produced: &Path, project_dir: &Path, name: &str) -> Result<(PathBuf, Ve
 ///
 /// # Errors
 ///
-/// `QQQ-1005` when a previous digest exists and differs.
+/// `QQQ-1005` when a previous digest exists and differs, or when the new
+/// baseline cannot be recorded: a reproducibility gate that silently drops
+/// its baseline voids the guarantee it exists to provide, so a read-only
+/// or torn stamp fails the build it was meant to check.
 fn check_reproducible(project_dir: &Path, name: &str, digest: &str) -> Result<()> {
     let stamp = project_dir
         .join(OUTPUT_DIR)
@@ -1705,8 +1937,18 @@ fn check_reproducible(project_dir: &Path, name: &str, digest: &str) -> Result<()
     }
 
     // Written only on success, so a failing build never poisons the baseline it
-    // is being compared against.
-    let _ = std::fs::write(&stamp, digest);
+    // is being compared against. Atomic: a torn write would make the *next*
+    // build compare against half a digest and fail for the wrong reason.
+    // Failures propagate — without a recorded baseline there is nothing to
+    // compare the next build against, and pretending otherwise voids the gate.
+    crate::aot::atomic_write(&stamp, digest.as_bytes()).map_err(|e| {
+        Error::new(
+            ErrorCode::NonReproducibleBuild,
+            format!("could not record the reproducibility baseline `{}`", stamp.display()),
+        )
+        .with_cause(e.to_string())
+        .with_remediation("check the target directory is writable; without a recorded baseline `--reproducible` cannot verify the next build")
+    })?;
     Ok(())
 }
 
@@ -2011,8 +2253,18 @@ mod tests {
     fn a_foreign_driver_can_resolve_a_relative_explicit_output() {
         let dir = temp_dir("foreign-artifact");
         std::fs::write(dir.join("app.wasm"), b"component").expect("write fixture");
-        let locator = ArtifactSpec::file("app.wasm");
-        assert_eq!(locator.resolve(&dir), Some(dir.join("app.wasm")));
+        let plan = BuildPlan {
+            steps: vec![BuildStep {
+                program: "true".to_owned(),
+                args: vec![],
+                cwd: dir.clone(),
+            }],
+            artifact: ArtifactSpec::file("app.wasm"),
+        };
+        let loaded = loaded("[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+        let found = locate_produced(&plan, &loaded, std::time::SystemTime::now())
+            .expect("an explicit relative output resolves against the project dir");
+        assert_eq!(found, dir.join("app.wasm"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2315,21 +2567,22 @@ mod tests {
         assert_eq!(ArtifactKind::classify(&bytes), ArtifactKind::CoreModule);
     }
 
-    /// An unrecognised layer must not be claimed as a component. Reporting
-    /// "not a component" is true and actionable; a guess would move the failure
-    /// to the loader.
+    /// An unrecognised layer is neither a core module nor a component: it is
+    /// unknown, and the error names it as such instead of misdirecting the
+    /// operator toward a `cdylib` rebuild for an encoding no flag produces.
     #[test]
     fn an_unknown_layer_is_not_claimed_as_a_component() {
         // layer = 2
         assert_eq!(
             ArtifactKind::classify(b"\0asm\x0d\0\x02\0"),
-            ArtifactKind::CoreModule
+            ArtifactKind::Unknown
         );
         // layer = 0xffff, all bits set
         assert_eq!(
             ArtifactKind::classify(b"\0asm\0\0\xff\xff"),
-            ArtifactKind::CoreModule
+            ArtifactKind::Unknown
         );
+        assert_eq!(ArtifactKind::Unknown.as_str(), "unknown");
     }
 
     /// A core module with an unusual version is still a core module: version 1
@@ -2367,6 +2620,24 @@ mod tests {
         assert_eq!(ArtifactKind::Component.as_str(), "component");
         assert_eq!(ArtifactKind::CoreModule.as_str(), "core-module");
         assert_eq!(ArtifactKind::NotWasm.as_str(), "not-wasm");
+        assert_eq!(ArtifactKind::Unknown.as_str(), "unknown");
+    }
+
+    /// An unknown encoding fails verification with its own message, not the
+    /// core-module one: telling the operator to rebuild as `cdylib` for an
+    /// encoding no flag can produce sends them down the wrong tree.
+    #[test]
+    fn an_unknown_encoding_is_rejected_as_unknown() {
+        let dir = temp_dir("unknown-encoding");
+        let path = dir.join("odd.wasm");
+        // Magic, version 13, layer 2: valid framing, unknown layer.
+        std::fs::write(&path, b"\0asm\x0d\0\x02\0").expect("write fixture");
+        let err = verify_artifact(&path).expect_err("an unknown encoding must not verify");
+        assert!(
+            err.to_string().contains("encoding revision"),
+            "the error must name the encoding, not a missing cdylib: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2411,11 +2682,10 @@ mod tests {
     #[test]
     fn a_hyphenated_package_finds_its_underscored_artifact() {
         let out = build_dir("hyphen", &["orders_api.wasm"]);
-        let found = find_artifact_in(&out, "orders-api");
-        assert_eq!(
-            found.map(|p| p.file_name().unwrap().to_string_lossy().into_owned()),
-            Some("orders_api.wasm".to_owned()),
-            "`orders-api` must find `orders_api.wasm`"
+        let found = find_artifact_in_detailed(&out, "orders-api");
+        assert!(
+            matches!(&found, ArtifactSearch::Expected(p) if p.file_name().is_some_and(|n| n == "orders_api.wasm")),
+            "`orders-api` must find `orders_api.wasm` as its expected name, got {found:?}"
         );
         let _ = std::fs::remove_dir_all(&out);
     }
@@ -2423,7 +2693,10 @@ mod tests {
     #[test]
     fn an_underscored_package_finds_its_artifact() {
         let out = build_dir("plain", &["app.wasm"]);
-        assert!(find_artifact_in(&out, "app").is_some());
+        assert!(matches!(
+            find_artifact_in_detailed(&out, "app"),
+            ArtifactSearch::Expected(_)
+        ));
         let _ = std::fs::remove_dir_all(&out);
     }
 
@@ -2431,8 +2704,11 @@ mod tests {
     #[test]
     fn a_literal_name_is_found_when_no_underscored_one_exists() {
         let out = build_dir("literal", &["orders-api.wasm"]);
-        let found = find_artifact_in(&out, "orders-api");
-        assert!(found.is_some(), "the literal crate name must be tried");
+        let found = find_artifact_in_detailed(&out, "orders-api");
+        assert!(
+            matches!(found, ArtifactSearch::Expected(_)),
+            "the literal crate name must be tried"
+        );
         let _ = std::fs::remove_dir_all(&out);
     }
 
@@ -2440,10 +2716,10 @@ mod tests {
     #[test]
     fn a_single_unexpected_artifact_is_accepted() {
         let out = build_dir("renamed", &["something_else.wasm"]);
-        let found = find_artifact_in(&out, "orders-api");
+        let found = find_artifact_in_detailed(&out, "orders-api");
         assert!(
-            found.is_some(),
-            "an unambiguous single artifact must be used"
+            matches!(found, ArtifactSearch::SingleUnnamed(_)),
+            "an unambiguous single artifact must be used, got {found:?}"
         );
         let _ = std::fs::remove_dir_all(&out);
     }
@@ -2453,9 +2729,11 @@ mod tests {
     #[test]
     fn ambiguity_resolves_to_nothing_rather_than_a_guess() {
         let out = build_dir("ambiguous", &["alpha.wasm", "beta.wasm"]);
-        assert_eq!(
-            find_artifact_in(&out, "orders-api"),
-            None,
+        assert!(
+            matches!(
+                find_artifact_in_detailed(&out, "orders-api"),
+                ArtifactSearch::Ambiguous(_)
+            ),
             "two candidates and no match must not produce a guess"
         );
         let _ = std::fs::remove_dir_all(&out);
@@ -2467,10 +2745,10 @@ mod tests {
     #[test]
     fn the_expected_name_wins_over_other_artifacts() {
         let out = build_dir("prefer", &["orders_api.wasm", "unrelated.wasm"]);
-        let found = find_artifact_in(&out, "orders-api").expect("the expected name must be found");
-        assert_eq!(
-            found.file_name().unwrap().to_string_lossy(),
-            "orders_api.wasm"
+        let found = find_artifact_in_detailed(&out, "orders-api");
+        assert!(
+            matches!(&found, ArtifactSearch::Expected(p) if p.file_name().is_some_and(|n| n == "orders_api.wasm")),
+            "the expected name must win outright, got {found:?}"
         );
         let _ = std::fs::remove_dir_all(&out);
     }
@@ -2482,9 +2760,11 @@ mod tests {
         let out = build_dir("deps-empty", &[]);
         std::fs::create_dir_all(out.join("deps")).expect("create deps");
         std::fs::write(out.join("deps").join("serde.wasm"), b"\0asm\x0d\0\x01\0").unwrap();
-        assert_eq!(
-            find_artifact_in(&out, "app"),
-            None,
+        assert!(
+            matches!(
+                find_artifact_in_detailed(&out, "app"),
+                ArtifactSearch::Missing
+            ),
             "a `.wasm` under deps/ must not be mistaken for the build output"
         );
         let _ = std::fs::remove_dir_all(&out);
@@ -2494,7 +2774,171 @@ mod tests {
     fn a_missing_directory_lists_no_files_and_does_not_panic() {
         let missing = temp_dir("absent").join("no-such-subdir");
         assert!(list_wasm_files(&missing).is_empty());
-        assert_eq!(find_artifact_in(&missing, "app"), None);
+        assert!(matches!(
+            find_artifact_in_detailed(&missing, "app"),
+            ArtifactSearch::Missing
+        ));
+    }
+
+    /// A stale stranger is not a build product: the only `.wasm` present
+    /// predates the build, so staging it would ship whatever happened to
+    /// be lying around — including another tenant of a shared target dir.
+    /// Written first and failing first: on the old passthrough the stale
+    /// file staged without a word.
+    #[test]
+    fn a_stale_single_artifact_is_refused_not_staged() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let root = temp_dir("stale-locate");
+        let dir = root.join("target").join("wasm32-wasip2").join("release");
+        std::fs::create_dir_all(&dir).expect("create artifact dir");
+        std::fs::write(dir.join("stale.wasm"), b"\0asm\x0d\0\x01\0").expect("write stranger");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("stale.wasm"))
+            .expect("open")
+            .set_modified(UNIX_EPOCH + Duration::from_secs(1))
+            .expect("backdate the stranger");
+        let plan = BuildPlan {
+            // Never executed here: `locate_produced` only reads the plan.
+            // `cwd` is the project root the artifact search is rooted at.
+            steps: vec![BuildStep {
+                program: "true".to_owned(),
+                args: vec![],
+                cwd: root.clone(),
+            }],
+            artifact: ArtifactSpec::cargo("release", "wasm32-wasip2", "app"),
+        };
+        let manifest = loaded("[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+        let err = locate_produced(&plan, &manifest, std::time::SystemTime::now())
+            .expect_err("a stale stranger must not stage");
+        assert!(
+            err.to_string().contains("predates this build"),
+            "the refusal must name staleness: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A fresh stranger stages: the renamed-lib case the fallback exists
+    /// for writes its output during this build, so its mtime proves it.
+    /// Written alongside the stale case — together they pin the exact
+    /// boundary rather than just one side of it.
+    #[test]
+    fn a_fresh_single_artifact_stages() {
+        let root = temp_dir("fresh-locate");
+        let dir = root.join("target").join("wasm32-wasip2").join("release");
+        std::fs::create_dir_all(&dir).expect("create artifact dir");
+        // Written now, so its mtime postdates any plausible build start.
+        std::fs::write(dir.join("renamed.wasm"), b"\0asm\x0d\0\x01\0").expect("write output");
+        let plan = BuildPlan {
+            steps: vec![BuildStep {
+                program: "true".to_owned(),
+                args: vec![],
+                cwd: root.clone(),
+            }],
+            artifact: ArtifactSpec::cargo("release", "wasm32-wasip2", "app"),
+        };
+        let manifest = loaded("[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+        let found = locate_produced(&plan, &manifest, std::time::SystemTime::now())
+            .expect("a fresh build product must stage");
+        assert_eq!(
+            found.file_name().and_then(|n| n.to_str()),
+            Some("renamed.wasm")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Ambiguity names its candidates: "no component found" would send the
+    /// operator hunting for a missing file when two are fighting.
+    #[test]
+    fn an_ambiguous_directory_names_both_candidates() {
+        let root = temp_dir("ambiguous-locate");
+        let dir = root.join("target").join("wasm32-wasip2").join("release");
+        std::fs::create_dir_all(&dir).expect("create artifact dir");
+        std::fs::write(dir.join("alpha.wasm"), b"\0asm\x0d\0\x01\0").expect("write");
+        std::fs::write(dir.join("beta.wasm"), b"\0asm\x0d\0\x01\0").expect("write");
+        let plan = BuildPlan {
+            steps: vec![BuildStep {
+                program: "true".to_owned(),
+                args: vec![],
+                cwd: root.clone(),
+            }],
+            artifact: ArtifactSpec::cargo("release", "wasm32-wasip2", "app"),
+        };
+        let manifest = loaded("[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+        let err = locate_produced(&plan, &manifest, std::time::SystemTime::now())
+            .expect_err("ambiguity must not guess");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("alpha.wasm") && msg.contains("beta.wasm"),
+            "the error must name both candidates: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A symlink pointing outside the artifact directory is refused, not
+    /// followed: the discovery answer must stay inside the searched tree.
+    /// A symlink that stays inside is harmless and still stages.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_escaping_the_artifact_dir_is_refused() {
+        let root = temp_dir("escape-link");
+        let dir = root.join("target").join("wasm32-wasip2").join("release");
+        std::fs::create_dir_all(&dir).expect("create artifact dir");
+        let outside = root.join("outside.wasm");
+        std::fs::write(&outside, b"\0asm\x0d\0\x01\0").expect("write outside");
+        std::os::unix::fs::symlink(&outside, dir.join("link.wasm")).expect("link out");
+        let err = confine_to(&dir.join("link.wasm"), &dir).expect_err("escape must fail");
+        assert!(
+            err.to_string().contains("escapes the artifact directory"),
+            "the refusal must name the escape: {err}"
+        );
+        // And a link that stays inside the tree stages normally.
+        std::fs::write(dir.join("real.wasm"), b"\0asm\x0d\0\x01\0").expect("write inside");
+        std::os::unix::fs::symlink(dir.join("real.wasm"), dir.join("inner.wasm"))
+            .expect("link inside");
+        confine_to(&dir.join("inner.wasm"), &dir).expect("an interior link is not an escape");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Plans are single-rooted: `BuildPlan::cwd` reads the first step, so
+    /// a heterogeneous plan would silently misattribute every path. The
+    /// constructor asserts uniformity where tests can see it.
+    #[test]
+    #[should_panic(expected = "one working directory")]
+    fn heterogeneous_plan_cwds_fail_loudly_in_tests() {
+        let _ = BuildPlan::from_steps(vec![
+            BuildStep {
+                program: "cargo".to_owned(),
+                args: vec![],
+                cwd: PathBuf::from("app-a"),
+            },
+            BuildStep {
+                program: "cargo".to_owned(),
+                args: vec![],
+                cwd: PathBuf::from("app-b"),
+            },
+        ]);
+    }
+
+    /// A baseline that cannot be recorded fails the build it was meant to
+    /// check: without it the *next* run compares against nothing, and a
+    /// `--reproducible` gate that silently skips is worse than no gate.
+    /// Blocking the directory with a file makes the write fail portably
+    /// (no permissions to juggle, works on every OS).
+    #[test]
+    fn an_unwritable_stamp_dir_fails_the_reproducibility_check() {
+        let dir = temp_dir("repro-readonly");
+        std::fs::create_dir_all(dir.join(OUTPUT_DIR)).expect("create qqq dir");
+        // Occupy the directory slot with a file: no baseline can be written.
+        std::fs::remove_dir_all(dir.join(OUTPUT_DIR)).expect("remove dir");
+        std::fs::write(dir.join(OUTPUT_DIR), b"not a directory").expect("block the path");
+        let err = check_reproducible(&dir, "app", "abc123")
+            .expect_err("an unwritable stamp must fail, not vanish");
+        assert!(
+            err.to_string().contains("baseline"),
+            "the error must say what was lost: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The listing must name only `.wasm` files, so the error message can tell
@@ -2699,6 +3143,16 @@ mod target_root_tests {
             target_root_for(project, Some(std::ffi::OsStr::new(""))),
             PathBuf::from("/proj/target"),
             "an EMPTY value is not an override -- cargo treats it as unset, so this must too"
+        );
+        // Written first and failing first: on the old verbatim code this
+        // resolved against the process cwd, while the child cargo resolved
+        // against the project dir — a `qqqai build` run from anywhere but
+        // the project root then reported "no component found" for a build
+        // that succeeded, or read another directory's artifact.
+        assert_eq!(
+            target_root_for(project, Some(std::ffi::OsStr::new("rel-target"))),
+            PathBuf::from("/proj/rel-target"),
+            "a relative override is project-relative, like it is for cargo"
         );
     }
 

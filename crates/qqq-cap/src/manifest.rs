@@ -2778,18 +2778,18 @@ allow_origins = ["https://app.example.com"]
         }
     }
 
-    /// Bare, bracketed, and zoned IP literals parse: `ws::host_name`
-    /// preserves brackets when stripping a numeric port and leaves
-    /// addresses without brackets or port untouched, so `[::1]:8080`
-    /// normalizes to `[::1]`, `::1` to itself, and `[fe80::1%eth0]` keeps
-    /// its zone — refusing any of them would lie about a mapping that
-    /// works. Anything else bracketed, unbalanced, or over-long stays
+    /// Bracketed IPv6 literals (plain and zoned) and bare IPv4 parse:
+    /// `ws::host_name` preserves brackets when stripping a numeric port,
+    /// so `[::1]:8080` normalizes to `[::1]` and `[fe80::1%eth0]` keeps
+    /// its zone. Bare `::1` and bracketed `[127.0.0.1]` do not: only
+    /// bracketed IPv6 appears on the wire from compliant clients, so those
+    /// keys could never match one — refusing them is honest, not strict.
+    /// Anything else bracketed, unbalanced, non-ASCII, or over-long stays
     /// refused.
     #[test]
     fn tenant_hosts_accept_ip_literals() {
         for (key, label) in [
             ("[::1]", "loopback"),
-            ("::1", "loopback6"),
             ("[fe80::1%eth0]", "linklocal"),
             ("127.0.0.1", "loopback4"),
         ] {
@@ -2808,6 +2808,10 @@ allow_origins = ["https://app.example.com"]
             ("{ \"[xyz]\" = \"shop\" }", "non-IP brackets"),
             ("{ \"[::1\" = \"shop\" }", "unbalanced bracket"),
             ("{ \"[fe80::1%]\" = \"shop\" }", "empty zone"),
+            ("{ \"::1\" = \"shop\" }", "unbracketed IPv6"),
+            ("{ \"[127.0.0.1]\" = \"shop\" }", "bracketed IPv4"),
+            ("{ \"[fe80::1%eth 0]\" = \"shop\" }", "spaced zone"),
+            ("{ \"münchen.de\" = \"shop\" }", "non-ASCII host"),
         ] {
             let text = format!(
                 "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
@@ -2821,6 +2825,13 @@ allow_origins = ["https://app.example.com"]
             "a".repeat(250)
         );
         Manifest::parse(&long_host).expect_err("an over-long host must be refused");
+        // Exactly 253 bytes parses: the bound is DNS-real, not rounded.
+        let max_host = format!(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = {{ \"{}.example.com\" = \"shop\" }}",
+            "a".repeat(241)
+        );
+        Manifest::parse(&max_host).expect("a 253-byte host must parse");
     }
 
     /// A tenant label no reader can distinguish from another is dead
@@ -2911,6 +2922,15 @@ allow_origins = ["https://app.example.com"]
             err.to_string().contains("server.tenants.components"),
             "the error must name the table: {err}"
         );
+        // Exactly 64 characters parses: the bound is the shared identifier
+        // ceiling, not a rounded guess.
+        let max_artifact = format!(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = {{ \"shop.example.com\" = \"shop\" }}\n\
+             [server.tenants.components]\nshop = \"{}\"",
+            "a".repeat(64)
+        );
+        Manifest::parse(&max_artifact).expect("a 64-char artifact must parse");
     }
 
     /// Component keys match resolved labels verbatim: anything that cannot

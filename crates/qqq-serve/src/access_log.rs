@@ -917,11 +917,12 @@ fn one_line(s: &str) -> String {
 /// Scoped to labels (tenant names) rather than widening [`one_line`]:
 /// [`one_line`] renders messages too, and messages legitimately carry
 /// joiners (emoji sequences) that must survive. Tenant labels are
-/// identifiers — no legitimate label contains a zero-width space, a blank,
-/// a non-breaking space, or a layout-forger — so all of them fold here:
-/// the shared forgery predicate, the invisible-format predicate, and
-/// non-space whitespace. Applied before the field encoder, so controls
-/// still escape precisely (`\uXXXX` in JSON) rather than folding.
+/// identifiers — no legitimate label contains a control, a layout-forger,
+/// an invisible, or a non-space whitespace — so all of them fold here to
+/// U+FFFD. Controls fold (rather than escaping precisely as `\uXXXX`)
+/// because a label is read, not parsed back: the folded form tells the
+/// reader something was there, and the field encoder then only handles
+/// the structural characters (quotes, backslashes, real newlines).
 #[must_use]
 fn fold_label_invisibles(label: &str) -> String {
     if !label.chars().any(|c| {
@@ -1204,19 +1205,22 @@ mod tests {
     /// characters, and U+2028/U+2029 throw pre-ES2019 JSON parsers.
     #[test]
     fn separators_and_non_ascii_controls_are_escaped() {
-        let escaped = json_string("del\u{7f}c1\u{85}sep\u{2028}sep\u{2029}end");
+        let escaped = json_string("del\u{7f}c1\u{85}sep\u{2028}sep\u{2029}blank\u{2800}end");
         assert!(
             !escaped
                 .chars()
                 .any(|c| c == '\u{7f}' || c.is_control() || c == '\u{2028}' || c == '\u{2029}'),
             "no raw separator or control survives: {escaped:?}"
         );
-        for seq in ["\\u007f", "\\u0085", "\\u2028", "\\u2029"] {
+        for seq in ["\\u007f", "\\u0085", "\\u2028", "\\u2029", "\\u2800"] {
             assert!(escaped.contains(seq), "{seq} must be escaped: {escaped:?}");
         }
         let v: serde_json::Value =
             serde_json::from_str(&format!("{{\"v\":{escaped}}}")).expect("valid JSON");
-        assert_eq!(v["v"], "del\u{7f}c1\u{85}sep\u{2028}sep\u{2029}end");
+        assert_eq!(
+            v["v"],
+            "del\u{7f}c1\u{85}sep\u{2028}sep\u{2029}blank\u{2800}end"
+        );
     }
 
     /// The human rendering is one line and names the level first.
@@ -1249,6 +1253,9 @@ mod tests {
         // the second the predicate arm.
         assert_eq!(one_line("a\u{85}b"), "a\u{FFFD}b");
         assert_eq!(one_line("a\u{FEFF}b"), "a\u{FFFD}b");
+        // The braille blank folds too: it is a layout-forger with no
+        // legitimate content use, so content paths do not preserve it.
+        assert_eq!(one_line("a\u{2800}b"), "a\u{FFFD}b");
     }
 
     /// An invisible format character in a tenant label folds in both
@@ -1293,6 +1300,9 @@ mod tests {
     /// One member per invisible range in the tenant field, so dropping any
     /// range from the predicate fails here rather than passing silently.
     /// Messages keep their joiners (content rule); only the label folds.
+    /// Controls and layout-forgers ride along: the fold runs before the
+    /// field encoders, so a control in a label folds to FFFD instead of
+    /// escaping precisely — pinned here, not assumed.
     #[test]
     fn tenant_labels_fold_every_invisible_range() {
         for invisible in [
@@ -1305,6 +1315,10 @@ mod tests {
             "\u{FFF9}",
             "\u{E0001}",
             "\u{A0}",
+            "\u{0}",
+            "\u{7F}",
+            "\u{2028}",
+            "\u{202E}",
         ] {
             let mut r = record();
             r.tenant = format!("acme{invisible}corp");
@@ -1316,6 +1330,27 @@ mod tests {
             let json = r.render_json();
             let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
             assert_eq!(v["tenant"], "acme\u{FFFD}corp");
+        }
+    }
+
+    /// Controls fold in the tenant field in both encodings — not just
+    /// invisibles: the label fold runs before the field encoders, so a
+    /// control reaches neither `one_line`'s arm nor `json_string`'s `\uXXXX`
+    /// arm. FFFD rather than the code point is what keeps the two
+    /// encodings agreeing on identifiers.
+    #[test]
+    fn tenant_labels_fold_controls_in_both_encodings() {
+        for hostile in ["a\u{0}b", "a\u{7F}b", "a\nb"] {
+            let mut r = record();
+            r.tenant = hostile.to_owned();
+            let human = r.render_human();
+            assert!(
+                human.contains("a\u{FFFD}b"),
+                "{hostile:?} must fold in the human tenant field: {human:?}"
+            );
+            let json = r.render_json();
+            let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+            assert_eq!(v["tenant"], "a\u{FFFD}b");
         }
     }
 

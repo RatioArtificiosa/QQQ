@@ -316,9 +316,12 @@ mod tests {
                 "{c:?} must round-trip through its pair"
             );
         }
-        assert!(
-            count > 300,
-            "the set holds hundreds of supplementary members; got {count}"
+        // E0020-E007F (96) + E0100-E01EF (240) + 1D173-1D7A (8) + 110BD,
+        // 110CD, 13430, 1BCA0, E0001 (5): the count pins the set exactly,
+        // so a dropped range fails here rather than passing silently.
+        assert_eq!(
+            count, 349,
+            "the set holds 349 supplementary members; update test and predicate together"
         );
     }
 }

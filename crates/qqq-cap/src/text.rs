@@ -45,12 +45,15 @@ mod tests {
             "a\nb",
             "a\"b",
             "a\\b",
+            "a\u{A0}b",
         ] {
             let escaped = super::escape_for_error(hostile);
             assert!(
-                !escaped
-                    .chars()
-                    .any(|c| c.is_control() || super::is_layout_forgery(c) || c == '\u{2800}'),
+                !escaped.chars().any(|c| c.is_control()
+                    || super::is_layout_forgery(c)
+                    || super::is_invisible_format(c)
+                    || c == '\u{2800}'
+                    || (c.is_whitespace() && c != ' ')),
                 "{hostile:?} must escape invisibly: {escaped:?}"
             );
         }

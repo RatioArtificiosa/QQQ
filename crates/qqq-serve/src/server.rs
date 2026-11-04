@@ -4476,6 +4476,10 @@ mod tests {
             TenantResolution::Resolved("loopback".to_owned())
         );
         // Bare IPv6 literals match the same way (no brackets to strip).
+        // NOTE: manifests refuse bare-`::1` keys (only bracketed IPv6
+        // appears on the wire from compliant clients), but the matcher
+        // itself is verbatim — validation is the strict layer, resolution
+        // the literal one. This pins the matcher side of that split.
         let bare_hosts: BTreeMap<String, String> =
             BTreeMap::from([("::1".to_owned(), "loopback6".to_owned())]);
         assert_eq!(

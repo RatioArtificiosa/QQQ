@@ -177,23 +177,26 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
     // real `Host` header either, so a key carrying one is dead the same
     // way — and would render invisibly in every log line that names it.
     // Over-long keys are dead too: no DNS name exceeds 253 bytes.
-    // A bare or bracketed IP literal is looked up verbatim:
-    // `ws::host_name` preserves brackets when stripping a numeric port
-    // and leaves addresses without brackets or port untouched, so
-    // `[::1]:8080` normalizes to `[::1]`, `::1` to `::1`, and a zoned
-    // `[fe80::1%eth0]` keeps its zone. Refusing any of them would lie
-    // about a mapping that works. Anything else bracketed stays dead.
+    // A bracketed IPv6 literal is looked up verbatim: `ws::host_name`
+    // preserves brackets when stripping a numeric port, so a request Host
+    // of `[::1]:8080` normalizes to `[::1]` and looks the key up verbatim,
+    // and a zoned `[fe80::1%eth0]` keeps its zone. Refusing either would
+    // lie about a mapping that works. Everything else with a colon or
+    // brackets stays dead: bare `::1` and bracketed `[127.0.0.1]` only
+    // match clients that do not bracket the way compliant ones do, so
+    // they would 421 all real traffic while reading as configured.
     // Zones follow RFC 6874 (`unreserved`); an empty or exotic zone is
     // refused, not guessed.
-    let literal = host
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(host);
-    let (addr, zone) = match literal.split_once('%') {
-        Some((a, z)) => (a, Some(z)),
-        None => (literal, None),
+    let (inner, bracketed) = match host.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        Some(inner) => (inner, true),
+        None => (host, false),
     };
-    let ip_literal = addr.parse::<std::net::IpAddr>().is_ok()
+    let (addr, zone) = match inner.split_once('%') {
+        Some((a, z)) => (a, Some(z)),
+        None => (inner, None),
+    };
+    let ip_literal = bracketed
+        && addr.parse::<std::net::Ipv6Addr>().is_ok()
         && zone.is_none_or(|z| {
             !z.is_empty()
                 && z.chars()
@@ -212,6 +215,7 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
         || host.ends_with('.')
         || host.chars().any(char::is_whitespace)
         || ((host.contains('[') || host.contains(']')) && !ip_literal)
+        || !host.is_ascii()
         || host.chars().any(|c| {
             c.is_control()
                 || crate::text::is_layout_forgery(c)
@@ -221,9 +225,9 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
         return Err(ManifestError::InvalidField {
             field: "server.tenants.hosts".to_owned(),
             reason: format!(
-                "host key `{}` can never match: write the bare \
+                "host key `{}` can never match: write the bare ASCII \
                  lowercased host without port, trailing dot, whitespace, \
-                 stray brackets, or invisible characters, as it arrives after normalization",
+                 stray brackets, non-ASCII, or invisible characters, as it arrives after normalization",
                 crate::text::escape_for_error(host)
             ),
         });

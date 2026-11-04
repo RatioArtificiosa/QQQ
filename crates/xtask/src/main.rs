@@ -2295,26 +2295,48 @@ fn manifest_process_value(
     let mut rest = rest;
     // L-2 r20: `path =` with the value on the next line is valid TOML
     // (blanks and comments may surround `=`) — read it instead of
-    // fail-closing a valid manifest.
+    // fail-closing a valid manifest. M-1 r21: only a quote-led line can
+    // be the value — never consume a header or key line (that would hide
+    // the next section), and never silently stop at EOF.
     if rest.is_empty() {
         let mut j = *li;
-        let mut found = false;
+        let mut accepted: Option<&str> = None;
         while let Some(&next) = raw_lines.get(j) {
             j += 1;
             let code = next[..manifest_code_cut(next)].trim();
             if code.is_empty() {
                 continue;
             }
-            rest = code;
+            let is_value = code.starts_with(['"', '\''])
+                || (section == &ManifestSection::Package
+                    && norm == "build"
+                    && (code == "false" || code == "true"));
+            if !is_value {
+                break;
+            }
+            accepted = Some(code);
             *li = j;
-            found = true;
             break;
         }
-        if !found {
+        let Some(v) = accepted else {
+            if out.problem.is_none() {
+                out.problem = Some(format!("Cargo.toml {norm} value unclosed"));
+            }
             return;
-        }
+        };
+        rest = v;
     }
     if section == &ManifestSection::Package && norm == "build" {
+        if out.build_seen {
+            // M-2 r21: duplicate `build` keys are invalid TOML — fail
+            // closed with a problem and do not trust the skip flag.
+            if out.problem.is_none() {
+                out.problem = Some("Cargo.toml build key is duplicated".to_owned());
+            }
+            out.skip_build_rs = false;
+            return;
+        }
+        out.build_seen = true;
         if rest == "false" || rest == "true" {
             // `build = false` disables the script: the conventional
             // build.rs is dead code (M-3 r20). `true` keeps it.
@@ -2402,6 +2424,9 @@ struct ManifestRoots {
     /// Present-but-unreadable manifest (L-4 r15): the named roots are
     /// unknown, so callers fail loudly instead of certifying them.
     problem: Option<String>,
+    /// A `[package] build` key was seen (any value shape): duplicate
+    /// `build` keys are invalid TOML and fail closed (M-2 r21).
+    build_seen: bool,
     /// `[package] build = "custom/…"`, `build = false`, or an unresolvable
     /// string build value (M-3 r20): a custom script or disabled script
     /// means the conventional `build.rs` is NOT compiled — skip its
@@ -2505,47 +2530,26 @@ enum ManifestSection {
     Other,
 }
 
-/// How a manifest key resolves: a normalized root key, an unparseable
-/// target-table shape (fail closed), or an unrelated key (dependencies
-/// and friends are not crate roots — skip silently).
+/// How a manifest key resolves: a normalized root key, or nothing.
 enum KeyUse<'a> {
     Key(&'a str),
-    Unsupported,
     Ignore,
 }
 
-/// Classify one manifest key in its section (H-1 r20). Dotted keys
-/// (`lib.path`, `package.build`) and whole-section inline tables
-/// (`lib = {...}`) are TOML-valid Cargo — resolve the known root forms,
-/// fail closed on target-table shapes the line parser cannot resolve,
-/// and ignore everything else. Dotted target heads outside `[package]`
-/// are ignored, not failed: there they are either invalid Cargo or a
-/// dependency (e.g. `[dependencies] lib.path`), never a target root of
-/// this crate — and the line parser stays silent on invalid lines
-/// without a root-shaped key.
+/// Classify one manifest key in its section (H-1 r20, H-2/H-3 r21).
+/// Dotted keys NEVER name target roots (verified against cargo across
+/// placements: top-level dotted becomes a dependency spec, in-section
+/// dotted is silently ignored) — dependencies and dotted shapes are not
+/// crate roots, so skip silently. Quote handling: `"path"` unquotes to
+/// `path`; `"lib.path"` keeps its dot and is ignored like the bare form.
 fn classify_manifest_key<'a>(section: &ManifestSection, key: &'a str) -> KeyUse<'a> {
-    if let Some(dot) = key.find('.') {
-        let (head, tail) = (&key[..dot], &key[dot + 1..]);
-        match (section, head, tail) {
-            (ManifestSection::Package, "lib", "path") => KeyUse::Key("path"),
-            (ManifestSection::Package, "package", "build") => KeyUse::Key("build"),
-            (
-                ManifestSection::Package,
-                "lib" | "bin" | "test" | "example" | "bench" | "package",
-                _,
-            ) => KeyUse::Unsupported,
-            _ => KeyUse::Ignore,
-        }
-    } else {
-        match (section, key) {
-            (ManifestSection::LibBin | ManifestSection::Aux, "path") => KeyUse::Key("path"),
-            (ManifestSection::Package, "build") => KeyUse::Key("build"),
-            (
-                ManifestSection::Package | ManifestSection::LibBin | ManifestSection::Aux,
-                "lib" | "bin" | "test" | "example" | "bench" | "package",
-            ) => KeyUse::Unsupported,
-            _ => KeyUse::Ignore,
-        }
+    if key.contains('.') {
+        return KeyUse::Ignore;
+    }
+    match (section, key) {
+        (ManifestSection::LibBin | ManifestSection::Aux, "path") => KeyUse::Key("path"),
+        (ManifestSection::Package, "build") => KeyUse::Key("build"),
+        _ => KeyUse::Ignore,
     }
 }
 
@@ -2603,9 +2607,11 @@ fn parse_manifest_value(rest: &str, lines: &[&str], li: &mut usize) -> ManifestV
         return ManifestValue::Unclosed;
     };
     // L-4 r20: anything but blanks after the closer is invalid TOML —
-    // comments were stripped before the key split, so a remainder is
-    // junk, not a second value.
-    if !chunk[end + mark.len()..].trim().is_empty() {
+    // a trailing comment belongs to the line, not the value (M-3 r21:
+    // strip it before judging the remainder — the single-line path was
+    // already comment-cut, the multiline path was not).
+    let after = &chunk[end + mark.len()..];
+    if !after[..manifest_code_cut(after)].trim().is_empty() {
         return ManifestValue::TrailingJunk;
     }
     if !backslash_escapes {
@@ -2710,15 +2716,6 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
         let key = strip_one_quote_pair(t[..eq].trim());
         let norm = match classify_manifest_key(&section, key) {
             KeyUse::Key(k) => k,
-            KeyUse::Unsupported => {
-                // Target-table shape the line parser cannot resolve
-                // (`lib = {...}`, `bin = […]`, unknown dotted forms):
-                // invalid or exotic Cargo, fail closed (H-1 r20).
-                if out.problem.is_none() {
-                    out.problem = Some(format!("Cargo.toml {key} is not a resolvable path value"));
-                }
-                continue;
-            }
             KeyUse::Ignore => continue,
         };
         manifest_process_value(
@@ -6280,9 +6277,13 @@ mod tests {
     }
 
     #[test]
-    fn manifest_custom_roots_parses_dotted_lib_path() {
-        // H-1 r20: `lib.path = "…"` is TOML-valid Cargo — a dotted custom
-        // root compiles exactly like `[lib] path = …`.
+    fn manifest_custom_roots_ignores_dotted_lib_path() {
+        // H-2 r21: dotted `lib.path` never compiles as the lib target
+        // (verified against cargo: top-level becomes a dependency spec,
+        // in-section is ignored) — dependencies are not crate roots, so
+        // skip silently. (An earlier revision parsed in-`[package]`
+        // dotted forms as roots; the probes proved those files never
+        // compile, so parsing them risked false-flagging dead code.)
         let dir =
             std::env::temp_dir().join(format!("qqq-xtask-xmanifest-dotted-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -6294,36 +6295,48 @@ mod tests {
         .expect("manifest");
         let (roots, problem) = manifest_custom_roots(&dir);
         assert_eq!(problem, None);
-        assert_eq!(roots, vec![dir.join("custom/d.rs")]);
+        assert!(roots.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn manifest_custom_roots_parses_dotted_package_build() {
-        // H-1 r20: `package.build = "…"` names the build script from
-        // inside `[package]`, same as a bare `build` key.
-        let dir = std::env::temp_dir().join(format!(
-            "qqq-xtask-xmanifest-dotbuild-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
+    fn manifest_custom_roots_ignores_dead_dotted_root() {
+        // H-2 r21 run-level pin: a dotted-named NON-`.rs` file is dead
+        // code — the walk never collects it, and dotted keys never name
+        // roots (verified against cargo), so flagging it would be a
+        // false positive on a building tree. (An in-tree `.rs` file is
+        // still scanned by the walk, dotted key or not — that is the
+        // walk-everything policy, not manifest discovery.)
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xdotdead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::create_dir_all(dir.join("custom")).expect("custom dir");
         std::fs::write(
             dir.join("Cargo.toml"),
-            "[package]\nname = \"probe\"\npackage.build = \"custom/b2.txt\"\n",
+            "[package]\nname = \"probe\"\nlib.path = \"custom/d.txt\"\n\n[lib]\npath = \"src/lib.rs\"\n",
         )
         .expect("manifest");
-        let (roots, problem) = manifest_custom_roots(&dir);
-        assert_eq!(problem, None);
-        assert_eq!(roots, vec![dir.join("custom/b2.txt")]);
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            dir.join("custom").join("d.txt"),
+            "pub unsafe fn evil() {}\n",
+        )
+        .expect("dead file");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(ok, "dead dotted file failed the scan:\n{out}");
     }
 
     #[test]
-    fn manifest_custom_roots_rejects_inline_lib_table() {
-        // H-1 r20: `lib = { path = "e.rs" }` is a custom root the
-        // line parser cannot resolve — fail closed with a problem,
-        // never silently skip (same contract as invalid escapes).
+    fn manifest_custom_roots_ignores_inline_lib_table() {
+        // H-1 r21: `lib = { path = "e.rs" }` never compiles as the lib
+        // target (verified against cargo: silently ignored). Skip
+        // silently — failing here would false-positive on building trees.
         let dir =
             std::env::temp_dir().join(format!("qqq-xtask-xmanifest-inline-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -6335,7 +6348,7 @@ mod tests {
         .expect("manifest");
         let (roots, problem) = manifest_custom_roots(&dir);
         assert!(roots.is_empty());
-        assert!(problem.is_some(), "inline lib table surfaced no problem");
+        assert_eq!(problem, None, "ignored inline table surfaced a problem");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6358,6 +6371,95 @@ mod tests {
         let (roots, problem) = manifest_custom_roots(&dir);
         assert_eq!(problem, None);
         assert_eq!(roots, vec![dir.join("src/lib.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_duplicate_build() {
+        // M-2 r21: duplicate `build` keys are invalid TOML — fail closed
+        // with a problem; first occurrence wins, the second adds nothing.
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-dupbuild-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = false\nbuild = \"custom/b.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "duplicate build surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_ignores_comment_after_triple_closer() {
+        // M-3 r21: a `#` comment after the triple closer on a
+        // continuation line is a real comment — the single-line path
+        // strips it, the multiline path must too instead of TrailingJunk.
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-tricomment-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"\"\"custom/a\nb.rs\"\"\" # the root\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/a\nb.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_eof_after_equals() {
+        // L-1 r21: `path =` with no value through EOF names an unknown
+        // root — fail closed, never silently return to conventional roots.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-eofeq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath =",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "EOF after `=` surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_does_not_swallow_header_as_value() {
+        // M-1 r21: `path =` followed by a header line must not consume
+        // the header as its value — a `[`-led line is never a value, so
+        // report unclosed without advancing past it (the next `path`
+        // still resolves in its own section: aux, not lib_bin).
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-noswallow-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath =\n[[test]]\nname = \"t\"\npath = \"custom/t.rs\"\n",
+        )
+        .expect("manifest");
+        let roots = manifest_roots(&dir);
+        assert!(
+            roots.problem.is_some(),
+            "swallowed header surfaced no problem"
+        );
+        assert!(roots.lib_bin.is_empty(), "header swallowed into lib");
+        assert_eq!(roots.aux, vec![dir.join("custom/t.rs")]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1178,13 +1178,7 @@ fn unsafe_line_is_violation(line: &str) -> bool {
             continue;
         }
         if st.in_line_comment || st.comment_depth > 0 {
-            if step_comment_text(
-                line,
-                bytes,
-                &mut i,
-                &mut st.in_line_comment,
-                &mut st.comment_depth,
-            ) {
+            if step_comment_text(line, bytes, &mut i, &mut st) {
                 return true;
             }
             continue;
@@ -1311,52 +1305,63 @@ fn step_code_text(line: &str, bytes: &[u8], i: &mut usize, st: &mut ScanState) -
         return false;
     }
     if is_unsafe_opener(line, bytes, *i, false) {
+        // Advance past the keyword even though this caller returns: the
+        // prefix pass (`raw_entry_states`) ignores the verdict and keeps
+        // threading, and re-reading the same keyword would loop forever.
+        *i += "unsafe".len();
         return true;
     }
     *i += 1;
     false
 }
 
-/// One step while inside comment text (`in_line_comment || depth > 0`).
-/// Comment-held quotes never toggle string state (H2); the `unsafe` check
-/// still runs, per the comments-match policy. Returns true on a violation
-/// at this position; otherwise advances `*i` past what it consumed.
-fn step_comment_text(
-    line: &str,
-    bytes: &[u8],
-    i: &mut usize,
-    in_line_comment: &mut bool,
-    comment_depth: &mut u32,
-) -> bool {
+/// One step while inside comment text. Comment-held quotes never toggle
+/// string state (H2); the `unsafe` check still runs, per the comments-match
+/// policy. Returns true on a violation at this position; otherwise advances
+/// `*i` past what it consumed.
+fn step_comment_text(line: &str, bytes: &[u8], i: &mut usize, st: &mut ScanState) -> bool {
     let Some(&b) = bytes.get(*i) else {
         return false;
     };
-    if b == b'\n' {
-        // Newlines end line comments (block comments thread through, via
-        // the depth branch below). Without this reset a `//`-commented
-        // keyword would govern a real block on the next line — precisely
-        // backwards: the commented keyword governs nothing.
-        *in_line_comment = false;
-        *i += 1;
-        return false;
-    }
-    if *comment_depth > 0 {
+    // No `\n` arm here (LOW r4: dead defense): every newline reaches
+    // `step_literal_text` first, which consumes it and resets the line
+    // comment — this function provably never observes one. Deleting the
+    // unreachable branch rather than documenting around it.
+    if st.comment_depth > 0 {
         if b == b'*' && bytes.get(*i + 1) == Some(&b'/') {
-            *comment_depth = comment_depth.saturating_sub(1);
+            st.comment_depth = st.comment_depth.saturating_sub(1);
             *i += 2;
             return false;
         }
         if b == b'/' && bytes.get(*i + 1) == Some(&b'*') {
-            *comment_depth += 1;
+            st.comment_depth += 1;
             *i += 2;
             return false;
         }
     }
-    if is_unsafe_opener(line, bytes, *i, *in_line_comment) {
+    if is_unsafe_opener(line, bytes, *i, st.in_line_comment) {
+        // Same advance-past-the-keyword contract as the code step above.
+        *i += "unsafe".len();
         return true;
     }
     *i += 1;
     false
+}
+
+/// Whether `c` can sit inside a Rust identifier. ASCII follows the lexer
+/// exactly; non-ASCII accepts alphabetic characters and `_` (M7 r4: pure
+/// `is_alphanumeric` admits `²`, which no Rust ident holds, so the keyword
+/// after such a mark still matches — fail-noisy on code that cannot
+/// compile — while pure-ASCII would split `é` and false-positive on a real
+/// identifier). Barring the `unicode-ident` crate this errs fail-noisy:
+/// exotic Nd identifiers (Arabic-Indic digits) read as boundaries, and
+/// the scan then flags rather than certifies).
+fn is_ident_char(c: char) -> bool {
+    if c.is_ascii() {
+        c.is_ascii_alphanumeric() || c == '_'
+    } else {
+        c.is_alphabetic() || c == '_'
+    }
 }
 
 /// The `unsafe`-opener test at byte `i`: the word `unsafe` on a non-identifier
@@ -1374,23 +1379,21 @@ fn step_comment_text(
 fn is_unsafe_opener(line: &str, bytes: &[u8], i: usize, same_line_only: bool) -> bool {
     if bytes.get(i) != Some(&b'u')
         || !line.get(i..).is_some_and(|t| t.starts_with("unsafe"))
-        // LOW r3: the boundary is Unicode-aware like `starts_word` below —
-        // a byte check reads `é` as two non-ident bytes and flagging
-        // `éunsafe{` as a violation (it is one identifier, not the keyword).
         || !(i == 0
             || line
                 .get(..i)
-                .is_none_or(|pre| !pre.ends_with(|c: char| c.is_alphanumeric() || c == '_')))
+                .is_none_or(|pre| !pre.ends_with(is_ident_char)))
     {
         return false;
     }
     let mut j = i + "unsafe".len();
     loop {
+        // H-r4-H1: every Rust line separator breaks nothing — space, tab,
+        // newline, lone CR, form feed. (str::lines already strips `\r\n`
+        // pairs; a lone `\r` or `\x0C` mid-line stays and is whitespace.)
         while let Some(&x) = bytes.get(j) {
-            if x == b' ' || x == b'\t' {
-                j += 1;
-            } else if x == b'\n' {
-                if same_line_only {
+            if x == b' ' || x == b'\t' || x == b'\n' || x == b'\r' || x == b'\x0C' {
+                if x == b'\n' && same_line_only {
                     return false;
                 }
                 j += 1;
@@ -1423,6 +1426,17 @@ fn is_unsafe_opener(line: &str, bytes: &[u8], i: usize, same_line_only: bool) ->
                 // The comment runs past end of line: no opener is visible on
                 // this line (the multiline residual, documented above).
                 return false;
+            }
+            continue;
+        }
+        // H-r4-H2: a `//` tail comment does not end the search when the
+        // opener may legally sit on the next line (`unsafe // SAFETY: …`
+        // with the block below is valid Rust). Line-comment context itself
+        // stays strict via `same_line_only` above.
+        if !same_line_only && bytes.get(j) == Some(&b'/') && bytes.get(j + 1) == Some(&b'/') {
+            j += 2;
+            while bytes.get(j).is_some_and(|&c| c != b'\n') {
+                j += 1;
             }
             continue;
         }
@@ -1463,11 +1477,46 @@ fn raw_opener(line: &str, i: usize) -> Option<usize> {
     if start > 0
         && line
             .get(..start)
-            .is_some_and(|pre| pre.ends_with(|c: char| c.is_alphanumeric() || c == '_'))
+            .is_some_and(|pre| pre.ends_with(is_ident_char))
     {
         return None;
     }
     Some(hashes)
+}
+
+/// Skip `/*…*/` block comments (nesting) plus surrounding spaces/tabs at
+/// the start of `rest`, returning what follows. Single-purpose helper for
+/// the forbid-attribute parser (LOW r4): token-stream spacing, not text.
+fn skip_inline_block_comments(mut rest: &str) -> &str {
+    loop {
+        rest = rest.trim_start_matches([' ', '\t']);
+        if !(rest.starts_with("/*")) {
+            return rest;
+        }
+        let mut depth: u32 = 0;
+        let mut j = 0;
+        let bytes = rest.as_bytes();
+        let mut closed = None;
+        while let Some(&c) = bytes.get(j) {
+            if c == b'/' && bytes.get(j + 1) == Some(&b'*') {
+                depth += 1;
+                j += 2;
+            } else if c == b'*' && bytes.get(j + 1) == Some(&b'/') {
+                depth = depth.saturating_sub(1);
+                j += 2;
+                if depth == 0 {
+                    closed = Some(j);
+                    break;
+                }
+            } else {
+                j += 1;
+            }
+        }
+        match closed.and_then(|k| rest.get(k..)) {
+            Some(after) => rest = after,
+            None => return rest,
+        }
+    }
 }
 
 /// A line carries the crate-level attribute iff `#![forbid(unsafe_code)]`
@@ -1573,6 +1622,9 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
         let Some(rest) = rest.strip_prefix("forbid") else {
             return false;
         };
+        // So is a block comment there (LOW r4): `forbid/*c*/(...)` is one
+        // token stream, and whitespace-trimming alone would miss it.
+        let rest = skip_inline_block_comments(rest);
         let rest = rest.trim_start_matches([' ', '\t']);
         let Some(rest) = rest.strip_prefix('(') else {
             return false;
@@ -1611,7 +1663,7 @@ fn starts_word(s: &str, word: &str) -> bool {
         && s[word.len()..]
             .chars()
             .next()
-            .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+            .is_none_or(|c| !is_ident_char(c))
 }
 
 /// Scan one crate's `.rs` files for `unsafe` code positions, recording
@@ -1649,15 +1701,59 @@ fn scan_crate_rs_files(
     }
 }
 
-/// Scan one file's text: every line alone, then every adjacent pair.
+/// Whether each line starts inside a multiline raw string (no code there).
+/// One threading pass with the shared step helpers — no drift by
+/// construction. Strings, chars and line comments reset at every joining
+/// newline (same as the pair scan); only raw strings and block comments
+/// thread through. Callers skip raw-content lines for single hits and
+/// refuse pairs that start in one: a content line ending in `unsafe` must
+/// not resolve against the next line as code.
+fn raw_entry_states(lines: &[&str]) -> Vec<bool> {
+    let mut st = ScanState::default();
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        out.push(st.in_raw.is_some());
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while bytes.get(i).is_some() {
+            if step_literal_text(bytes, &mut i, &mut st) {
+                continue;
+            }
+            if st.in_line_comment || st.comment_depth > 0 {
+                if step_comment_text(line, bytes, &mut i, &mut st) {
+                    // A hit changes nothing about the lexer state the next
+                    // line inherits — keep threading to end of line.
+                }
+                continue;
+            }
+            if step_code_text(line, bytes, &mut i, &mut st) {
+                // Same: the verdict is the caller's; state threads on.
+            }
+        }
+        // The joining newline, exactly as the pair scan applies it.
+        let mut k = 0;
+        step_literal_text(b"\n", &mut k, &mut st);
+    }
+    out
+}
+
+/// Scan one file's text: every line alone, then every significant pair.
 /// The pair re-test closes the cross-line shape (H-r3-H1: `unsafe` dangling
 /// at end of line with the opener on the next); pairs whose lines already
 /// flagged are skipped to avoid double-reporting the same finding.
+/// Pairing skips blank and full-line-`//` separators (H-r4-H2): they carry
+/// no tokens, so `unsafe`, a blank or comment line, then the opener still
+/// resolves. Lines starting inside a multiline raw string are prose, not
+/// code, for both passes. L14: a dangling keyword separated by intervening
+/// *code*, or inside an unclosed block comment, stays invisible — the
+/// whole-file grammar that would see it is the same work `audit_unsafe.py`
+/// defers, and both scanners agree here.
 fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
     let lines: Vec<&str> = text.lines().collect();
+    let raw_entry = raw_entry_states(&lines);
     let mut flagged: Vec<bool> = Vec::with_capacity(lines.len());
     for (n, line) in lines.iter().enumerate() {
-        if unsafe_line_exempt(line) {
+        if raw_entry.get(n) == Some(&true) || unsafe_line_exempt(line) {
             flagged.push(false);
             continue;
         }
@@ -1668,9 +1764,27 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
             flagged.push(false);
         }
     }
-    for (n, w) in lines.windows(2).enumerate() {
-        let [a, b] = w else { continue };
-        if flagged.get(n) == Some(&true) || flagged.get(n + 1) == Some(&true) {
+    let sig: Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            // Blank and full-line-`//` separators carry no tokens. Dropping
+            // a raw-string content line that happens to start with `//` is
+            // safe: the pair machine re-derives raw state from the first
+            // line, so the content still classifies as a string.
+            let t = l.trim();
+            !(t.is_empty() || t.starts_with("//"))
+        })
+        .map(|(n, l)| (n, *l))
+        .collect();
+    for w in sig.windows(2) {
+        let (Some(&(na, a)), Some(&(nb, b))) = (w.first(), w.get(1)) else {
+            continue;
+        };
+        if raw_entry.get(na) == Some(&true)
+            || flagged.get(na) == Some(&true)
+            || flagged.get(nb) == Some(&true)
+        {
             continue;
         }
         let mut pair = String::with_capacity(a.len() + b.len() + 1);
@@ -1683,8 +1797,8 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
         if unsafe_line_is_violation(&pair) {
             violations.push(format!(
                 "{rel}:{}:cross-line `unsafe` opener (the keyword dangles at the end of line {})",
-                n + 2,
-                n + 1
+                nb + 1,
+                na + 1
             ));
         }
     }
@@ -1714,8 +1828,17 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
                 continue;
             }
         };
-        if e.file_type().is_ok_and(|t| t.is_dir()) {
-            crates.push(e.path());
+        // H-r4-H3: a failed `file_type` (dangling target, denied stat) is a
+        // hole the same size as a failed listing — neither dir nor file may
+        // silently vanish. `file_type` never follows symlinks, so linked
+        // trees stay unrecursed by design (L11: same as the CI grep's `-r`).
+        match e.file_type() {
+            Ok(t) if t.is_dir() => crates.push(e.path()),
+            Ok(_) => {}
+            Err(e) => violations.push(format!(
+                "{}: cannot stat entry, scan incomplete: {e}",
+                workspace.join("crates").display()
+            )),
         }
     }
     crates.sort();
@@ -1787,6 +1910,11 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
 /// failure, not a skip (M4): `run_unsafe_scan` fails loudly on `problems`
 /// instead of certifying a tree it never saw. (Unreadable *files* already
 /// fail the same way at the read site below.)
+/// Symlinked directories are not recursed (L11): `file_type` never follows
+/// links, so a linked tree is silently unrecursed rather than loop-chased.
+/// That matches the CI grep's default `-r` (which likewise does not follow
+/// symlinks) — following them would need a visited-set against cycles,
+/// and the parity target defines the contract here.
 fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String>) {
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
@@ -1838,7 +1966,11 @@ const HELP_COMMANDS: &[&str] = &[
 /// checker blocks its lane until the CI job's own 60-minute backstop kills
 /// it. The sequential lane still prints its `run` line up front, so the
 /// in-flight step is named in the log instead of going silent.
-fn target_debug_dir(workspace: &Path) -> PathBuf {
+///
+/// M6 r4: a failed `cargo metadata` (toolchain broken mid-gate) is an
+/// `Err` with the real cause — falling back to `workspace/target` would
+/// blame a missing build for a broken toolchain, the wrong repair.
+fn target_debug_dir(workspace: &Path) -> Result<PathBuf, String> {
     let via_env = std::env::var("CARGO_TARGET_DIR")
         .ok()
         .filter(|d| !d.is_empty());
@@ -1846,14 +1978,25 @@ fn target_debug_dir(workspace: &Path) -> PathBuf {
     // must not silently fall back to `workspace/target` and then fail as
     // "missing; run the build step first" — check `success()` like the
     // `git` and interpreter-discovery paths do.
-    let via_metadata = Command::new("cargo")
+    let via_metadata = match Command::new("cargo")
         .args(["metadata", "--format-version=1", "--no-deps"])
         .current_dir(workspace)
         .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| parse_target_dir(&o.stdout));
-    resolve_target_debug_dir(workspace, via_env.as_deref(), via_metadata)
+    {
+        Err(e) => return Err(format!("cannot run `cargo metadata`: {e}")),
+        Ok(o) if !o.status.success() => {
+            return Err(format!(
+                "`cargo metadata` exited {}: the toolchain is broken, not the target dir",
+                o.status
+            ));
+        }
+        Ok(o) => parse_target_dir(&o.stdout),
+    };
+    Ok(resolve_target_debug_dir(
+        workspace,
+        via_env.as_deref(),
+        via_metadata,
+    ))
 }
 
 /// Pure core of `target_debug_dir`, so the relative-var pinning is unit
@@ -1952,6 +2095,8 @@ fn parse_target_dir_at(json: &[u8]) -> Option<PathBuf> {
             b'n' => out.push(b'\n'),
             b't' => out.push(b'\t'),
             b'r' => out.push(b'\r'),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0C),
             b'\\' => out.push(b'\\'),
             b'"' => out.push(b'"'),
             b'/' => out.push(b'/'),
@@ -2001,9 +2146,11 @@ fn parse_hex4(it: &mut std::slice::Iter<'_, u8>) -> Option<u32> {
 /// Counts from the process output like the CI pipe does — never held in a
 /// shell variable, which is the vacuity the CI comments warn about.
 /// Presence keys on the command as the first token of an *indented* line
-/// (LOW r3): pinning clap's exact four spaces would read a layout change
-/// as 16 missing commands, while an unindented prose match ("run the
-/// doctor …") must never count.
+/// followed by a column separator (LOW r3: pinning clap's exact four spaces
+/// would read a layout change as 16 missing commands; LOW r4: bare
+/// first-token matching would count indented prose starting with a command
+/// word, and a suffixed token like `doctor,` must not stand in for the
+/// entry — clap pads entries with two or more spaces).
 fn help_check(output: &str) -> Result<(usize, usize), String> {
     let text = output.replace("\r\n", "\n");
     if text.is_empty() {
@@ -2014,10 +2161,16 @@ fn help_check(output: &str) -> Result<(usize, usize), String> {
     let lines = text.lines().count();
     let mut present = 0;
     for cmd in HELP_COMMANDS {
-        if text
-            .lines()
-            .any(|l| l.starts_with([' ', '\t']) && l.split_whitespace().next() == Some(*cmd))
-        {
+        if text.lines().any(|l| {
+            let t = l.trim_start_matches([' ', '\t']);
+            // Indented (so prose at column zero never counts) with the
+            // command as the first token and a column gap after it.
+            l.len() != t.len()
+                && t.split_whitespace().next() == Some(*cmd)
+                && t.get(cmd.len()..).is_some_and(|r| {
+                    r.starts_with("  ") || r.starts_with('\t') || r.trim().is_empty()
+                })
+        }) {
             present += 1;
         } else {
             return Err(format!("the help omits the {cmd} command"));
@@ -2039,7 +2192,12 @@ fn help_check(output: &str) -> Result<(usize, usize), String> {
 
 fn run_help_brevity(workspace: &Path) -> (bool, String) {
     let exe = if cfg!(windows) { "qqqai.exe" } else { "qqqai" };
-    let bin = target_debug_dir(workspace).join(exe);
+    // M6 r4: a broken toolchain reports itself here, not as a missing
+    // binary that sends the reader to re-run the build.
+    let bin = match target_debug_dir(workspace) {
+        Ok(dir) => dir.join(exe),
+        Err(e) => return (false, e),
+    };
     if !bin.is_file() {
         return (
             false,
@@ -2123,9 +2281,14 @@ fn injection_verdict(run: Result<(bool, String), String>, expect: &str) -> Resul
     if ok {
         return Ok(false);
     }
-    let detected = output
-        .lines()
-        .any(|l| l.contains(expect) && l.trim_start().starts_with("FAIL"));
+    let detected = output.lines().any(|l| {
+        // `FAIL ` with a column separator — not a bare `FAIL` prefix, which
+        // `FAILED…` crash lines also carry (M4 r4).
+        l.trim_start()
+            .strip_prefix("FAIL")
+            .is_some_and(|r| r.starts_with([' ', '\t', ':']))
+            && l.contains(expect)
+    });
     Ok(detected)
 }
 
@@ -2779,8 +2942,15 @@ mod tests {
             "{ in a comment"
         )));
         // The word boundary is Unicode-aware (LOW r3): `éunsafe` is one
-        // identifier, not the keyword plus a brace.
+        // identifier, not the keyword plus a brace — while `²unsafe` is not
+        // one identifier at all (² is alphanumeric but not alphabetic, and
+        // no Rust ident holds it), so the keyword still matches there:
+        // fail-noisy on code that cannot compile beats silent (M7 r4).
+        // (`unsafe²` cuts the other way: `²` is not gap whitespace, so no
+        // opener is visible — the machine reports what it sees.)
         assert!(!unsafe_line_is_violation("éunsafe { x(); }"));
+        assert!(unsafe_line_is_violation("²unsafe { x(); }"));
+        assert!(!unsafe_line_is_violation("unsafe² { x(); }"));
     }
 
     #[test]
@@ -2925,6 +3095,13 @@ mod tests {
             parse_target_dir(pair),
             Some(PathBuf::from("/tmp/\u{1F600}"))
         );
+        // The full JSON escape set decodes (M5 r4): `\b` and `\f` are not
+        // exotic, just rare in paths — refusing them falls back silently.
+        let bf = br#"{"target_directory":"/tmp/a\bb\fc"}"#;
+        assert_eq!(
+            parse_target_dir(bf),
+            Some(PathBuf::from("/tmp/a\u{8}b\u{c}c"))
+        );
         // The first key hit may sit inside a string value (M-r3-MED) — keep
         // searching instead of refusing on its non-colon follower.
         let inner = br#"{"a":"\"target_directory\"","target_directory":"/real"}"#;
@@ -3066,6 +3243,15 @@ mod tests {
             ),
             Ok(false)
         );
+        // M4 r4: the prefix is `FAIL `, not `FAIL` — a crash line starting
+        // `FAILED…` that echoes the needle must not count as a detection.
+        assert_eq!(
+            injection_verdict(
+                Ok((false, "  FAILED to parse std::env::var report".to_owned())),
+                "std::env"
+            ),
+            Ok(false)
+        );
         assert_eq!(
             injection_verdict(
                 Ok((
@@ -3182,6 +3368,11 @@ mod tests {
         assert!(unsafe_line_is_violation("unsafe\n{ x(); }"));
         assert!(unsafe_line_is_violation("unsafe /* trailing */\n{ x(); }"));
         assert!(!unsafe_line_is_violation("// unsafe\n{ x(); }"));
+        // H-r4: the gap is every Rust line separator — lone CR too — and a
+        // `//` tail comment does not end the search when the opener may
+        // legally sit on the next line (same_line_only stays strict).
+        assert!(unsafe_line_is_violation("unsafe\r{ x(); }"));
+        assert!(unsafe_line_is_violation("unsafe // SAFETY: why\n{ x(); }"));
     }
 
     #[test]
@@ -3191,18 +3382,61 @@ mod tests {
         // attribute would fail the scan for the wrong reason), the only
         // violation the dangling keyword plus next-line brace.
         let root = std::env::temp_dir().join(format!("qqq-xtask-xline-{}", std::process::id()));
+        // M8: clear a previous crashed run's residue first — create alone
+        // would reuse it, and the assertion below must judge this run.
+        let _ = std::fs::remove_dir_all(&root);
         let src = root.join("crates").join("probe").join("src");
         std::fs::create_dir_all(&src).expect("temp crate");
         std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
         std::fs::write(
             src.join("main.rs"),
-            "#![forbid(unsafe_code)]\nfn main() {\n    let x = unsafe\n    { 1 };\n    let _ = x;\n}\n",
+            "#![forbid(unsafe_code)]\nfn main() {\n    let x = unsafe\n\n    // SAFETY: separated\n    { 1 };\n    let _ = x;\n}\n",
         )
         .expect("main");
         let (ok, out) = run_unsafe_scan(&root);
         let _ = std::fs::remove_dir_all(&root);
         assert!(!ok, "cross-line opener passed the scan:\n{out}");
         assert!(out.contains("cross-line"), "wrong failure shape:\n{out}");
+    }
+
+    #[test]
+    fn raw_entry_states_thread_across_lines() {
+        // Prefix-pass contract: lines inside a multiline raw string are
+        // marked as content, and keyword-heavy prose or comments do not
+        // disturb the threading. (The verdict-ignoring loop once re-read
+        // the same keyword forever here — caught only by the real-tree
+        // tripwire hanging, never by an assertion. This test pins the
+        // termination directly: it hangs pre-fix.)
+        let lines = vec![
+            "let s = r#\"",
+            "    foo unsafe",
+            "    { x }",
+            "\"#;",
+            "// a comment holding unsafe { shapes",
+            "let y = unsafe",
+            "{ y };",
+        ];
+        let entry = raw_entry_states(&lines);
+        assert_eq!(entry, vec![false, true, true, true, false, false, false]);
+    }
+
+    #[test]
+    fn unsafe_scan_ignores_multiline_raw_content() {
+        // Entry-raw run level: mimic shapes inside a multiline raw string
+        // are prose — the pair scan must not resolve them as code.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xraw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
+        std::fs::write(
+            src.join("main.rs"),
+            "#![forbid(unsafe_code)]\nfn main() {\n    let s = r#\"\n    foo unsafe\n    { x }\n    \"#;\n    let _ = s;\n}\n",
+        )
+        .expect("main");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(ok, "multiline raw content flagged as code:\n{out}");
     }
 
     #[test]
@@ -3225,6 +3459,9 @@ mod tests {
         // Space between the lint path and its list is legal Rust.
         let mut b = 0;
         assert!(line_has_forbid_attr("#![forbid (unsafe_code)]", &mut b));
+        // So is a block comment there (LOW r4): token stream, not text.
+        let mut b = 0;
+        assert!(line_has_forbid_attr("#![forbid/*c*/(unsafe_code)]", &mut b));
     }
 
     #[test]
@@ -3252,6 +3489,12 @@ mod tests {
         let (_, present) = help_check(&narrow).expect("indent-tolerant fixture must pass");
         assert_eq!(present, 16);
         assert!(help_check("run the doctor when sick\n").is_err());
+        // LOW r4: indented prose starting with a command word must not
+        // count either — the token needs a column separator after it (two
+        // spaces, as clap pads entries), not prose spacing. Drop the real
+        // entry so only the prose could satisfy it.
+        let no_doctor = help.replace("    doctor  do doctor\n", "");
+        assert!(help_check(&(no_doctor + "    doctor is great\n")).is_err());
     }
 
     #[test]

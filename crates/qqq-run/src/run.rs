@@ -467,7 +467,7 @@ pub fn package_of(interface: &str) -> String {
     }
 }
 
-/// Map an imported interface to the capability that unlocks it, **exactly**.
+/// Map an imported interface to **every** capability that unlocks it, **exactly**.
 ///
 /// # There is only one mapping, and this is it
 ///
@@ -492,19 +492,34 @@ pub fn package_of(interface: &str) -> String {
 ///
 /// The two answer different questions and the difference is a security bug if
 /// conflated.
+///
+/// # Why plural, and what the singular wrapper is for
+///
+/// Two capabilities may legitimately unlock one interface (`qqq:http/http`
+/// carries both `send` and `incoming-authority`), so the audit answer is a
+/// list: reporting only one understates what an artifact can do, and
+/// understating is the one failure an audit surface must not have. The
+/// pre-flight gate, by contrast, must demand **one** grant to check — so
+/// [`capability_for_import`] answers with the strongest, fail-closed, and
+/// documents that it is the gate's answer, not the audit's.
+///
+/// ```
+/// let caps = qqq_run::run::capabilities_for_import("qqq:http/http@1.0.0");
+/// assert_eq!(caps.len(), 2, "both directions are implied, not just the strongest");
+/// ```
 #[must_use]
-pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
+pub fn capabilities_for_import(interface: &str) -> Vec<qqq_cap::Capability> {
     let wanted = strip_version(interface);
 
     // The precise table first: for a package with several interfaces, this is
     // the only mapping that can name the right capability.
     //
-    // **Capabilities come back in a defined order and the strongest wins.** Two
-    // capabilities may legitimately map to one interface: `qqq:http/http`
-    // carries both `send` (outbound) and `incoming-authority` (which server is
-    // serving), so importing it implies `http.client` *and* `http.server`. The
-    // report must name the stronger, because understating what an artifact can
-    // do is the one failure an audit surface must not have.
+    // **Every match is returned, strongest first.** Two capabilities may
+    // legitimately map to one interface: `qqq:http/http` carries both `send`
+    // (outbound) and `incoming-authority` (which server is serving), so
+    // importing it implies `http.client` *and* `http.server`. An audit surface
+    // that names only one understates what the artifact can do — the failure
+    // this shape exists to prevent.
     let matches: Vec<qqq_cap::Capability> = qqq_cap::Capability::all()
         .iter()
         .copied()
@@ -514,7 +529,7 @@ pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
         .collect();
 
     if !matches.is_empty() {
-        return matches.into_iter().max_by_key(|c| exposure_rank(*c));
+        return strongest_first(matches);
     }
 
     // The 0.3 set beside 0.2 (**ABI-017**): versioned WASI names resolve to
@@ -539,7 +554,7 @@ pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
         .collect();
 
     if !wasi03.is_empty() {
-        return wasi03.into_iter().max_by_key(|c| exposure_rank(*c));
+        return strongest_first(wasi03);
     }
 
     // Then the package-level fallback, for single-interface packages where the
@@ -574,14 +589,82 @@ pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
         })
         .collect();
 
-    // Same strongest-wins rule as above. `qqq:fs/filesystem` is unlocked by
-    // `FsRead`, `FsWrite` **and** `FsWatch`; reporting `fs.read` for an
-    // artifact that imports the whole filesystem interface would understate it
-    // by two thirds, and understating is the failure that matters here.
-    if matching.is_empty() {
-        return None;
+    // Every match, strongest first — `qqq:fs/filesystem` is unlocked by
+    // `FsRead`, `FsWrite` **and** `FsWatch`, and the audit surface must name
+    // all three rather than only the strongest.
+    strongest_first(matching)
+}
+
+/// Order matches strongest-first, deterministically.
+///
+/// Exposure rank decides — the gate and the audit agree on what "stronger"
+/// means — and rank ties resolve to the **later** declaration in
+/// [`qqq_cap::Capability::all`]. That is not an aesthetic choice: the legacy
+/// singular gate used `max_by_key`, which returns the last maximum, so this
+/// order keeps `capability_for_import`'s answer byte-identical to the one the
+/// existing pins assert (`fs.write`, not `fs.watch`). A prettier tie-break
+/// would silently move the gate.
+fn strongest_first(mut caps: Vec<qqq_cap::Capability>) -> Vec<qqq_cap::Capability> {
+    caps.sort_by(|a, b| {
+        exposure_rank(*b)
+            .cmp(&exposure_rank(*a))
+            .then_with(|| all_index(*b).cmp(&all_index(*a)))
+    });
+    caps
+}
+
+/// The declaration order of a capability, for tie-breaking.
+fn all_index(c: qqq_cap::Capability) -> usize {
+    qqq_cap::Capability::all()
+        .iter()
+        .position(|&x| x == c)
+        .unwrap_or(usize::MAX)
+}
+
+/// The single capability the pre-flight gate demands for an import.
+///
+/// This is [`capabilities_for_import`] reduced to its strongest match:
+/// fail-closed, one grant to check. It is the gate's answer — used where
+/// enforcement needs a decision — not the audit's answer, which must name
+/// every implied capability. Callers that report authority use the plural.
+#[must_use]
+pub fn capability_for_import(interface: &str) -> Option<qqq_cap::Capability> {
+    capabilities_for_import(interface).into_iter().next()
+}
+
+/// Whether the host can serve an import today, regardless of grants.
+///
+/// This is servability, not authority: it answers "would instantiation find
+/// an implementation", the question `QQQ-6004` asks at bind time. Grants are
+/// deliberately out of scope — an ungranted-but-servable interface fails with
+/// a remediation, an unservable one fails no matter what the manifest says,
+/// and the audit surface must not conflate the two.
+///
+/// * `wasi:` names follow the link set: the 0.2 baseline links
+///   unconditionally, a 0.3 name is served exactly when it maps to a
+///   capability the 0.3 table knows.
+/// * `qqq:` names follow the registry's per-package `implemented` flag, which
+///   the pinning test in `qqq-abi` keeps honest.
+/// * Anything else has no implementation behind it.
+///
+/// ```
+/// assert!(qqq_run::run::interface_implemented("qqq:crypto/hashing@1.0.0"));
+/// assert!(!qqq_run::run::interface_implemented("qqq:http/http@1.0.0"));
+/// ```
+#[must_use]
+pub fn interface_implemented(interface: &str) -> bool {
+    if interface.starts_with("wasi:") {
+        return is_wasi02_baseline(interface)
+            || (is_wasi03_revision(interface) && !capabilities_for_import(interface).is_empty());
     }
-    matching.into_iter().max_by_key(|c| exposure_rank(*c))
+    if !interface.contains(':') {
+        return false;
+    }
+    let package = package_of(interface);
+    qqq_abi::registry::interfaces()
+        .iter()
+        .find(|i| strip_version(&i.name) == package)
+        .is_some_and(|i| i.implemented)
 }
 
 /// How much authority a capability grants, for choosing between two that unlock
@@ -663,8 +746,17 @@ fn import_error(check: &ImportCheck, loaded: &LoadedManifest) -> Error {
     // path was missed because the two commands reach the mapping differently —
     // `inspect` had a visible wrong answer in its report, while `run` only shows
     // it in a remediation line that a reader is already primed to trust.
-    let implicated: Option<qqq_cap::Capability> =
-        check.missing.iter().find_map(|i| capability_for_import(i));
+    //
+    // Every capability each missing interface implies, not just the strongest:
+    // naming one grant when the interface needs two leaves the component still
+    // failing after the operator pastes the fix.
+    let mut implicated: Vec<qqq_cap::Capability> = check
+        .missing
+        .iter()
+        .flat_map(|i| capabilities_for_import(i))
+        .collect();
+    implicated.sort();
+    implicated.dedup();
 
     let mut e = Error::new(
         ErrorCode::ComponentLoadFailed,
@@ -676,8 +768,8 @@ fn import_error(check: &ImportCheck, loaded: &LoadedManifest) -> Error {
     .with_context("missing", missing)
     .with_context("granted", check.satisfied.join(", "))
     .with_context("project", loaded.name().to_owned())
-    .with_remediation(match implicated {
-        Some(cap) => crate::commands::fix_stanza_for(cap),
+    .with_remediation(match implicated.first() {
+        Some(cap) => crate::commands::fix_stanza_for(*cap),
         None => format!(
             "run `{} caps` to see what is granted, and `{} why <capability>` to \
              understand a decision",
@@ -685,8 +777,18 @@ fn import_error(check: &ImportCheck, loaded: &LoadedManifest) -> Error {
             qqq_core::BINARY_NAME
         ),
     });
-    if let Some(cap) = implicated {
+    if let Some(cap) = implicated.first() {
         e = e.with_context("capability", cap.name().to_owned());
+    }
+    if implicated.len() > 1 {
+        let rest = implicated
+            .get(1..)
+            .unwrap_or_default()
+            .iter()
+            .map(|c| c.name().to_owned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        e = e.with_context("also_implicated", rest);
     }
     e
 }
@@ -1673,6 +1775,32 @@ mod tests {
         // No colon and no path: nothing to reduce, so nothing is reduced.
         assert_eq!(package_of("plain"), "plain");
         assert_eq!(package_of(""), "");
+    }
+
+    /// Servability follows the registry and the link set, not the grants.
+    ///
+    /// An artifact requiring `http.server` reads nothing like one requiring
+    /// `crypto.hash` at instantiation — the first has no host implementation
+    /// yet — so the artifact report marks each requirement. Grants are out of
+    /// scope here on purpose: ungranted-but-servable fails with a remediation,
+    /// unservable fails regardless.
+    #[test]
+    fn servability_follows_the_registry_and_the_link_set() {
+        // Implemented rows serve.
+        assert!(interface_implemented("qqq:crypto/hashing@1.0.0"));
+        assert!(interface_implemented("qqq:clock/wall-clock@1.0.0"));
+        // Unimplemented rows do not, even though they map to capabilities.
+        assert!(!interface_implemented("qqq:http/http@1.0.0"));
+        assert!(!interface_implemented("qqq:fs/filesystem@1.0.0"));
+        // The 0.2 baseline links unconditionally — except `wasi:http`, which
+        // has no baseline registration and must stay missing.
+        assert!(interface_implemented("wasi:cli/stdout@0.2.0"));
+        assert!(!interface_implemented("wasi:http/incoming-handler@0.2.0"));
+        // A 0.3 name is served exactly when the 0.3 table knows it.
+        assert!(interface_implemented("wasi:clocks/monotonic-clock@0.3.2"));
+        assert!(!interface_implemented("wasi:http/incoming-handler@0.3.2"));
+        // Unknown names serve nothing.
+        assert!(!interface_implemented("not-an-interface"));
     }
 
     /// A package-spelled import still resolves, through the fallback branch.

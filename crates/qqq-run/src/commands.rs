@@ -200,10 +200,53 @@ pub fn fix_stanza_for(c: Capability) -> String {
     if c == Capability::QueueSubscribe {
         return "add to qqq.toml:\n\n    [[capabilities.queue]]\n    name = \"orders.events\"\n    direction = \"subscribe\"  # for queue.subscribe".to_owned();
     }
+    // One capability, one grant: suggesting the whole namespace table for a
+    // single denial pastes unasked authority. `why http.server` on a deny-all
+    // manifest used to suggest `server = true` **and** `client = [...]` — an
+    // operator fixing a server denial would grant egress too, and the `crypto`
+    // table was worse (five grants including the covert `crypto.random`).
+    // Each arm below parses to exactly the capability named in its comment,
+    // pinned by `fix_stanzas_grant_only_the_capability_named`.
+    if c == Capability::HttpServer {
+        return "add to qqq.toml:\n\n    [capabilities.http]\n    server = true  # for http.server"
+            .to_owned();
+    }
+    if c == Capability::HttpClient {
+        return "add to qqq.toml:\n\n    [capabilities.http]\n    client = [\"host:443\"]  # for http.client".to_owned();
+    }
+    if c == Capability::CryptoRandom {
+        return "add to qqq.toml:\n\n    [capabilities.crypto]\n    random = true  # for crypto.random".to_owned();
+    }
+    if c == Capability::CryptoHash {
+        return "add to qqq.toml:\n\n    [capabilities.crypto]\n    hash = [\"sha256\"]  # for crypto.hash".to_owned();
+    }
+    if c == Capability::CryptoHmac {
+        return "add to qqq.toml:\n\n    [capabilities.crypto]\n    hmac = [\"sha256\"]  # for crypto.hmac".to_owned();
+    }
+    if c == Capability::CryptoAead {
+        return "add to qqq.toml:\n\n    [capabilities.crypto]\n    aead = [\"aes-256-gcm\"]  # for crypto.aead".to_owned();
+    }
+    if c == Capability::CryptoSign {
+        return "add to qqq.toml:\n\n    [capabilities.crypto]\n    sign = [\"ed25519\"]  # for crypto.sign".to_owned();
+    }
+    if c == Capability::ClockWall {
+        return "add to qqq.toml:\n\n    [capabilities.clock]\n    wall = true  # for clock.wall"
+            .to_owned();
+    }
+    if c == Capability::ClockMonotonic {
+        return "add to qqq.toml:\n\n    [capabilities.clock]\n    monotonic = true  # for clock.monotonic".to_owned();
+    }
     match c.namespace() {
+        // Whole-table fallbacks, reachable only by future variants of these
+        // namespaces: every capability known today returns above with an
+        // exact stanza. A future variant has no per-capability pin yet, so
+        // the table — with each line annotated — is the honest suggestion
+        // until its pin lands.
         "http" => "add to qqq.toml:\n\n    [capabilities.http]\n    server = true          # for http.server\n    client = [\"host:443\"]  # for http.client".to_owned(),
         "fs" => "add to qqq.toml:\n\n    [[capabilities.fs]]\n    path = \"/var/lib/app\"\n    mode = \"read-only\"     # or \"append-only\" / \"read-write\"".to_owned(),
         "crypto" => "add to qqq.toml:\n\n    [capabilities.crypto]\n    random = true          # for crypto.random\n    hash = [\"sha256\"]      # for crypto.hash\n    hmac = [\"sha256\"]      # for crypto.hmac\n    aead = [\"aes-256-gcm\"] # for crypto.aead\n    sign = [\"ed25519\"]     # for crypto.sign".to_owned(),
+        // Future-variant fallback like `http` above: known capabilities
+        // return exact stanzas before the match.
         "clock" => "add to qqq.toml:\n\n    [capabilities.clock]\n    wall = true            # for clock.wall\n    monotonic = true       # for clock.monotonic".to_owned(),
         "env" => "add to qqq.toml:\n\n    [capabilities.env]\n    allow = [\"LOG_LEVEL\"]  # name each variable; wildcards are refused".to_owned(),
         "dns" => "add to qqq.toml:\n\n    [capabilities.dns]\n    resolve = [\"api.example.com\"]".to_owned(),
@@ -340,14 +383,6 @@ impl CommandOutput for CapsOutput {
         }
         out.pop();
 
-        if self.explained.iter().all(|e| e.decisions.is_empty()) && !self.explained.is_empty() {
-            let _ = write!(
-                out,
-                "\n\nNo layer recorded a decision for these capabilities. That means each was \
-                 granted\nby qqq.toml and nothing narrowed it -- which is the normal case."
-            );
-        }
-
         if !self.layers.is_empty() {
             let _ = write!(out, "\n\nGranted by: {}", self.layers.join(", "));
         }
@@ -482,30 +517,40 @@ pub fn caps(loaded: &LoadedManifest, explain: bool) -> CapsOutput {
             Vec::new()
         },
         warnings: {
-            // A filesystem-root grant authorizes the entire visible tree, so
-            // accepting one silently is how an operator believes a narrow
-            // grant is active while every descendant is authorized
-            // (CAP-FS-002). The check is lexical on the declared path — no
-            // filesystem access — and shares `is_filesystem_root` with the
-            // normalization contract, so the two cannot disagree on what
-            // counts as a root. It lives on `caps` rather than `inspect`
-            // because `InspectOutput` has no warnings field and growing the
-            // schema for a warning is the wrong trade; `caps` is the surface
-            // whose job is warning about grants.
             let mut warnings = resolution.warnings.clone();
-            for entry in &loaded.manifest.capabilities.fs {
-                if qqq_cap::is_filesystem_root(&entry.path) {
-                    warnings.push(format!(
-                        "filesystem grant for `{}` covers a filesystem root — \
-                         every descendant is authorized; narrow it to the \
-                         smallest directory the guest needs",
-                        entry.path
-                    ));
-                }
-            }
+            warnings.extend(filesystem_root_warnings(&loaded.manifest));
             warnings
         },
     }
+}
+
+/// Warnings for filesystem grants that cover a filesystem root.
+///
+/// A filesystem-root grant authorizes the entire visible tree, so accepting
+/// one silently is how an operator believes a narrow grant is active while
+/// every descendant is authorized (CAP-FS-002). The check is lexical on the
+/// declared path — no filesystem access — and shares `is_filesystem_root`
+/// with the normalization contract, so the two cannot disagree on what
+/// counts as a root.
+///
+/// Shared by `caps` and `inspect`: both surfaces report grants, so both must
+/// warn about them. A warning that lives on only one of two grant-reporting
+/// commands is one a reviewer reading the other will never see.
+fn filesystem_root_warnings(manifest: &qqq_cap::manifest::Manifest) -> Vec<String> {
+    manifest
+        .capabilities
+        .fs
+        .iter()
+        .filter(|entry| qqq_cap::is_filesystem_root(&entry.path))
+        .map(|entry| {
+            format!(
+                "filesystem grant for `{}` covers a filesystem root — \
+                 every descendant is authorized; narrow it to the \
+                 smallest directory the guest needs",
+                entry.path
+            )
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -610,7 +655,11 @@ pub fn openapi(loaded: &crate::manifest_loader::LoadedManifest) -> Result<Openap
     // `path_count` whenever two routes share a path -- which is ordinary, and would make the
     // summary wrong in exactly the case a user checks it.
     let path_count = doc.paths.len();
-    let operation_count = doc.paths.values().filter(|i| !i.is_empty()).count();
+    let operation_count: usize = doc
+        .paths
+        .values()
+        .map(crate::openapi::PathItem::operation_count)
+        .sum();
     let document = serde_json::to_value(&doc).map_err(|e| {
         Error::new(
             ErrorCode::InternalInvariantViolated,
@@ -647,6 +696,19 @@ pub struct InspectOutput {
     pub limits: LimitsReport,
     /// A human-readable security posture.
     pub posture: Posture,
+    /// Capabilities that are covert channels, called out separately.
+    ///
+    /// `caps` has always reported these; `inspect` did not, so a reviewer
+    /// reading only the project report missed the grants §10.5 singles out
+    /// as information channels the audit stream cannot see.
+    pub covert_channels: Vec<String>,
+    /// Non-blocking warnings from resolution, e.g. a filesystem-root grant.
+    ///
+    /// Same sources as `caps`: resolution warnings plus the shared
+    /// filesystem-root check. Two grant-reporting commands must not disagree
+    /// on what they warn about.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// One interface a component will be able to import.
@@ -727,10 +789,15 @@ impl TenantLimitReport {
     }
 
     /// Whether this entry carries no limit at all.
+    ///
+    /// A window with no capped quantity bounds nothing — it only scopes
+    /// `max_requests_per_window` — so a window-only header declares no policy
+    /// and is dropped like any other empty header.
     #[must_use]
     const fn is_empty(&self) -> bool {
         self.max_body_bytes.is_none()
             && self.max_requests_per_window.is_none()
+            && self.window_seconds.is_none()
             && self.max_connections.is_none()
     }
 }
@@ -859,6 +926,20 @@ impl CommandOutput for InspectOutput {
             out.pop();
         }
 
+        // Covert channels and warnings are rendered, not merely carried — the
+        // same trap `implemented` fell into: a fact *available* in JSON and not
+        // *presented* reads as a fact that does not exist.
+        if !self.covert_channels.is_empty() {
+            let _ = write!(
+                out,
+                "\n\nCovert channels not yet closed: {}",
+                self.covert_channels.join(", ")
+            );
+        }
+        for w in &self.warnings {
+            let _ = write!(out, "\n\nwarning: {w}");
+        }
+
         let limits = &self.limits;
         let _ = write!(
             out,
@@ -885,6 +966,11 @@ impl CommandOutput for InspectOutput {
                     let _ = write!(out, "\n      max_body_bytes          {v}");
                 }
                 if let Some(v) = row.max_requests_per_window {
+                    // The 60 is the manifest's documented default, not an
+                    // invention: `qqq_cap::manifest::TenantLimit::window`
+                    // applies it when a request cap is set with no window, so
+                    // the report and the limiter agree. If that default ever
+                    // changes, this line must change with it.
                     let window = row.window_seconds.unwrap_or(60);
                     let _ = write!(out, "\n      max_requests_per_window {v} per {window}s");
                 }
@@ -965,6 +1051,13 @@ pub fn diff_artifacts(before: &ArtifactReport, after: &ArtifactReport) -> Artifa
     // §10.5 singles out as information channels the audit stream cannot see.
     let gained_channel = added.iter().any(|c| c.covert_channel);
 
+    // Any added capability is an escalation, which subsumes both rules above:
+    // a move between bands and a gained channel both add a name. The two
+    // narrower checks stay as documentation of *why* those shapes matter, but
+    // the gate branches on the growth itself — otherwise a new write or egress
+    // grant inside one band (http.server, then +sql.execute, both `Exposed`)
+    // reads as "authority changed" while the CI gate stays green.
+    let any_added = !added.is_empty();
     ArtifactDiff {
         before: before.artifact.clone(),
         after: after.artifact.clone(),
@@ -973,7 +1066,7 @@ pub fn diff_artifacts(before: &ArtifactReport, after: &ArtifactReport) -> Artifa
         added,
         removed,
         unchanged,
-        escalation: posture_worsened || gained_channel,
+        escalation: posture_worsened || gained_channel || any_added,
         before_posture: before.posture.as_str().to_owned(),
         after_posture: after.posture.as_str().to_owned(),
     }
@@ -1101,14 +1194,17 @@ impl CommandOutput for ArtifactDiff {
 ///
 /// # Errors
 ///
-/// * `QQQ-2001` — the artifact could not be read.
+/// * `QQQ-1002` — the artifact could not be read. An unreadable component is
+///   a component-domain failure, like `run`'s and `serve`'s reads of the
+///   same bytes — not a manifest-syntax failure, which is what `QQQ-2001`
+///   names.
 /// * `QQQ-6003` — the artifact is not a valid component. Reported rather than
 ///   falling back to a manifest, because silently answering a different
 ///   question is the failure this command was fixed for.
 pub fn inspect_artifact(path: &std::path::Path) -> Result<ArtifactReport> {
     let bytes = std::fs::read(path).map_err(|e| {
         Error::new(
-            ErrorCode::ManifestSyntaxInvalid,
+            ErrorCode::InvalidComponentArtifact,
             format!("could not read `{}`", path.display()),
         )
         .with_cause(e.to_string())
@@ -1135,19 +1231,26 @@ pub fn inspect_artifact(path: &std::path::Path) -> Result<ArtifactReport> {
 
     let imports = component.imported_interfaces(&engine);
 
-    // Map each imported interface to the capability it requires. An import with
-    // no matching capability is *not* dropped: it is reported as unmapped,
-    // because an interface the host cannot name is exactly the thing an auditor
-    // needs to see. Silently omitting it would understate the surface.
+    // Map each imported interface to **every** capability it requires. One
+    // interface can imply several (`qqq:http/http` is both `http.client` and
+    // `http.server`): reporting only the strongest understates what the
+    // artifact can do, and understating is the one failure an audit surface
+    // must not have. An import with no matching capability is *not* dropped:
+    // it is reported as unmapped, because an interface the host cannot name is
+    // exactly the thing an auditor needs to see.
     let mut required = Vec::new();
     let mut unmapped = Vec::new();
     for iface in &imports {
-        match crate::run::capability_for_import(iface) {
-            Some(cap) => required.push(CapabilityReport {
+        let caps = crate::run::capabilities_for_import(iface);
+        if caps.is_empty() {
+            unmapped.push(iface.clone());
+        }
+        for cap in caps {
+            required.push(CapabilityReport {
                 name: cap.name().to_owned(),
                 interface: iface.clone(),
-            }),
-            None => unmapped.push(iface.clone()),
+                implemented: crate::run::interface_implemented(iface),
+            });
         }
     }
     required.sort_by(|a, b| (&a.name, &a.interface).cmp(&(&b.name, &b.interface)));
@@ -1161,7 +1264,10 @@ pub fn inspect_artifact(path: &std::path::Path) -> Result<ArtifactReport> {
         .collect();
 
     Ok(ArtifactReport {
-        artifact: path.display().to_string().replace('\\', "/"),
+        // The path as given: normalising separators would break the
+        // digest-to-path tie on Windows, where the audit log records the
+        // path the operator typed.
+        artifact: path.display().to_string(),
         digest: format!("sha256:{}", qqq_pkg::Digest::of(&bytes).hex()),
         size_bytes: bytes.len(),
         kind: crate::build::ArtifactKind::classify(&bytes)
@@ -1207,6 +1313,14 @@ pub struct CapabilityReport {
     pub name: String,
     /// The interface whose import implies it.
     pub interface: String,
+    /// Whether the host can serve the interface today, regardless of grants.
+    ///
+    /// The manifest `inspect` marks unimplemented interfaces; the artifact
+    /// report did not, so an artifact requiring `http.server` read exactly
+    /// like one requiring `crypto.hash`. Servability is not authority — an
+    /// ungranted-but-servable interface fails with a remediation, an
+    /// unservable one fails no matter what the manifest says.
+    pub implemented: bool,
 }
 
 impl CommandOutput for ArtifactReport {
@@ -1218,22 +1332,46 @@ impl CommandOutput for ArtifactReport {
         // In human format this is the whole output, so the capabilities are
         // listed. An artifact inspection that reports a count and withholds the
         // names would fail the one question it exists to answer (`§O-036a`).
+        //
+        // The digest preview is `"sha256:"` (7) plus 16 hex characters: long
+        // enough to match against the audit log, short enough for one line.
+        const DIGEST_PREVIEW_LEN: usize = 23;
         let mut out = format!(
             "{}: {} ({} bytes, {}), {} required capabilit{}",
             self.artifact,
             self.kind,
             self.size_bytes,
-            &self.digest[..self.digest.len().min(23)],
+            &self.digest[..self.digest.len().min(DIGEST_PREVIEW_LEN)],
             self.required.len(),
             if self.required.len() == 1 { "y" } else { "ies" }
         );
+
+        // A capability the host cannot serve yet fails at instantiation, not
+        // at the call the author expected — the same reason the manifest
+        // `inspect` annotates unimplemented interfaces rather than listing
+        // them bare.
+        let unimplemented = self.required.iter().filter(|r| !r.implemented).count();
+        if unimplemented > 0 {
+            let _ = write!(
+                out,
+                " ({unimplemented} with no host implementation yet, marked below)"
+            );
+        }
 
         if self.required.is_empty() {
             out.push_str("\n\nThis artifact imports nothing: it can reach no host capability.");
         } else {
             out.push_str("\n\nRequired capabilities");
             for r in &self.required {
-                let _ = write!(out, "\n  {:<20} from {}", r.name, r.interface);
+                if r.implemented {
+                    let _ = write!(out, "\n  {:<20} from {}", r.name, r.interface);
+                } else {
+                    let _ = write!(
+                        out,
+                        "\n  {:<20} from {}  (no host implementation yet)",
+                        r.name, r.interface
+                    );
+                }
             }
         }
 
@@ -1298,29 +1436,91 @@ pub fn inspect(loaded: &LoadedManifest) -> Result<InspectOutput> {
                 .filter(|r| !r.is_empty()),
         },
         posture: classify_posture(&caps),
+        covert_channels: loaded
+            .manifest
+            .covert_channels()
+            .iter()
+            .map(|c| c.name().to_owned())
+            .collect(),
+        warnings: {
+            let mut warnings = resolution.warnings.clone();
+            warnings.extend(filesystem_root_warnings(&loaded.manifest));
+            warnings.extend(dead_window_warnings(&loaded.manifest));
+            warnings
+        },
     })
+}
+
+/// Tenants that declare a window but no capped quantity.
+///
+/// A window only scopes `max_requests_per_window`; on its own it bounds
+/// nothing. The entry is kept in the report (it *is* declared) with this
+/// warning, rather than dropped silently — a dropped header would hide an
+/// operator's half-written limit, while a bare entry would suggest a policy
+/// that does not exist.
+fn dead_window_warnings(manifest: &qqq_cap::manifest::Manifest) -> Vec<String> {
+    let Some(limits) = manifest.server.limits.as_ref() else {
+        return Vec::new();
+    };
+    limits
+        .default
+        .iter()
+        .map(|d| ("default", d))
+        .chain(limits.per_tenant.iter().map(|(t, d)| (t.as_str(), d)))
+        .filter(|(_, d)| {
+            d.window_seconds.is_some()
+                && d.max_body_bytes.is_none()
+                && d.max_requests_per_window.is_none()
+                && d.max_connections.is_none()
+        })
+        .map(|(tenant, _)| {
+            format!(
+                "request limits for tenant `{tenant}` set a window with no capped \
+                 quantity — it bounds nothing; add a cap or remove the header"
+            )
+        })
+        .collect()
 }
 
 /// Read the `qqq.lock` that sits beside a loaded manifest, if there is one.
 ///
-/// # Why `None` covers both "absent" and "unparseable"
+/// # Why three outcomes instead of two
 ///
-/// Because the audit's supply-chain section is *optional context*, and the two
-/// cases lead to the same action: run `qqqai install`. A malformed lockfile is
-/// reported by `install` with its own error and line number, which is a better
-/// diagnostic than an audit finding could produce -- so duplicating it here would
-/// be a second, worse report of the same problem.
+/// Absence and corruption used to collapse into `None`, and the audit's
+/// supply-chain section — *optional context* — reported both as silence. But
+/// the two cases do not lead to the same action: absence means "never
+/// examined", while a present-but-unparseable file means "examined and
+/// broken" — a bad merge or tampering, the one shape where staying silent
+/// hides exactly what the supply-chain section exists to catch. So absence
+/// stays `Ok(None)` and corruption is an error the audit surfaces as a
+/// finding (`audit::corrupt_lockfile_finding`); `install` remains the command
+/// that reports the parse error with its line number.
 ///
-/// The distinction that **does** matter is `None` versus an empty lockfile: no
-/// lockfile means the supply-chain surface was never examined, while an empty one
-/// means it was examined and found to declare nothing. [`crate::audit::audit`]
-/// reports neither as clean, which is the point.
-#[must_use]
-pub fn sibling_lockfile(loaded: &LoadedManifest) -> Option<qqq_pkg::lock::Lockfile> {
-    let dir = loaded.path.parent()?;
+/// # Errors
+///
+/// When the lockfile exists but cannot be read, or parses as invalid. The
+/// error names the file; absence is `Ok(None)`, never an error.
+pub fn sibling_lockfile(loaded: &LoadedManifest) -> Result<Option<qqq_pkg::lock::Lockfile>> {
+    let Some(dir) = loaded.path.parent() else {
+        return Ok(None);
+    };
     let path = dir.join("qqq.lock");
-    let text = std::fs::read_to_string(&path).ok()?;
-    qqq_pkg::lock::Lockfile::parse(&text).ok()
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        Error::new(
+            ErrorCode::HostResourceExhausted,
+            format!("could not read `{}`", path.display()),
+        )
+        .with_cause(e.to_string())
+    })?;
+    qqq_pkg::lock::Lockfile::parse(&text)
+        .map(Some)
+        .map_err(|e| {
+            e.to_error()
+                .with_context("lockfile", path.display().to_string())
+        })
 }
 
 /// Whether one capability exposes the posture on its own.
@@ -1861,6 +2061,42 @@ mod tests {
         );
     }
 
+    /// A `fix` stanza grants exactly the capability it names — nothing else
+    /// in its namespace.
+    ///
+    /// `why http.server` used to suggest `server = true` **and**
+    /// `client = [...]`, so fixing a server denial granted egress; the
+    /// `crypto` suggestion granted five capabilities including the covert
+    /// `crypto.random`. Each arm now round-trips to a grant set containing
+    /// exactly the denied capability.
+    #[test]
+    fn fix_stanzas_grant_only_the_capability_named() {
+        use qqq_cap::manifest::Manifest;
+        for cap in [
+            Capability::HttpServer,
+            Capability::HttpClient,
+            Capability::CryptoRandom,
+            Capability::CryptoHash,
+            Capability::CryptoHmac,
+            Capability::CryptoAead,
+            Capability::CryptoSign,
+            Capability::ClockWall,
+            Capability::ClockMonotonic,
+        ] {
+            let fix = fix_stanza_for(cap);
+            let body = stanza_body(&fix).unwrap_or_else(|| panic!("{cap} has a stanza"));
+            let manifest = Manifest::parse(&format!(
+                "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n{body}"
+            ))
+            .unwrap_or_else(|e| panic!("{cap}: the suggestion must parse: {e}"));
+            assert_eq!(
+                manifest.declared_capabilities(),
+                vec![cap],
+                "{cap}: the pasted stanza must grant exactly the denied capability"
+            );
+        }
+    }
+
     /// The `fs` stanza grants `watch` for the readable modes (CAP-024):
     /// read-only and read-write entries imply `FsWatch`; append-only does
     /// not, or watching would leak reads the mode withholds. A pasted
@@ -2152,6 +2388,41 @@ mod tests {
         assert_eq!(out.limits.epoch_deadline_ms, 5_000);
     }
 
+    /// `inspect` warns about the grants it reports: covert channels and a
+    /// filesystem-root grant.
+    ///
+    /// `caps` has always carried both; `inspect` carried neither, so a
+    /// reviewer reading only the project report missed the randomness grant
+    /// §10.5 singles out and the root grant that authorizes the whole tree.
+    /// The fields and the rendering are pinned separately: a populated field
+    /// the human output drops reads exactly like a field that does not exist.
+    #[test]
+    fn inspect_warns_about_covert_channels_and_root_grants() {
+        const RISKY: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+            [capabilities.crypto]\nhash = [\"sha256\"]\nrandom = true\n\
+            [[capabilities.fs]]\npath = \"/\"\nmode = \"read-only\"\n";
+        let out = inspect(&loaded(RISKY)).unwrap();
+        assert!(
+            out.covert_channels.contains(&"crypto.random".to_owned()),
+            "randomness is a covert channel: {:?}",
+            out.covert_channels
+        );
+        assert!(
+            out.warnings.iter().any(|w| w.contains("filesystem root")),
+            "the root grant must warn: {:?}",
+            out.warnings
+        );
+        let text = out.summary();
+        assert!(
+            text.contains("Covert channels not yet closed: crypto.random"),
+            "the covert grant must reach the human output:\n{text}"
+        );
+        assert!(
+            text.contains("warning:"),
+            "the root warning must reach the human output:\n{text}"
+        );
+    }
+
     /// A manifest with no `[server.limits]` reports no request limits.
     ///
     /// The absence must be an absence, not an empty table: "the author declared no
@@ -2250,6 +2521,44 @@ handler = "health"
         );
     }
 
+    /// A window with no capped quantity bounds nothing: the entry is kept (it
+    /// *is* declared) with a warning, rather than dropped like a fully empty
+    /// header — dropping it would hide an operator's half-written limit.
+    #[test]
+    fn inspect_warns_on_a_window_only_entry() {
+        const WINDOW_ONLY: &str = r#"
+[package]
+name = "app"
+version = "0.1.0"
+
+[server]
+default_auth = "none"
+
+[[server.routes]]
+path = "/healthz"
+methods = ["GET"]
+handler = "health"
+
+[server.limits.per_tenant."127.0.0.1"]
+window_seconds = 60
+"#;
+        let out = inspect(&loaded(WINDOW_ONLY)).unwrap();
+        let req = out
+            .limits
+            .request_limits
+            .as_ref()
+            .expect("a declared window is declared, not dropped");
+        assert!(
+            req.per_tenant.iter().any(|e| e.tenant == "127.0.0.1"),
+            "the window-only tenant must be listed: {req:?}"
+        );
+        assert!(
+            out.warnings.iter().any(|w| w.contains("bounds nothing")),
+            "the dead window must warn: {:?}",
+            out.warnings
+        );
+    }
+
     // -- posture -----------------------------------------------------------
 
     #[test]
@@ -2263,6 +2572,7 @@ handler = "health"
         // Anything that writes or reaches out is exposed.
         for c in [
             Capability::FsWrite,
+            Capability::FsWatch,
             Capability::HttpClient,
             Capability::HttpServer,
             Capability::SqlExecute,
@@ -2270,6 +2580,7 @@ handler = "health"
             Capability::DnsResolve,
             Capability::QueuePublish,
             Capability::QueueSubscribe,
+            Capability::AiInfer,
         ] {
             assert_eq!(
                 classify_posture(&[c]),
@@ -2313,6 +2624,42 @@ handler = "health"
             got,
             Capability::FsWrite,
             "the strongest of fs.read / fs.write / fs.watch"
+        );
+    }
+
+    /// The audit surface reports every implied capability, not just the strongest.
+    ///
+    /// `qqq:http/http` is unlocked by both `HttpClient` and `HttpServer`: an
+    /// artifact importing it for send-only can also serve, and naming only the
+    /// server half hides the exfiltration path. The singular mapping stays the
+    /// gate's answer; this is the audit's.
+    #[test]
+    fn an_interface_implying_several_capabilities_reports_all_of_them() {
+        let http = crate::run::capabilities_for_import("qqq:http/http@1.0.0");
+        assert_eq!(
+            http.len(),
+            2,
+            "http/http implies two capabilities: {http:?}"
+        );
+        assert!(
+            http.contains(&Capability::HttpClient),
+            "send-only still implies the client: {http:?}"
+        );
+        assert!(
+            http.contains(&Capability::HttpServer),
+            "the authority query still implies the server: {http:?}"
+        );
+
+        let fs = crate::run::capabilities_for_import("qqq:fs/filesystem@1.0.0");
+        assert_eq!(
+            fs.len(),
+            3,
+            "the whole filesystem interface is three grants: {fs:?}"
+        );
+        assert_eq!(
+            fs[0],
+            Capability::FsWrite,
+            "strongest first, so the singular gate agrees: {fs:?}"
         );
     }
 
@@ -2391,7 +2738,126 @@ handler = "health"
         );
     }
 
+    // -- escalation --------------------------------------------------------
+
+    /// A scratch manifest directory isolated by process id, so parallel test
+    /// runners never share it.
+    fn temp_project(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("qqq-commands-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn loaded_at(dir: &std::path::Path, src: &str) -> LoadedManifest {
+        std::fs::write(dir.join("qqq.toml"), src).unwrap();
+        LoadedManifest {
+            manifest: qqq_cap::manifest::Manifest::parse(src).expect("test manifest"),
+            path: dir.join("qqq.toml"),
+            source: src.to_owned(),
+        }
+    }
+
+    /// Absence stays silence: no lockfile means the supply-chain surface was
+    /// never examined.
+    #[test]
+    fn a_missing_sibling_lockfile_is_not_an_error() {
+        let dir = temp_project("no-lock");
+        let loaded = loaded_at(&dir, DENY_ALL);
+        assert!(sibling_lockfile(&loaded).expect("absent is Ok").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Corruption is an error the audit surfaces — never silent `None`.
+    ///
+    /// A present-but-unparseable lockfile is what a bad merge or tampering
+    /// produces; collapsing it into "absent" made the supply-chain section
+    /// report nothing for exactly the file that needed a finding.
+    #[test]
+    fn a_corrupt_sibling_lockfile_is_an_error() {
+        let dir = temp_project("corrupt-lock");
+        let loaded = loaded_at(&dir, DENY_ALL);
+        std::fs::write(dir.join("qqq.lock"), "this is not TOML [[[").unwrap();
+        let err = sibling_lockfile(&loaded).expect_err("corrupt is Err");
+        assert!(
+            err.to_string().contains("qqq.lock"),
+            "the error must name the file: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn artifact_report(required: &[(&str, &str)], posture: Posture) -> ArtifactReport {
+        ArtifactReport {
+            artifact: "a.wasm".to_owned(),
+            digest: "sha256:abc".to_owned(),
+            size_bytes: 8,
+            kind: "component".to_owned(),
+            required: required
+                .iter()
+                .map(|(n, i)| CapabilityReport {
+                    name: (*n).to_owned(),
+                    interface: (*i).to_owned(),
+                    implemented: crate::run::interface_implemented(i),
+                })
+                .collect(),
+            unmapped_interfaces: Vec::new(),
+            posture,
+        }
+    }
+
+    /// Any gained authority is an escalation, even inside one posture band.
+    ///
+    /// `before = [http.server]` is `Exposed`; `after = +[sql.execute]` is
+    /// still `Exposed`, and `sql.execute` is not a covert channel — so the
+    /// old `posture_worsened || gained_channel` rule stayed silent while
+    /// authority grew, and the CI gate that promises "a gain of any
+    /// authority" fails stayed green on a new write grant.
+    #[test]
+    fn any_added_authority_is_an_escalation() {
+        let before = artifact_report(&[("http.server", "qqq:http/http")], Posture::Exposed);
+        let after = artifact_report(
+            &[
+                ("http.server", "qqq:http/http"),
+                ("sql.execute", "qqq:sql/database"),
+            ],
+            Posture::Exposed,
+        );
+        let diff = diff_artifacts(&before, &after);
+        assert_eq!(diff.added.len(), 1, "one capability was gained");
+        assert!(
+            diff.escalation,
+            "a gained capability is an escalation even when the posture band does not move"
+        );
+        let narrowed = diff_artifacts(&after, &before);
+        assert!(
+            !narrowed.escalation,
+            "removing authority must not read as an escalation"
+        );
+        let same = diff_artifacts(&before, &before);
+        assert!(!same.escalation, "no change must not read as an escalation");
+    }
+
     // -- developer overlay -------------------------------------------------
+
+    /// The envelope counts operations, not non-empty paths.
+    ///
+    /// One path serving `GET` + `POST` is one path and two operations: the old
+    /// filter reported "1 operation" next to a document containing two.
+    #[test]
+    fn openapi_counts_operations_not_paths() {
+        let l = loaded(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+             [server]\n\
+             routes = [{ path = \"/orders\", methods = [\"GET\", \"POST\"], handler = \"orders\" }]\n",
+        );
+        let out = openapi(&l).expect("the fixture generates");
+        assert_eq!(out.path_count, 1);
+        assert_eq!(
+            out.operation_count, 2,
+            "GET + POST on one path is two operations"
+        );
+    }
 
     #[test]
     fn the_developer_overlay_only_narrows_and_warns() {

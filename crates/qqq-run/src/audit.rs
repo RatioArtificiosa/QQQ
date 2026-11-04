@@ -143,6 +143,25 @@ impl AuditReport {
         self.worst().is_some_and(|w| w >= threshold)
     }
 
+    /// Add a finding discovered after the audit ran, keeping the sort invariant.
+    ///
+    /// The audit sorts findings so two runs diff cleanly; a caller that pushes
+    /// onto `findings` directly would break that contract silently. The sort
+    /// stays in [`finding_order`], shared with `audit`.
+    ///
+    /// ```
+    /// let mut report = qqq_run::audit::AuditReport {
+    ///     project: "probe".to_owned(),
+    ///     findings: Vec::new(),
+    /// };
+    /// report.push_finding(qqq_run::audit::corrupt_lockfile_finding("unparseable"));
+    /// assert_eq!(report.findings.len(), 1);
+    /// ```
+    pub fn push_finding(&mut self, finding: Finding) {
+        self.findings.push(finding);
+        self.findings.sort_by(finding_order);
+    }
+
     /// The report as a SARIF 2.1.0 document.
     ///
     /// # Why this is hand-written rather than derived
@@ -379,17 +398,50 @@ pub fn audit(loaded: &LoadedManifest, lock: Option<&qqq_pkg::lock::Lockfile>) ->
     // Severity descending, then by rule and message, so two runs of the same
     // project produce identical output -- which is what makes a SARIF baseline
     // comparison meaningful.
-    findings.sort_by(|a, b| {
-        b.severity
-            .cmp(&a.severity)
-            .then_with(|| a.rule.cmp(b.rule))
-            .then_with(|| a.message.cmp(&b.message))
-    });
+    findings.sort_by(finding_order);
 
     AuditReport {
         project: loaded.name().to_owned(),
         findings,
     }
+}
+
+/// The finding order: severity descending, then rule and message.
+///
+/// One function so `audit` and `AuditReport::push_finding` cannot disagree on
+/// it — two runs of the same project must produce identical output, including
+/// a run where the caller appends a finding after the audit.
+fn finding_order(a: &Finding, b: &Finding) -> std::cmp::Ordering {
+    b.severity
+        .cmp(&a.severity)
+        .then_with(|| a.rule.cmp(b.rule))
+        .then_with(|| a.message.cmp(&b.message))
+}
+
+/// A finding for a lockfile that exists but cannot be used.
+///
+/// Absence means "never examined"; corruption means "examined and broken" — a
+/// bad merge or tampering, the one shape where staying silent would hide
+/// exactly what the supply-chain section exists to catch. Warning, not error:
+/// the manifest audit still ran, so the report is partial, not void.
+///
+/// ```
+/// let f = qqq_run::audit::corrupt_lockfile_finding("could not parse `qqq.lock`");
+/// assert_eq!(f.rule, "qqq/corrupt-lockfile");
+/// ```
+#[must_use]
+pub fn corrupt_lockfile_finding(detail: impl Into<String>) -> Finding {
+    Finding::new(
+        "qqq/corrupt-lockfile",
+        Severity::Warning,
+        format!(
+            "the lockfile could not be used ({}), so dependency authority \
+             could not be checked",
+            detail.into()
+        ),
+        "run `qqqai install` to regenerate it; if it was edited by hand, \
+         restore it from version control",
+    )
 }
 
 /// The unused-grant question: does the manifest grant something the artifact cannot import?
@@ -1345,6 +1397,30 @@ mod tests {
     }
 
     // -- Determinism, which makes a SARIF baseline meaningful -------------
+
+    /// A corrupt lockfile is a Warning finding, appended without breaking the
+    /// sort two runs must agree on.
+    #[test]
+    fn a_corrupt_lockfile_is_a_finding_not_silence() {
+        let mut report = audit(&loaded(MINIMAL), None);
+        report.push_finding(corrupt_lockfile_finding(
+            "QQQ-7002: could not parse `qqq.lock`",
+        ));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule == "qqq/corrupt-lockfile" && f.severity == Severity::Warning),
+            "corruption must surface: {:?}",
+            report.findings
+        );
+        let mut sorted = report.findings.clone();
+        sorted.sort_by(finding_order);
+        assert_eq!(
+            report.findings, sorted,
+            "push_finding keeps the sort invariant"
+        );
+    }
 
     #[test]
     fn two_runs_produce_identical_output() {

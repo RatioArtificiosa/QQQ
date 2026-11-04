@@ -122,6 +122,32 @@ impl PathItem {
             && self.trace.is_none()
     }
 
+    /// How many operations this path carries.
+    ///
+    /// The envelope's `operation_count` sums this over paths: counting
+    /// non-empty paths instead reported "1 operation" for a path serving
+    /// `GET` + `POST`, disagreeing with the document it summarizes.
+    ///
+    /// ```
+    /// assert_eq!(qqq_run::openapi::PathItem::default().operation_count(), 0);
+    /// ```
+    #[must_use]
+    pub fn operation_count(&self) -> usize {
+        [
+            &self.get,
+            &self.post,
+            &self.put,
+            &self.patch,
+            &self.delete,
+            &self.head,
+            &self.options,
+            &self.trace,
+        ]
+        .iter()
+        .filter(|s| s.is_some())
+        .count()
+    }
+
     /// Set the operation for a method, or `None` if the method has no place in the spec.
     fn set(&mut self, method: &str, op: Operation) -> bool {
         let slot = match method {
@@ -507,6 +533,27 @@ mod tests {
         let item = &d.paths["/orders"];
         assert!(item.get.is_some(), "GET");
         assert!(item.post.is_some(), "POST");
+    }
+
+    /// One path serving two methods is two operations, not one.
+    ///
+    /// The envelope's `operation_count` sums this: counting non-empty paths
+    /// reported "1 operation" for the document above, disagreeing with the
+    /// payload it summarizes.
+    #[test]
+    fn two_methods_on_one_path_are_two_operations() {
+        let d = doc(
+            "routes = [{ path = \"/orders\", methods = [\"GET\", \"POST\"], handler = \"orders\" }]",
+        );
+        assert_eq!(d.paths["/orders"].operation_count(), 2);
+        assert_eq!(
+            doc("routes = []")
+                .paths
+                .values()
+                .map(PathItem::operation_count)
+                .sum::<usize>(),
+            0
+        );
     }
 
     // -- operation ids -----------------------------------------------------

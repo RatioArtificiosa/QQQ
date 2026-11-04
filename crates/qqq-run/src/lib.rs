@@ -139,8 +139,9 @@ pub use output::{
     Output, command_schemas,
 };
 pub use run::{
-    ImportCheck, Prepared, RunOptions, RunOutcome, RunOutput, capability_for_import, check_imports,
-    exposure_rank, locate_artifact, new_engine, parse_cap_flag, prepare, resolve_grants,
+    ImportCheck, Prepared, RunOptions, RunOutcome, RunOutput, capabilities_for_import,
+    capability_for_import, check_imports, exposure_rank, interface_implemented, locate_artifact,
+    new_engine, parse_cap_flag, prepare, resolve_grants,
 };
 pub use scaffold::{
     Detection, DetectionSource, InitOptions, InitOutput, Language, NewOptions, NewOutput, Template,

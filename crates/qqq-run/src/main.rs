@@ -675,7 +675,7 @@ fn run_command(name: CommandName, args: &[String], flags: GlobalFlags) -> ExitCo
             // The capability argument is extracted before `out` is borrowed by
             // `with_manifest`, so the missing-argument error does not conflict
             // with the later mutable borrow.
-            if let Some(cap) = args.first().cloned() {
+            if let Some(cap) = first_positional_cap(args) {
                 dispatch_why(name, &mut out, args, &cap)
             } else {
                 let err = qqq_core::Error::new(
@@ -821,39 +821,15 @@ fn dispatch_inspect(
     args: &[String],
     out: &mut Output<std::io::Stdout>,
 ) -> ExitCode {
-    // `--manifest` and `--diff` take values, so their values must not be
-    // mistaken for artifact paths. This is the same reasoning as
-    // `build_options`'s `TAKES_VALUE`: a flag's value that is read as a
-    // positional silently inspects the wrong file.
-    const TAKES_VALUE: [&str; 2] = ["--manifest", "--diff"];
-    let mut artifact: Option<String> = None;
-    let mut diff_against: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        let Some(a) = args.get(i).map(String::as_str) else {
-            break;
-        };
-        if a == "--diff" {
-            let Some(v) = args.get(i + 1) else {
-                let e = missing_value("--diff");
-                let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
-                return ExitCode::from(exit::USAGE);
-            };
-            diff_against = Some(v.clone());
-            i += 1;
-        } else if let Some(v) = a.strip_prefix("--diff=") {
-            diff_against = Some(v.to_owned());
-        } else if TAKES_VALUE.contains(&a) {
-            i += 1;
-        } else if a.starts_with('-') {
-            // Unknown flags are ignored here rather than rejected: `inspect`
-            // shares the global vocabulary (`--json`) and rejecting a valid
-            // global flag would be worse than tolerating one.
-        } else if artifact.is_none() {
-            artifact = Some(a.to_owned());
+    let parsed = match inspect_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
         }
-        i += 1;
-    }
+    };
+    let artifact = parsed.artifact;
+    let diff_against = parsed.diff_against;
 
     // `--diff` without an artifact has nothing to compare *from*, and comparing
     // against the manifest would be a category error — the two sides would be a
@@ -906,6 +882,64 @@ fn dispatch_inspect(
     } else {
         code
     }
+}
+
+/// The parsed `inspect` arguments: an optional artifact and an optional diff
+/// baseline.
+///
+/// A pure function so tests can pin the parsing — including the refusal of
+/// unknown flags — without building an `Output` sink.
+#[derive(Debug)]
+struct InspectArgs {
+    artifact: Option<String>,
+    diff_against: Option<String>,
+}
+
+fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
+    // `--manifest` and `--diff` take values, so their values must not be
+    // mistaken for artifact paths. This is the same reasoning as
+    // `build_options`'s `TAKES_VALUE`: a flag's value that is read as a
+    // positional silently inspects the wrong file.
+    const TAKES_VALUE: [&str; 2] = ["--manifest", "--diff"];
+    let mut artifact: Option<String> = None;
+    let mut diff_against: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
+        if a == "--diff" {
+            let Some(v) = args.get(i + 1) else {
+                return Err(missing_value("--diff"));
+            };
+            diff_against = Some(v.clone());
+            i += 1;
+        } else if let Some(v) = a.strip_prefix("--diff=") {
+            diff_against = Some(v.to_owned());
+        } else if TAKES_VALUE.contains(&a) {
+            i += 1;
+        } else if a.starts_with('-') {
+            // Refused, not ignored: the global parser consumes `--json` and
+            // its siblings before dispatch, so a flag-shaped argument here is
+            // a typo (`--dif` for `--diff`). Ignoring it silently inspects
+            // the manifest instead of the artifact the operator named — the
+            // same defect `caps` refuses via its own loop.
+            return Err(qqq_core::Error::new(
+                qqq_core::ErrorCode::CliFlagUnknown,
+                format!("`inspect` does not accept `{a}`"),
+            )
+            .with_remediation(
+                "`inspect` accepts an artifact path, --diff <artifact> and --manifest <file>",
+            ));
+        } else if artifact.is_none() {
+            artifact = Some(a.to_owned());
+        }
+        i += 1;
+    }
+    Ok(InspectArgs {
+        artifact,
+        diff_against,
+    })
 }
 
 /// Dispatch `qqqai build`.
@@ -1032,8 +1066,18 @@ fn dispatch_audit(
         }
     };
 
-    let lock = qqq_run::sibling_lockfile(&loaded);
-    let report = qqq_run::audit::audit(&loaded, lock.as_ref());
+    // A corrupt lockfile is a finding, not a fatal error and not silence: the
+    // manifest audit still ran, so the report is partial rather than void —
+    // but a present-but-unparseable lockfile (bad merge, tampering) must not
+    // read as "no supply-chain information".
+    let report = match qqq_run::sibling_lockfile(&loaded) {
+        Ok(lock) => qqq_run::audit::audit(&loaded, lock.as_ref()),
+        Err(e) => {
+            let mut report = qqq_run::audit::audit(&loaded, None);
+            report.push_finding(qqq_run::audit::corrupt_lockfile_finding(e.to_string()));
+            report
+        }
+    };
 
     // The threshold is computed **before** the output branch, so `--sarif
     // --fail-on note` gates like every other mode.
@@ -1563,40 +1607,20 @@ fn dispatch_openapi(
     // `--out <file>` and `--out=<file>`, the two spellings every CLI accepts. A bare `--out`
     // with nothing after it is a usage error rather than a silent write to a file named `--`,
     // which is the mistake this shape prevents.
-    let mut target: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        let Some(a) = args.get(i).map(String::as_str) else {
-            break;
-        };
-        if let Some(v) = a.strip_prefix("--out=") {
-            target = Some(v.to_owned());
-        } else if a == "--out" || a == "-o" {
-            // `let ... else`, not a `match` with one meaningful arm: a bare `--out` is a
-            // usage error rather than a silent write to a file named `--`, and the shape says
-            // so in one line instead of seven.
-            let Some(v) = args.get(i + 1) else {
-                let err = qqq_core::Error::new(
-                    qqq_core::ErrorCode::McpArgumentInvalid,
-                    "`--out` needs a file path".to_owned(),
-                )
-                .with_remediation("write `--out openapi.json`");
-                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
-                return ExitCode::from(exit::USAGE);
-            };
-            target = Some(v.clone());
-            i += 1;
-        } else {
-            let err = qqq_core::Error::new(
-                qqq_core::ErrorCode::McpArgumentInvalid,
-                format!("unknown argument `{a}` for `openapi`"),
-            )
-            .with_remediation("`openapi` accepts --out <file> and nothing else");
-            let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+    //
+    // `--manifest` is passed through rather than consumed here for the same reason
+    // `with_manifest` owns it: a monorepo's `openapi` must describe the project
+    // the user named, exactly like `why`, `caps` and `inspect` do. Refusing it
+    // sent every monorepo user to the wrong `qqq.toml`.
+    let parsed = match openapi_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
             return ExitCode::from(exit::USAGE);
         }
-        i += 1;
-    }
+    };
+    let target = parsed.out;
+    let manifest = parsed.manifest;
 
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
@@ -1611,7 +1635,7 @@ fn dispatch_openapi(
         }
     };
 
-    let loaded = match qqq_run::LoadedManifest::discover(&cwd, None) {
+    let loaded = match qqq_run::LoadedManifest::discover(&cwd, manifest.as_deref()) {
         Ok(l) => l,
         Err(e) => {
             let _ = out.emit_error_with_exit(name, &e, exit::FAILURE);
@@ -1663,6 +1687,66 @@ fn dispatch_openapi(
     // so the envelope and the payload cannot disagree about which command produced them.
     let _ = out.emit(&payload);
     ExitCode::from(exit::OK)
+}
+
+/// The parsed `openapi` arguments: an optional output file and an optional
+/// manifest override.
+///
+/// A pure function so tests can pin the parsing without building an `Output`
+/// sink or touching the filesystem.
+struct OpenapiArgs {
+    out: Option<String>,
+    manifest: Option<std::path::PathBuf>,
+}
+
+fn openapi_args(args: &[String]) -> Result<OpenapiArgs, qqq_core::Error> {
+    // `--out <file>` and `--out=<file>`, the two spellings every CLI accepts. A bare `--out`
+    // with nothing after it is a usage error rather than a silent write to a file named `--`,
+    // which is the mistake this shape prevents.
+    let mut out: Option<String> = None;
+    let mut manifest: Option<std::path::PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let Some(a) = args.get(i).map(String::as_str) else {
+            break;
+        };
+        if let Some(v) = a.strip_prefix("--out=") {
+            out = Some(v.to_owned());
+        } else if a == "--out" || a == "-o" {
+            // `let ... else`, not a `match` with one meaningful arm: a bare `--out` is a
+            // usage error rather than a silent write to a file named `--`, and the shape says
+            // so in one line instead of seven.
+            let Some(v) = args.get(i + 1) else {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    "`--out` needs a file path".to_owned(),
+                )
+                .with_remediation("write `--out openapi.json`"));
+            };
+            out = Some(v.clone());
+            i += 1;
+        } else if a == "--manifest" {
+            let Some(v) = args.get(i + 1) else {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    "`--manifest` needs a file path".to_owned(),
+                )
+                .with_remediation("write `--manifest path/to/qqq.toml`"));
+            };
+            manifest = Some(std::path::PathBuf::from(v));
+            i += 1;
+        } else if let Some(v) = a.strip_prefix("--manifest=") {
+            manifest = Some(std::path::PathBuf::from(v));
+        } else {
+            return Err(qqq_core::Error::new(
+                qqq_core::ErrorCode::McpArgumentInvalid,
+                format!("unknown argument `{a}` for `openapi`"),
+            )
+            .with_remediation("`openapi` accepts --out <file> and --manifest <file>"));
+        }
+        i += 1;
+    }
+    Ok(OpenapiArgs { out, manifest })
 }
 
 /// Decode `qqqai new`'s own flags.
@@ -3453,6 +3537,35 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
             return Some(v.to_owned());
         }
         rest = tail;
+    }
+    None
+}
+
+/// The capability `qqqai why` should explain: the first argument that is not a
+/// flag or a flag's value.
+///
+/// `qqqai why --manifest qqq.toml crypto.hash` used to explain `--manifest`
+/// itself and report `CapabilitySyntaxInvalid`, while `caps` skipped the flag
+/// correctly — the same global flag parsed two ways by two sibling commands.
+/// Only `--manifest` takes a value on this command, so only it (in both
+/// spellings) is skipped along with its value; any other `-` argument is left
+/// for `why` to refuse by name rather than silently skipped here.
+fn first_positional_cap(args: &[String]) -> Option<String> {
+    let mut rest: &[String] = args;
+    while let Some((a, tail)) = rest.split_first() {
+        if a == "--manifest" {
+            rest = tail.get(1..).unwrap_or(&[]);
+            continue;
+        }
+        if a.starts_with("--manifest=") || a == "--json" || a == "--jsonl" || a == "--json-lines" {
+            rest = tail;
+            continue;
+        }
+        if a.starts_with('-') {
+            rest = tail;
+            continue;
+        }
+        return Some((*a).clone());
     }
     None
 }
@@ -5258,6 +5371,77 @@ mod tests {
     /// This is the invariant that makes `--fix` trustworthy: while `--fix` was
     /// unimplemented, running it behaved exactly like plain `doctor`, so the
     /// user had no way to learn the option did nothing.
+    #[test]
+    fn why_skips_global_flags_to_find_the_capability() {
+        let args = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            first_positional_cap(&args(&["crypto.hash"])).as_deref(),
+            Some("crypto.hash")
+        );
+        assert_eq!(
+            first_positional_cap(&args(&["--manifest", "qqq.toml", "crypto.hash"])).as_deref(),
+            Some("crypto.hash"),
+            "`why --manifest <file> <cap>` must explain the cap, not the flag"
+        );
+        assert_eq!(
+            first_positional_cap(&args(&["--manifest=qqq.toml", "crypto.hash"])).as_deref(),
+            Some("crypto.hash")
+        );
+        assert_eq!(
+            first_positional_cap(&args(&["--manifest", "qqq.toml"])),
+            None,
+            "a flag value is not a capability"
+        );
+        assert_eq!(first_positional_cap(&args(&[])), None);
+    }
+
+    #[test]
+    fn inspect_refuses_unknown_flags() {
+        let args = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        // The typo shape: `--dif` for `--diff` must fail loudly, not silently
+        // inspect the manifest.
+        let err = inspect_args(&args(&["--dif", "a.wasm"])).expect_err("unknown flag");
+        assert_eq!(err.code, qqq_core::ErrorCode::CliFlagUnknown);
+        assert!(err.message.contains("--dif"), "{}", err.message);
+        // Accepted shapes still parse: artifact, values, and `=` forms.
+        let p = inspect_args(&args(&[
+            "a.wasm",
+            "--diff",
+            "b.wasm",
+            "--manifest",
+            "q.toml",
+        ]))
+        .expect("parses");
+        assert_eq!(p.artifact.as_deref(), Some("a.wasm"));
+        assert_eq!(p.diff_against.as_deref(), Some("b.wasm"));
+        let p = inspect_args(&args(&["--diff=b.wasm"])).expect("parses");
+        assert_eq!(p.diff_against.as_deref(), Some("b.wasm"));
+        assert_eq!(p.artifact, None);
+    }
+
+    #[test]
+    fn openapi_accepts_a_manifest_override() {
+        let args = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let p = openapi_args(&args(&["--manifest", "sub/qqq.toml"])).expect("parses");
+        assert_eq!(
+            p.manifest.as_deref(),
+            Some(std::path::Path::new("sub/qqq.toml")),
+            "`openapi --manifest` must reach discovery, like `caps`"
+        );
+        assert_eq!(p.out, None);
+        let p =
+            openapi_args(&args(&["--manifest=sub/qqq.toml", "--out", "o.json"])).expect("parses");
+        assert_eq!(
+            p.manifest.as_deref(),
+            Some(std::path::Path::new("sub/qqq.toml"))
+        );
+        assert_eq!(p.out.as_deref(), Some("o.json"));
+        assert!(
+            openapi_args(&args(&["--bogus"])).is_err(),
+            "unknown flags must still be refused"
+        );
+    }
+
     #[test]
     fn doctor_refuses_flags_it_does_not_accept() {
         let err = reject_unknown_flags(CommandName::Doctor, &["--jsonn".to_owned()], &["--fix"])

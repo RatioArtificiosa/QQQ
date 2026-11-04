@@ -1890,6 +1890,7 @@ fn is_qqq_sys_content(qsys_canon: &Path, f: &Path) -> bool {
 fn scan_crate_rs_files(
     workspace: &Path,
     dir: &Path,
+    roots: &ManifestRoots,
     violations: &mut Vec<String>,
     files_scanned: &mut usize,
 ) {
@@ -1906,16 +1907,17 @@ fn scan_crate_rs_files(
     violations.extend(redir_problems);
     // H-1 r14: manifest custom roots compile as crate roots regardless
     // of location or extension — a `path = "custom/lib.txt"` with
-    // `unsafe` would otherwise sail through GREEN. Gate like a redirect
-    // (inside the workspace only; unreadable files are reported by the
-    // scan loop when it reaches them) and skip files the normal walk
-    // already found.
+    // `unsafe` would otherwise sail through GREEN. The parse below is
+    // shared with the roots check (L-3 r17); aux roots join the body
+    // scan only (see `ManifestRoots::aux`).
     {
+        // L-3 r17: one parse per crate — `manifest_roots` is read once
+        // here and shared with the roots check, so one unreadable
+        // manifest yields one problem entry, not one per consumer.
         let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-        let (custom_roots, manifest_problem) = manifest_custom_roots(dir);
         // L-4 r15: a present-but-unreadable manifest fails loudly — the
         // roots it names are unknown, so the scan cannot certify them.
-        if let Some(problem) = manifest_problem {
+        if let Some(problem) = &roots.problem {
             violations.push(format!(
                 "{}: manifest problem, scan incomplete ({})",
                 sanitize_for_log(
@@ -1924,17 +1926,23 @@ fn scan_crate_rs_files(
                         .to_string_lossy()
                         .replace('\\', "/")
                 ),
-                sanitize_for_log(&problem),
+                sanitize_for_log(problem),
             ));
         }
-        for root in custom_roots {
+        // H-1 r14 + M-1 r17: manifest custom roots compile as crate roots
+        // regardless of location or extension — a `path = "custom/lib.txt"`
+        // with `unsafe` would otherwise sail through GREEN. Gate like a
+        // redirect (inside the workspace only) and skip files the normal
+        // walk already found. Aux (test/example/bench) roots join the body
+        // scan but never the forbid check (see `ManifestRoots::aux`).
+        for root in roots.lib_bin.iter().chain(&roots.aux) {
             // M-2 r15: fold before the lexical fallback — an escaping
             // `..` is invisible to a raw `strip_prefix` (it matches the
             // joined prefix lexically) and would be silently dropped
             // instead of flagged outside. Roots arrive folded from the
             // parser; folding again is idempotent belt-and-braces.
-            let inside = std::fs::canonicalize(&root).map_or_else(
-                |_| fold_dot_components(&root).strip_prefix(workspace).is_ok(),
+            let inside = std::fs::canonicalize(root).map_or_else(
+                |_| fold_dot_components(root).strip_prefix(workspace).is_ok(),
                 |c| c.strip_prefix(&ws_canon).is_ok(),
             );
             if !inside {
@@ -1950,8 +1958,8 @@ fn scan_crate_rs_files(
                 ));
                 continue;
             }
-            if root.is_file() && !files.contains(&root) {
-                files.push(root);
+            if root.is_file() && !files.contains(root) {
+                files.push(root.clone());
             }
         }
     }
@@ -2160,8 +2168,9 @@ fn collect_bin_roots(
             Ok(e) => e,
             Err(e) => {
                 violations.push(format!(
-                    "{}: bin entry unreadable mid-listing, scan incomplete: {e}",
-                    rel()
+                    "{}: bin entry unreadable mid-listing, scan incomplete: {}",
+                    rel(),
+                    fmt_io_err(&e)
                 ));
                 continue;
             }
@@ -2174,8 +2183,9 @@ fn collect_bin_roots(
             Ok(t) => t,
             Err(e) => {
                 violations.push(format!(
-                    "{}: cannot stat bin entry, scan incomplete: {e}",
-                    sanitize_for_log(&p.to_string_lossy())
+                    "{}: cannot stat bin entry, scan incomplete: {}",
+                    sanitize_for_log(&p.to_string_lossy()),
+                    fmt_io_err(&e)
                 ));
                 continue;
             }
@@ -2226,6 +2236,161 @@ fn strip_one_quote_pair(s: &str) -> &str {
     }
 }
 
+/// Custom root paths from a crate manifest, classified by target kind and
+/// parsed once per crate (L-3 r17: the scan loop and the roots check share
+/// one parse, so one unreadable manifest yields one problem entry, not
+/// one per consumer).
+#[derive(Default)]
+struct ManifestRoots {
+    /// `[lib]`/`[[bin]]` roots: compiled code whose missing forbid fails
+    /// the gate (M-1 r12).
+    lib_bin: Vec<PathBuf>,
+    /// `[[test]]`/`[[example]]`/`[[bench]]` roots (M-1 r17): compiled code
+    /// whose bodies are scanned like every other root — but never
+    /// forbid-checked here. The compiler owns test-target lints via the
+    /// manifest `[lints]` table (every crate sets it), which source
+    /// text cannot see; forbid-checking them would false-flag
+    /// `[lints]`-covered trees.
+    aux: Vec<PathBuf>,
+    /// Present-but-unreadable manifest (L-4 r15): the named roots are
+    /// unknown, so callers fail loudly instead of certifying them.
+    problem: Option<String>,
+}
+
+/// Escape-aware search for a TOML value closer: returns the byte index
+/// where `mark` starts, or `None` when the line holds no closer. A `\`
+/// escapes the next char inside `"…"` strings only (M-4 r16) — TOML
+/// `'...'` literals have no escapes, so a `\` there must not swallow the
+/// real closer.
+fn find_value_close(chunk: &str, mark: &str, backslash_escapes: bool) -> Option<usize> {
+    let mut escaped = false;
+    for (i, c) in chunk.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if backslash_escapes && c == '\\' {
+            escaped = true;
+        } else if chunk[i..].starts_with(mark) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Hex run inside a TOML `\u`/`\U` escape: `n` hex digits to a char.
+/// `None` on short input, non-hex digits, or a non-scalar value.
+fn toml_hex(chars: &mut std::str::Chars<'_>, n: usize) -> Option<char> {
+    let mut v: u32 = 0;
+    for _ in 0..n {
+        v = v * 16 + chars.next()?.to_digit(16)?;
+    }
+    char::from_u32(v)
+}
+
+/// Decode TOML basic-string escapes (`\\ \" \/ \b \f \n \r \t \uXXXX`
+/// `\UXXXXXXXX`) in a manifest value. `None` on invalid escape — the
+/// manifest is then not valid TOML (Cargo rejects it), so the caller
+/// treats the root as unknown (fail-closed problem, same as L-4 r15).
+fn decode_basic_escapes(s: &str) -> Option<String> {
+    if !s.contains('\\') {
+        return Some(s.to_owned());
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            '/' => out.push('/'),
+            'b' => out.push('\u{8}'),
+            'f' => out.push('\u{C}'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'u' => out.push(toml_hex(&mut chars, 4)?),
+            'U' => out.push(toml_hex(&mut chars, 8)?),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Target section of a manifest `path = …` line: compiled lib/bin roots
+/// versus test/example/bench roots (see `ManifestRoots::aux`).
+#[derive(PartialEq)]
+enum ManifestSection {
+    LibBin,
+    Aux,
+    Other,
+}
+
+/// Outcome of parsing one manifest `path = value` right-hand side.
+enum ManifestValue {
+    /// Decoded value (TOML basic escapes applied for `"…"` strings).
+    Value(String),
+    /// No closer on this line (single-quoted) or through EOF (triple).
+    Unclosed,
+    /// Invalid escape in a `"…"` value: invalid TOML, fail closed.
+    BadEscape,
+}
+
+/// Parse the value of a manifest `path = …` line whose right-hand side
+/// (trimmed) is `rest`: detect the quote mark (triple or single),
+/// accumulate continuation lines for triple-quoted values spanning lines
+/// (M-2 r17), and TOML-decode basic-string escapes (M-2 r17). Advances
+/// `li` past consumed continuation lines. Split out of `manifest_roots`
+/// for the line budget.
+fn parse_manifest_value(rest: &str, lines: &[&str], li: &mut usize) -> ManifestValue {
+    let (mark, mlen): (&str, usize) = if rest.starts_with("\"\"\"") {
+        ("\"\"\"", 3)
+    } else if rest.starts_with("'''") {
+        ("'''", 3)
+    } else if rest.starts_with('"') {
+        ("\"", 1)
+    } else if rest.starts_with('\'') {
+        ("'", 1)
+    } else {
+        return ManifestValue::Unclosed;
+    };
+    // L-3 r15: the value closer is escape-aware — `\"` is content, not
+    // the end of the value. Escapes apply inside `"…"` strings only
+    // (M-4 r16): TOML `'...'` literals have none, so a `\` there must
+    // not swallow the real closer.
+    let backslash_escapes = mark.starts_with('"');
+    let mut chunk = rest[mlen..].to_string();
+    let mut end = find_value_close(&chunk, mark, backslash_escapes);
+    while end.is_none() && mark.len() == 3 {
+        let Some(&next) = lines.get(*li) else {
+            break;
+        };
+        *li += 1;
+        chunk.push('\n');
+        chunk.push_str(next);
+        end = find_value_close(&chunk, mark, backslash_escapes);
+    }
+    let Some(end) = end else {
+        return ManifestValue::Unclosed;
+    };
+    let Some(raw) = chunk.get(..end) else {
+        return ManifestValue::Unclosed;
+    };
+    if !backslash_escapes {
+        return ManifestValue::Value(raw.to_owned());
+    }
+    // M-2 r17: the compiled path is the TOML-decoded value — `\"` is `"`,
+    // `\\` is `\`. Without decoding, lexical and compiled paths disagree
+    // and `root_ok` vacuous-passes the nonexistent lexical path. Invalid
+    // escapes mean invalid TOML (Cargo rejects it): fail closed with a
+    // problem, never skip silently.
+    if let Some(v) = decode_basic_escapes(raw) {
+        ManifestValue::Value(v)
+    } else {
+        ManifestValue::BadEscape
+    }
+}
 /// Custom root paths from a crate manifest (`[lib] path = …`,
 /// `[[bin]] path = …`): without this, a root living outside `src/`
 /// compiles but is never forbid-checked (M-1 r12). Line-oriented on
@@ -2236,7 +2401,15 @@ fn strip_one_quote_pair(s: &str) -> &str {
 /// Returns the discovered roots plus a problem description when the
 /// manifest is present but unreadable (L-4 r15) — callers fail the scan
 /// loudly instead of certifying roots they never saw.
+/// Test-only view of the lib/bin subset (the forbid-checked roots):
+/// production code uses `manifest_roots` directly.
+#[cfg(test)]
 fn manifest_custom_roots(dir: &Path) -> (Vec<PathBuf>, Option<String>) {
+    let roots = manifest_roots(dir);
+    (roots.lib_bin, roots.problem)
+}
+
+fn manifest_roots(dir: &Path) -> ManifestRoots {
     let manifest = dir.join("Cargo.toml");
     let text = match std::fs::read_to_string(&manifest) {
         Ok(t) => t,
@@ -2244,16 +2417,25 @@ fn manifest_custom_roots(dir: &Path) -> (Vec<PathBuf>, Option<String>) {
         // symlink reports absent and would silently yield no roots.
         // Presence is the link itself; readability is the read above.
         Err(e) if std::fs::symlink_metadata(&manifest).is_ok() => {
-            return (Vec::new(), Some(format!("Cargo.toml unreadable: {e}")));
+            return ManifestRoots {
+                problem: Some(format!("Cargo.toml unreadable: {e}")),
+                ..ManifestRoots::default()
+            };
         }
-        Err(_) => return (Vec::new(), None),
+        Err(_) => return ManifestRoots::default(),
     };
-    let mut out = Vec::new();
-    let mut in_target_section = false;
-    // H-2 r16: a UTF-8 BOM prefixes the first line — a section header
-    // there must still match (editors add BOMs silently).
-    let body: &str = text.strip_prefix('\u{FEFF}').unwrap_or(&text);
-    for raw_line in body.lines() {
+    let mut out = ManifestRoots::default();
+    let mut section = ManifestSection::Other;
+    // H-2 r16: leading UTF-8 BOMs prefix the first line — a section header
+    // there must still match (editors add BOMs silently). L-2 r17: strip
+    // all of them, not just one.
+    let body: &str = text.trim_start_matches('\u{FEFF}');
+    // Index loop (not `for`): a triple-quoted value may span lines (M-2
+    // r17) — continuation lines are consumed as part of the value.
+    let raw_lines: Vec<&str> = body.lines().collect();
+    let mut li = 0;
+    while let Some(&raw_line) = raw_lines.get(li) {
+        li += 1;
         // Strip `#` comments, but never inside quotes — `#` is legal in
         // Unix/Windows filenames (M-3 r14: `path = "a#b/lib.rs"` must not
         // truncate to `path = "a`). A `\` escapes the next char inside
@@ -2288,10 +2470,18 @@ fn manifest_custom_roots(dir: &Path) -> (Vec<PathBuf>, Option<String>) {
             .map(|r| r.trim_start_matches('[').trim_end_matches(']').trim());
         if inner.is_some() {
             // H-1 r16: quoted headers (`["lib"]`) name the same section.
-            in_target_section = matches!(inner.map(strip_one_quote_pair), Some("lib" | "bin"));
+            // M-1 r17: `[[test]]`/`[[example]]`/`[[bench]]` custom paths
+            // compile as Rust too — their bodies join the scan (as aux
+            // roots, never forbid-checked: the compiler owns those
+            // lints, see `ManifestRoots::aux`).
+            section = match inner.map(strip_one_quote_pair) {
+                Some("lib" | "bin") => ManifestSection::LibBin,
+                Some("test" | "example" | "bench") => ManifestSection::Aux,
+                _ => ManifestSection::Other,
+            };
             continue;
         }
-        if !in_target_section {
+        if section == ManifestSection::Other {
             continue;
         }
         // H-1 r15: TOML keys may be quoted (`"path" = …`, `'path' = …`)
@@ -2305,58 +2495,41 @@ fn manifest_custom_roots(dir: &Path) -> (Vec<PathBuf>, Option<String>) {
             continue;
         }
         let rest = t[eq + 1..].trim_start();
-        // L-2 r16: TOML multiline strings (`"""…"""`, `'''…'''`) are valid
-        // values — the closer is the triple mark, not the first quote.
-        let (mark, mlen): (&str, usize) = if rest.starts_with("\"\"\"") {
-            ("\"\"\"", 3)
-        } else if rest.starts_with("'''") {
-            ("'''", 3)
-        } else if rest.starts_with('"') {
-            ("\"", 1)
-        } else if rest.starts_with('\'') {
-            ("'", 1)
-        } else {
-            continue;
-        };
-        // L-3 r15: the value closer is escape-aware — `\"` is content, not
-        // the end of the value. Escapes apply inside `"…"` strings only
-        // (M-4 r16): TOML `'...'` literals have none, so a `\` there must
-        // not swallow the real closer.
-        let body = &rest[mlen..];
-        let backslash_escapes = mark.starts_with('"');
-        let mut end = None;
-        let mut escaped = false;
-        for (i, c) in body.char_indices() {
-            if escaped {
-                escaped = false;
-            } else if backslash_escapes && c == '\\' {
-                escaped = true;
-            } else if body[i..].starts_with(mark) {
-                end = Some(i);
-                break;
+        match parse_manifest_value(rest, &raw_lines, &mut li) {
+            ManifestValue::Value(value) => {
+                if !value.is_empty() {
+                    // L-1 r15: fold `.`/`..` lexically so spellings like
+                    // `sub/../lib.rs` merge with the walked path instead of
+                    // double-scanning (and so the callers' lexical
+                    // outside-gate sees the real shape — M-2 r15).
+                    let root = fold_dot_components(&dir.join(&value));
+                    if section == ManifestSection::LibBin {
+                        out.lib_bin.push(root);
+                    } else {
+                        out.aux.push(root);
+                    }
+                }
             }
-        }
-        let Some(end) = end else {
-            continue;
-        };
-        let value = &body[..end];
-        if !value.is_empty() {
-            // L-1 r15: fold `.`/`..` lexically so spellings like
-            // `sub/../lib.rs` merge with the walked path instead of
-            // double-scanning (and so the callers' lexical outside-gate
-            // sees the real shape — M-2 r15).
-            out.push(fold_dot_components(&dir.join(value)));
+            ManifestValue::BadEscape => {
+                if out.problem.is_none() {
+                    out.problem = Some("Cargo.toml has invalid escape in path value".to_owned());
+                }
+            }
+            ManifestValue::Unclosed => {}
         }
     }
-    out.sort();
-    out.dedup();
-    (out, None)
+    out.lib_bin.sort();
+    out.lib_bin.dedup();
+    out.aux.sort();
+    out.aux.dedup();
+    out
 }
 
 fn check_crate_roots(
     workspace: &Path,
     dir: &Path,
     name: &str,
+    lib_bin: &[PathBuf],
     violations: &mut Vec<String>,
     missing: &mut Vec<String>,
 ) {
@@ -2411,6 +2584,9 @@ fn check_crate_roots(
     // purpose (this crate takes no dependencies): section headers plus
     // `path = "…"` lines cover every real manifest shape; anything fancier
     // falls back to the conventional roots, and rustc owns the rest.
+    // `lib_bin` arrives pre-parsed from the shared per-crate parse (L-3
+    // r17); aux (test/example/bench) roots are never forbid-checked here
+    // (see `ManifestRoots::aux`).
     let mut roots = vec![
         dir.join("src").join("lib.rs"),
         dir.join("src").join("main.rs"),
@@ -2423,21 +2599,13 @@ fn check_crate_roots(
     // otherwise; outside roots are skipped here because the scan loop
     // already emits the outside-workspace violation for them.
     let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    let (custom_roots, manifest_problem) = manifest_custom_roots(dir);
-    if let Some(problem) = manifest_problem {
-        violations.push(format!(
-            "{}: manifest problem, scan incomplete ({})",
-            rel(),
-            sanitize_for_log(&problem)
-        ));
-    }
-    for root in custom_roots {
-        let inside = std::fs::canonicalize(&root).map_or_else(
-            |_| fold_dot_components(&root).strip_prefix(workspace).is_ok(),
+    for root in lib_bin {
+        let inside = std::fs::canonicalize(root).map_or_else(
+            |_| fold_dot_components(root).strip_prefix(workspace).is_ok(),
             |c| c.strip_prefix(&ws_canon).is_ok(),
         );
         if inside {
-            roots.push(root);
+            roots.push(root.clone());
         }
     }
     roots.extend(collect_bin_roots(dir, &rel, violations));
@@ -2481,6 +2649,35 @@ fn incomplete_report(prefix: &str, violations: &[String], missing: &[String]) ->
     (false, out)
 }
 
+/// Render an I/O error for a violation line: OS error text echoes the
+/// offending path, which may carry line breaks or terminal escapes in a
+/// hostile filename, so it passes through the same redaction as paths
+/// (L-1 r17) instead of reaching the report raw.
+fn fmt_io_err(e: &std::io::Error) -> String {
+    sanitize_for_log(&e.to_string())
+}
+
+/// Scan one crate dir: the shared manifest parse feeds the body scan,
+/// and (except qqq-sys) the forbid-roots check. Split out of
+/// `run_unsafe_scan` for the line budget (L r17).
+fn scan_one_crate(
+    workspace: &Path,
+    dir: &Path,
+    name: &str,
+    violations: &mut Vec<String>,
+    missing: &mut Vec<String>,
+    files_scanned: &mut usize,
+) {
+    // L-3 r17: one manifest parse per crate, shared by the body scan
+    // and the roots check (duplicate parses also duplicated the
+    // unreadable-manifest problem entry).
+    let roots = manifest_roots(dir);
+    scan_crate_rs_files(workspace, dir, &roots, violations, files_scanned);
+    if name != "qqq-sys" {
+        check_crate_roots(workspace, dir, name, &roots.lib_bin, violations, missing);
+    }
+}
+
 fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
     let mut violations = Vec::new();
     let mut missing = Vec::new();
@@ -2514,8 +2711,9 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             Ok(e) => e,
             Err(e) => {
                 violations.push(format!(
-                    "{}: directory entry unreadable mid-listing, scan incomplete: {e}",
-                    sanitize_for_log(&workspace.join("crates").display().to_string())
+                    "{}: directory entry unreadable mid-listing, scan incomplete: {}",
+                    sanitize_for_log(&workspace.join("crates").display().to_string()),
+                    fmt_io_err(&e)
                 ));
                 continue;
             }
@@ -2538,8 +2736,9 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             Ok(t) if t.is_dir() => crates.push(e.path()),
             Ok(_) => {}
             Err(e) => violations.push(format!(
-                "{}: cannot stat entry, scan incomplete: {e}",
-                sanitize_for_log(&workspace.join("crates").display().to_string())
+                "{}: cannot stat entry, scan incomplete: {}",
+                sanitize_for_log(&workspace.join("crates").display().to_string()),
+                fmt_io_err(&e)
             )),
         }
     }
@@ -2562,10 +2761,16 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
             // The scanner itself is scanned like every other crate: no
             // exception, and it must carry the forbid attribute to prove it.
         }
-        scan_crate_rs_files(workspace, dir, &mut violations, &mut files_scanned);
-        if name != "qqq-sys" {
-            check_crate_roots(workspace, dir, &name, &mut violations, &mut missing);
-        }
+        // L-3 r17: one manifest parse per crate, shared by the body scan
+        // and the roots check — see `scan_one_crate`.
+        scan_one_crate(
+            workspace,
+            dir,
+            &name,
+            &mut violations,
+            &mut missing,
+            &mut files_scanned,
+        );
     }
     if files_scanned == 0 {
         return incomplete_report(
@@ -2960,6 +3165,14 @@ fn literal_string(text: &str, buf: &[u8], pos: usize) -> Option<(String, usize)>
 
 /// Try `#[ path = lit ]` with gaps at `i` (which points at `#`).
 /// Returns the target and the index past the match, or `None`.
+///
+/// `#[cfg_attr(pred, path = lit)]` expands to the plain path attribute
+/// when the cfg holds (H-1 r17: `#[cfg_attr(all(), path = "evil.txt")]`
+/// compiles `evil.txt` as Rust — verified against rustc), so the
+/// follower sees through it. The match is condition-blind (conservative
+/// for true cfgs; a false cfg over-follows noisily, same as the scan's
+/// existing `#[cfg]` blindness). Strings in the predicate are skipped
+/// (`target_os = "…"`) and the match anchors at the top-level comma.
 fn match_path_attr(text: &str, buf: &[u8], idx: usize) -> Option<(String, usize)> {
     let mut pos = idx + 1;
     skip_gap_tokens(text, buf, &mut pos);
@@ -2968,6 +3181,48 @@ fn match_path_attr(text: &str, buf: &[u8], idx: usize) -> Option<(String, usize)
     }
     pos += 1;
     skip_gap_tokens(text, buf, &mut pos);
+    if text.get(pos..).is_some_and(|r| r.starts_with("cfg_attr"))
+        && word_ends_clean(text, pos, "cfg_attr")
+    {
+        pos += "cfg_attr".len();
+        skip_gap_tokens(text, buf, &mut pos);
+        if buf.get(pos) != Some(&b'(') {
+            return None;
+        }
+        pos += 1;
+        // Balanced skip of the cfg predicate to the top-level comma:
+        // parens nest, strings may hide both (skipped whole).
+        let mut depth: u32 = 1;
+        loop {
+            skip_gap_tokens(text, buf, &mut pos);
+            if let Some((_, end)) = literal_string(text, buf, pos) {
+                pos = end;
+                continue;
+            }
+            match buf.get(pos) {
+                Some(b'(') => {
+                    depth += 1;
+                    pos += 1;
+                }
+                Some(b')') => {
+                    if depth == 1 {
+                        return None;
+                    }
+                    depth -= 1;
+                    pos += 1;
+                }
+                Some(b',') if depth == 1 => {
+                    pos += 1;
+                    break;
+                }
+                Some(_) => {
+                    pos += 1;
+                }
+                None => return None,
+            }
+        }
+        skip_gap_tokens(text, buf, &mut pos);
+    }
     if !(text.get(pos..).is_some_and(|r| r.starts_with("path"))
         && word_ends_clean(text, pos, "path"))
     {
@@ -3090,8 +3345,9 @@ fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String
         Ok(rd) => rd,
         Err(e) => {
             problems.push(format!(
-                "{}: unreadable directory, scan incomplete: {e}",
-                sanitize_for_log(&dir.display().to_string())
+                "{}: unreadable directory, scan incomplete: {}",
+                sanitize_for_log(&dir.display().to_string()),
+                fmt_io_err(&e)
             ));
             return;
         }
@@ -3103,8 +3359,9 @@ fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String
             Ok(e) => e,
             Err(e) => {
                 problems.push(format!(
-                    "{}: directory entry unreadable mid-listing, scan incomplete: {e}",
-                    sanitize_for_log(&dir.display().to_string())
+                    "{}: directory entry unreadable mid-listing, scan incomplete: {}",
+                    sanitize_for_log(&dir.display().to_string()),
+                    fmt_io_err(&e)
                 ));
                 continue;
             }
@@ -3138,8 +3395,9 @@ fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String
                 }
             }
             Err(e) => problems.push(format!(
-                "{}: cannot stat entry, scan incomplete: {e}",
-                sanitize_for_log(&p.display().to_string())
+                "{}: cannot stat entry, scan incomplete: {}",
+                sanitize_for_log(&p.display().to_string()),
+                fmt_io_err(&e)
             )),
         }
     }
@@ -4946,6 +5204,31 @@ mod tests {
             code_redirections("#[path = \"i\rr.rs\"]\n"),
             (Vec::<String>::new(), false)
         );
+        // H-1 r17: `#[cfg_attr(pred, path = "…")]` expands to the path
+        // when the cfg holds — the follower must see through it, with
+        // strings in the predicate skipped (`target_os = "…"`) and the
+        // match at the top-level comma.
+        assert_eq!(
+            code_redirections("#[cfg_attr(all(), path = \"j.rs\")]\n"),
+            (vec!["j.rs".to_owned()], false)
+        );
+        assert_eq!(
+            code_redirections("#[cfg_attr(target_os = \"linux\", path = \"k.rs\")]\n"),
+            (vec!["k.rs".to_owned()], false)
+        );
+        // No path after the predicate comma: nothing to follow.
+        assert_eq!(
+            code_redirections("#[cfg_attr(all(), warn(dead_code))]\n"),
+            (Vec::<String>::new(), false)
+        );
+    }
+
+    #[test]
+    fn io_errors_are_sanitized_for_log() {
+        // L-1 r17: OS error text echoes the offending path — hostile
+        // filenames (newlines, escapes) must not reach the report raw.
+        let e = std::io::Error::other("bad\nname\x08");
+        assert_eq!(fmt_io_err(&e), "bad?name?");
     }
 
     #[test]
@@ -5041,6 +5324,92 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(!ok, "redirected unsafe passed the scan:\n{out}");
         assert!(out.contains("hidden.txt"), "wrong file flagged:\n{out}");
+    }
+
+    #[test]
+    fn unsafe_scan_follows_cfg_attr_path_redirection() {
+        // H-1 r17 run level: `#[cfg_attr(all(), path = "hidden2.txt")]`
+        // compiles the target as Rust when the cfg holds — the scan is
+        // condition-blind (conservative for true cfgs) and must see it.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xcfgredir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(&src).expect("temp crate");
+        std::fs::write(src.join("lib.rs"), "#![forbid(unsafe_code)]\n").expect("lib");
+        std::fs::write(
+            src.join("redir.rs"),
+            "#![forbid(unsafe_code)]\n#[cfg_attr(all(), path = \"hidden2.txt\")]\nmod hidden2;\n",
+        )
+        .expect("redir");
+        std::fs::write(src.join("hidden2.txt"), "pub unsafe fn evil() {}\n").expect("hidden");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "cfg_attr-redirected unsafe passed the scan:\n{out}");
+        assert!(out.contains("hidden2.txt"), "wrong file flagged:\n{out}");
+    }
+
+    #[test]
+    fn unsafe_scan_scans_custom_test_target_body() {
+        // M-1 r17 run level: a custom `[[test]] path` outside `tests/`
+        // (here with a non-`.rs` extension the walk never takes) compiles
+        // as Rust — its body must be scanned. Forbid roots stay with
+        // lib/bin (the compiler owns test-target lints via manifest
+        // `[lints]`), so no "missing forbid" may appear for it.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xtestroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::create_dir_all(dir.join("custom")).expect("custom dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[[test]]\nname = \"weird\"\npath = \"custom/t.txt\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            dir.join("custom").join("t.txt"),
+            "#![forbid(unsafe_code)]\npub unsafe fn evil() {}\n",
+        )
+        .expect("test root");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "custom test target unsafe passed the scan:\n{out}");
+        assert!(out.contains("t.txt"), "wrong failure shape:\n{out}");
+        assert!(
+            !out.contains("missing forbid"),
+            "test target wrongly forbid-checked:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_reports_unreadable_manifest_once() {
+        // L-3 r17 run level: one unreadable manifest must yield one
+        // problem entry, not one per consumer (scan loop +
+        // roots check). A directory in place of the file fails every
+        // read on all platforms.
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-dupmsg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("Cargo.toml")).expect("temp crate");
+        std::fs::create_dir_all(dir.join("src")).expect("src dir");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "unreadable manifest passed the scan:\n{out}");
+        let hits = out
+            .lines()
+            .filter(|l| l.contains("manifest problem"))
+            .count();
+        assert_eq!(hits, 1, "manifest problem reported twice:\n{out}");
     }
 
     #[test]
@@ -5360,7 +5729,49 @@ mod tests {
         .expect("manifest");
         let (roots, problem) = manifest_custom_roots(&dir);
         assert_eq!(problem, None);
-        assert_eq!(roots, vec![dir.join("a\\\"#b.rs")]);
+        // M-2 r17: basic-string escapes decode — the compiled path is
+        // `a"#b.rs`, not the raw `a\"#b.rs`.
+        assert_eq!(roots, vec![dir.join("a\"#b.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_invalid_escapes() {
+        // M-2 r17: `\q` is not a TOML escape — the manifest is invalid
+        // (Cargo rejects it), so the root is unknown: fail closed with a
+        // problem, never silently skip or join the raw text.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-badesc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"a\\qb.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "invalid escape surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_reads_spanning_triple_values() {
+        // M-2 r17: a `"""…"""` value may span lines — accumulate until
+        // the triple closer instead of dropping the root. (TOML trims one
+        // leading newline; other newlines are content.)
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-span-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"\"\"custom/sp\nan.rs\"\"\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/sp\nan.rs")]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5429,7 +5840,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         std::fs::write(
             dir.join("Cargo.toml"),
-            "\u{FEFF}[lib]\npath = \"custom/q.rs\"\n",
+            "\u{FEFF}\u{FEFF}[lib]\npath = \"custom/q.rs\"\n",
         )
         .expect("manifest");
         let (roots, problem) = manifest_custom_roots(&dir);

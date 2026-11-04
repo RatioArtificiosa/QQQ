@@ -507,57 +507,64 @@ fn main() -> ExitCode {
 /// records do not parse, or one whose chain does not verify — and those are refused, because a
 /// report rendered from a broken chain would assert something false in the document whose whole
 /// purpose is to be believed.
+/// The parsed `audit-log` arguments: a path and an optional SARIF switch.
+///
+/// A pure function so tests can pin the parsing without building an `Output`
+/// sink. Any dash-led token is an unknown flag — including `--manifest`,
+/// which this command has no use for (it reads the path positionally).
+#[derive(Debug)]
+struct AuditLogArgs {
+    path: String,
+    sarif: bool,
+}
+
+fn audit_log_args(args: &[String]) -> Result<AuditLogArgs, qqq_core::Error> {
+    let mut path: Option<String> = None;
+    let mut sarif = false;
+    for a in args {
+        match a.as_str() {
+            "--sarif" => sarif = true,
+            other if other.starts_with('-') => {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::CliFlagUnknown,
+                    format!("`{other}` is not a flag `qqqai audit-log` understands"),
+                )
+                .with_remediation("`qqqai audit-log <path> [--sarif]`"));
+            }
+            other if path.is_none() => path = Some(other.to_owned()),
+            _ => {
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    "`qqqai audit-log` reads one file".to_owned(),
+                )
+                .with_remediation("pass a single path"));
+            }
+        }
+    }
+    let Some(path) = path else {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`qqqai audit-log` needs the file `qqqai serve --audit-log` wrote".to_owned(),
+        )
+        .with_remediation("`qqqai audit-log /var/log/qqq/audit.jsonl`"));
+    };
+    Ok(AuditLogArgs { path, sarif })
+}
+
 fn dispatch_audit_log(
     name: CommandName,
     out: &mut Output<std::io::Stdout>,
     args: &[String],
 ) -> ExitCode {
-    let mut path: Option<String> = None;
-    let mut sarif = false;
-    let mut i = 0;
-    while i < args.len() {
-        let Some(a) = args.get(i).map(String::as_str) else {
-            break;
-        };
-        match a {
-            "--sarif" => {
-                sarif = true;
-                i += 1;
-            }
-            other if other.starts_with("--") => {
-                let err = qqq_core::Error::new(
-                    qqq_core::ErrorCode::CliFlagUnknown,
-                    format!("`{other}` is not a flag `qqqai audit-log` understands"),
-                )
-                .with_remediation("`qqqai audit-log <path> [--sarif]`");
-                let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
-                return ExitCode::from(exit::USAGE);
-            }
-            other => {
-                if path.is_some() {
-                    let err = qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
-                        "`qqqai audit-log` reads one file".to_owned(),
-                    )
-                    .with_remediation("pass a single path");
-                    let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
-                    return ExitCode::from(exit::USAGE);
-                }
-                path = Some(other.to_owned());
-                i += 1;
-            }
+    let parsed = match audit_log_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
         }
-    }
-
-    let Some(path) = path else {
-        let err = qqq_core::Error::new(
-            qqq_core::ErrorCode::McpArgumentInvalid,
-            "`qqqai audit-log` needs the file `qqqai serve --audit-log` wrote".to_owned(),
-        )
-        .with_remediation("`qqqai audit-log /var/log/qqq/audit.jsonl`");
-        let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
-        return ExitCode::from(exit::USAGE);
     };
+    let path = parsed.path;
+    let sarif = parsed.sarif;
 
     // Read and verify, without touching the file. A broken chain refuses here
     // rather than being rendered -- the exporters enforce it too, but a refusal
@@ -589,12 +596,17 @@ fn dispatch_audit_log(
     };
 
     if loaded.dropped_partial_line {
+        // Deliberately outside `Output`: a torn tail means the report is
+        // partial, and a completeness warning must not be quietable — `--quiet`
+        // suppresses human success narration, never a warning that the data
+        // being reported on is itself damaged.
         eprintln!(
             "warning: {path} ended mid-record; the incomplete line was dropped. The process that \
              wrote it did not shut down cleanly."
         );
     }
     if loaded.records.len() > stream.len() {
+        // Same: a windowed report must say so even when quiet.
         eprintln!(
             "note: {path} holds {} records; this report covers the most recent {} \
              (the in-memory window). Rotate the log for full-history reports.",
@@ -944,7 +956,8 @@ fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
             break;
         };
         if a == "--diff" {
-            let Some(v) = args.get(i + 1) else {
+            // Empty counts as bare: `--diff ""` names no baseline.
+            let Some(v) = args.get(i + 1).filter(|v| !v.is_empty()) else {
                 return Err(missing_value("--diff"));
             };
             diff_against = Some(v.clone());
@@ -955,7 +968,8 @@ fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
             }
             diff_against = Some(v.to_owned());
         } else if a == "--manifest" {
-            let Some(v) = args.get(i + 1) else {
+            // Empty counts as bare: `--manifest ""` names no file.
+            let Some(v) = args.get(i + 1).filter(|v| !v.is_empty()) else {
                 return Err(missing_value("--manifest"));
             };
             manifest = Some(v.clone());
@@ -1096,8 +1110,14 @@ fn audit_args(args: &[String]) -> Result<AuditArgs, qqq_core::Error> {
             if v.is_empty() {
                 return Err(missing_value("--manifest"));
             }
-        } else if a.starts_with("--") {
-            // **An unknown flag is refused rather than dropped.** There was no arm here, so
+        } else if a.starts_with('-') {
+            // **An unknown flag is refused rather than dropped.** Single-dash
+            // flags (`-x`) are flags too: without this arm they fell through
+            // silently. Bare positionals (including a lone `-`) are ignored
+            // below: `audit` takes none today, and §5.2's `audit <artifact>`
+            // shape is an open documentation-vs-code gap tracked separately
+            // rather than something to newly refuse here.
+            // There was no arm here, so
             // `qqqai audit --bogus` printed the human report and exited `0`: the caller got an answer
             // to a question they did not ask, with nothing to say the option had been discarded. Of
             // the three things a command can do with a flag it does not implement -- honour it, refuse
@@ -2324,6 +2344,24 @@ fn test_exec_flag(
 /// # Errors
 ///
 /// A QQQ-7001 usage error for an unrecognised flag or a non-numeric `--trials`.
+/// Set the test filter, refusing a second one.
+///
+/// Split out of [`test_options`]: the "one filter" rule is checked in two
+/// places (a bare second positional and a `--` remainder after a filter),
+/// and the two copies would drift. A second filter silently winning or losing
+/// depending on order is the defect this names.
+fn set_test_filter(opts: &mut qqq_run::TestOptions, filter: String) -> qqq_core::Result<()> {
+    if opts.filter.is_some() {
+        return Err(qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            "`test` takes one filter",
+        )
+        .with_remediation("combine patterns into one filter, e.g. `test 'foo|bar'`"));
+    }
+    opts.filter = Some(filter);
+    Ok(())
+}
+
 fn test_options(
     args: &[String],
     flags: GlobalFlags,
@@ -2421,6 +2459,19 @@ fn test_options(
                 }
                 i += 1;
             }
+            // `--` comes before the flag catch-all: it *is* flag-shaped,
+            // but it is a separator, not a flag.
+            "--" => {
+                // Everything after `--` is a positional, not a flag:
+                // `test -- -foo` filters for `-foo` instead of refusing an
+                // unknown flag. Joined into one filter — two filters would
+                // silently win or lose.
+                let rest = args.get(i + 1..).unwrap_or_default();
+                if !rest.is_empty() {
+                    set_test_filter(&mut opts, rest.join(" "))?;
+                }
+                break;
+            }
             other if other.starts_with('-') => {
                 return Err(qqq_core::Error::new(
                     qqq_core::ErrorCode::CliFlagUnknown,
@@ -2428,24 +2479,14 @@ fn test_options(
                 )
                 .with_remediation(
                     "`test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --watch, --watch-limit, --format, \
-                     --dry-run, --history, --flaky, --snapshot, --snapshot-update and --manifest",
+                     --dry-run, --history, --flaky, --snapshot, --snapshot-update, --manifest and `--`",
                 ));
             }
             // A bare argument is treated as a filter, which is what every other
             // test runner does and what a user typing `qqqai test smoke` means.
+            // A second one goes through the shared one-filter rule.
             other => {
-                if opts.filter.is_none() {
-                    opts.filter = Some(other.to_owned());
-                } else {
-                    // A second filter would silently win or lose depending on
-                    // order; naming it keeps `test foo bar` from testing only
-                    // one of the two.
-                    return Err(qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
-                        format!("`test` takes one filter, not `{other}` either"),
-                    )
-                    .with_remediation("combine patterns into one filter, e.g. `test 'foo|bar'`"));
-                }
+                set_test_filter(&mut opts, other.to_owned())?;
             }
         }
         i += 1;
@@ -3911,7 +3952,11 @@ fn strip_manifest_flag(args: &[String]) -> Result<Vec<String>, qqq_core::Error> 
                 return Err(missing_value("--manifest"));
             };
             rest = after;
-        } else if a.starts_with("--manifest=") {
+        } else if let Some(v) = a.strip_prefix("--manifest=") {
+            // An empty `--manifest=` is a missing value, not an empty path.
+            if v.is_empty() {
+                return Err(missing_value("--manifest"));
+            }
             rest = tail;
         } else {
             out.push(a.clone());
@@ -4377,6 +4422,23 @@ fn schema_args(args: &[String]) -> Result<SchemaArgs, qqq_core::Error> {
                 }
             }
             other => {
+                // `schema` describes the CLI, not a project: `--manifest`
+                // names no manifest to read, and a positional names no
+                // command to describe — both are refused rather than ignored.
+                if other == "--manifest" || other.starts_with("--manifest=") {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::CliFlagUnknown,
+                        "`schema` takes no `--manifest`: it describes the CLI itself",
+                    )
+                    .with_remediation("`schema` takes `--all`, `--errors`, `--command <name>`"));
+                }
+                if !other.starts_with('-') {
+                    return Err(qqq_core::Error::new(
+                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        format!("`schema` takes no positional arguments, not `{other}`"),
+                    )
+                    .with_remediation("describe one command: `qqqai schema --command <name>`"));
+                }
                 return Err(qqq_core::Error::new(
                     qqq_core::ErrorCode::CliFlagUnknown,
                     format!("unknown flag `{other}` for `schema`"),
@@ -6247,5 +6309,34 @@ mod tests {
         inspect_args(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
         openapi_args(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
         audit_args(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
+        // `audit-log` reads the path positionally: any dash-led token is an
+        // unknown flag (including single-dash `-x` and `--manifest`), and a
+        // second path is refused, not silently dropped.
+        let p = audit_log_args(&argv(&["a.jsonl", "--sarif"])).expect("parses");
+        assert_eq!(p.path, "a.jsonl");
+        assert!(p.sarif);
+        audit_log_args(&argv(&["-x"])).expect_err("single-dash flags are flags");
+        audit_log_args(&argv(&["--manifest", "q.toml"])).expect_err("no manifest to override");
+        audit_log_args(&argv(&["a.jsonl", "b.jsonl"])).expect_err("one file only");
+        audit_log_args(&argv(&[])).expect_err("a path is required");
+        // `schema` describes the CLI, not a project: no manifest, no
+        // positionals.
+        schema_args(&argv(&["--manifest", "q.toml"])).expect_err("schema takes no manifest");
+        let err = schema_args(&argv(&["caps"])).expect_err("positionals must fail");
+        assert!(err.message.contains("no positional"), "{}", err.message);
+        // Space-form empties are missing values too.
+        inspect_args(&argv(&["--diff", ""])).expect_err("empty --diff must fail");
+        inspect_args(&argv(&["a.wasm", "--manifest", ""])).expect_err("empty --manifest must fail");
+        openapi_args(&argv(&["--out", ""])).expect_err("empty --out must fail");
+        let err = openapi_args(&argv(&["oops"])).expect_err("positionals must fail");
+        assert!(err.message.contains("no positional"), "{}", err.message);
+        // `--` passes the rest through as one filter, even flag-shaped text.
+        let o = test_options(&argv(&["--", "-foo"]), GlobalFlags::default()).expect("parses");
+        assert_eq!(o.filter.as_deref(), Some("-foo"));
+        let err = test_options(&argv(&["a", "--", "b"]), GlobalFlags::default())
+            .expect_err("two filters must fail");
+        assert!(err.message.contains("one filter"), "{}", err.message);
+        // Single-dash audit flags are refused, not swallowed.
+        audit_args(&argv(&["-x"])).expect_err("single-dash flags are flags");
     }
 }

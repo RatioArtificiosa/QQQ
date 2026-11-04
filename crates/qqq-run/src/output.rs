@@ -488,10 +488,19 @@ impl<W: Write> Output<W> {
     ///
     /// `--quiet` shows errors and keeps exit codes — a gate that exits
     /// without saying why is one people work around — but hides the human
-    /// summary. Machine formats are contracts, not narration: JSON and
-    /// JSON Lines are unchanged, and commands that stream (serve, dev,
-    /// watch) manage their own sinks. What quiets, precisely, is the
-    /// `Format::Human` success path in [`Self::emit_with_exit`].
+    /// summary. What quiets, precisely, is the `Format::Human` success path
+    /// in [`Self::emit_with_exit`].
+    ///
+    /// Deliberately NOT quieted, each for its own reason:
+    /// * machine formats (JSON, JSON Lines, `SARIF`, `JUnit`, `TAP`): contracts,
+    ///   not narration — a quiet machine consumer is a broken pipe;
+    /// * errors and exit codes: the verdict always shows;
+    /// * safety warnings (redaction counts, metrics exposure, deterministic
+    ///   mode, torn audit tails): a warning the operator reads only when
+    ///   they ask for noise warns about nothing in time;
+    /// * guest output and logs: the program's own bytes, not QQQ narration;
+    /// * streaming servers and watchers: their output *is* the product, and
+    ///   they manage their own sinks rather than this one.
     ///
     /// ```
     /// let mut out =
@@ -1123,12 +1132,10 @@ mod tests {
         assert_eq!(v["command"], "why");
         assert_eq!(v["error"]["code"], "QQQ-4003");
         assert_eq!(v["error"]["retryable"], false);
-        assert!(
-            v["error"]["docs_url"]
-                .as_str()
-                .unwrap()
-                .ends_with("QQQ-4003")
-        );
+        assert!(v["error"]["docs_url"]
+            .as_str()
+            .unwrap()
+            .ends_with("QQQ-4003"));
         assert!(v["error"]["remediation"].is_string());
         // Context must be an array of named objects, not tuples.
         assert_eq!(v["error"]["context"][0]["name"], "capability");

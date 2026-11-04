@@ -1217,15 +1217,19 @@ fn step_literal_text(bytes: &[u8], i: &mut usize, st: &mut ScanState) -> bool {
         return false;
     };
     if let Some(n) = st.in_raw {
-        // Inside a raw string: no escapes, exact-count close only.
+        // Inside a raw string: no escapes; the string closes at a `"`
+        // followed by *at least* `n` hashes (L-1 r13: `r"a"#` closes at
+        // the `"`, the trailing `#` is a separate token — only
+        // uncompilable code shapes this, so either reading is fail-noisy,
+        // and matching real lexing is strictly more faithful).
         if b == b'"' {
             let mut k = 0;
             while bytes.get(*i + 1 + k) == Some(&b'#') {
                 k += 1;
             }
-            if k == n {
+            if k >= n {
                 st.in_raw = None;
-                *i += 1 + k;
+                *i += 1 + n;
                 return true;
             }
         }
@@ -1585,6 +1589,8 @@ fn strip_block_comments(s: &str) -> String {
 /// If `line` (which starts inside a raw string of `hash` hashes) closes it,
 /// return what follows the closer. Byte-level but boundary-safe: only
 /// ASCII `"`/`#` are examined, so indices never split a multi-byte char.
+/// Closes at *at least* `hash` hashes (L-1 r13): a trailing `#` after the
+/// closer is a separate token, and only uncompilable code shapes this.
 fn raw_tail_after_close(line: &str, hash: usize) -> Option<&str> {
     let bytes = line.as_bytes();
     let mut i = 0;
@@ -1594,8 +1600,8 @@ fn raw_tail_after_close(line: &str, hash: usize) -> Option<&str> {
             while bytes.get(i + 1 + k) == Some(&b'#') {
                 k += 1;
             }
-            if k == hash {
-                return line.get(i + 1 + k..);
+            if k >= hash {
+                return line.get(i + 1 + hash..);
             }
         }
         i += 1;
@@ -1866,23 +1872,17 @@ fn starts_word(s: &str, word: &str) -> bool {
             .is_none_or(|c| !is_ident_char(c))
 }
 
-/// Whether `f` lives under the audited `crates/qqq-sys/` exception — by
-/// path *component*, not string prefix (H-2 r11). A directory literally
-/// named `qqq-sys\evil` (legal on Unix/git) mangles to
-/// `crates/qqq-sys/evil/…` under `replace('\\', "/")`, and a prefix test
-/// would exempt a tree that is not the exception crate. Components cannot
-/// be confused this way.
-fn is_qqq_sys_path(workspace: &Path, f: &Path) -> bool {
-    use std::path::Component;
-    let mut comps = match f.strip_prefix(workspace) {
-        Ok(r) => r.components(),
-        Err(_) => return false,
-    };
-    matches!(
-        (comps.next(), comps.next()),
-        (Some(Component::Normal(a)), Some(Component::Normal(b)))
-        if a == "crates" && b == "qqq-sys"
-    )
+/// Whether `f` is exempt as audited `crates/qqq-sys/` content: the REAL
+/// file must live under the REAL qqq-sys dir (H-2 r12). A lexical check
+/// is fooled by a symlinked parent smuggling outside content under the
+/// exception name — resolve both sides with `canonicalize` first. Failure
+/// to resolve means we cannot prove exemption, so do NOT exempt
+/// (fail-noisy: the file gets scanned).
+fn is_qqq_sys_content(qsys_canon: &Path, f: &Path) -> bool {
+    match std::fs::canonicalize(f) {
+        Ok(canon) => canon.strip_prefix(qsys_canon).is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Scan one crate's `.rs` files for `unsafe` code positions, recording
@@ -1905,6 +1905,9 @@ fn scan_crate_rs_files(
     follow_code_redirections(workspace, &mut files, &mut redir_problems);
     violations.extend(redir_problems);
     files.sort();
+    // Canonical exception root, hoisted out of the per-file loop (L-9).
+    let qsys_canon = std::fs::canonicalize(workspace.join("crates").join("qqq-sys"))
+        .unwrap_or_else(|_| workspace.join("crates").join("qqq-sys"));
     for f in &files {
         // M-7 r11: path-derived fragments are sanitized at format time —
         // a hostile filename must not split the violation report.
@@ -1921,11 +1924,13 @@ fn scan_crate_rs_files(
             continue;
         };
         *files_scanned += 1;
-        // H-3 r11: a symlink *file* inside qqq-sys is still scanned — the
-        // exemption covers the audited crate's own files, not outside
-        // content linked under its name. `symlink_metadata` never follows.
+        // H-2 r12: the exemption attaches to where the file REALLY lives,
+        // not its lexical path — a symlinked parent dir would otherwise
+        // smuggle outside content under the exception name. H-3 r11: a
+        // symlink *file* itself is still scanned (`symlink_metadata` never
+        // follows), since only audited content is exempt.
         let is_link = std::fs::symlink_metadata(f).is_ok_and(|m| m.file_type().is_symlink());
-        if !is_link && is_qqq_sys_path(workspace, f) {
+        if !is_link && is_qqq_sys_content(&qsys_canon, f) {
             continue;
         }
         scan_rs_text(&rel, &text, violations);
@@ -2137,6 +2142,69 @@ fn collect_bin_roots(
     bins
 }
 
+/// Custom root paths from a crate manifest (`[lib] path = …`,
+/// `[[bin]] path = …`): without this, a root living outside `src/`
+/// compiles but is never forbid-checked (M-1 r12). Line-oriented on
+/// purpose — this crate takes no dependencies: section headers plus
+/// `path = "…"` lines with `#` comments stripped cover every real
+/// manifest shape. Anything fancier falls back to the conventional roots
+/// (collected separately); rustc fails an unresolvable manifest loudly.
+fn manifest_custom_roots(dir: &Path) -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut in_target_section = false;
+    for raw_line in text.lines() {
+        // Strip `#` comments (a `#` inside a quoted value would be
+        // eaten too — acceptable: real paths never contain `#`, and a
+        // missed custom path falls back to rustc failing the build).
+        let line = match raw_line.find('#') {
+            Some(i) => &raw_line[..i],
+            None => raw_line,
+        };
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_target_section = t == "[lib]" || t == "[[bin]]";
+            continue;
+        }
+        if !in_target_section {
+            continue;
+        }
+        let Some(rest) = t.strip_prefix("path") else {
+            continue;
+        };
+        // Word boundary: `pathname` is not `path`.
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            continue;
+        }
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let quote = match rest.chars().next() {
+            Some('"') => '"',
+            Some('\'') => '\'',
+            _ => continue,
+        };
+        let Some(end) = rest[1..].find(quote).map(|i| i + 1) else {
+            continue;
+        };
+        let value = &rest[1..end];
+        if !value.is_empty() {
+            out.push(dir.join(value));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn check_crate_roots(
     workspace: &Path,
     dir: &Path,
@@ -2185,19 +2253,22 @@ fn check_crate_roots(
                 .replace('\\', "/"),
         )
     };
-    // M-1 r9 + r10: every compilable root carries the attribute —
+    // M-1 r9 + r10 + r12: every compilable root carries the attribute —
     // lib.rs, main.rs, each src/bin/<name>.rs, each src/bin/<name>/main.rs
-    // (cargo's second binary form), and the crate-level build.rs.
+    // (cargo's second binary form), [lib]/[[bin]] custom `path = …`
+    // redirections, and the crate-level build.rs.
     // The file scan already covers their bodies for `unsafe`; the missing
     // check must cover their roots for the lint, or a bin target could
-    // drop its forbid silently. Custom [lib]/[[bin]] path= redirections
-    // stay a documented residual: parsing manifests would need TOML, and
-    // the value must be an exact file the author names in the open.
+    // drop its forbid silently. Manifest parsing is line-oriented on
+    // purpose (this crate takes no dependencies): section headers plus
+    // `path = "…"` lines cover every real manifest shape; anything fancier
+    // falls back to the conventional roots, and rustc owns the rest.
     let mut roots = vec![
         dir.join("src").join("lib.rs"),
         dir.join("src").join("main.rs"),
         dir.join("build.rs"),
     ];
+    roots.extend(manifest_custom_roots(dir));
     roots.extend(collect_bin_roots(dir, &rel, violations));
     let mut unreadable = false;
     let mut missing_root = false;
@@ -2243,7 +2314,17 @@ fn run_unsafe_scan(workspace: &Path) -> (bool, String) {
         // hole the same size as a failed listing — neither dir nor file may
         // silently vanish. `file_type` never follows symlinks, so linked
         // trees stay unrecursed by design (L11: same as the CI grep's `-r`).
+        // H-1 r13: a symlinked *directory* is fail-closed, not skipped —
+        // the collector would never recurse into it, so silence would
+        // certify unseen code. (Symlinked *files* are still collected:
+        // the scan reads through them, so their content is verified.)
         match e.file_type() {
+            Ok(t) if t.is_symlink() && std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir()) => {
+                violations.push(format!(
+                    "{}: symlinked crate dir, scan incomplete",
+                    sanitize_for_log(&e.path().to_string_lossy())
+                ));
+            }
             Ok(t) if t.is_dir() => crates.push(e.path()),
             Ok(_) => {}
             Err(e) => violations.push(format!(
@@ -2367,6 +2448,11 @@ fn gate_redirect(
 /// report it.)
 /// Cycle-safe via the visited set; unresolvable targets are ignored
 /// (rustc fails the build elsewhere, loudly).
+/// Accepted residual (L-2 r12): the gate canonicalizes but the scan reads
+/// by the lexical path, so a concurrent tree mutation between the two
+/// could substitute content. No concurrent-writer threat model exists for
+/// a local gate run — an adversary with write access in that window has
+/// simpler attacks — so this stays documented, not plumbed.
 fn follow_code_redirections(
     workspace: &Path,
     files: &mut Vec<PathBuf>,
@@ -2521,8 +2607,10 @@ fn quoted_lit(text: &str, buf: &[u8], mut pos: usize) -> Option<(String, usize)>
     Some((String::from_utf8(out).ok()?, pos))
 }
 
-/// A raw-string literal at `pos` (`r"…"`, `r#"…"#`, …): no escapes,
-/// exact-count close (M-3 r8). Returns the value and the index past it.
+/// A raw-string literal at `pos` (`r"…"`, `r#"…"#`, …): no escapes.
+/// Closes at *at least* the opening hash count, consuming exactly that
+/// many (L-1 r13): a trailing `#` after the closer is a separate token —
+/// only uncompilable code shapes this, and real lexing never swallows it.
 fn raw_quoted_lit(buf: &[u8], mut pos: usize) -> Option<(String, usize)> {
     pos += 1;
     let mut hashes = 0;
@@ -2542,8 +2630,8 @@ fn raw_quoted_lit(buf: &[u8], mut pos: usize) -> Option<(String, usize)> {
             while buf.get(pos + 1 + closing) == Some(&b'#') {
                 closing += 1;
             }
-            if closing == hashes {
-                pos += 1 + closing;
+            if closing >= hashes {
+                pos += 1 + hashes;
                 break;
             }
             out.push(cur);
@@ -2783,6 +2871,16 @@ fn collect_rs_into(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String
         // silently vanish. (Symlink *targets* are not followed, L11 above;
         // this arm is about the stat itself failing.)
         match e.file_type() {
+            // H-1 r13: a symlinked directory is fail-closed, not silently
+            // skipped — the collector below would never recurse into it.
+            // (Symlinked *files* are still collected and read through, so
+            // their content is verified rather than vouched for.)
+            Ok(t) if t.is_symlink() && std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir()) => {
+                problems.push(format!(
+                    "{}: symlinked dir, scan incomplete",
+                    sanitize_for_log(&e.path().to_string_lossy())
+                ));
+            }
             Ok(t) if t.is_dir() => collect_rs_into(&p, out, problems),
             Ok(_) => {
                 // L-2 r6: case-insensitive — `FOO.RS` compiles via an
@@ -4815,6 +4913,170 @@ mod tests {
         assert!(
             !out.contains("pub unsafe"),
             "escaped content echoed:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_symlinked_crate_dir_is_loud() {
+        // H-1 r13: a symlinked crate dir is fail-closed, not silently
+        // skipped — the collector never recurses into it, so silence
+        // would vouch for unseen code. Skipped where the platform denies
+        // symlink creation.
+        let outside =
+            std::env::temp_dir().join(format!("qqq-xtask-xcrateout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(outside.join("src")).expect("outside dir");
+        std::fs::write(
+            outside.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("outside lib");
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xcratelink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("crates")).expect("crates dir");
+        #[cfg(unix)]
+        let link_ok =
+            std::os::unix::fs::symlink(&outside, root.join("crates").join("linkcrate")).is_ok();
+        #[cfg(windows)]
+        let link_ok =
+            std::os::windows::fs::symlink_dir(&outside, root.join("crates").join("linkcrate"))
+                .is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let link_ok = false;
+        if !link_ok {
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&outside);
+            eprintln!("SKIP: cannot create symlinks here");
+            return;
+        }
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        assert!(!ok, "symlinked crate dir passed the scan:\n{out}");
+        assert!(out.contains("symlinked"), "wrong failure shape:\n{out}");
+    }
+
+    #[test]
+    fn unsafe_scan_symlinked_bin_dir_is_loud() {
+        // H-4 r12: a symlinked src/bin/<name> dir is fail-closed — the
+        // collector never recurses into it, so vouching for its target
+        // would certify unseen code. Skipped where the platform denies
+        // symlink creation.
+        let target = std::env::temp_dir().join(format!("qqq-xtask-xbinout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&target).expect("outside dir");
+        std::fs::write(target.join("main.rs"), "fn main() {}\n").expect("bin main");
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xbinlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(src.join("bin")).expect("temp crate");
+        std::fs::write(
+            src.join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        #[cfg(unix)]
+        let link_ok = std::os::unix::fs::symlink(&target, src.join("bin").join("tool")).is_ok();
+        #[cfg(windows)]
+        let link_ok =
+            std::os::windows::fs::symlink_dir(&target, src.join("bin").join("tool")).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let link_ok = false;
+        if !link_ok {
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&target);
+            eprintln!("SKIP: cannot create symlinks here");
+            return;
+        }
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&target);
+        assert!(!ok, "symlinked bin dir passed the scan:\n{out}");
+        assert!(out.contains("symlinked"), "wrong failure shape:\n{out}");
+    }
+
+    #[test]
+    fn manifest_custom_roots_parses_lib_and_bin_paths() {
+        // M-1 r13: custom [lib]/[[bin]] path= redirections are discovered
+        // for the missing-forbid backstop.
+        let dir = std::env::temp_dir().join(format!("qqq-xtask-xmanifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"custom/lib2.rs\"\n\n[[bin]]\nname = \"tool\"\npath = 'custom-bin/main.rs' # comment\n\n[dependencies]\n",
+        )
+        .expect("manifest");
+        let mut roots = manifest_custom_roots(&dir);
+        roots.sort();
+        assert_eq!(
+            roots,
+            vec![dir.join("custom/lib2.rs"), dir.join("custom-bin/main.rs")]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsafe_scan_requires_custom_manifest_root_forbid() {
+        // M-1 r13 run level: a custom [lib] path without the attribute
+        // fails loudly like a conventional root.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xmanifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("custom")).expect("temp crate");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"custom/lib2.rs\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.join("custom").join("lib2.rs"), "pub fn f() {}\n").expect("lib");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "unforbidden custom root passed the scan:\n{out}");
+        assert!(
+            out.contains("missing forbid"),
+            "wrong failure shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_symlink_inside_qqq_sys_is_scanned() {
+        // H-2 r12: a symlinked path inside qqq-sys does not inherit the
+        // exception — the target lives outside the audited crate (here in
+        // a sibling crate dir inside the workspace, so the outside-workspace
+        // gate does not interfere), so its content must be scanned, not
+        // skipped. The target is a non-.rs file so only the `#[path]`
+        // redirection — not the normal walk — can discover it.
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xqlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let victim = root.join("crates").join("victim");
+        std::fs::create_dir_all(&victim).expect("victim dir");
+        std::fs::write(victim.join("evil.txt"), "pub unsafe fn evil() {}\n").expect("evil");
+        let qsys = root.join("crates").join("qqq-sys").join("src");
+        std::fs::create_dir_all(&qsys).expect("temp crate");
+        #[cfg(unix)]
+        let link_ok = std::os::unix::fs::symlink(&victim, qsys.join("link")).is_ok();
+        #[cfg(windows)]
+        let link_ok = std::os::windows::fs::symlink_dir(&victim, qsys.join("link")).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let link_ok = false;
+        if !link_ok {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("SKIP: cannot create symlinks here");
+            return;
+        }
+        std::fs::write(
+            qsys.join("lib.rs"),
+            "#![forbid(unsafe_code)]\n#[path = \"link/evil.txt\"]\nmod evil;\n",
+        )
+        .expect("lib");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "symlinked qqq-sys content passed the scan:\n{out}");
+        assert!(
+            out.contains("evil"),
+            "wrong failure shape (expected the outside file flagged):\n{out}"
         );
     }
 

@@ -330,10 +330,10 @@ fn metrics_path_of(args: &[String], i: usize) -> Result<String> {
 ///
 /// # Errors
 ///
-/// `QQQ-7001` for an unknown flag, a flag without a value, or a value that does not
-/// parse. Every one is a *usage* error: the command names what was wrong and what
-/// to write instead, because a server that starts with a flag silently ignored is
-/// worse than one that refuses to start.
+/// `QQQ-7004` for an unknown flag, `QQQ-7001` for a flag without a value or a
+/// value that does not parse. Every one is a *usage* error: the command names
+/// what was wrong and what to write instead, because a server that starts
+/// with a flag silently ignored is worse than one that refuses to start.
 /// Read and validate `--workers`' value.
 ///
 /// # Errors
@@ -441,19 +441,72 @@ fn parse_deterministic_flag(opts: &mut ServeOptions, arg: &str) -> bool {
     }
 }
 
+/// Parse one observability flag (`--trace-*`, `--metrics-path`,
+/// `--log-format`, `--redact-from`, `--audit-*`).
+///
+/// Split out of [`options`]: the observability family pushed it over the
+/// line budget, and they change together (sampling, redaction, audit sink)
+/// while serving flags do not. Returns whether the flag belonged to the
+/// family; unknown flags fall through to the caller's refusal.
+fn parse_observability_flag(
+    opts: &mut ServeOptions,
+    flag: &str,
+    args: &[String],
+    index: &mut usize,
+) -> Result<bool> {
+    let i = *index;
+    match flag {
+        "--trace-sample" => {
+            opts.trace_rate = Some(trace_rate_of(args, i)?);
+            *index += 2;
+        }
+        "--trace-keep-failures" => {
+            opts.trace_keep_failures = true;
+            *index += 1;
+        }
+        "--metrics-path" => {
+            opts.metrics_path = Some(metrics_path_of(args, i)?);
+            *index += 2;
+        }
+        "--log-format" => {
+            opts.log_format = Some(log_format_of(args, i)?);
+            *index += 2;
+        }
+        "--redact-from" => {
+            let v = value_of(args, i, "--redact-from")?;
+            if v.is_empty() {
+                return Err(usage("`--redact-from` needs a path").with_remediation(
+                    "pass the `NAME=value` file holding the secret values to redact, for \
+                     example `--redact-from /etc/qqq/secrets.env`",
+                ));
+            }
+            opts.redact_from = Some(v);
+            *index += 2;
+        }
+        "--audit-log" => {
+            opts.audit_log = Some(audit_log_of(args, i)?);
+            *index += 2;
+        }
+        "--audit-hmac-key-file" => {
+            opts.audit_hmac_key_file = Some(audit_hmac_key_file_of(args, i)?);
+            *index += 2;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 /// Parse `qqqai serve`'s arguments.
 ///
 /// # Errors
 ///
-/// `QQQ-7001` for an unknown flag, a flag without a value, or a value that does not parse. Every
-/// one is a *usage* error: the command names what was wrong and what to write instead, because a
-/// server that starts with a flag silently ignored is worse than one that refuses to start.
+/// `QQQ-7004` for an unknown flag, `QQQ-7001` for a flag without a value or a
+/// value that does not parse. Every one is a *usage* error: the command names
+/// what was wrong and what to write instead, because a server that starts
+/// with a flag silently ignored is worse than one that refuses to start.
 pub fn options(args: &[String]) -> Result<ServeOptions> {
     let mut opts = ServeOptions::default();
-    // `--flag=value` twins for every value flag: without this, `dev` and `run`
-    // accept `=` while `serve` calls the same spelling unknown. Expanding up
-    // front keeps every arm — and its validation — single-sourced, and values
-    // never start with `--`, so only real flags split.
+    // `--flag=value` twins, expanded up front (see `expand_equals`).
     let expanded = expand_equals(args);
     let args = expanded.as_slice();
     let mut i = 0;
@@ -494,41 +547,6 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
                 opts.config = Some(value_of(args, i, "--manifest")?);
                 i += 2;
             }
-            "--trace-sample" => {
-                opts.trace_rate = Some(trace_rate_of(args, i)?);
-                i += 2;
-            }
-            "--trace-keep-failures" => {
-                opts.trace_keep_failures = true;
-                i += 1;
-            }
-            "--metrics-path" => {
-                opts.metrics_path = Some(metrics_path_of(args, i)?);
-                i += 2;
-            }
-            "--log-format" => {
-                opts.log_format = Some(log_format_of(args, i)?);
-                i += 2;
-            }
-            "--redact-from" => {
-                let v = value_of(args, i, "--redact-from")?;
-                if v.is_empty() {
-                    return Err(usage("`--redact-from` needs a path").with_remediation(
-                        "pass the `NAME=value` file holding the secret values to redact, for \
-                         example `--redact-from /etc/qqq/secrets.env`",
-                    ));
-                }
-                opts.redact_from = Some(v);
-                i += 2;
-            }
-            "--audit-log" => {
-                opts.audit_log = Some(audit_log_of(args, i)?);
-                i += 2;
-            }
-            "--audit-hmac-key-file" => {
-                opts.audit_hmac_key_file = Some(audit_hmac_key_file_of(args, i)?);
-                i += 2;
-            }
             "--accept-limit" => {
                 let v = value_of(args, i, "--accept-limit")?;
                 let n: u64 = v.parse().map_err(|_| {
@@ -546,14 +564,23 @@ pub fn options(args: &[String]) -> Result<ServeOptions> {
                 i += 2;
             }
             other => {
-                return Err(usage(format!("`{other}` is not a flag `serve` accepts"))
-                    .with_remediation(
-                        "serve accepts --listen, --workers, --tls, --config, --manifest, \
-                         --accept-limit, --aot-cache, --audit-log, \
-                         --audit-hmac-key-file, --redact-from, --log-format, \
-                         --metrics-path, --trace-sample, --trace-keep-failures, \
-                         --deterministic and --allow-deterministic-public",
-                    ));
+                // Observability flags live in their own parser (line budget);
+                // anything else here is unknown.
+                if parse_observability_flag(&mut opts, other, args, &mut i)? {
+                    // Handled.
+                    continue;
+                }
+                return Err(qqq_core::Error::new(
+                    qqq_core::ErrorCode::CliFlagUnknown,
+                    format!("`{other}` is not a flag `serve` accepts"),
+                )
+                .with_remediation(
+                    "serve accepts --listen, --workers, --tls, --config, --manifest, \
+                     --accept-limit, --aot-cache, --audit-log, \
+                     --audit-hmac-key-file, --redact-from, --log-format, \
+                     --metrics-path, --trace-sample, --trace-keep-failures, \
+                     --deterministic and --allow-deterministic-public",
+                ));
             }
         }
     }
@@ -631,6 +658,9 @@ fn validate_standalone_flags(opts: &ServeOptions) -> Result<()> {
 ///
 /// An empty value (`--flag=`) expands to the bare flag, so `value_of`
 /// reports it missing: an empty path never names anything real.
+///
+/// Shared with every other parser via [`crate::args::expand_equals`]: one
+/// implementation, so the spelling contract cannot drift between commands.
 fn expand_equals(args: &[String]) -> Vec<String> {
     const VALUE_FLAGS: [&str; 12] = [
         "--aot-cache",
@@ -646,24 +676,7 @@ fn expand_equals(args: &[String]) -> Vec<String> {
         "--audit-hmac-key-file",
         "--accept-limit",
     ];
-    let mut out = Vec::with_capacity(args.len());
-    for arg in args {
-        if let Some((flag, value)) = arg.split_once('=')
-            && flag.starts_with("--")
-            && VALUE_FLAGS.contains(&flag)
-        {
-            out.push(flag.to_owned());
-            // An empty value is a missing value: pushing the bare flag lets
-            // `value_of` report it instead of a downstream error about an
-            // empty path.
-            if !value.is_empty() {
-                out.push(value.to_owned());
-            }
-        } else {
-            out.push(arg.clone());
-        }
-    }
-    out
+    crate::args::expand_equals(args, &VALUE_FLAGS)
 }
 
 /// Read the value that follows a flag.

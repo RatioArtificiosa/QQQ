@@ -26,6 +26,9 @@
 /// anything real, and accepting it would defer the failure to a confusing
 /// downstream error.
 ///
+/// Splitting stops at a bare `--`: everything after it is a positional for
+/// the guest, not a flag, even if it contains `=`.
+///
 /// ```
 /// let expanded = qqq_run::args::expand_equals(
 ///     &["--target=x".to_owned(), "--release".to_owned(), "--bogus=y".to_owned()],
@@ -37,13 +40,26 @@
 /// );
 /// let empty = qqq_run::args::expand_equals(&["--target=".to_owned()], &["--target"]);
 /// assert_eq!(empty, vec!["--target".to_owned()]);
+/// let passthrough = qqq_run::args::expand_equals(
+///     &["--".to_owned(), "--target=x".to_owned()],
+///     &["--target"],
+/// );
+/// assert_eq!(passthrough, vec!["--".to_owned(), "--target=x".to_owned()]);
 /// ```
 #[must_use]
 pub fn expand_equals(args: &[String], value_flags: &[&str]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
+    let mut passthrough = false;
     for arg in args {
+        // Past `--`, nothing is a flag: `run -- --target=x` passes the
+        // spelling to the component untouched.
+        if arg == "--" {
+            passthrough = true;
+        }
         match arg.split_once('=') {
-            Some((flag, value)) if flag.starts_with("--") && value_flags.contains(&flag) => {
+            Some((flag, value))
+                if !passthrough && flag.starts_with("--") && value_flags.contains(&flag) =>
+            {
                 out.push(flag.to_owned());
                 // An empty value is a missing value: pushing the bare flag
                 // lets the parser's `missing_value` fire instead of a
@@ -101,5 +117,12 @@ mod tests {
     fn short_flags_never_split() {
         let expanded = expand_equals(&["-f=x".to_owned()], &["-f"]);
         assert_eq!(expanded, vec!["-f=x".to_owned()]);
+    }
+
+    /// Past `--`, nothing splits: the guest owns the spelling.
+    #[test]
+    fn separator_stops_the_split() {
+        let expanded = expand_equals(&["--".to_owned(), "--target=x".to_owned()], &["--target"]);
+        assert_eq!(expanded, vec!["--".to_owned(), "--target=x".to_owned()]);
     }
 }

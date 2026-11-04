@@ -95,6 +95,21 @@ fn value_of(args: &[String], i: usize, flag: &str) -> Result<String, Error> {
     })
 }
 
+/// The value-taking flags: both spellings parse identically, via the shared
+/// pre-expansion. The list is the contract — a flag missing here falls into
+/// the unknown-option arm.
+const VALUE_FLAGS: [&str; 9] = [
+    "--listen",
+    "--target",
+    "--url",
+    "--only",
+    "--filter",
+    "--requests",
+    "--seconds",
+    "--connections",
+    "--timeout",
+];
+
 /// Parse the command line.
 ///
 /// # Errors
@@ -103,20 +118,6 @@ fn value_of(args: &[String], i: usize, flag: &str) -> Result<String, Error> {
 /// anything is measured, because a typo should be reported while the user is
 /// looking at the command they typed (`§O-033a`) — not after ten seconds of load.
 pub fn options(args: &[String]) -> Result<BenchOptions, Error> {
-    // Both spellings, one contract: `--requests 50` and `--requests=50` parse
-    // identically, via the shared pre-expansion. The list is the contract —
-    // a flag missing here falls into the unknown-option arm.
-    const VALUE_FLAGS: [&str; 9] = [
-        "--listen",
-        "--target",
-        "--url",
-        "--only",
-        "--filter",
-        "--requests",
-        "--seconds",
-        "--connections",
-        "--timeout",
-    ];
     let args = crate::args::expand_equals(args, &VALUE_FLAGS);
     let args: &[String] = &args;
     let mut opts = BenchOptions::default();
@@ -199,12 +200,17 @@ pub fn options(args: &[String]) -> Result<BenchOptions, Error> {
                 i += 1;
             }
             other => {
-                return Err(usage(format!("unknown option `{other}` for `qqqai bench`"))
-                    .with_remediation(
-                        "run `qqqai bench --help`; the options are --listen, --only, \
-                         --requests, --seconds, --connections, --timeout, --json, \
-                         --fail-on-miss",
-                    ));
+                // Unknown options are unknown flags, not bad values: the
+                // code says which reading to do, the message names the flag.
+                return Err(Error::new(
+                    ErrorCode::CliFlagUnknown,
+                    format!("unknown option `{other}` for `qqqai bench`"),
+                )
+                .with_remediation(
+                    "run `qqqai bench --help`; the options are --listen, --only, \
+                     --requests, --seconds, --connections, --timeout, --json, \
+                     --fail-on-miss",
+                ));
             }
         }
     }

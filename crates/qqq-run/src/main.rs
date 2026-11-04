@@ -157,6 +157,11 @@ enum Action {
     Version,
     /// The arguments were not understood.
     UsageError(String),
+    /// A global flag was not understood. Separate from [`Action::UsageError`]
+    /// so it reports [`ErrorCode::CliFlagUnknown`]: an unrecognised option is
+    /// fixed by reading the usage, while `UsageError` covers the shape of the
+    /// invocation (unknown commands, missing subcommands).
+    UnknownFlag(String),
 }
 
 /// The exit codes, matching `sysexits.h` conventions where they apply.
@@ -247,7 +252,7 @@ fn parse_args(argv: &[String]) -> Parsed {
                 // An unknown global flag *before* the command is a usage error.
                 // After the command it belongs to the command and passes
                 // through untouched.
-                action = Some(Action::UsageError(format!("unknown flag `{other}`")));
+                action = Some(Action::UnknownFlag(format!("unknown flag `{other}`")));
                 break;
             }
             other => {
@@ -461,6 +466,17 @@ fn main() -> ExitCode {
             let _ = out.emit_error_with_exit(CommandName::Help, &err, exit::USAGE);
             ExitCode::from(exit::USAGE)
         }
+        Action::UnknownFlag(message) => {
+            let format = flags.format();
+            let mut out = Output::new(format, std::io::stdout());
+            let err = qqq_core::Error::new(qqq_core::ErrorCode::CliFlagUnknown, message)
+                .with_remediation(format!(
+                    "run `{} --help` to see the available flags",
+                    qqq_core::BINARY_NAME
+                ));
+            let _ = out.emit_error_with_exit(CommandName::Help, &err, exit::USAGE);
+            ExitCode::from(exit::USAGE)
+        }
         Action::Command { name, args } => run_command(name, &args, flags),
     }
 }
@@ -510,7 +526,7 @@ fn dispatch_audit_log(
             }
             other if other.starts_with("--") => {
                 let err = qqq_core::Error::new(
-                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    qqq_core::ErrorCode::CliFlagUnknown,
                     format!("`{other}` is not a flag `qqqai audit-log` understands"),
                 )
                 .with_remediation("`qqqai audit-log <path> [--sarif]`");
@@ -946,7 +962,10 @@ fn inspect_args(args: &[String]) -> Result<InspectArgs, qqq_core::Error> {
             i += 1;
         } else if let Some(v) = a.strip_prefix("--manifest=") {
             // Self-contained: no value to skip, and nothing here is an
-            // artifact path.
+            // artifact path. Empty is missing, not an empty path.
+            if v.is_empty() {
+                return Err(missing_value("--manifest"));
+            }
             manifest = Some(v.to_owned());
         } else if a.starts_with('-') {
             // Refused, not ignored: the global parser consumes `--json` and
@@ -1072,8 +1091,11 @@ fn audit_args(args: &[String]) -> Result<AuditArgs, qqq_core::Error> {
                 return Err(missing_value("--manifest"));
             }
             i += 1;
-        } else if a.starts_with("--manifest=") {
-            // Self-contained twin: nothing to skip.
+        } else if let Some(v) = a.strip_prefix("--manifest=") {
+            // Self-contained twin: nothing to skip. Empty is missing.
+            if v.is_empty() {
+                return Err(missing_value("--manifest"));
+            }
         } else if a.starts_with("--") {
             // **An unknown flag is refused rather than dropped.** There was no arm here, so
             // `qqqai audit --bogus` printed the human report and exited `0`: the caller got an answer
@@ -1090,7 +1112,7 @@ fn audit_args(args: &[String]) -> Result<AuditArgs, qqq_core::Error> {
             // `--json` as a usage error, which would have broken
             // `audit_json_is_parseable_and_only_the_envelope` -- a green test. Measured, then reverted.
             return Err(qqq_core::Error::new(
-                qqq_core::ErrorCode::McpArgumentInvalid,
+                qqq_core::ErrorCode::CliFlagUnknown,
                 format!("`{a}` is not a flag `qqqai audit` understands"),
             )
             .with_remediation(
@@ -1284,8 +1306,32 @@ fn dispatch_style(
     // documents: a command that accepts anything it does not understand silently does the wrong
     // thing. Measured before this existed: `qqqai lint --check` ran a full lint and exited `0`,
     // so a caller asking for a check got a green result from a flag nothing implemented.
-    if let Some(code) = refuse_flags(name, args, &["--manifest"], out) {
+    //
+    // `--manifest` (both spellings) is stripped first: it belongs to
+    // `with_manifest_verdict`, which reads the raw argv. A bare trailing
+    // flag fails loudly instead of loading the ambient project. Positionals
+    // are refused for the same reason: these commands take none.
+    let stripped = match strip_manifest_flag(args) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = out.emit_error_with_exit(name, &e, exit::USAGE);
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    // Validation runs on the stripped args; discovery below reads the raw
+    // argv (which still carries `--manifest`) via `with_manifest_verdict`.
+    let rest = stripped.as_slice();
+    if let Some(code) = refuse_flags(name, rest, &[], out) {
         return code;
+    }
+    if let Some(pos) = rest.iter().find(|a| !a.starts_with('-')) {
+        let err = qqq_core::Error::new(
+            qqq_core::ErrorCode::McpArgumentInvalid,
+            format!("`{name}` takes no positional arguments, not `{pos}`"),
+        )
+        .with_remediation("run without arguments; the project comes from the manifest");
+        let _ = out.emit_error_with_exit(name, &err, exit::USAGE);
+        return ExitCode::from(exit::USAGE);
     }
     // The verdict is the whole point of `lint` existing, and it was **missing** until external
     // review caught it: this called `with_manifest`, which maps every `Ok` to `exit::OK`, so a
@@ -1803,8 +1849,9 @@ fn openapi_args(args: &[String]) -> Result<OpenapiArgs, qqq_core::Error> {
         } else if a == "--out" || a == "-o" {
             // `let ... else`, not a `match` with one meaningful arm: a bare `--out` is a
             // usage error rather than a silent write to a file named `--`, and the shape says
-            // so in one line instead of seven.
-            let Some(v) = args.get(i + 1) else {
+            // so in one line instead of seven. Empty counts as bare: `--out ""`
+            // names no file either.
+            let Some(v) = args.get(i + 1).filter(|v| !v.is_empty()) else {
                 return Err(qqq_core::Error::new(
                     qqq_core::ErrorCode::McpArgumentInvalid,
                     "`--out` needs a file path".to_owned(),
@@ -1814,7 +1861,7 @@ fn openapi_args(args: &[String]) -> Result<OpenapiArgs, qqq_core::Error> {
             out = Some(v.clone());
             i += 1;
         } else if a == "--manifest" {
-            let Some(v) = args.get(i + 1) else {
+            let Some(v) = args.get(i + 1).filter(|v| !v.is_empty()) else {
                 return Err(qqq_core::Error::new(
                     qqq_core::ErrorCode::McpArgumentInvalid,
                     "`--manifest` needs a file path".to_owned(),
@@ -1824,11 +1871,22 @@ fn openapi_args(args: &[String]) -> Result<OpenapiArgs, qqq_core::Error> {
             manifest = Some(std::path::PathBuf::from(v));
             i += 1;
         } else if let Some(v) = a.strip_prefix("--manifest=") {
+            // Self-contained: no value to skip. Empty is missing, not an
+            // empty path.
+            if v.is_empty() {
+                return Err(missing_value("--manifest"));
+            }
             manifest = Some(std::path::PathBuf::from(v));
+        } else if a.starts_with('-') {
+            return Err(qqq_core::Error::new(
+                qqq_core::ErrorCode::CliFlagUnknown,
+                format!("unknown flag `{a}` for `openapi`"),
+            )
+            .with_remediation("`openapi` accepts --out <file> and --manifest <file>"));
         } else {
             return Err(qqq_core::Error::new(
                 qqq_core::ErrorCode::McpArgumentInvalid,
-                format!("unknown argument `{a}` for `openapi`"),
+                format!("`openapi` takes no positional arguments, not `{a}`"),
             )
             .with_remediation("`openapi` accepts --out <file> and --manifest <file>"));
         }
@@ -1856,16 +1914,16 @@ fn new_options(args: &[String]) -> Result<qqq_run::NewOptions, qqq_core::Error> 
         };
         match a {
             "--lang" | "--language" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.language = Language::parse(v).ok_or_else(|| {
-                    unknown_choice("language", v, &Language::ALL.map(Language::as_str))
+                let v = required_value(args, i, a)?;
+                opts.language = Language::parse(&v).ok_or_else(|| {
+                    unknown_choice("language", &v, &Language::ALL.map(Language::as_str))
                 })?;
                 i += 1;
             }
             "--template" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.template = Template::parse(v).ok_or_else(|| {
-                    unknown_choice("template", v, &Template::ALL.map(Template::as_str))
+                let v = required_value(args, i, a)?;
+                opts.template = Template::parse(&v).ok_or_else(|| {
+                    unknown_choice("template", &v, &Template::ALL.map(Template::as_str))
                 })?;
                 i += 1;
             }
@@ -1888,7 +1946,7 @@ fn new_options(args: &[String]) -> Result<qqq_run::NewOptions, qqq_core::Error> 
                     })?;
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        qqq_core::ErrorCode::CliFlagUnknown,
                         format!("unknown flag `{other}` for `new`"),
                     )
                     .with_remediation(
@@ -1969,16 +2027,16 @@ fn init_options(args: &[String]) -> Result<qqq_run::InitOptions, qqq_core::Error
         };
         match a {
             "--lang" | "--language" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.language = Some(Language::parse(v).ok_or_else(|| {
-                    unknown_choice("language", v, &Language::ALL.map(Language::as_str))
+                let v = required_value(args, i, a)?;
+                opts.language = Some(Language::parse(&v).ok_or_else(|| {
+                    unknown_choice("language", &v, &Language::ALL.map(Language::as_str))
                 })?);
                 i += 1;
             }
             "--template" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.template = Template::parse(v).ok_or_else(|| {
-                    unknown_choice("template", v, &Template::ALL.map(Template::as_str))
+                let v = required_value(args, i, a)?;
+                opts.template = Template::parse(&v).ok_or_else(|| {
+                    unknown_choice("template", &v, &Template::ALL.map(Template::as_str))
                 })?;
                 i += 1;
             }
@@ -1999,7 +2057,7 @@ fn init_options(args: &[String]) -> Result<qqq_run::InitOptions, qqq_core::Error
                     })?;
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        qqq_core::ErrorCode::CliFlagUnknown,
                         format!("unknown flag `{other}` for `init`"),
                     )
                     .with_remediation("`init` accepts --lang, --template and --force"));
@@ -2078,10 +2136,14 @@ fn dispatch_test(
             }
         };
         // **Raw to stdout**, the arrangement the foreign report formats use: this is a document rather
-        // than an envelope, and a reader may pipe it.
+        // than an envelope, and a reader may pipe it. Machine documents are exempt from `--quiet`
+        // (like SARIF): quiet suppresses human narration, not piped documents.
         let text = qqq_run::flaky::report(&found);
         if text.is_empty() {
-            println!("no flaky tests in the history");
+            // Human narration, not a document: quiet suppresses it.
+            if !flags.quiet() {
+                println!("no flaky tests in the history");
+            }
         } else {
             print!("{text}");
         }
@@ -2204,14 +2266,14 @@ fn test_exec_flag(
             opts.snapshot = Some(qqq_run::SnapshotMode::Update);
         }
         "--jobs" => {
-            let v = args.get(*index + 1).ok_or_else(|| missing_value(flag))?;
+            let v = required_value(args, *index, flag)?;
             let jobs: u32 = v
                 .parse()
-                .map_err(|_| bad_value(flag, v, "a whole number of parallel jobs"))?;
+                .map_err(|_| bad_value(flag, &v, "a whole number of parallel jobs"))?;
             if jobs == 0 {
                 return Err(bad_value(
                     flag,
-                    v,
+                    &v,
                     "at least 1 worker (omit --jobs for sequential)",
                 ));
             }
@@ -2226,14 +2288,14 @@ fn test_exec_flag(
             opts.watch = true;
         }
         "--watch-limit" => {
-            let v = args.get(*index + 1).ok_or_else(|| missing_value(flag))?;
+            let v = required_value(args, *index, flag)?;
             let limit: u32 = v
                 .parse()
-                .map_err(|_| bad_value(flag, v, "a whole number of re-runs to allow"))?;
+                .map_err(|_| bad_value(flag, &v, "a whole number of re-runs to allow"))?;
             if limit == 0 {
                 return Err(bad_value(
                     flag,
-                    v,
+                    &v,
                     "at least 1 re-run (omit --watch-limit for unbounded)",
                 ));
             }
@@ -2301,8 +2363,8 @@ fn test_options(
         };
         match a {
             "--filter" | "-f" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.filter = Some(v.clone());
+                let v = required_value(args, i, a)?;
+                opts.filter = Some(v);
                 i += 1;
             }
             "--fail-fast" => opts.fail_fast = true,
@@ -2318,17 +2380,17 @@ fn test_options(
             // a USAGE error rather than a silent fallback to human text: a CI job collecting no
             // artifact must not look like a job that succeeded.
             "--format" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.format = qqq_run::TestFormat::parse(v)
-                    .ok_or_else(|| bad_value(a, v, "one of human, json, junit, tap"))?;
+                let v = required_value(args, i, a)?;
+                opts.format = qqq_run::TestFormat::parse(&v)
+                    .ok_or_else(|| bad_value(a, &v, "one of human, json, junit, tap"))?;
                 opts.json = opts.format == qqq_run::TestFormat::Json;
                 i += 1;
             }
             "--trials" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                let v = required_value(args, i, a)?;
                 opts.trials = Some(
                     v.parse()
-                        .map_err(|_| bad_value(a, v, "a whole number of trials"))?,
+                        .map_err(|_| bad_value(a, &v, "a whole number of trials"))?,
                 );
                 i += 1;
             }
@@ -2342,12 +2404,12 @@ fn test_options(
             // identifier come from the environment, which keeps this list at twelve entries for a help
             // text with a brevity budget (`DX-013`).
             "--history" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                let v = required_value(args, i, a)?;
                 opts.history = Some(std::path::PathBuf::from(v));
                 i += 1;
             }
             "--flaky" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                let v = required_value(args, i, a)?;
                 opts.flaky = Some(std::path::PathBuf::from(v));
                 i += 1;
             }
@@ -2361,7 +2423,7 @@ fn test_options(
             }
             other if other.starts_with('-') => {
                 return Err(qqq_core::Error::new(
-                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    qqq_core::ErrorCode::CliFlagUnknown,
                     format!("unknown flag `{other}` for `test`"),
                 )
                 .with_remediation(
@@ -2634,18 +2696,18 @@ fn add_cap_options(
         };
         match a {
             "--cap" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                table = Some(v.clone());
+                let v = required_value(args, i, a)?;
+                table = Some(v);
                 i += 1;
             }
             "--path" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                path = Some(v.clone());
+                let v = required_value(args, i, a)?;
+                path = Some(v);
                 i += 1;
             }
             "--mode" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                mode = Some(v.clone());
+                let v = required_value(args, i, a)?;
+                mode = Some(v);
                 i += 1;
             }
             "--dry-run" => {}
@@ -2660,7 +2722,7 @@ fn add_cap_options(
                     i += 1;
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        qqq_core::ErrorCode::CliFlagUnknown,
                         format!("unknown flag `{other}` for `add-cap`"),
                     )
                     .with_remediation(
@@ -2749,10 +2811,16 @@ fn remove_args(args: &[String]) -> Result<RemoveArgs, qqq_core::Error> {
                 }
                 i += 1;
             }
-            a if a.starts_with("--manifest=") => {}
+            _ if a.starts_with("--manifest=") => {
+                // The `=` twin: self-contained, no value to skip. Empty is
+                // missing, not an empty path.
+                if a == "--manifest=" {
+                    return Err(missing_value("--manifest"));
+                }
+            }
             other if other.starts_with('-') => {
                 return Err(qqq_core::Error::new(
-                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    qqq_core::ErrorCode::CliFlagUnknown,
                     format!("unknown flag `{other}` for `remove`"),
                 )
                 .with_remediation("`remove` accepts --dev and --manifest"));
@@ -3171,15 +3239,19 @@ fn update_options(
         ..Default::default()
     };
 
+    // `--manifest` (both spellings) belongs to `with_manifest`, which reads
+    // the raw argv: strip it here so the loop below never trips over it, and
+    // a bare trailing flag fails loudly instead of loading the ambient project.
+    let args = strip_manifest_flag(args)?;
+    let args = args.as_slice();
+
     for a in args {
         match a.as_str() {
             "--latest" => opts.latest = true,
             "--dry-run" => opts.dry_run = true,
-            // Consumed by `with_manifest`.
-            "--manifest" => {}
             other if other.starts_with('-') => {
                 return Err(qqq_core::Error::new(
-                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    qqq_core::ErrorCode::CliFlagUnknown,
                     format!("unknown flag `{other}` for `update`"),
                 )
                 .with_remediation("`update` accepts --latest, --dry-run and --manifest"));
@@ -3217,17 +3289,22 @@ fn install_options(
     // adds the lockfile requirement. Taking the strictest value means no
     // combination of flags can weaken the strongest one the user wrote.
     let mut mode = qqq_run::LockMode::Update;
+
+    // `--manifest` (both spellings) belongs to `with_manifest`: strip it here
+    // so the loop below never trips over it, and a bare trailing flag fails
+    // loudly instead of loading the ambient project.
+    let args = strip_manifest_flag(args)?;
+    let args = args.as_slice();
+
     for a in args {
         match a.as_str() {
             "--locked" => mode = mode.max(qqq_run::LockMode::Locked),
             "--frozen" => mode = mode.max(qqq_run::LockMode::Frozen),
             "--offline" => mode = mode.max(qqq_run::LockMode::Offline),
             "--force" => opts.force = true,
-            // Consumed by `with_manifest`, which reads the value itself.
-            "--manifest" => {}
             other if other.starts_with('-') => {
                 return Err(qqq_core::Error::new(
-                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    qqq_core::ErrorCode::CliFlagUnknown,
                     format!("unknown flag `{other}` for `install`"),
                 )
                 .with_remediation(
@@ -3280,12 +3357,12 @@ fn add_options(args: &[String]) -> Result<AddRequest, qqq_core::Error> {
             "--dev" => dev = true,
             "--exact" => exact = true,
             "--feature" | "-F" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                features.push(v.clone());
+                let v = required_value(args, i, a)?;
+                features.push(v);
                 i += 1;
             }
             "--registry" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                let v = required_value(args, i, a)?;
                 source = Some(format!("registry+{v}"));
                 i += 1;
             }
@@ -3299,7 +3376,7 @@ fn add_options(args: &[String]) -> Result<AddRequest, qqq_core::Error> {
                     i += 1;
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        qqq_core::ErrorCode::CliFlagUnknown,
                         format!("unknown flag `{other}` for `add`"),
                     )
                     .with_remediation(
@@ -3367,6 +3444,36 @@ fn split_spec(spec: &str) -> (String, Option<String>) {
     }
 }
 
+/// Parse one `dev` `=` twin (`--port=x`, `--host=x`, ...).
+///
+/// Split out of [`dev_options`]: six twins pushed it over the line budget,
+/// and they are one family (self-contained spellings with no value to skip)
+/// while the space forms need the index dance. Returns whether the argument
+/// was a twin; anything else falls through to the caller's arms. Empty twin
+/// values are missing values, matching the space forms.
+fn parse_dev_equals(opts: &mut qqq_run::DevOptions, other: &str) -> qqq_core::Result<bool> {
+    if let Some(v) = other.strip_prefix("--port=") {
+        opts.port = dev_port("--port", &non_empty_value("--port", v)?)?;
+    } else if let Some(v) = other.strip_prefix("--host=") {
+        non_empty_value("--host", v)?.clone_into(&mut opts.host);
+    } else if let Some(v) = other.strip_prefix("--watch=") {
+        opts.watch.push(non_empty_value("--watch", v)?);
+    } else if let Some(v) = other.strip_prefix("--ignore=") {
+        opts.ignore.push(non_empty_value("--ignore", v)?);
+    } else if let Some(v) = other.strip_prefix("--inspect=") {
+        opts.inspect = Some(dev_port("--inspect", &non_empty_value("--inspect", v)?)?);
+    } else if let Some(v) = other.strip_prefix("--reload-limit=") {
+        let v = non_empty_value("--reload-limit", v)?;
+        opts.reload_limit = Some(
+            v.parse()
+                .map_err(|_| bad_value("--reload-limit", &v, "a positive number"))?,
+        );
+    } else {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// Decode `qqqai dev`'s own flags.
 ///
 /// # Errors
@@ -3381,35 +3488,35 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
         };
         match a {
             "--port" | "-p" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.port = dev_port(a, v)?;
+                let v = required_value(args, i, a)?;
+                opts.port = dev_port(a, &v)?;
                 i += 1;
             }
             "--host" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                let v = required_value(args, i, a)?;
                 v.clone_into(&mut opts.host);
                 i += 1;
             }
             "--watch" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.watch.push(v.clone());
+                let v = required_value(args, i, a)?;
+                opts.watch.push(v);
                 i += 1;
             }
             "--ignore" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.ignore.push(v.clone());
+                let v = required_value(args, i, a)?;
+                opts.ignore.push(v);
                 i += 1;
             }
             "--inspect" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
-                opts.inspect = Some(dev_port(a, v)?);
+                let v = required_value(args, i, a)?;
+                opts.inspect = Some(dev_port(a, &v)?);
                 i += 1;
             }
             "--reload-limit" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value(a))?;
+                let v = required_value(args, i, a)?;
                 opts.reload_limit = Some(
                     v.parse()
-                        .map_err(|_| bad_value(a, v, "a positive whole number"))?,
+                        .map_err(|_| bad_value(a, &v, "a positive whole number"))?,
                 );
                 i += 1;
             }
@@ -3418,22 +3525,8 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
             "--https" => opts.set(qqq_run::DevOptions::HTTPS),
             "--deterministic" => opts.set(qqq_run::DevOptions::DETERMINISTIC),
             other => {
-                if let Some(v) = other.strip_prefix("--port=") {
-                    opts.port = dev_port("--port", &non_empty_value("--port", v)?)?;
-                } else if let Some(v) = other.strip_prefix("--host=") {
-                    non_empty_value("--host", v)?.clone_into(&mut opts.host);
-                } else if let Some(v) = other.strip_prefix("--watch=") {
-                    opts.watch.push(non_empty_value("--watch", v)?);
-                } else if let Some(v) = other.strip_prefix("--ignore=") {
-                    opts.ignore.push(non_empty_value("--ignore", v)?);
-                } else if let Some(v) = other.strip_prefix("--inspect=") {
-                    opts.inspect = Some(dev_port("--inspect", &non_empty_value("--inspect", v)?)?);
-                } else if let Some(v) = other.strip_prefix("--reload-limit=") {
-                    let v = non_empty_value("--reload-limit", v)?;
-                    opts.reload_limit = Some(
-                        v.parse()
-                            .map_err(|_| bad_value("--reload-limit", &v, "a positive number"))?,
-                    );
+                if parse_dev_equals(&mut opts, other)? {
+                    // Handled by the `=`-twin family below.
                 } else if other == "--manifest" {
                     // Owned by `with_manifest`; skip its value. A bare
                     // `--manifest` is a usage error, not a silent no-op.
@@ -3442,10 +3535,14 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
                     }
                     i += 1;
                 } else if other.starts_with("--manifest=") {
-                    // `--manifest=x` twin: consumed by `with_manifest`.
+                    // `--manifest=x` twin: consumed by `with_manifest`. Empty
+                    // is missing, not an empty path.
+                    if other == "--manifest=" {
+                        return Err(missing_value("--manifest"));
+                    }
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        qqq_core::ErrorCode::CliFlagUnknown,
                         format!("unknown flag `{other}` for `dev`"),
                     )
                     .with_remediation(
@@ -3540,6 +3637,8 @@ fn emit_test_report(
             // pass.
             qqq_run::TestFormat::Human | qqq_run::TestFormat::Json => String::new(),
         };
+        // A machine document, exempt from `--quiet` like SARIF: quiet
+        // suppresses human narration, not piped documents.
         print!("{document}");
         let _ = std::io::stdout().flush();
         return ExitCode::from(verdict(result));
@@ -3717,11 +3816,15 @@ fn caps_args(args: &[String]) -> Result<CapsArgs, qqq_core::Error> {
             // The `=` twin is self-contained: no value to skip. Without this
             // arm it fell into the unknown-flag refusal below, so
             // `caps --manifest=x.toml` failed while `with_manifest`
-            // (via `flag_value`) would have accepted it.
-            a if a.starts_with("--manifest=") => {}
+            // (via `flag_value`) would have accepted it. Empty is missing.
+            _ if a.starts_with("--manifest=") => {
+                if a == "--manifest=" {
+                    return Err(missing_value("--manifest"));
+                }
+            }
             other if other.starts_with('-') => {
                 return Err(qqq_core::Error::new(
-                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    qqq_core::ErrorCode::CliFlagUnknown,
                     format!("unknown flag `{other}` for `caps`"),
                 )
                 .with_remediation(
@@ -3792,6 +3895,32 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// Strip a global `--manifest` (both spellings) from argv, refusing a bare one.
+///
+/// Commands that do not parse `--manifest` themselves still receive it: the
+/// value belongs to `flag_value` / `with_manifest`, which read the raw argv.
+/// Leaving the flag in place makes the command's own parser trip over it
+/// (`unknown flag`) or, worse, silently accept it and ignore the value.
+/// The bare flag is a usage error, not a silent no-op.
+fn strip_manifest_flag(args: &[String]) -> Result<Vec<String>, qqq_core::Error> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut rest: &[String] = args;
+    while let Some((a, tail)) = rest.split_first() {
+        if a == "--manifest" {
+            let Some((_, after)) = tail.split_first() else {
+                return Err(missing_value("--manifest"));
+            };
+            rest = after;
+        } else if a.starts_with("--manifest=") {
+            rest = tail;
+        } else {
+            out.push(a.clone());
+            rest = tail;
+        }
+    }
+    Ok(out)
+}
+
 /// The capability `qqqai why` should explain: the first argument that is not a
 /// flag or a flag's value.
 ///
@@ -3815,6 +3944,10 @@ fn first_positional_cap(args: &[String]) -> Result<Option<String>, qqq_core::Err
             continue;
         }
         if a.starts_with("--manifest=") {
+            // Self-contained twin: nothing to skip. Empty is missing.
+            if a == "--manifest=" {
+                return Err(missing_value("--manifest"));
+            }
             rest = tail;
             continue;
         }
@@ -3875,7 +4008,8 @@ fn build_options(args: &[String]) -> Result<qqq_run::BuildOptions, qqq_core::Err
             "--aot-cache" => {
                 cache = Some(std::path::PathBuf::from(
                     args.get(i + 1)
-                        .ok_or_else(|| missing_value("--aot-cache"))?,
+                        .ok_or_else(|| missing_value("--aot-cache"))
+                        .and_then(|v| non_empty_value("--aot-cache", v))?,
                 ));
                 bits |= qqq_run::BuildOptions::AOT;
                 i += 1;
@@ -3885,8 +4019,8 @@ fn build_options(args: &[String]) -> Result<qqq_run::BuildOptions, qqq_core::Err
             "--aot" | "--emit-cwasm" => bits |= qqq_run::BuildOptions::AOT,
             "--reproducible" => bits |= qqq_run::BuildOptions::REPRODUCIBLE,
             "--target" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value("--target"))?;
-                target = Some(v.clone());
+                let v = required_value(args, i, "--target")?;
+                target = Some(v);
                 i += 1;
             }
             other => {
@@ -3901,7 +4035,7 @@ fn build_options(args: &[String]) -> Result<qqq_run::BuildOptions, qqq_core::Err
                     i += 1;
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        qqq_core::ErrorCode::CliFlagUnknown,
                         format!("unknown flag `{other}` for `build`"),
                     )
                     .with_remediation(
@@ -3939,6 +4073,17 @@ fn non_empty_value(flag: &str, value: &str) -> Result<String, qqq_core::Error> {
         return Err(missing_value(flag));
     }
     Ok(value.to_owned())
+}
+
+/// The value following a flag, refusing absence and emptiness alike.
+///
+/// A bare flag and `--flag ""` fail the same way: an empty string never names
+/// anything real, and accepting it would defer the failure to a confusing
+/// downstream error (an empty path that is not found, an empty filter that
+/// silently matches everything because every string contains `""`).
+fn required_value(args: &[String], i: usize, flag: &str) -> Result<String, qqq_core::Error> {
+    let v = args.get(i + 1).ok_or_else(|| missing_value(flag))?;
+    non_empty_value(flag, v)
 }
 
 /// Decode `qqqai run`'s own flags.
@@ -3983,32 +4128,31 @@ fn run_options(
             // would be ceremony.
             "--deterministic" => opts.deterministic = true,
             "--replay-log" => {
-                let v = args
-                    .get(i + 1)
-                    .ok_or_else(|| missing_value("--replay-log"))?;
+                let v = required_value(args, i, "--replay-log")?;
                 opts.replay_log = Some(std::path::PathBuf::from(v));
                 i += 1;
             }
             "--aot-cache" => {
                 opts.aot_cache = Some(std::path::PathBuf::from(
                     args.get(i + 1)
-                        .ok_or_else(|| missing_value("--aot-cache"))?,
+                        .ok_or_else(|| missing_value("--aot-cache"))
+                        .and_then(|v| non_empty_value("--aot-cache", v))?,
                 ));
                 i += 1;
             }
             "--replay" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value("--replay"))?;
+                let v = required_value(args, i, "--replay")?;
                 opts.replay = Some(std::path::PathBuf::from(v));
                 i += 1;
             }
             "--artifact" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value("--artifact"))?;
+                let v = required_value(args, i, "--artifact")?;
                 opts.artifact = Some(std::path::PathBuf::from(v));
                 i += 1;
             }
             "--cap" => {
-                let v = args.get(i + 1).ok_or_else(|| missing_value("--cap"))?;
-                opts.caps.push(v.clone());
+                let v = required_value(args, i, "--cap")?;
+                opts.caps.push(v);
                 i += 1;
             }
             other => {
@@ -4028,7 +4172,11 @@ fn run_options(
                         v,
                     )?));
                 } else if other.starts_with("--manifest=") {
-                    // `--manifest=x` twin: consumed by `with_manifest`.
+                    // `--manifest=x` twin: consumed by `with_manifest`. Empty
+                    // is missing, not an empty path.
+                    if other == "--manifest=" {
+                        return Err(missing_value("--manifest"));
+                    }
                 } else if TAKES_VALUE.contains(&other) {
                     // `--manifest` is consumed by `with_manifest`; skip its
                     // value here so it is not mistaken for a positional. A
@@ -4039,7 +4187,7 @@ fn run_options(
                     i += 1;
                 } else if other.starts_with('-') {
                     return Err(qqq_core::Error::new(
-                        qqq_core::ErrorCode::McpArgumentInvalid,
+                        qqq_core::ErrorCode::CliFlagUnknown,
                         format!("unknown flag `{other}` for `run`"),
                     )
                     .with_remediation(
@@ -4201,7 +4349,8 @@ fn schema_args(args: &[String]) -> Result<SchemaArgs, qqq_core::Error> {
             // Accepted and identical to the bare command; see the doc comment.
             "--all" | "--errors" => {}
             "--command" => {
-                let Some(v) = args.get(i + 1) else {
+                // Empty counts as bare: `--command ""` names no command.
+                let Some(v) = args.get(i + 1).filter(|v| !v.is_empty()) else {
                     return Err(qqq_core::Error::new(
                         qqq_core::ErrorCode::McpArgumentInvalid,
                         "`--command` needs a command name",
@@ -4229,7 +4378,7 @@ fn schema_args(args: &[String]) -> Result<SchemaArgs, qqq_core::Error> {
             }
             other => {
                 return Err(qqq_core::Error::new(
-                    qqq_core::ErrorCode::McpArgumentInvalid,
+                    qqq_core::ErrorCode::CliFlagUnknown,
                     format!("unknown flag `{other}` for `schema`"),
                 )
                 .with_remediation("`schema` takes `--all`, `--errors`, `--command <name>`"));
@@ -5206,9 +5355,12 @@ mod tests {
 
     #[test]
     fn unknown_global_flag_is_a_usage_error() {
+        // Unknown flags report `CliFlagUnknown`, not the generic usage code:
+        // the fix is reading the usage, not fixing a value. The exit is still
+        // USAGE either way.
         match action_of(&["--frobnicate", "doctor"]) {
-            Action::UsageError(m) => assert!(m.contains("--frobnicate")),
-            other => panic!("expected a usage error, got {other:?}"),
+            Action::UnknownFlag(m) => assert!(m.contains("--frobnicate")),
+            other => panic!("expected an unknown-flag action, got {other:?}"),
         }
     }
 
@@ -6085,5 +6237,15 @@ mod tests {
         audit_args(&argv(&["--fail-on"])).expect_err("bare --fail-on must fail");
         audit_args(&argv(&["--manifest"])).expect_err("bare --manifest must fail");
         audit_args(&argv(&["--bogus"])).expect_err("unknown flags must fail");
+        // Empty `--manifest=` is a missing value everywhere, not an empty
+        // string that fails downstream in discovery.
+        caps_args(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
+        remove_args(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
+        dev_options(&argv(&["--watch="])).expect_err("empty --watch= must fail");
+        dev_options(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
+        first_positional_cap(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
+        inspect_args(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
+        openapi_args(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
+        audit_args(&argv(&["--manifest="])).expect_err("empty --manifest= must fail");
     }
 }

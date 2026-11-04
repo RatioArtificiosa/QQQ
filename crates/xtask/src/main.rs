@@ -1975,10 +1975,20 @@ fn scan_crate_rs_files(
     files.dedup();
     // M-3 r20: a custom `build = …` or `build = false` uncompiles the
     // conventional build.rs — drop it from the body scan too (dead code
-    // is not a root; the forbid check skips it the same way).
+    // is not a root; the forbid check skips it the same way). H-1 r21:
+    // but a custom root that NAMES the conventional file (`build =
+    // "build.rs"`, possibly via `sub/../` folds) IS compiled — dropping
+    // it would sail its `unsafe` through GREEN while forbid still passes.
     if roots.skip_build_rs {
         let conventional = dir.join("build.rs");
-        files.retain(|f| f != &conventional);
+        let custom_covers = roots
+            .lib_bin
+            .iter()
+            .chain(&roots.aux)
+            .any(|r| r == &conventional);
+        if !custom_covers {
+            files.retain(|f| f != &conventional);
+        }
     }
     // Canonical exception root, hoisted out of the per-file loop (L-9).
     let qsys_canon = std::fs::canonicalize(workspace.join("crates").join("qqq-sys"))
@@ -5839,6 +5849,41 @@ mod tests {
             !out.contains("missing forbid"),
             "ungated read of outside build leaked into evidence:\n{out}"
         );
+    }
+
+    #[test]
+    fn unsafe_scan_scans_self_referential_build_script() {
+        // H-1 r21 run level: `[package] build = "build.rs"` names the
+        // conventional file explicitly — the skip for the conventional
+        // path must not drop a root that is also the custom target, or
+        // its `unsafe` sails through GREEN while forbid still passes.
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xbuildself-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = \"build.rs\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            dir.join("build.rs"),
+            "#![forbid(unsafe_code)]\npub unsafe fn evil() {}\n",
+        )
+        .expect("build script");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            !ok,
+            "self-referential build script unsafe passed the scan:\n{out}"
+        );
+        assert!(out.contains("build.rs"), "wrong failure shape:\n{out}");
     }
 
     #[test]

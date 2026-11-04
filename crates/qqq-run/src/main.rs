@@ -203,8 +203,25 @@ fn parse_args(argv: &[String]) -> Parsed {
     let mut command: Option<CommandName> = None;
     let mut rest: Vec<String> = Vec::new();
     let mut action: Option<Action> = None;
+    // Past `--`, nothing is a flag: `run -- --json` hands `--json` to the
+    // guest instead of switching the envelope. Without this, the global arms
+    // below consumed the guest's flags and the component received nothing —
+    // a silent misdirection, since `run` documents `--` as the separator.
+    // The marker itself stays in `rest` so per-command parsers that honour
+    // it (`run`, `test`) keep working; commands without one reject it as an
+    // unknown flag, which is also honest.
+    let mut passthrough = false;
 
     for arg in argv {
+        if passthrough {
+            rest.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            rest.push(arg.clone());
+            continue;
+        }
         match arg.as_str() {
             // These short-circuit: the user is asking what to do, so nothing
             // later on the line changes the answer.
@@ -1902,13 +1919,13 @@ fn openapi_args(args: &[String]) -> Result<OpenapiArgs, qqq_core::Error> {
                 qqq_core::ErrorCode::CliFlagUnknown,
                 format!("unknown flag `{a}` for `openapi`"),
             )
-            .with_remediation("`openapi` accepts --out <file> and --manifest <file>"));
+            .with_remediation("`openapi` accepts --out/-o <file> and --manifest <file>"));
         } else {
             return Err(qqq_core::Error::new(
                 qqq_core::ErrorCode::McpArgumentInvalid,
                 format!("`openapi` takes no positional arguments, not `{a}`"),
             )
-            .with_remediation("`openapi` accepts --out <file> and --manifest <file>"));
+            .with_remediation("`openapi` accepts --out/-o <file> and --manifest <file>"));
         }
         i += 1;
     }
@@ -1970,7 +1987,7 @@ fn new_options(args: &[String]) -> Result<qqq_run::NewOptions, qqq_core::Error> 
                         format!("unknown flag `{other}` for `new`"),
                     )
                     .with_remediation(
-                        "`new` accepts --lang, --template, --no-git, --force and --yes",
+                        "`new` accepts --lang, --template, --no-git, --force and --yes/-y",
                     ));
                 } else if saw_name {
                     // A second positional is a mistake worth naming: it most
@@ -2402,7 +2419,7 @@ fn test_options(
         match a {
             "--filter" | "-f" => {
                 let v = required_value(args, i, a)?;
-                opts.filter = Some(v);
+                set_test_filter(&mut opts, v)?;
                 i += 1;
             }
             "--fail-fast" => opts.fail_fast = true,
@@ -2478,7 +2495,7 @@ fn test_options(
                     format!("unknown flag `{other}` for `test`"),
                 )
                 .with_remediation(
-                    "`test` accepts --filter, --fail-fast, --isolate, --trials, --jobs, --watch, --watch-limit, --format, \
+                    "`test` accepts --filter/-f, --fail-fast, --isolate, --trials, --jobs, --watch, --watch-limit, --format, \
                      --dry-run, --history, --flaky, --snapshot, --snapshot-update, --manifest and `--`",
                 ));
             }
@@ -3421,7 +3438,7 @@ fn add_options(args: &[String]) -> Result<AddRequest, qqq_core::Error> {
                         format!("unknown flag `{other}` for `add`"),
                     )
                     .with_remediation(
-                        "`add` accepts --dev, --exact, --feature, --registry and --manifest",
+                        "`add` accepts --dev, --exact, --feature/-F, --registry and --manifest",
                     ));
                 } else if spec.is_none() {
                     spec = Some(other.to_owned());
@@ -3507,7 +3524,7 @@ fn parse_dev_equals(opts: &mut qqq_run::DevOptions, other: &str) -> qqq_core::Re
         let v = non_empty_value("--reload-limit", v)?;
         opts.reload_limit = Some(
             v.parse()
-                .map_err(|_| bad_value("--reload-limit", &v, "a positive number"))?,
+                .map_err(|_| bad_value("--reload-limit", &v, "a positive whole number"))?,
         );
     } else {
         return Ok(false);
@@ -3587,7 +3604,7 @@ fn dev_options(args: &[String]) -> Result<qqq_run::DevOptions, qqq_core::Error> 
                         format!("unknown flag `{other}` for `dev`"),
                     )
                     .with_remediation(
-                        "`dev` accepts --port, --host, --watch, --ignore, --inspect, \
+                        "`dev` accepts --port/-p, --host, --watch, --ignore, --inspect, \
                          --reload-limit, --open, --https and --once (`--deterministic` is \
                          not supported by `dev`; use `serve`)",
                     ));
@@ -4128,6 +4145,12 @@ fn non_empty_value(flag: &str, value: &str) -> Result<String, qqq_core::Error> {
 /// silently matches everything because every string contains `""`).
 fn required_value(args: &[String], i: usize, flag: &str) -> Result<String, qqq_core::Error> {
     let v = args.get(i + 1).ok_or_else(|| missing_value(flag))?;
+    // A value that looks like a flag means the flag got no value:
+    // `test --filter --snapshot` must not filter for the literal string
+    // "--snapshot" while silently dropping a flag the user typed.
+    if v.starts_with('-') {
+        return Err(missing_value(flag));
+    }
     non_empty_value(flag, v)
 }
 
@@ -5449,6 +5472,22 @@ mod tests {
         // JSON Lines wins when both are present.
         let both = parsed(&["--json", "--jsonl", "doctor"]);
         assert_eq!(both.flags.format(), Format::JsonLines);
+
+        // Past `--`, nothing is a flag: `run -- --json` hands the spelling
+        // to the guest instead of switching the envelope.
+        let p = parsed(&["run", "--", "--json"]);
+        assert!(!p.flags.json(), "post-separator flags must not parse");
+        match p.action {
+            Action::Command { name, args } => {
+                assert_eq!(name, CommandName::Run);
+                assert_eq!(
+                    args,
+                    vec!["--".to_owned(), "--json".to_owned()],
+                    "the separator and everything after it reach the command"
+                );
+            }
+            other => panic!("expected a run command, got {other:?}"),
+        }
     }
 
     /// Flag bits must be independent: setting one must not disturb another.
@@ -6366,5 +6405,8 @@ mod tests {
         let err = qqq_run::bench::options(&argv(&["--requests", ""]))
             .expect_err("empty --requests must fail");
         assert!(err.to_string().contains("needs a value"), "got {err}");
+        // A flag where the value goes is a missing value, not the value.
+        test_options(&argv(&["--filter", "--snapshot"]), GlobalFlags::default())
+            .expect_err("flag-shaped value must fail");
     }
 }

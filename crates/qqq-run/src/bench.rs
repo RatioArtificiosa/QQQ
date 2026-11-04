@@ -91,10 +91,12 @@ impl Default for BenchOptions {
 ///
 /// Absent and empty both mean missing: `--flag ""` names nothing real, and
 /// reporting it as missing points at the invocation rather than at a
-/// downstream parse of an empty string.
+/// downstream parse of an empty string. A value that looks like a flag means
+/// the same thing: `--only --json` is a missing benchmark, not a benchmark
+/// named `--json`.
 fn value_of(args: &[String], i: usize, flag: &str) -> Result<String, Error> {
     args.get(i + 1)
-        .filter(|v| !v.is_empty())
+        .filter(|v| !v.is_empty() && !v.starts_with('-'))
         .cloned()
         .ok_or_else(|| {
             usage(format!("`{flag}` needs a value"))
@@ -116,6 +118,94 @@ const VALUE_FLAGS: [&str; 9] = [
     "--connections",
     "--timeout",
 ];
+
+/// Parse one whole-number bench option (`--requests`, `--seconds`,
+/// `--connections`, `--timeout`).
+///
+/// Split out of [`options`]: the four arms share one shape (parse, refuse
+/// zero, store) and the function pushed past the line budget. Zero is refused
+/// everywhere a count of nothing would report zeros that read as results.
+fn parse_count_option(
+    opts: &mut BenchOptions,
+    flag: &str,
+    args: &[String],
+    index: &mut usize,
+) -> Result<(), Error> {
+    let i = *index;
+    match flag {
+        "--requests" => {
+            let v = value_of(args, i, flag)?;
+            let n: u64 = v.parse().map_err(|_| {
+                usage(format!("`--requests {v}` is not a number"))
+                    .with_remediation("pass a whole number, for example `--requests 5000`")
+            })?;
+            if n == 0 {
+                return Err(
+                    usage("`--requests 0` would send no requests").with_remediation(
+                        "pass at least 1, or omit the flag to use the workload's own count",
+                    ),
+                );
+            }
+            opts.requests = Some(n);
+            *index += 2;
+        }
+        "--seconds" => {
+            let v = value_of(args, i, flag)?;
+            let n: u32 = v.parse().map_err(|_| {
+                usage(format!("`--seconds {v}` is not a number"))
+                    .with_remediation("pass a whole number, for example `--seconds 30`")
+            })?;
+            if n == 0 {
+                return Err(
+                    usage("`--seconds 0` would measure nothing").with_remediation(
+                        "pass at least 1, or omit the flag to use the workload's own shape",
+                    ),
+                );
+            }
+            opts.seconds = Some(n);
+            *index += 2;
+        }
+        "--connections" | "-c" => {
+            let v = value_of(args, i, flag)?;
+            let n: u32 = v.parse().map_err(|_| {
+                usage(format!("`--connections {v}` is not a number"))
+                    .with_remediation("pass a whole number, for example `--connections 64`")
+            })?;
+            if n == 0 {
+                return Err(
+                    usage("`--connections 0` would send no requests").with_remediation(
+                        "pass at least 1, or omit the flag to use the workload's own level",
+                    ),
+                );
+            }
+            opts.connections = Some(n);
+            *index += 2;
+        }
+        "--timeout" => {
+            let v = value_of(args, i, flag)?;
+            let n: u64 = v.parse().map_err(|_| {
+                usage(format!("`--timeout {v}` is not a number of milliseconds"))
+                    .with_remediation("pass a whole number, for example `--timeout 5000`")
+            })?;
+            if n == 0 {
+                return Err(
+                    usage("`--timeout 0` would time out every request").with_remediation(
+                        "pass at least 1, or omit the flag to use the default budget",
+                    ),
+                );
+            }
+            opts.timeout_ms = n;
+            *index += 2;
+        }
+        _ => {
+            // Unreachable: the caller matches the same set before delegating.
+            // A wildcard arm here would silently accept a numeric flag the
+            // caller forgot to list.
+            unreachable!("parse_count_option saw a non-count flag: {flag}");
+        }
+    }
+    Ok(())
+}
 
 /// Parse the command line.
 ///
@@ -159,44 +249,11 @@ pub fn options(args: &[String]) -> Result<BenchOptions, Error> {
                 opts.only.push(name);
                 i += 2;
             }
-            "--requests" => {
-                let v = value_of(args, i, arg)?;
-                opts.requests = Some(v.parse().map_err(|_| {
-                    usage(format!("`--requests {v}` is not a number"))
-                        .with_remediation("pass a whole number, for example `--requests 5000`")
-                })?);
-                i += 2;
-            }
-            "--seconds" => {
-                let v = value_of(args, i, arg)?;
-                opts.seconds = Some(v.parse().map_err(|_| {
-                    usage(format!("`--seconds {v}` is not a number"))
-                        .with_remediation("pass a whole number, for example `--seconds 30`")
-                })?);
-                i += 2;
-            }
-            "--connections" | "-c" => {
-                let v = value_of(args, i, arg)?;
-                let n: u32 = v.parse().map_err(|_| {
-                    usage(format!("`--connections {v}` is not a number"))
-                        .with_remediation("pass a whole number, for example `--connections 64`")
-                })?;
-                if n == 0 {
-                    return Err(usage("`--connections 0` would send no requests")
-                        .with_remediation(
-                            "pass at least 1, or omit the flag to use the workload's own level",
-                        ));
-                }
-                opts.connections = Some(n);
-                i += 2;
-            }
-            "--timeout" => {
-                let v = value_of(args, i, arg)?;
-                opts.timeout_ms = v.parse().map_err(|_| {
-                    usage(format!("`--timeout {v}` is not a number of milliseconds"))
-                        .with_remediation("pass a whole number, for example `--timeout 5000`")
-                })?;
-                i += 2;
+            "--requests" | "--seconds" | "--connections" | "-c" | "--timeout" => {
+                // One family: whole numbers that must be positive. The shared
+                // parser keeps the four arms — and their zero checks — from
+                // drifting apart.
+                parse_count_option(&mut opts, arg, args, &mut i)?;
             }
             "--json" => {
                 opts.json = true;
@@ -215,7 +272,7 @@ pub fn options(args: &[String]) -> Result<BenchOptions, Error> {
                 )
                 .with_remediation(
                     "run `qqqai bench --help`; the options are --listen, --only, \
-                     --requests, --seconds, --connections, --timeout, --json, \
+                     --filter, --requests, --seconds, --connections/-c, --timeout, --json, \
                      --fail-on-miss",
                 ));
             }
@@ -1088,6 +1145,20 @@ mod tests {
         assert!(err.to_string().contains("no requests"), "got {err}");
     }
 
+    /// Zero budgets are refused like zero connections: a benchmark that
+    /// measures nothing reports zeros that read as results.
+    #[test]
+    fn zero_budgets_are_refused() {
+        for (flag, phrase) in [
+            ("--requests", "no requests"),
+            ("--seconds", "measure nothing"),
+            ("--timeout", "every request"),
+        ] {
+            let err = options(&args(&[flag, "0"])).expect_err("zero must be refused");
+            assert!(err.to_string().contains(phrase), "{flag}: got {err}");
+        }
+    }
+
     #[test]
     fn a_non_numeric_value_names_the_flag() {
         for (flag, bad) in [
@@ -1105,6 +1176,10 @@ mod tests {
     #[test]
     fn a_flag_without_a_value_is_refused() {
         let err = options(&args(&["--listen"])).expect_err("must be refused");
+        assert!(err.to_string().contains("needs a value"), "got {err}");
+        // A value shaped like a flag means the flag got no value, not that
+        // the value happens to start with dashes.
+        let err = options(&args(&["--only", "--json"])).expect_err("must be refused");
         assert!(err.to_string().contains("needs a value"), "got {err}");
     }
 

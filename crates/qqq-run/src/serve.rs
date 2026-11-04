@@ -393,14 +393,7 @@ fn log_format_of(args: &[String], i: usize) -> Result<String> {
 ///
 /// A usage error naming the flag when the value is empty.
 fn audit_log_of(args: &[String], i: usize) -> Result<String> {
-    let v = value_of(args, i, "--audit-log")?;
-    if v.is_empty() {
-        return Err(usage("`--audit-log` needs a path").with_remediation(
-            "pass the file the capability-use record is appended to, for example \
-             `--audit-log /var/log/qqq/audit.jsonl`",
-        ));
-    }
-    Ok(v)
+    value_of(args, i, "--audit-log")
 }
 
 /// Read and validate `--audit-hmac-key-file`'s value.
@@ -409,16 +402,7 @@ fn audit_log_of(args: &[String], i: usize) -> Result<String> {
 ///
 /// A usage error naming the flag when the value is empty.
 fn audit_hmac_key_file_of(args: &[String], i: usize) -> Result<String> {
-    let v = value_of(args, i, "--audit-hmac-key-file")?;
-    if v.is_empty() {
-        return Err(
-            usage("`--audit-hmac-key-file` needs a path").with_remediation(
-                "pass a file holding 64 hex characters, for example \
-             `--audit-hmac-key-file /etc/qqq/audit.key`",
-            ),
-        );
-    }
-    Ok(v)
+    value_of(args, i, "--audit-hmac-key-file")
 }
 
 /// Parse the deterministic-mode flags, reporting whether `arg` was one.
@@ -473,14 +457,8 @@ fn parse_observability_flag(
             *index += 2;
         }
         "--redact-from" => {
-            let v = value_of(args, i, "--redact-from")?;
-            if v.is_empty() {
-                return Err(usage("`--redact-from` needs a path").with_remediation(
-                    "pass the `NAME=value` file holding the secret values to redact, for \
-                     example `--redact-from /etc/qqq/secrets.env`",
-                ));
-            }
-            opts.redact_from = Some(v);
+            // `value_of` already refuses absent and empty alike.
+            opts.redact_from = Some(value_of(args, i, "--redact-from")?);
             *index += 2;
         }
         "--audit-log" => {
@@ -684,10 +662,12 @@ fn expand_equals(args: &[String]) -> Vec<String> {
 ///
 /// Absent and empty both mean missing: `--flag ""` names nothing real, and
 /// reporting it as missing points at the invocation rather than at a
-/// downstream parse of an empty string.
+/// downstream parse of an empty string. A value that looks like a flag means
+/// the same thing: `--listen --workers` is a missing address, not an address
+/// spelled `--workers`.
 fn value_of(args: &[String], i: usize, flag: &str) -> Result<String> {
     args.get(i + 1)
-        .filter(|v| !v.is_empty())
+        .filter(|v| !v.is_empty() && !v.starts_with('-'))
         .cloned()
         .ok_or_else(|| {
             usage(format!("`{flag}` needs a value"))
@@ -2275,6 +2255,13 @@ mod tests {
         assert!(
             err.message.contains("needs a value"),
             "the error must name the missing value: {}",
+            err.message
+        );
+        // A value shaped like a flag means the flag got no value.
+        let err = options(&args(&["--listen", "--workers"])).expect_err("must be refused");
+        assert!(
+            err.message.contains("needs a value"),
+            "a flag where the value goes is a missing value: {}",
             err.message
         );
     }

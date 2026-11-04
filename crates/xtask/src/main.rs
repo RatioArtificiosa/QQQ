@@ -2349,12 +2349,14 @@ fn decode_basic_escapes(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// Target section of a manifest `path = …` line: compiled lib/bin roots
-/// versus test/example/bench roots (see `ManifestRoots::aux`).
+/// Target section of a manifest `path = …` line: compiled lib/bin roots,
+/// test/example/bench roots (see `ManifestRoots::aux`), and the
+/// `[package]` table (only its `build` key names a compilable root).
 #[derive(PartialEq)]
 enum ManifestSection {
     LibBin,
     Aux,
+    Package,
     Other,
 }
 
@@ -2508,6 +2510,7 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
             section = match inner.map(strip_one_quote_pair) {
                 Some("lib" | "bin") => ManifestSection::LibBin,
                 Some("test" | "example" | "bench") => ManifestSection::Aux,
+                Some("package") => ManifestSection::Package,
                 _ => ManifestSection::Other,
             };
             continue;
@@ -2518,14 +2521,27 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
         // H-1 r15: TOML keys may be quoted (`"path" = …`, `'path' = …`)
         // — Cargo accepts them, so an unquoted-only match would miss the
         // root entirely. Split at the first `=` (keys never contain a
-        // bare one), strip one matching quote pair, and compare.
+        // bare one), strip one matching quote pair, and compare. In
+        // `[package]` only `build` names a root (C-1 r19: a custom build
+        // script compiles as Rust); `build = false` and friends are not
+        // paths and stay silent.
         let Some(eq) = t.find('=') else {
             continue;
         };
-        if strip_one_quote_pair(t[..eq].trim()) != "path" {
+        let key = strip_one_quote_pair(t[..eq].trim());
+        let want = match section {
+            ManifestSection::LibBin | ManifestSection::Aux => key == "path",
+            ManifestSection::Package => key == "build",
+            ManifestSection::Other => false,
+        };
+        if !want {
             continue;
         }
         let rest = t[eq + 1..].trim_start();
+        if section == ManifestSection::Package && !(rest.starts_with('"') || rest.starts_with('\''))
+        {
+            continue;
+        }
         match parse_manifest_value(rest, &raw_lines, &mut li) {
             ManifestValue::Value(value) => {
                 if !value.is_empty() {
@@ -2534,10 +2550,13 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
                     // double-scanning (and so the callers' lexical
                     // outside-gate sees the real shape — M-2 r15).
                     let root = fold_dot_components(&dir.join(&value));
-                    if section == ManifestSection::LibBin {
-                        out.lib_bin.push(root);
-                    } else {
+                    // C-1 r19: custom build scripts join lib_bin (scanned
+                    // + forbid-checked exactly like a conventional
+                    // build.rs); aux roots stay scan-only.
+                    if section == ManifestSection::Aux {
                         out.aux.push(root);
+                    } else {
+                        out.lib_bin.push(root);
                     }
                 }
             }
@@ -2546,7 +2565,18 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
                     out.problem = Some("Cargo.toml has invalid escape in path value".to_owned());
                 }
             }
-            ManifestValue::Unclosed => {}
+            // M-1 r19: a `path`/`build = …` line with no closer names an
+            // unknown root (truncated line, unclosed string) — fail closed
+            // with a problem, never silently skip. Non-string values in
+            // `[lib]` sections are invalid Cargo, so they land here
+            // correctly; `[package] build = false` never reaches the
+            // parser (guarded above: bools are valid and mean "no custom
+            // script").
+            ManifestValue::Unclosed => {
+                if out.problem.is_none() {
+                    out.problem = Some("Cargo.toml path value unclosed".to_owned());
+                }
+            }
         }
     }
     out.lib_bin.sort();
@@ -2865,13 +2895,28 @@ fn sanitize_for_log(s: &str) -> String {
 /// (M-2 r10, L-1/M-2 r15). `..` folds without following links, so the
 /// result keeps working for gating and reporting when the target does not
 /// exist; when it does exist, callers canonicalize for the real decision.
+/// A `..` that `pop()` cannot fold (leading `..` of a relative path) is
+/// content, not nothing (L-1 r19): dropping it would re-root `../../b`
+/// as `b` — inside instead of outside. Absolute callers are unaffected
+/// (their prefix is never empty).
 fn fold_dot_components(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for c in p.components() {
         match c {
             Component::ParentDir => {
-                out.pop();
+                // Pop a real segment; a `..` with nothing (or only `..`)
+                // left is content (L-1 r19). Above a root/prefix there is
+                // nothing to pop — drop it (the historical absolute fold).
+                match out.components().next_back() {
+                    Some(Component::Normal(_)) => {
+                        out.pop();
+                    }
+                    None | Some(Component::ParentDir) => {
+                        out.push("..");
+                    }
+                    _ => {}
+                }
             }
             Component::CurDir => {}
             _ => out.push(c.as_os_str()),
@@ -5514,6 +5559,38 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_scan_scans_custom_build_script_body() {
+        // C-1 r19 run level: `[package] build = "custom/b.txt"` compiles
+        // as the build script — its body is scanned and its forbid is
+        // checked exactly like a conventional `build.rs`.
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xbuildroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::create_dir_all(dir.join("custom")).expect("custom dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = \"custom/b.txt\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            dir.join("custom").join("b.txt"),
+            "#![forbid(unsafe_code)]\npub unsafe fn evil() {}\n",
+        )
+        .expect("build script");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "custom build script unsafe passed the scan:\n{out}");
+        assert!(out.contains("b.txt"), "wrong failure shape:\n{out}");
+    }
+
+    #[test]
     fn unsafe_scan_reports_unreadable_manifest_once() {
         // L-3 r17 run level: one unreadable manifest must yield one
         // problem entry, not one per consumer (scan loop +
@@ -5901,6 +5978,89 @@ mod tests {
         assert_eq!(problem, None);
         assert_eq!(roots, vec![dir.join("custom/sp\nan.rs")]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_parses_package_build() {
+        // C-1 r19: `[package] build = "custom/b.txt"` compiles as the
+        // crate's build script — a custom path there must be discovered
+        // like any other root, or its `unsafe` sails through GREEN.
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-build-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = \"custom/b.txt\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(
+            roots,
+            vec![dir.join("custom/b.txt"), dir.join("src/lib.rs")]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_ignores_bool_build() {
+        // `build = false` disables the build script — no string, no root,
+        // and crucially no problem entry (it is valid TOML, unlike an
+        // unclosed string).
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-nobuild-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = false\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("src/lib.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_rejects_unclosed_value() {
+        // M-1 r19: `path = "a.rs` (truncated, no closer) names an unknown
+        // root — fail closed with a problem, never silently skip (same
+        // contract as invalid escapes).
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-unclosed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"a.rs\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(roots.is_empty());
+        assert!(problem.is_some(), "unclosed value surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fold_dot_components_keeps_leading_parent_dirs() {
+        // L-1 r19: a leading `..` that `pop()` cannot fold is content, not
+        // nothing — dropping it re-roots the path inside (`../../b` is
+        // outside, `b` is not). Absolute callers are unaffected (their
+        // prefix is never empty).
+        assert_eq!(
+            fold_dot_components(std::path::Path::new("../../b")),
+            std::path::PathBuf::from("../../b")
+        );
+        assert_eq!(
+            fold_dot_components(std::path::Path::new("sub/../lib.rs")),
+            std::path::PathBuf::from("lib.rs")
+        );
     }
 
     #[test]

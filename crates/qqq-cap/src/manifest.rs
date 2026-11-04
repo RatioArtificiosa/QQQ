@@ -1934,12 +1934,12 @@ pub struct Server {
 /// served under a guessed tenant — it is refused with 421.
 ///
 /// [`Server::validate`] rejects dead keys at parse time: empty, non-lowercase,
-/// carrying a `:port`, a trailing dot, whitespace, or brackets — and an empty
-/// map, which would behave as absent. A bracketed IPv6 literal (`[::1]`) is
-/// the one bracketed shape that parses: the matcher preserves brackets when
-/// stripping the port, so it looks the key up verbatim. A mapping that can
-/// never match (or that labels nothing) is dead configuration reading as
-/// policy.
+/// carrying a `:port`, a trailing dot, whitespace, stray brackets, or an
+/// over-long name — and an empty map, which would behave as absent. A bare
+/// or bracketed IP literal (`::1`, `[::1]`, `[fe80::1%eth0]`) is the
+/// exception: it is looked up verbatim, so refusing it would lie about a
+/// mapping that works. A mapping that can never match (or that labels
+/// nothing) is dead configuration reading as policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenantHosts {
@@ -2776,19 +2776,51 @@ allow_origins = ["https://app.example.com"]
                 "dead {field} must fail naming its reason, got: {err}"
             );
         }
-        // A bracketed IPv6 literal parses: `ws::host_name` preserves brackets
-        // when stripping the port, so `[::1]:8080` normalizes to `[::1]` and
-        // looks the key up verbatim — refusing it would lie about a mapping
-        // that works.
-        let m = Manifest::parse(
+    }
+
+    /// Bare, bracketed, and zoned IP literals parse: `ws::host_name`
+    /// preserves brackets when stripping a numeric port and leaves
+    /// addresses without brackets or port untouched, so `[::1]:8080`
+    /// normalizes to `[::1]`, `::1` to itself, and `[fe80::1%eth0]` keeps
+    /// its zone — refusing any of them would lie about a mapping that
+    /// works. Anything else bracketed, unbalanced, or over-long stays
+    /// refused.
+    #[test]
+    fn tenant_hosts_accept_ip_literals() {
+        for (key, label) in [
+            ("[::1]", "loopback"),
+            ("::1", "loopback6"),
+            ("[fe80::1%eth0]", "linklocal"),
+            ("127.0.0.1", "loopback4"),
+        ] {
+            let text = format!(
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [server.tenants]\nhosts = {{ \"{key}\" = \"{label}\" }}\n"
+            );
+            let m = Manifest::parse(&text).expect("an IP literal must parse");
+            assert_eq!(
+                m.server.tenants.expect("tenants").hosts.get(key),
+                Some(&label.to_owned()),
+                "{key} must survive parsing"
+            );
+        }
+        for (hosts, why) in [
+            ("{ \"[xyz]\" = \"shop\" }", "non-IP brackets"),
+            ("{ \"[::1\" = \"shop\" }", "unbalanced bracket"),
+            ("{ \"[fe80::1%]\" = \"shop\" }", "empty zone"),
+        ] {
+            let text = format!(
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [server.tenants]\nhosts = {hosts}\n"
+            );
+            Manifest::parse(&text).expect_err(&format!("{why} must be refused"));
+        }
+        let long_host = format!(
             "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
-             [server.tenants]\nhosts = { \"[::1]\" = \"loopback\" }\n",
-        )
-        .expect("a bracketed IPv6 literal must parse");
-        assert_eq!(
-            m.server.tenants.expect("tenants").hosts.get("[::1]"),
-            Some(&"loopback".to_owned())
+             [server.tenants]\nhosts = {{ \"{}.example.com\" = \"shop\" }}",
+            "a".repeat(250)
         );
+        Manifest::parse(&long_host).expect_err("an over-long host must be refused");
     }
 
     /// A tenant label no reader can distinguish from another is dead
@@ -2846,6 +2878,13 @@ allow_origins = ["https://app.example.com"]
             ("sub/shop-app", "path separator"),
             ("shop-app.wasm", "file suffix, not a package name"),
             ("shop app", "interior space"),
+            // PackageName rules beyond the old charset gate: the toolchain
+            // builds artifacts from package names, so anything the package
+            // gate refuses cannot be built either.
+            ("Shop-App", "uppercase"),
+            ("9lives", "leading digit"),
+            ("shop-", "trailing separator"),
+            ("shop_", "trailing separator"),
         ] {
             let text = format!(
                 "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
@@ -2859,6 +2898,19 @@ allow_origins = ["https://app.example.com"]
                 "the error must name the table: {err}"
             );
         }
+        // Over-long names refuse too: artifacts longer than 64 characters
+        // cannot be package names.
+        let long = format!(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [server.tenants]\nhosts = {{ \"shop.example.com\" = \"shop\" }}\n\
+             [server.tenants.components]\nshop = \"{}\"",
+            "a".repeat(65)
+        );
+        let err = Manifest::parse(&long).expect_err("a 65-char artifact must be refused");
+        assert!(
+            err.to_string().contains("server.tenants.components"),
+            "the error must name the table: {err}"
+        );
     }
 
     /// Component keys match resolved labels verbatim: anything that cannot

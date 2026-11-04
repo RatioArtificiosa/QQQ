@@ -59,7 +59,7 @@
 //!
 //! See Proposal §5.3, §6.4 and Checklist `SRV-001`, `SRV-002`, `SRV-019`.
 
-use crate::manifest::{quoted, AuthMode, Cors, ManifestError, Route, Server};
+use crate::manifest::{AuthMode, Cors, ManifestError, Route, Server, quoted};
 
 /// The HTTP methods a route may declare, in the spelling `qqq.toml` uses.
 ///
@@ -165,23 +165,39 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
             ),
         });
     }
-    // The request side strips any `:port` before lookup (`ws::host_name`),
-    // so a key that still carries one — or a trailing dot, whitespace,
-    // or brackets — can never equal a normalized request host. Controls,
+    // The request side strips a numeric `:port` before lookup
+    // (`ws::host_name`: a non-numeric or empty port is not a port at all,
+    // so the whole value compares instead) — so a key that still carries
+    // one, or a trailing dot, whitespace, or stray brackets, can never
+    // equal a normalized request host. The two must agree on what a port
+    // is: if `host_name` ever strips non-numeric ports, this gate must
+    // follow, or dead keys become live without review. Controls,
     // layout-forgers, and invisible format characters cannot arrive in a
     // real `Host` header either, so a key carrying one is dead the same
     // way — and would render invisibly in every log line that names it.
     // Over-long keys are dead too: no DNS name exceeds 253 bytes.
-    // Bracketed IPv6 literals (`[::1]`) are the one bracketed shape
-    // that can match: `ws::host_name` preserves brackets when stripping
-    // the port, so a request Host of `[::1]:8080` normalizes to `[::1]`
-    // and looks the key up verbatim. Refusing it would lie about a
-    // mapping that works — loopback-only deployments legitimately name
-    // their loopback tenant.
-    let bracketed_v6 = host
+    // A bare or bracketed IP literal is looked up verbatim:
+    // `ws::host_name` preserves brackets when stripping a numeric port
+    // and leaves addresses without brackets or port untouched, so
+    // `[::1]:8080` normalizes to `[::1]`, `::1` to `::1`, and a zoned
+    // `[fe80::1%eth0]` keeps its zone. Refusing any of them would lie
+    // about a mapping that works. Anything else bracketed stays dead.
+    // Zones follow RFC 6874 (`unreserved`); an empty or exotic zone is
+    // refused, not guessed.
+    let literal = host
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
-        .is_some_and(|inner| inner.parse::<std::net::Ipv6Addr>().is_ok());
+        .unwrap_or(host);
+    let (addr, zone) = match literal.split_once('%') {
+        Some((a, z)) => (a, Some(z)),
+        None => (literal, None),
+    };
+    let ip_literal = addr.parse::<std::net::IpAddr>().is_ok()
+        && zone.is_none_or(|z| {
+            !z.is_empty()
+                && z.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c))
+        });
     if host.len() > 253 {
         return Err(ManifestError::InvalidField {
             field: "server.tenants.hosts".to_owned(),
@@ -190,10 +206,10 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
             ),
         });
     }
-    if (host.contains(':') && !bracketed_v6)
+    if (host.contains(':') && !ip_literal)
         || host.ends_with('.')
         || host.chars().any(char::is_whitespace)
-        || ((host.contains('[') || host.contains(']')) && !bracketed_v6)
+        || ((host.contains('[') || host.contains(']')) && !ip_literal)
         || host.chars().any(|c| {
             c.is_control()
                 || crate::text::is_layout_forgery(c)
@@ -205,7 +221,7 @@ fn validate_host_entry(host: &str, label: &str) -> Result<(), ManifestError> {
             reason: format!(
                 "host key `{host:?}` can never match: write the bare \
                  lowercased host without port, trailing dot, whitespace, \
-                 brackets, or invisible characters, as it arrives after normalization"
+                 stray brackets, or invisible characters, as it arrives after normalization"
             ),
         });
     }
@@ -281,17 +297,19 @@ fn validate_tenants(tenants: &crate::manifest::TenantHosts) -> Result<(), Manife
         // Artifacts are bare Cargo package names, resolved by `find_artifact`
         // as `{package}.wasm` under the build directory. Anything that is
         // not a valid package name — a control character, whitespace, a path
-        // separator, parent navigation, a file suffix, a leading digit, a
-        // trailing separator, or more than 64 characters — can never name a
-        // built artifact, so it is refused here instead of failing at serve
-        // time far from the line that is wrong. `PackageName` is the same
-        // gate `[package] name` passes at parse, so an artifact the
-        // toolchain itself built always passes too.
+        // separator, parent navigation, a file suffix, an uppercase letter,
+        // a leading digit, a trailing separator, or more than 64 characters —
+        // is refused here instead of failing at serve time far from the line
+        // that is wrong. `PackageName` is the same gate `[package] name`
+        // passes at parse, so an artifact the toolchain itself built always
+        // passes; a hand-placed file with another spelling must be renamed
+        // to the package name rather than relied on through the single-file
+        // fallback, which breaks the moment a second file lands beside it.
         if let Err(reason) = qqq_core::PackageName::new(artifact.clone()) {
             return Err(ManifestError::InvalidField {
                 field: "server.tenants.components".to_owned(),
                 reason: format!(
-                    "component artifact `{artifact}` never resolves ({reason}); write the bare package name"
+                    "component artifact `{artifact}` is not a valid package name ({reason}); write the bare package name"
                 ),
             });
         }

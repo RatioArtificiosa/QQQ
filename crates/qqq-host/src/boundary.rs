@@ -1392,6 +1392,7 @@ mod tests {
     /// Unicode layout forgery escapes like ASCII controls: `U+2028` breaks
     /// lines in renderers that honor it, and bidi overrides reorder the
     /// visible text. Same predicate as the trap escaper, so the two agree.
+    /// The braille blank folds too: it has no legitimate content use.
     #[test]
     fn rendering_escapes_unicode_layout_forgery() {
         let rendered = render_for_diagnostic("ok\u{2028}\u{202E}forged");
@@ -1402,6 +1403,15 @@ mod tests {
         assert!(
             rendered.contains("\\u{2028}") && rendered.contains("\\u{202e}"),
             "each control escapes visibly: {rendered:?}"
+        );
+        let blank = render_for_diagnostic("ok\u{2800}forged");
+        assert!(
+            !blank.contains('\u{2800}'),
+            "the braille blank must not pass through: {blank:?}"
+        );
+        assert!(
+            blank.contains("\\u{2800}"),
+            "the blank escapes visibly: {blank:?}"
         );
     }
 

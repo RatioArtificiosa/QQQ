@@ -16,10 +16,10 @@
 //! output) preserve it — a zero-width joiner builds legitimate emoji, and
 //! mangling content to police identifiers punishes the wrong layer.
 //!
-//! U+2800 BRAILLE PATTERN BLANK is the one member that is neither format
-//! nor mark: it is a symbol (`So`) whose glyph is blank by design, with the
-//! same advance width as a space in most fonts — an invisible twin no
-//! whitespace, control, or format check catches.
+//! U+2800 BRAILLE PATTERN BLANK is deliberately NOT in the invisible set:
+//! unlike joiners (legitimate emoji) or spaces (legitimate text), a blank
+//! has no legitimate content use — it exists to be invisible — so it lives
+//! in [`is_layout_forgery`] and folds everywhere, including content paths.
 //!
 //! ```rust
 //! use qqq_core::text::is_layout_forgery;
@@ -29,14 +29,20 @@
 //! ```
 ///
 /// Whether one character is an invisible layout-forger: a line/paragraph
-/// separator or a bidirectional control. Neither is a C0/C1 control, so
-/// `char::is_control` misses both -- check this alongside that predicate,
-/// never instead of it.
+/// separator, a bidirectional control, or a blank space with no visible
+/// glyph. Neither is a C0/C1 control, so `char::is_control` misses all of
+/// them — check this alongside that predicate, never instead of it.
+///
+/// U+2800 BRAILLE PATTERN BLANK lives here rather than in
+/// [`is_invisible_format`]: unlike joiners (legitimate emoji) or spaces
+/// (legitimate text), a blank has no legitimate content use — it exists to
+/// be invisible — so every renderer folds it, including content paths.
 ///
 /// ```rust
 /// use qqq_core::is_layout_forgery;
 ///
 /// assert!(is_layout_forgery('\u{202e}'));
+/// assert!(is_layout_forgery('\u{2800}'));
 /// assert!(!is_layout_forgery('x'));
 /// ```
 #[must_use]
@@ -50,6 +56,7 @@ pub fn is_layout_forgery(c: char) -> bool {
             | '\u{061C}'
             | '\u{202A}'..='\u{202E}'
             | '\u{2066}'..='\u{2069}'
+            | '\u{2800}'
             | '\u{FEFF}'
     )
 }
@@ -150,7 +157,6 @@ pub fn is_invisible_format(c: char) -> bool {
             | '\u{200B}'..='\u{200D}'
             | '\u{2060}'..='\u{2064}'
             | '\u{206A}'..='\u{206F}'
-            | '\u{2800}'
             | '\u{FE00}'..='\u{FE0F}'
             | '\u{FFF9}'..='\u{FFFB}'
             | '\u{E0001}'
@@ -171,19 +177,19 @@ mod tests {
         let members = [
             '\u{2028}', '\u{2029}', '\u{200E}', '\u{200F}', '\u{061C}', '\u{202A}', '\u{202B}',
             '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
-            '\u{FEFF}',
+            '\u{2800}', '\u{FEFF}',
         ];
         assert_eq!(
             members.len(),
-            15,
-            "the set has 15 members; update both sides together"
+            16,
+            "the set has 16 members; update both sides together"
         );
         for c in members {
             assert!(is_layout_forgery(c), "{c:?} must be a layout-forger");
         }
         for c in [
             'a', '\u{200B}', '\u{00A0}', '\u{0085}', '\u{007F}', '\u{071C}', '\u{2027}',
-            '\u{202F}', '\u{206A}', '\u{2060}',
+            '\u{202F}', '\u{206A}', '\u{2060}', '\u{2801}',
         ] {
             assert!(!is_layout_forgery(c), "{c:?} must not be a layout-forger");
         }
@@ -209,7 +215,6 @@ mod tests {
             '\u{13430}',
             '\u{180F}',
             '\u{1BCA0}',
-            '\u{2800}',
             '\u{E0001}',
         ];
         let ranges = [
@@ -232,12 +237,12 @@ mod tests {
             assert!(!is_layout_forgery(c), "{c:?} must be in exactly one set");
         }
         assert_eq!(
-            count, 401,
-            "the set has 401 members; update test and predicate together"
+            count, 400,
+            "the set has 400 members; update test and predicate together"
         );
         for c in [
             'a', '\u{202E}', '\u{2066}', '\u{00A0}', '\u{0085}', '\u{2065}', '\u{115F}',
-            '\u{2000}', '\u{3000}',
+            '\u{2000}', '\u{3000}', '\u{2800}',
         ] {
             assert!(
                 !is_invisible_format(c),
@@ -256,11 +261,11 @@ mod tests {
 
     /// The count pins the predicate, not the test list above: scanning every
     /// scalar value catches a member added to `is_invisible_format` without
-    /// extending the list (the count would exceed 401), which the list-side
+    /// extending the list (the count would exceed 400), which the list-side
     /// count cannot see. One hundred thousand iterations of a `matches!` is
     /// milliseconds — cheaper than the spoofing hole it guards.
     #[test]
-    fn invisible_format_predicate_holds_exactly_401_members() {
+    fn invisible_format_predicate_holds_exactly_400_members() {
         let mut count = 0u32;
         for cp in 0..0x11_0000u32 {
             if let Some(c) = char::from_u32(cp)
@@ -270,8 +275,50 @@ mod tests {
             }
         }
         assert_eq!(
-            count, 401,
+            count, 400,
             "the predicate drifted from its pinned list; update both together"
+        );
+    }
+
+    /// Every supplementary member pairs and round-trips: the JSON escapers
+    /// rely on [`utf16_surrogate_pair`] for exactly this set, so a member
+    /// the helper mishandles is a corruption the round-trip tests would
+    /// only catch one member at a time.
+    #[test]
+    fn every_supplementary_member_pairs_and_round_trips() {
+        let mut count = 0u32;
+        for cp in 0x10000..0x11_0000u32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            if !is_invisible_format(c) {
+                continue;
+            }
+            count += 1;
+            let Some((hi, lo)) = utf16_surrogate_pair(c) else {
+                panic!("{c:?} is supplementary and must pair");
+            };
+            // Wrapping arithmetic with a range assert first: halves outside
+            // the surrogate ranges fail loudly above instead of wrapping
+            // silently, and inside them every operation is exact.
+            let hi = u32::from(hi);
+            let lo = u32::from(lo);
+            assert!(
+                (0xD800..=0xDBFF).contains(&hi) && (0xDC00..=0xDFFF).contains(&lo),
+                "{c:?} must pair within the surrogate ranges"
+            );
+            let n = 0x1_0000u32
+                .wrapping_add(hi.wrapping_sub(0xD800).wrapping_shl(10))
+                .wrapping_add(lo.wrapping_sub(0xDC00));
+            assert_eq!(
+                char::from_u32(n),
+                Some(c),
+                "{c:?} must round-trip through its pair"
+            );
+        }
+        assert!(
+            count > 300,
+            "the set holds hundreds of supplementary members; got {count}"
         );
     }
 }

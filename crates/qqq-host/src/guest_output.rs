@@ -874,6 +874,7 @@ fn layout_forgery_at(chunk: &[u8]) -> Option<(usize, u32)> {
         [0xE2, 0x80, 0x8F, ..] => Some((3, 0x200F)),
         [0xE2, 0x80, b @ 0xAA..=0xAE, ..] => Some((3, 0x202A + u32::from(b.saturating_sub(0xAA)))),
         [0xE2, 0x81, b @ 0xA6..=0xA9, ..] => Some((3, 0x2066 + u32::from(b.saturating_sub(0xA6)))),
+        [0xE2, 0xA0, 0x80, ..] => Some((3, 0x2800)),
         [0xD8, 0x9C, ..] => Some((2, 0x061C)),
         [0xEF, 0xBB, 0xBF, ..] => Some((3, 0xFEFF)),
         [0xC2, b @ 0x80..=0x9F, ..] => Some((2, 0x80 + u32::from(b.saturating_sub(0x80)))),
@@ -885,9 +886,10 @@ fn layout_forgery_at(chunk: &[u8]) -> Option<(usize, u32)> {
 ///
 /// A tail shorter than 3 bytes that no complete pattern matches is only
 /// safe to pass through when no pattern *starts* with it: `[E2]`,
-/// `[E2,80/81]`, `[D8]` and `[EF]/[EF,BB]` would all complete on the next
-/// push, so the escaper treats them as undecided and escapes eagerly rather
-/// than emitting bytes the next chunk could complete past every check.
+/// `[E2,80/81/A0]`, `[D8]` and `[EF]/[EF,BB]` would all complete on the
+/// next push, so the escaper treats them as undecided and escapes eagerly
+/// rather than emitting bytes the next chunk could complete past every
+/// check.
 ///
 /// Two-byte C1 tails never reach here: a complete `[C2,80-9F]` always matches
 /// the table first, so there is deliberately no arm for one — and none for a
@@ -906,7 +908,7 @@ fn layout_forgery_at(chunk: &[u8]) -> Option<(usize, u32)> {
 fn is_incomplete_prefix(tail: &[u8]) -> bool {
     match tail {
         [lead] => matches!(lead, 0xE2 | 0xD8 | 0xEF | 0xC2),
-        [0xE2, cont] => matches!(cont, 0x80 | 0x81),
+        [0xE2, cont] => matches!(cont, 0x80 | 0x81 | 0xA0),
         [0xEF, 0xBB] => true,
         _ => false,
     }
@@ -1837,8 +1839,8 @@ mod tests {
         members.insert('\u{FEFF}');
         assert_eq!(
             members.len(),
-            15,
-            "the predicate names exactly 15 members: {members:?}"
+            16,
+            "the predicate names exactly 16 members: {members:?}"
         );
         for c in &members {
             let mut buf = [0u8; 4];
@@ -1853,13 +1855,20 @@ mod tests {
             assert_eq!(page, u32::from(*c), "member {c:?} must map to itself");
         }
         // Near-misses the old table got wrong: U+071C is an innocent Syriac
-        // letter, not the ALM it was mistaken for.
+        // letter, not the ALM it was mistaken for -- and U+2801 is real
+        // braille, while only the blank U+2800 forges.
         assert!(!crate::boundary::is_layout_forgery('\u{071C}'));
         let mut buf = [0u8; 4];
         let bytes = '\u{071C}'.encode_utf8(&mut buf);
         assert!(
             layout_forgery_at(bytes.as_bytes()).is_none(),
             "U+071C must pass through: {bytes:?}"
+        );
+        let mut buf = [0u8; 4];
+        let bytes = '\u{2801}'.encode_utf8(&mut buf);
+        assert!(
+            layout_forgery_at(bytes.as_bytes()).is_none(),
+            "U+2801 is real braille and must pass through: {bytes:?}"
         );
     }
 
@@ -1871,13 +1880,27 @@ mod tests {
     /// place that sees it.
     #[test]
     fn table_matches_imply_predicate_members() {
-        // All two-byte C2/D8 sequences plus every three-byte E2 80/81 window the
-        // table arms cover, and the FEFF header.
+        // All two-byte C2/D8 sequences plus every three-byte E2 window the
+        // table arms cover; E1-led triples are swept negatively (no E1 arm
+        // may exist), and the FEFF header.
         let mut checked = 0u32;
-        for b1 in [0xC2u8, 0xD8, 0xE2, 0xEF] {
+        for b1 in [0xC2u8, 0xD8, 0xE1, 0xE2, 0xEF] {
             for b2 in 0x80u8..=0xBF {
                 let mut chunk = vec![b1, b2];
-                if b1 == 0xE2 {
+                if b1 == 0xE1 {
+                    // No E1-led pattern exists (U+2800 rides E2 A0 80), so
+                    // every E1-led triple must miss: a stale E1 arm would
+                    // launder a non-member. The negative sweep is the guard
+                    // the positive arms get for free.
+                    for b3 in 0x80u8..=0xBF {
+                        let mut full = chunk.clone();
+                        full.push(b3);
+                        assert!(
+                            layout_forgery_at(&full).is_none(),
+                            "no E1-led sequence is a forgery: {full:02X?}"
+                        );
+                    }
+                } else if b1 == 0xE2 {
                     for b3 in [0x80u8, 0x81] {
                         chunk.push(b3);
                         for b4 in 0x80u8..=0xBF {
@@ -1964,6 +1987,21 @@ mod tests {
         assert!(
             out.windows(6).any(|w| w == *b"\\u0085"),
             "the whole sequence escapes through the table: {out:02X?}"
+        );
+        // A U+2800 split: `[E2,A0]` is an undecided prefix (only `80`
+        // completes it), so the lead escapes eagerly and the orphaned
+        // continuation passes through raw — the blank never forms.
+        let mut escaper = Escaper::new(STDOUT_PREFIX);
+        let mut out = Vec::new();
+        escaper.push(&[0xE2, 0xA0], &mut out);
+        escaper.push(&[0x80], &mut out);
+        assert!(
+            out.ends_with(&[b'\\', b'x', b'e', b'2', b'\\', b'x', b'a', b'0', 0x80]),
+            "the split blank must lead-escape plus raw continuation: {out:02X?}"
+        );
+        assert!(
+            !out.windows(3).any(|w| w == [0xE2, 0xA0, 0x80]),
+            "the complete blank must never appear raw across the split: {out:02X?}"
         );
     }
 

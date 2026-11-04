@@ -3273,7 +3273,7 @@ mod tests {
     /// **Surrogate pairs decode, lone halves refuse.**
     ///
     /// The audit JSON escapers emit supplementary-plane members as pairs,
-    /// so the hand parser must decode what they (and serde_json) produce —
+    /// so the hand parser must decode what they (and `serde_json`) produce —
     /// and nothing else. A lone high or low half is malformed input, not a
     /// character, and refuses like every other structural violation in this
     /// function. Raw supplementary characters (what the stream writer

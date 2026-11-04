@@ -912,27 +912,34 @@ fn one_line(s: &str) -> String {
         .collect()
 }
 
-/// Fold invisible characters in an identifier for rendering.
+/// Fold dangerous characters in an identifier for rendering.
 ///
 /// Scoped to labels (tenant names) rather than widening [`one_line`]:
 /// [`one_line`] renders messages too, and messages legitimately carry
 /// joiners (emoji sequences) that must survive. Tenant labels are
-/// identifiers — no legitimate label contains a zero-width space, and a
-/// non-breaking space renders exactly like the ASCII space it spoofs — so
-/// both fold here. Applied before the field encoder, so controls still
-/// escape precisely (`\uXXXX` in JSON) rather than folding.
+/// identifiers — no legitimate label contains a zero-width space, a blank,
+/// a non-breaking space, or a layout-forger — so all of them fold here:
+/// the shared forgery predicate, the invisible-format predicate, and
+/// non-space whitespace. Applied before the field encoder, so controls
+/// still escape precisely (`\uXXXX` in JSON) rather than folding.
 #[must_use]
 fn fold_label_invisibles(label: &str) -> String {
-    if !label
-        .chars()
-        .any(|c| qqq_host::is_invisible_format(c) || (c.is_whitespace() && c != ' '))
-    {
+    if !label.chars().any(|c| {
+        c.is_control()
+            || qqq_host::is_layout_forgery(c)
+            || qqq_host::is_invisible_format(c)
+            || (c.is_whitespace() && c != ' ')
+    }) {
         return label.to_owned();
     }
     label
         .chars()
         .map(|c| {
-            if qqq_host::is_invisible_format(c) || (c.is_whitespace() && c != ' ') {
+            if c.is_control()
+                || qqq_host::is_layout_forgery(c)
+                || qqq_host::is_invisible_format(c)
+                || (c.is_whitespace() && c != ' ')
+            {
                 '\u{FFFD}'
             } else {
                 c
@@ -1260,6 +1267,23 @@ mod tests {
         assert!(
             !human.contains('\u{200B}'),
             "no invisible survives in the human line: {human:?}"
+        );
+        let json = r.render_json();
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["tenant"], "acme\u{FFFD}corp");
+    }
+
+    /// The braille blank folds in both encodings too: it is a layout-forger
+    /// (no legitimate content use), so unlike joiners it does not survive
+    /// even where content is preserved.
+    #[test]
+    fn tenant_labels_fold_the_braille_blank() {
+        let mut r = record();
+        r.tenant = "acme\u{2800}corp".to_owned();
+        let human = r.render_human();
+        assert!(
+            human.contains("acme\u{FFFD}corp"),
+            "the blank must fold visibly: {human:?}"
         );
         let json = r.render_json();
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");

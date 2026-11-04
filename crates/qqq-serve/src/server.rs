@@ -4475,6 +4475,18 @@ mod tests {
             resolve_with(Some(&loopback_hosts), Some("[::1]:8080"), "127.0.0.1"),
             TenantResolution::Resolved("loopback".to_owned())
         );
+        // Bare IPv6 literals match the same way (no brackets to strip).
+        let bare_hosts: BTreeMap<String, String> =
+            BTreeMap::from([("::1".to_owned(), "loopback6".to_owned())]);
+        assert_eq!(
+            resolve_with(Some(&bare_hosts), Some("[::1]:8080"), "127.0.0.1"),
+            TenantResolution::Unknown("[::1]".to_owned()),
+            "a bracketed request does not match a bare key"
+        );
+        assert_eq!(
+            resolve_with(Some(&bare_hosts), Some("::1"), "127.0.0.1"),
+            TenantResolution::Resolved("loopback6".to_owned())
+        );
         assert_eq!(
             resolve_with(None, Some("shop.example.com"), "127.0.0.1"),
             TenantResolution::Fallback("127.0.0.1")

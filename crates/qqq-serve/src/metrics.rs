@@ -1277,6 +1277,7 @@ mod tests {
         assert_eq!(prometheus_escape("a\u{2029}b"), "a\u{FFFD}b");
         assert_eq!(prometheus_escape("a\u{85}b"), "a\u{FFFD}b");
         assert_eq!(prometheus_escape("a\u{202E}b"), "a\u{FFFD}b");
+        assert_eq!(prometheus_escape("a\u{2800}b"), "a\u{FFFD}b");
         // One member per invisible range, so dropping any range from the
         // predicate fails here rather than passing silently. Non-breaking
         // spaces fold too (they twin the ASCII space); plain spaces stay.

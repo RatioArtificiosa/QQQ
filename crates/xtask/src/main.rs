@@ -1794,6 +1794,28 @@ fn forbid_list_has_unsafe_code(after_forbid: &str) -> bool {
     let mut k = 0;
     let mut end = None;
     while let Some(&c) = bytes.get(k) {
+        if c == b'"' || c == b'\'' {
+            // M-4 r23: a `)` inside a string/char span cannot close the
+            // list — skip quoted spans whole so a quoted paren never
+            // truncates the match and hides a real lint. Only reachable
+            // in invalid Rust (valid lint lists hold no strings), which
+            // rustc owns; the dangerous direction would be a miss.
+            // Byte stepping is safe: no UTF-8 continuation byte collides
+            // with quote/backslash bytes.
+            let q = c;
+            k += 1;
+            while let Some(&c2) = bytes.get(k) {
+                if c2 == b'\\' {
+                    k += 2;
+                } else {
+                    k += 1;
+                    if c2 == q {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
         if c == b'/' && bytes.get(k + 1) == Some(&b'*') {
             let mut depth: u32 = 1;
             k += 2;
@@ -2223,8 +2245,18 @@ fn collect_bin_roots(
             continue;
         }
         if ft.is_dir() {
-            // Second binary form: src/bin/<name>/main.rs.
+            // Second binary form: src/bin/<name>/main.rs. M-5 r23: the
+            // `is_file` check follows symlinks — a symlinked main.rs
+            // would be read as a crate root (ungated arbitrary file, same
+            // class as the entry-level symlink arm above). Fail closed.
             let main = p.join("main.rs");
+            if std::fs::symlink_metadata(&main).is_ok_and(|m| m.file_type().is_symlink()) {
+                violations.push(format!(
+                    "{}: symlinked bin entry, scan incomplete",
+                    sanitize_for_log(&main.to_string_lossy())
+                ));
+                continue;
+            }
             if main.is_file() {
                 bins.push(main);
             }
@@ -2355,7 +2387,7 @@ fn manifest_process_value(
         rest = v;
     }
     if section == &ManifestSection::Package && norm == "build" {
-        if out.build_seen {
+        if out.dup.build {
             // M-2 r21: duplicate `build` keys are invalid TOML — fail
             // closed with a problem and do not trust the skip flag.
             if out.problem.is_none() {
@@ -2364,7 +2396,7 @@ fn manifest_process_value(
             out.skip_build_rs = false;
             return;
         }
-        out.build_seen = true;
+        out.dup.build = true;
         if rest == "false" || rest == "true" {
             // `build = false` disables the script: the conventional
             // build.rs is dead code (M-3 r20). `true` keeps it.
@@ -2381,10 +2413,6 @@ fn manifest_process_value(
             }
             return;
         }
-        // A string build value (even an unresolvable one) means a
-        // custom script: the conventional build.rs is not compiled
-        // (M-3 r20) — skip its forbid check and body scan below.
-        out.skip_build_rs = true;
     }
     match parse_manifest_value(rest, raw_lines, li) {
         ManifestValue::Value(value) => {
@@ -2396,10 +2424,23 @@ fn manifest_process_value(
                 let root = fold_dot_components(&dir.join(&value));
                 // C-1 r19: custom build scripts join lib_bin (scanned
                 // + forbid-checked exactly like a conventional
-                // build.rs); aux roots stay scan-only.
+                // build.rs); aux roots stay scan-only. L-1 r23: the skip
+                // commits only here, on a successfully parsed value — a
+                // string-shaped build that fails to parse (bad escape,
+                // unclosed, trailing junk, empty) leaves the conventional
+                // file checked rather than trusting a broken manifest.
                 if section == &ManifestSection::Aux {
                     out.aux.push(root);
                 } else {
+                    if section == &ManifestSection::Package && norm == "build" {
+                        out.skip_build_rs = true;
+                    }
+                    // M-1 r22: arm the duplicate-`path` tripwire only on a
+                    // pushed root — a valueless `path =` must not disarm
+                    // the real `path` that follows it.
+                    if norm == "path" {
+                        out.dup.path = true;
+                    }
                     out.lib_bin.push(root);
                 }
             } else if out.problem.is_none() {
@@ -2433,6 +2474,27 @@ fn manifest_process_value(
     }
 }
 
+/// Duplicate/invalid-input tracking for one manifest parse (M-1 r22,
+/// M-2 r21, M-2 r23): transient per-table state, kept out of
+/// `ManifestRoots` so the result struct stays a plain accumulator.
+#[derive(Default)]
+struct ManifestDup {
+    /// A `path` key already produced a root in this table: duplicate
+    /// `path` keys are invalid TOML and fail closed with first-wins.
+    /// Re-armed by every valid header ([[bin]] repeats legitimately).
+    /// Arms only on a pushed root — a valueless `path =` must not
+    /// disarm the real one that follows it.
+    path: bool,
+    /// A `[package] build` key was seen (any value shape): duplicate
+    /// `build` keys are invalid TOML and fail closed.
+    build: bool,
+    /// A duplicate singleton section is being skipped: after `[lib]` or
+    /// `[package]` repeats (invalid TOML), its keys are dropped with a
+    /// problem instead of silently merging. Non-singleton sections
+    /// re-arm normally.
+    skip_section: bool,
+}
+
 /// Custom root paths from a crate manifest, classified by target kind and
 /// parsed once per crate (L-3 r17: the scan loop and the roots check share
 /// one parse, so one unreadable manifest yields one problem entry, not
@@ -2452,15 +2514,14 @@ struct ManifestRoots {
     /// Present-but-unreadable manifest (L-4 r15): the named roots are
     /// unknown, so callers fail loudly instead of certifying them.
     problem: Option<String>,
-    /// A `[package] build` key was seen (any value shape): duplicate
-    /// `build` keys are invalid TOML and fail closed (M-2 r21).
-    build_seen: bool,
     /// `[package] build = "custom/…"`, `build = false`, or an unresolvable
     /// string build value (M-3 r20): a custom script or disabled script
     /// means the conventional `build.rs` is NOT compiled — skip its
     /// forbid check and body scan (it would be dead code). Defaults to
     /// false: no key (or `build = true`) means the conventional file.
     skip_build_rs: bool,
+    /// Per-table duplicate tracking (see above).
+    dup: ManifestDup,
 }
 
 /// Escape-aware search for a TOML value closer: returns the byte index
@@ -2691,10 +2752,10 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
     };
     let mut out = ManifestRoots::default();
     let mut section = ManifestSection::Other;
-    // M-1 r22: duplicate `path` keys in one table are invalid TOML —
-    // first wins, the second is dropped with a problem. Re-armed by
-    // every valid header ([[bin]] repeats legitimately).
-    let mut seen_path = false;
+    // Duplicate singleton sections are invalid TOML ([[bin]] repeats
+    // legitimately; [lib] and [package] never do).
+    let mut seen_lib = false;
+    let mut seen_package = false;
     // H-2 r16: leading UTF-8 BOMs prefix the first line — a section header
     // there must still match (editors add BOMs silently). L-2 r17: strip
     // all of them, not just one.
@@ -2714,6 +2775,24 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
             // compile as Rust too — their bodies join the scan (as aux
             // roots, never forbid-checked: the compiler owns those
             // lints, see `ManifestRoots::aux`).
+            // M-2 r23: `[lib]` and `[package]` are singleton tables —
+            // a repeat is invalid TOML (Cargo rejects duplicates), so
+            // fail closed with a problem and skip the repeated section
+            // instead of silently merging. `[[bin]]`-style array tables
+            // repeat legitimately and are exempt.
+            if (name == "lib" && seen_lib) || (name == "package" && seen_package) {
+                if out.problem.is_none() {
+                    out.problem = Some(format!("Cargo.toml [{name}] table is duplicated"));
+                }
+                out.dup.skip_section = true;
+            } else {
+                out.dup.skip_section = false;
+            }
+            if name == "lib" {
+                seen_lib = true;
+            } else if name == "package" {
+                seen_package = true;
+            }
             section = match name {
                 "lib" | "bin" => ManifestSection::LibBin,
                 "test" | "example" | "bench" => ManifestSection::Aux,
@@ -2722,20 +2801,26 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
             };
             // M-1 r22: `path`/`build` keys live in one table each —
             // a new header re-arms duplicate detection.
-            seen_path = false;
+            out.dup.path = false;
             continue;
         } else if t.starts_with('[') {
-            // L-3 r20 + H-3 r22: `[lib] garbage` is not a header — invalid
-            // TOML, so the section resets instead of misattributing the
-            // next `path` to the prior section. A root-shaped line is
-            // worse than junk: fail closed with a problem.
-            if t.contains('=') && out.problem.is_none() {
+            // L-3 r20 + H-3 r22 + M-1 r23: a `[`-led line that is not a
+            // valid header is invalid TOML (no valid manifest has one:
+            // value continuations are consumed by the value parser and
+            // comments are stripped first) — reset the section and fail
+            // closed with a problem instead of silently misattributing
+            // or skipping the next `path`.
+            if out.problem.is_none() {
                 out.problem = Some("Cargo.toml section header is malformed".to_owned());
             }
             section = ManifestSection::Other;
             continue;
         }
         if section == ManifestSection::Other {
+            continue;
+        }
+        // Duplicate singleton sections are skipped wholesale (M-2 r23).
+        if out.dup.skip_section {
             continue;
         }
         // H-1 r15: TOML keys may be quoted (`"path" = …`, `'path' = …`)
@@ -2755,15 +2840,15 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
         };
         // M-1 r22: duplicate `path` keys in one table are invalid TOML —
         // first wins, the second is dropped with a problem (same contract
-        // as duplicate `build`).
-        if norm == "path" {
-            if seen_path {
-                if out.problem.is_none() {
-                    out.problem = Some("Cargo.toml path key is duplicated".to_owned());
-                }
-                continue;
+        // as duplicate `build`). The flag arms only when a root is
+        // actually pushed (in `manifest_process_value`): a valueless
+        // `path =` followed by a real `path` is one root plus an
+        // Unclosed problem, not a duplicate.
+        if norm == "path" && out.dup.path {
+            if out.problem.is_none() {
+                out.problem = Some("Cargo.toml path key is duplicated".to_owned());
             }
-            seen_path = true;
+            continue;
         }
         manifest_process_value(
             &mut out,
@@ -3557,8 +3642,37 @@ fn match_include(text: &str, buf: &[u8], idx: usize) -> IncludeMatch {
     skip_gap_tokens(text, buf, &mut pos);
     match literal_string(text, buf, pos) {
         Some((target, end)) => IncludeMatch::Static(target, end),
+        // M-3 r23: `c"…"`/`b"…"` (and raw forms) are not string literals
+        // — `include!` rejects them at compile time ("argument must be a
+        // string literal", verified against rustc), so they are silently
+        // ignored like unresolvable paths, not flagged dynamic. Anything
+        // else non-literal (concat!, env!, variables) really can smuggle
+        // in generated code and stays fail-closed.
+        None if is_byte_or_c_string(text, buf, pos) => IncludeMatch::NoMatch,
         None => IncludeMatch::Dynamic,
     }
+}
+
+/// Whether `buf` holds a `c"..."` / `b"..."` (or raw `cr#"..."#` form)
+/// literal at `pos`: rejected by `include!`, which takes plain string
+/// literals only. Only the lead-in is checked; validity beyond that is
+/// rustc's.
+fn is_byte_or_c_string(text: &str, buf: &[u8], pos: usize) -> bool {
+    let Some(&lead) = buf.get(pos) else {
+        return false;
+    };
+    if lead != b'c' && lead != b'b' {
+        return false;
+    }
+    let after = pos + 1;
+    if buf.get(after) == Some(&b'"') {
+        return true;
+    }
+    // Raw forms: `br#"…"#`, `cr#"…"#`.
+    if (lead == b'b' || lead == b'c') && buf.get(after) == Some(&b'r') {
+        return matches!(text.get(after + 1..), Some(r) if r.starts_with(['"', '#']));
+    }
+    false
 }
 
 /// Static `#[path = "…"]` / `include!("…")` targets in `text`, plus whether
@@ -6191,6 +6305,58 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_scan_symlinked_nested_bin_main_is_loud() {
+        // M-5 r23: a symlinked `src/bin/<name>/main.rs` is read through by
+        // `is_file` — the no-follow check the entry arm applies must
+        // apply here too, or an outside file is read as a crate root.
+        // Skipped where the platform denies symlink creation (fires on CI).
+        let target =
+            std::env::temp_dir().join(format!("qqq-xtask-xbinmainout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&target).expect("outside dir");
+        std::fs::write(target.join("evil.rs"), "pub unsafe fn evil() {}\n").expect("outside file");
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xbinmainlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("crates").join("probe").join("src");
+        std::fs::create_dir_all(src.join("bin").join("tool")).expect("temp crate");
+        std::fs::write(
+            src.join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        #[cfg(unix)]
+        let link_ok = std::os::unix::fs::symlink(
+            target.join("evil.rs"),
+            src.join("bin").join("tool").join("main.rs"),
+        )
+        .is_ok();
+        #[cfg(windows)]
+        let link_ok = std::os::windows::fs::symlink_file(
+            target.join("evil.rs"),
+            src.join("bin").join("tool").join("main.rs"),
+        )
+        .is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let link_ok = false;
+        if !link_ok {
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&target);
+            eprintln!("SKIP: cannot create symlinks here");
+            return;
+        }
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&target);
+        assert!(!ok, "symlinked nested bin main passed the scan:\n{out}");
+        assert!(out.contains("symlinked"), "wrong failure shape:\n{out}");
+        assert!(
+            !out.contains("missing forbid"),
+            "ungated read of outside bin leaked into evidence:\n{out}"
+        );
+    }
+
+    #[test]
     fn manifest_custom_roots_parses_lib_and_bin_paths() {
         // M-1 r13: custom [lib]/[[bin]] path= redirections are discovered
         // for the missing-forbid backstop.
@@ -6457,6 +6623,27 @@ mod tests {
     }
 
     #[test]
+    fn manifest_custom_roots_rejects_duplicate_section() {
+        // M-2 r23: duplicate `[lib]` tables are invalid TOML (Cargo
+        // rejects them) — fail closed with a problem instead of silently
+        // merging their `path` keys. (`[[bin]]` repeats legitimately and
+        // is exempt.)
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-dupsec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n[lib]\npath = \"a.rs\"\n[lib]\npath = \"b.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(roots, vec![dir.join("a.rs")]);
+        assert!(problem.is_some(), "duplicate section surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn manifest_custom_roots_rejects_duplicate_build() {
         // M-2 r21: duplicate `build` keys are invalid TOML — fail closed
         // with a problem; first occurrence wins, the second adds nothing.
@@ -6608,8 +6795,9 @@ mod tests {
 
     #[test]
     fn manifest_custom_roots_resets_on_malformed_header() {
-        // L-3 r20: `[lib] garbage` is not a header — the section must
-        // reset instead of letting the next `path` inherit the prior one.
+        // L-3 r20 + M-2 r23: `[lib] garbage` is not a header — invalid TOML,
+        // so the section resets (the next `path` is not misattributed) AND
+        // a junk bracket line fails closed with a problem.
         let dir =
             std::env::temp_dir().join(format!("qqq-xtask-xmanifest-badhdr-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -6620,12 +6808,77 @@ mod tests {
         )
         .expect("manifest");
         let (roots, problem) = manifest_custom_roots(&dir);
-        assert_eq!(problem, None);
+        assert!(problem.is_some(), "malformed header surfaced no problem");
         assert_eq!(
             roots,
             vec![dir.join("a.rs")],
             "malformed header leaked section: {roots:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_ignores_junk_line_before_value() {
+        // M-1 r23 gate: a non-quote line after `path =` is not the value —
+        // report unclosed without consuming it, so the following lines
+        // still parse in their own section. (A `[`-led line is the
+        // header-swallowing case; here a stray key line must behave the
+        // same: no consumption, still fail closed.)
+        let dir = std::env::temp_dir().join(format!(
+            "qqq-xtask-xmanifest-junkline-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath =\nname = \"oops\"\npath = \"q.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert!(problem.is_some(), "junk line swallowed silently");
+        assert_eq!(roots, vec![dir.join("q.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_accepts_spaced_bracket_headers() {
+        // L-3 r23 pins: valid spacing/bracket shapes keep working under
+        // strict validation — `[ [bin]]`, `[[ "lib" ]]`, and an empty
+        // quoted name (unknown section, skipped silently).
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-spaced-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n[ [bin]]\nname = \"tool\"\npath = \"custom/t.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/t.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n[[ \"lib\" ]]\npath = \"custom/u.rs\"\n",
+        )
+        .expect("manifest");
+        let (mut roots, problem) = manifest_custom_roots(&dir);
+        roots.sort();
+        assert_eq!(problem, None);
+        assert_eq!(roots, vec![dir.join("custom/u.rs")]);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n[\"\"]\npath = \"custom/v.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert!(roots.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6752,9 +7005,9 @@ mod tests {
 
     #[test]
     fn manifest_custom_roots_rejects_bracket_mismatch_header() {
-        // M-2 r22: `[[[lib]]]` is not a header (extra brackets) — strict
-        // validation rejects it instead of folding to `lib` and
-        // misattributing the next `path`.
+        // `[[[lib]]]` is not a header — strict validation rejects the
+        // extra brackets (M-2 r22) and any `[`-led junk line fails closed
+        // (M-1 r23: no valid manifest has one).
         let dir = std::env::temp_dir().join(format!(
             "qqq-xtask-xmanifest-badbracket-{}",
             std::process::id()
@@ -6768,10 +7021,7 @@ mod tests {
         .expect("manifest");
         let (roots, problem) = manifest_custom_roots(&dir);
         assert!(roots.is_empty());
-        assert!(
-            problem.is_none(),
-            "bracket mismatch should reset silently (no `=` on the header line)"
-        );
+        assert!(problem.is_some(), "mismatched brackets surfaced no problem");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7327,6 +7577,42 @@ mod tests {
             "#![forbid(/* ) */, unsafe_code)]",
             &mut b
         ));
+        // M-4 r23: a `)` inside a string or char cannot close the list —
+        // strings never occur in a valid lint list, but the scan must not
+        // let one truncate the match (invalid Rust either way, and the
+        // dangerous direction is a miss).
+        let mut b = 0;
+        assert!(line_has_forbid_attr(
+            "#![forbid(note = \")\", unsafe_code)]",
+            &mut b
+        ));
+        let mut b = 0;
+        assert!(line_has_forbid_attr("#![forbid(')', unsafe_code)]", &mut b));
+    }
+
+    #[test]
+    fn code_redirections_ignores_non_string_literal_includes() {
+        // M-3 r23: `include!(c"…")` / `include!(b"…")` (and raw forms)
+        // are compile errors ("argument must be a string literal",
+        // verified against rustc) — rustc owns them, so they stay
+        // silent instead of tripping the dynamic-include fail-closed.
+        // Genuinely dynamic arguments (concat!, env!, idents) still do.
+        assert_eq!(
+            code_redirections("include!(c\"e.rs\");\n"),
+            (Vec::<String>::new(), false)
+        );
+        assert_eq!(
+            code_redirections("include!(b\"e.rs\");\n"),
+            (Vec::<String>::new(), false)
+        );
+        assert_eq!(
+            code_redirections("include!(br#\"e.rs\"#);\n"),
+            (Vec::<String>::new(), false)
+        );
+        assert_eq!(
+            code_redirections("include!(concat!(env!(\"OUT_DIR\"), \"/g.rs\"));\n"),
+            (Vec::<String>::new(), true)
+        );
     }
 
     #[test]

@@ -2943,8 +2943,18 @@ fn check_crate_roots(
         }
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
-            Err(_) if path.exists() => return None,
-            Err(_) => return Some(true),
+            // A missing root is not a violation (conventional roots are
+            // optional); an unreadable one is. `exists()` follows links,
+            // so a dangling symlink reports absent and would be
+            // vacuous-passed as "found" — check the link itself instead
+            // (L-1 r24): no link means absent, a link means unreadable.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(path).is_err() =>
+            {
+                return Some(true);
+            }
+            Err(_) => return None,
         };
         let lines: Vec<&str> = text.lines().collect();
         let raw_entry = raw_entry_states(&lines);
@@ -6135,6 +6145,53 @@ mod tests {
             "redirected disabled build script passed the scan:\n{out}"
         );
         assert!(out.contains("build.rs"), "wrong failure shape:\n{out}");
+    }
+
+    #[test]
+    fn unsafe_scan_dangling_symlink_root_is_unreadable() {
+        // L-1 r24: a custom root that is a dangling symlink is
+        // present-but-unreadable (`exists()` follows links, so the old
+        // check vacuous-passed it as "found"). Fail loud instead of
+        // certifying a root the scan never read. The `.txt` extension
+        // keeps the body walk from flagging it first, isolating the
+        // roots check. Skipped where the platform denies symlink
+        // creation (fires on CI).
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("qqq-xtask-xdanglink-{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::create_dir_all(dir.join("custom")).expect("custom dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[lib]\npath = \"custom/dangle.txt\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("lib");
+        let missing = std::env::temp_dir().join(format!("qqq-xtask-xdangling-target-{pid}.txt"));
+        let _ = std::fs::remove_file(&missing);
+        #[cfg(unix)]
+        let link_ok =
+            std::os::unix::fs::symlink(&missing, dir.join("custom").join("dangle.txt")).is_ok();
+        #[cfg(windows)]
+        let link_ok =
+            std::os::windows::fs::symlink_file(&missing, dir.join("custom").join("dangle.txt"))
+                .is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let link_ok = false;
+        if !link_ok {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("SKIP: cannot create symlinks here");
+            return;
+        }
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ok, "dangling symlinked root passed the scan:\n{out}");
+        assert!(out.contains("unreadable"), "wrong failure shape:\n{out}");
     }
 
     #[test]

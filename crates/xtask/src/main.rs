@@ -3788,8 +3788,15 @@ fn match_include(text: &str, buf: &[u8], idx: usize) -> IncludeMatch {
         // byte-char literal (`'…'`, `b'…'`) is equally invalid there.
         // Anything else non-literal (concat!, env!, variables) really can
         // smuggle in generated code and stays fail-closed.
-        None if is_byte_or_c_string(text, buf, pos) => IncludeMatch::NoMatch,
-        None if matches!(buf.get(pos).copied(), Some(b'\'')) => IncludeMatch::NoMatch,
+        None if is_byte_or_c_string(text, buf, pos)
+            || matches!(buf.get(pos).copied(), Some(39))
+            || matches!(
+                (buf.get(pos).copied(), buf.get(pos + 1).copied()),
+                (Some(98 | 99), Some(39))
+            ) =>
+        {
+            IncludeMatch::NoMatch
+        }
         None => IncludeMatch::Dynamic,
     }
 }
@@ -7869,6 +7876,10 @@ mod tests {
         );
         assert_eq!(
             code_redirections("include!('e');\n"),
+            (Vec::<String>::new(), false)
+        );
+        assert_eq!(
+            code_redirections("include!(b'e');\n"),
             (Vec::<String>::new(), false)
         );
         assert_eq!(

@@ -1782,7 +1782,9 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
 /// literal opens there. Used by the forbid-list paren scan so a paren
 /// inside one cannot truncate the list (M-4 r23: plain and char quotes
 /// are skipped inline; raw forms need their `#` count). Byte-safe and
-/// OOB-safe; unclosed spans run to EOF (fail-noisy, rustc owns validity).
+/// OOB-safe; an unclosed raw returns `None`, so the caller falls back to
+/// plain scanning (which can only resolve a later `)`, never miss an
+/// earlier one — fail-noisy on invalid Rust, which rustc owns).
 fn raw_lit_end(bytes: &[u8], k: usize) -> Option<usize> {
     let mut p = k;
     match bytes.get(p) {
@@ -2363,22 +2365,77 @@ fn manifest_code_cut(raw_line: &str) -> usize {
 
 /// Validate a TOML table header strictly: exactly `[ name ]` or
 /// `[[ name ]]` (TOML-legal inner spacing allowed), with no leftover
-/// brackets — `[[[lib]]]` or `[lib] junk` are not headers. The old
-/// trim-everything fold accepted those and misattributed the next `path`
-/// (M-2 r22). Returns the unquoted section name, or `None`.
-fn strict_header_name(t: &str) -> Option<&str> {
-    let inner = t.strip_prefix('[')?.strip_suffix(']')?.trim();
+/// brackets and no trailing junk — `[[[lib]]]`, `[lib] junk`, and `[lib`
+/// are not headers. The old trim-everything fold accepted those and
+/// misattributed the next `path` (M-2 r22). Brackets are content inside
+/// quoted spans, and dotted or target-cfg tables (`["a]b"]`,
+/// `[target.'cfg(…)'…]`, `[ a.b ]`) are valid headers for unknown
+/// sections — the quotes are parsed, not just spotted (r25 N2). Returns
+/// the unquoted section name for whole-quoted headers (possibly empty
+/// for `[""]`), the raw name otherwise, or `None`.
+fn strict_header_name(line: &str) -> Option<&str> {
+    let inner = line.strip_prefix('[')?.strip_suffix(']')?.trim();
     // Peel at most ONE more pair: `[[bin]]` is valid, `[[[lib]]]` is not.
     let inner = match inner.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
         Some(r) => r.trim(),
         None => inner,
     };
-    if inner.is_empty() || inner.chars().any(|c| c == '[' || c == ']') {
+    // Quote-aware validation (r25 N2): brackets (and anything else) are
+    // content inside quoted spans, so `["a]b"]` and target tables like
+    // `[target.'cfg(...)'...]` stay valid; bare brackets and anything
+    // besides one whole quoted name or one bare name are not headers.
+    // Returns the unquoted name for whole-quoted headers.
+    let bytes = inner.as_bytes();
+    let mut idx = 0;
+    let mut chunks = 0u32;
+    let mut quote_start = 0usize;
+    let mut quote_end = 0usize;
+    while let Some(&cur) = bytes.get(idx) {
+        if cur == b'"' || cur == b'\'' {
+            let quote = cur;
+            let mut inner_idx = idx + 1;
+            let mut escaped = false;
+            let mut closed = None;
+            while let Some(&inner_byte) = bytes.get(inner_idx) {
+                if escaped {
+                    escaped = false;
+                } else if inner_byte == b'\\' && quote == b'"' {
+                    escaped = true;
+                } else if inner_byte == quote {
+                    closed = Some(inner_idx);
+                    break;
+                }
+                inner_idx += 1;
+            }
+            let end = closed?;
+            chunks += 1;
+            quote_start = idx;
+            quote_end = end + 1;
+            idx = end + 1;
+        } else {
+            if cur == b'[' || cur == b']' {
+                return None;
+            }
+            idx += 1;
+        }
+    }
+    if chunks == 1 && quote_start == 0 && quote_end == bytes.len() {
+        // The whole name is one quoted string (possibly empty): brackets
+        // inside are content. An empty quoted name is still a header
+        // shape (unknown section), so return it rather than failing.
+        return Some(&inner[quote_start + 1..quote_end - 1]);
+    }
+    if inner.is_empty() {
+        // Bare `[]` is malformed.
         return None;
     }
-    Some(strip_one_quote_pair(inner))
+    // Anything else quote-balanced with no bare brackets (bare names,
+    // dotted paths, `target.'cfg(…)'…` tables, even exotic multi-chunk
+    // shapes): a valid header shape for an unknown section. Invalid TOML
+    // here is cargo's to reject — and there is no root-shaped signal to
+    // fail closed on.
+    Some(inner)
 }
-
 /// Strip one matching ASCII quote pair around a TOML key or section name
 /// (`"path"`, `'lib'`), returning the text unchanged when it is not
 /// quoted. H-1 r15/r16: Cargo accepts quoted keys and quoted table
@@ -2851,6 +2908,9 @@ fn manifest_roots(dir: &Path) -> ManifestRoots {
                 out.dup.skip_section = false;
             }
             if name == "lib" {
+                // L-4 r24: arming on the array form `[[lib]]` too is
+                // deliberate — that shape is invalid TOML either way, so
+                // a later `[lib]` still correctly reports "duplicated".
                 seen_lib = true;
             } else if name == "package" {
                 seen_package = true;
@@ -2937,19 +2997,23 @@ fn check_crate_roots(
     violations: &mut Vec<String>,
     missing: &mut Vec<String>,
 ) {
-    let root_ok = |path: &Path| -> Option<bool> {
+    let root_ok = |path: &Path, is_custom: bool| -> Option<bool> {
         if path.is_dir() {
             return None;
         }
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
-            // A missing root is not a violation (conventional roots are
+            // A missing conventional root is not a violation (roots are
             // optional); an unreadable one is. `exists()` follows links,
             // so a dangling symlink reports absent and would be
             // vacuous-passed as "found" — check the link itself instead
             // (L-1 r24): no link means absent, a link means unreadable.
+            // A missing *custom* root is unknown, not optional (N3 r25):
+            // the manifest names it, so fail loud instead of passing a
+            // root the scanner never saw.
             Err(e)
                 if e.kind() == std::io::ErrorKind::NotFound
+                    && !is_custom
                     && std::fs::symlink_metadata(path).is_err() =>
             {
                 return Some(true);
@@ -3031,7 +3095,10 @@ fn check_crate_roots(
     let mut unreadable = false;
     let mut missing_root = false;
     for root in &all_roots {
-        match root_ok(root) {
+        // Only manifest-declared roots are custom: conventional and bin
+        // roots stay vacuous-pass on missing files, custom ones fail loud.
+        let is_custom = roots.lib_bin.iter().any(|r| r == root);
+        match root_ok(root, is_custom) {
             Some(true) => {}
             None => unreadable = true,
             Some(false) => missing_root = true,
@@ -6797,6 +6864,28 @@ mod tests {
         let (roots, problem) = manifest_custom_roots(&dir);
         assert_eq!(roots, vec![dir.join("a.rs")]);
         assert!(problem.is_some(), "duplicate section surfaced no problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_custom_roots_accepts_quoted_target_headers() {
+        // r25 N2 regression pin: quotes inside headers are content, not
+        // structure — `[target.'cfg(…)'…]` target tables (used by the
+        // real qqq-sys manifest) and quoted names with brackets must
+        // parse as headers instead of tripping the malformed-header
+        // problem. Unknown sections stay silent (not roots).
+        let dir =
+            std::env::temp_dir().join(format!("qqq-xtask-xmanifest-tcfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\n\n[target.'cfg(target_os = \"linux\")'.dependencies]\nfoo = \"1\"\n\n[\"a]b\"]\npath = \"q.rs\"\n",
+        )
+        .expect("manifest");
+        let (roots, problem) = manifest_custom_roots(&dir);
+        assert_eq!(problem, None);
+        assert!(roots.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

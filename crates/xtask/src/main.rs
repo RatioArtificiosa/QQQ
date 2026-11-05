@@ -1777,6 +1777,55 @@ fn line_has_forbid_attr(line: &str, depth: &mut u32) -> bool {
     false
 }
 
+/// Byte index just past the raw/byte/C string literal opening at `k`
+/// (which points at the `r`, `b`, or `c` prefix), or `None` when no such
+/// literal opens there. Used by the forbid-list paren scan so a paren
+/// inside one cannot truncate the list (M-4 r23: plain and char quotes
+/// are skipped inline; raw forms need their `#` count). Byte-safe and
+/// OOB-safe; unclosed spans run to EOF (fail-noisy, rustc owns validity).
+fn raw_lit_end(bytes: &[u8], k: usize) -> Option<usize> {
+    let mut p = k;
+    match bytes.get(p) {
+        // `br`/`cr` need the `r`; a bare `b`/`c` faces a quote directly
+        // (handled by the plain-quote arm — a bare letter otherwise is
+        // just an identifier character, not a literal).
+        Some(b'b' | b'c') => {
+            p += 1;
+            if bytes.get(p) != Some(&b'r') {
+                return None;
+            }
+            p += 1;
+        }
+        Some(b'r') => {
+            p += 1;
+        }
+        _ => return None,
+    }
+    let mut hashes = 0;
+    while bytes.get(p) == Some(&b'#') {
+        hashes += 1;
+        p += 1;
+    }
+    if bytes.get(p) != Some(&b'"') {
+        return None;
+    }
+    // Closer is `"` followed by exactly `hashes` hashes.
+    let mut q = p + 1;
+    while let Some(&c) = bytes.get(q) {
+        if c == b'"' {
+            let mut h = 0;
+            while h < hashes && bytes.get(q + 1 + h) == Some(&b'#') {
+                h += 1;
+            }
+            if h == hashes {
+                return Some(q + 1 + hashes);
+            }
+        }
+        q += 1;
+    }
+    None
+}
+
 /// Whether the lint list after `forbid` names `unsafe_code`: `forbid`,
 /// optional spaces/comments, `(`, then the comma-separated list up to the
 /// matching `)` — comments stripped before splitting, so neither a paren
@@ -1794,6 +1843,13 @@ fn forbid_list_has_unsafe_code(after_forbid: &str) -> bool {
     let mut k = 0;
     let mut end = None;
     while let Some(&c) = bytes.get(k) {
+        // M-4 r23 follow-up: raw/byte/C strings open with prefixes, not a
+        // bare quote — skip their spans whole too, counting `#`s for the
+        // closer (`r#"…")"#` content may hold a bare `"`).
+        if let Some(past) = raw_lit_end(bytes, k) {
+            k = past;
+            continue;
+        }
         if c == b'"' || c == b'\'' {
             // M-4 r23: a `)` inside a string/char span cannot close the
             // list — skip quoted spans whole so a quoted paren never
@@ -1985,22 +2041,13 @@ fn scan_crate_rs_files(
             }
         }
     }
-    // H-3 r7: follow `#[path]`/`include!` redirections into non-`.rs`
-    // files — they compile as Rust regardless of extension. Runs after
-    // the manifest expansion above so chains rooted at custom roots are
-    // followed transitively (H-2 r18), including a dynamic `include!`
-    // hiding inside one (fail-closed, H-1 r8).
-    let mut redir_problems = Vec::new();
-    follow_code_redirections(workspace, &mut files, &mut redir_problems);
-    violations.extend(redir_problems);
-    files.sort();
-    files.dedup();
-    // M-3 r20: a custom `build = …` or `build = false` uncompiles the
-    // conventional build.rs — drop it from the body scan too (dead code
-    // is not a root; the forbid check skips it the same way). H-1 r21:
-    // but a custom root that NAMES the conventional file (`build =
-    // "build.rs"`, possibly via `sub/../` folds) IS compiled — dropping
-    // it would sail its `unsafe` through GREEN while forbid still passes.
+    // H-1 r23: drop the uncompiled conventional build.rs BEFORE the
+    // follower runs, so a `#[path]`/`include!` that names it re-adds it
+    // for the body scan (a custom `build = "build.rs"` self-ref, a
+    // redirected include, or any other live use compiles it after all —
+    // dropping it after the follow sailed that `unsafe` through GREEN).
+    // A custom root that already names the file keeps it: `custom_covers`
+    // skips the retain when the manifest claims the same path.
     if roots.skip_build_rs {
         let conventional = dir.join("build.rs");
         let custom_covers = roots
@@ -2012,6 +2059,16 @@ fn scan_crate_rs_files(
             files.retain(|f| f != &conventional);
         }
     }
+    // H-3 r7: follow `#[path]`/`include!` redirections into non-`.rs`
+    // files — they compile as Rust regardless of extension. Runs after
+    // the manifest expansion above so chains rooted at custom roots are
+    // followed transitively (H-2 r18), including a dynamic `include!`
+    // hiding inside one (fail-closed, H-1 r8).
+    let mut redir_problems = Vec::new();
+    follow_code_redirections(workspace, &mut files, &mut redir_problems);
+    violations.extend(redir_problems);
+    files.sort();
+    files.dedup();
     // Canonical exception root, hoisted out of the per-file loop (L-9).
     let qsys_canon = std::fs::canonicalize(workspace.join("crates").join("qqq-sys"))
         .unwrap_or_else(|_| workspace.join("crates").join("qqq-sys"));
@@ -2188,6 +2245,10 @@ fn scan_rs_text(rel: &str, text: &str, violations: &mut Vec<String>) {
 /// `check_crate_roots` for the line budget. Fail-loud on unreadable
 /// entries and symlinked bins (H-4/M-6 r11): the collector never follows
 /// them, so vouching for their targets would certify unseen code.
+/// Symlink check-vs-read here shares the documented TOCTOU shape (L-5 r15
+/// on `follow_code_redirections`): a concurrent tree mutation between the
+/// `symlink_metadata` gate and the read could substitute content, but
+/// there is no concurrent-writer threat model for a local gate run.
 fn collect_bin_roots(
     dir: &Path,
     rel: &dyn Fn() -> String,
@@ -2514,11 +2575,12 @@ struct ManifestRoots {
     /// Present-but-unreadable manifest (L-4 r15): the named roots are
     /// unknown, so callers fail loudly instead of certifying them.
     problem: Option<String>,
-    /// `[package] build = "custom/…"`, `build = false`, or an unresolvable
-    /// string build value (M-3 r20): a custom script or disabled script
-    /// means the conventional `build.rs` is NOT compiled — skip its
-    /// forbid check and body scan (it would be dead code). Defaults to
-    /// false: no key (or `build = true`) means the conventional file.
+    /// `[package] build = "custom/…"` (successfully parsed) or `build =
+    /// false`: a custom script or disabled script means the conventional
+    /// `build.rs` is NOT compiled — skip its forbid check and body scan
+    /// (it would be dead code). Defaults to false: no key, `build = true`,
+    /// or an unparseable build value (fail-closed: an unreadable value
+    /// must not silence the conventional file).
     skip_build_rs: bool,
     /// Per-table duplicate tracking (see above).
     dup: ManifestDup,
@@ -3645,10 +3707,12 @@ fn match_include(text: &str, buf: &[u8], idx: usize) -> IncludeMatch {
         // M-3 r23: `c"…"`/`b"…"` (and raw forms) are not string literals
         // — `include!` rejects them at compile time ("argument must be a
         // string literal", verified against rustc), so they are silently
-        // ignored like unresolvable paths, not flagged dynamic. Anything
-        // else non-literal (concat!, env!, variables) really can smuggle
-        // in generated code and stays fail-closed.
+        // ignored like unresolvable paths, not flagged dynamic. A char or
+        // byte-char literal (`'…'`, `b'…'`) is equally invalid there.
+        // Anything else non-literal (concat!, env!, variables) really can
+        // smuggle in generated code and stays fail-closed.
         None if is_byte_or_c_string(text, buf, pos) => IncludeMatch::NoMatch,
+        None if matches!(buf.get(pos).copied(), Some(b'\'')) => IncludeMatch::NoMatch,
         None => IncludeMatch::Dynamic,
     }
 }
@@ -3656,7 +3720,8 @@ fn match_include(text: &str, buf: &[u8], idx: usize) -> IncludeMatch {
 /// Whether `buf` holds a `c"..."` / `b"..."` (or raw `cr#"..."#` form)
 /// literal at `pos`: rejected by `include!`, which takes plain string
 /// literals only. Only the lead-in is checked; validity beyond that is
-/// rustc's.
+/// rustc's. (A bare `'...'`/`b'…'` char at `pos` is handled by the caller
+/// — also invalid for `include!`, same `NoMatch`.)
 fn is_byte_or_c_string(text: &str, buf: &[u8], pos: usize) -> bool {
     let Some(&lead) = buf.get(pos) else {
         return false;
@@ -6038,6 +6103,41 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_scan_follows_redirection_into_disabled_build_script() {
+        // H-1 r23: `build = false` uncompiles the conventional build.rs —
+        // but a `#[path]` that names it compiles it as a module anyway.
+        // The skip must run before the follower so the redirect re-adds
+        // it; dropping it after the follow sailed its `unsafe` GREEN.
+        let root =
+            std::env::temp_dir().join(format!("qqq-xtask-xredirbuild-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crates").join("probe");
+        std::fs::create_dir_all(dir.join("src")).expect("temp crate");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nbuild = false\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#![forbid(unsafe_code)]\n#[path = \"../build.rs\"]\nmod b;\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            dir.join("build.rs"),
+            "#![forbid(unsafe_code)]\npub unsafe fn evil() {}\n",
+        )
+        .expect("build script");
+        let (ok, out) = run_unsafe_scan(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            !ok,
+            "redirected disabled build script passed the scan:\n{out}"
+        );
+        assert!(out.contains("build.rs"), "wrong failure shape:\n{out}");
+    }
+
+    #[test]
     fn unsafe_scan_reports_unreadable_manifest_once() {
         // L-3 r17 run level: one unreadable manifest must yield one
         // problem entry, not one per consumer (scan loop +
@@ -7588,6 +7688,18 @@ mod tests {
         ));
         let mut b = 0;
         assert!(line_has_forbid_attr("#![forbid(')', unsafe_code)]", &mut b));
+        // Raw strings need their `#` count for the closer: content may
+        // hold a bare `"`, which must not end the match early.
+        let mut b = 0;
+        assert!(line_has_forbid_attr(
+            "#![forbid(r#\")\"#, unsafe_code)]",
+            &mut b
+        ));
+        let mut b = 0;
+        assert!(line_has_forbid_attr(
+            "#![forbid(br#\")\"#, unsafe_code)]",
+            &mut b
+        ));
     }
 
     #[test]
@@ -7607,6 +7719,10 @@ mod tests {
         );
         assert_eq!(
             code_redirections("include!(br#\"e.rs\"#);\n"),
+            (Vec::<String>::new(), false)
+        );
+        assert_eq!(
+            code_redirections("include!('e');\n"),
             (Vec::<String>::new(), false)
         );
         assert_eq!(
